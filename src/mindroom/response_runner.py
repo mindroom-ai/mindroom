@@ -19,7 +19,6 @@ from mindroom.ai import (
     build_matrix_run_metadata,
     stream_agent_response,
 )
-from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -38,7 +37,6 @@ from mindroom.hooks import (
     MessageEnvelope,
     SessionHookContext,
     emit,
-    is_automation_source_kind,
 )
 from mindroom.knowledge import (
     KnowledgeAccessSupport,
@@ -91,7 +89,7 @@ from .delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
-from .response_lifecycle import ResponseLifecycle
+from .response_lifecycle import ResponseLifecycle, ResponseLifecycleCoordinator
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -313,48 +311,6 @@ def prepare_memory_and_model_context(
     return prompt, thread_history, model_prompt_text, model_thread_history
 
 
-@dataclass
-class _QueuedMessageState:
-    """Track queued human ingress while one response lifecycle holds the lock."""
-
-    pending_human_messages: int = 0
-    _active_response_turns: int = 0
-    _event: asyncio.Event = field(default_factory=asyncio.Event)
-
-    def begin_response_turn(self) -> bool:
-        existing_turn = self._active_response_turns > 0
-        self._active_response_turns += 1
-        return existing_turn
-
-    def finish_response_turn(self) -> None:
-        if self._active_response_turns == 0:
-            return
-        self._active_response_turns -= 1
-
-    def add_waiting_human_message(self) -> None:
-        self.pending_human_messages += 1
-        self._event.set()
-
-    def consume_waiting_human_message(self) -> None:
-        if self.pending_human_messages == 0:
-            return
-        self.pending_human_messages -= 1
-        if self.pending_human_messages == 0:
-            self._event.clear()
-
-    def has_pending_human_messages(self) -> bool:
-        return self.pending_human_messages > 0
-
-    def has_active_response_turn(self) -> bool:
-        return self._active_response_turns > 0
-
-    async def wait(self) -> None:
-        await self._event.wait()
-
-    def is_set(self) -> bool:
-        return self._event.is_set()
-
-
 @dataclass(frozen=True)
 class ResponseRequest:
     """Typed carrier for one response lifecycle request."""
@@ -432,8 +388,10 @@ class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
 
     deps: ResponseRunnerDeps
-    _response_lifecycle_locks: dict[tuple[str, str | None], asyncio.Lock] = field(default_factory=dict, init=False)
-    _thread_queued_signals: dict[tuple[str, str | None], _QueuedMessageState] = field(default_factory=dict, init=False)
+    _lifecycle_coordinator: ResponseLifecycleCoordinator = field(
+        default_factory=ResponseLifecycleCoordinator,
+        init=False,
+    )
     _in_flight_response_count: int = field(default=0, init=False)
 
     def _client(self) -> nio.AsyncClient:
@@ -617,12 +575,7 @@ class ResponseRunner:
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
-        thread_key = (target.room_id, target.resolved_thread_id)
-        queued_signal = self._thread_queued_signals.get(thread_key)
-        if queued_signal is not None and queued_signal.has_active_response_turn():
-            return True
-        lifecycle_lock = self._response_lifecycle_locks.get(thread_key)
-        return lifecycle_lock.locked() if lifecycle_lock is not None else False
+        return self._lifecycle_coordinator.has_active_response_for_target(target)
 
     async def _run_in_tool_context(
         self,
@@ -666,39 +619,6 @@ class ResponseRunner:
             )
         )
 
-    def _response_lifecycle_lock(self, target: MessageTarget) -> asyncio.Lock:
-        """Return the per-target lock that serializes one response lifecycle."""
-        lock_key = (target.room_id, target.resolved_thread_id)
-        lock = self._response_lifecycle_locks.get(lock_key)
-        if lock is not None:
-            return lock
-        if len(self._response_lifecycle_locks) >= 100:
-            for candidate, candidate_lock in list(self._response_lifecycle_locks.items()):
-                if len(self._response_lifecycle_locks) < 100:
-                    break
-                if candidate_lock.locked():
-                    continue
-                self._response_lifecycle_locks.pop(candidate, None)
-                self._thread_queued_signals.pop(candidate, None)
-        lock = asyncio.Lock()
-        self._response_lifecycle_locks[lock_key] = lock
-        return lock
-
-    def _get_or_create_queued_signal(self, target: MessageTarget) -> _QueuedMessageState:
-        """Return the queued-message signal for one canonical conversation thread."""
-        thread_key = (target.room_id, target.resolved_thread_id)
-        signal = self._thread_queued_signals.get(thread_key)
-        if signal is not None:
-            return signal
-        signal = _QueuedMessageState()
-        self._thread_queued_signals[thread_key] = signal
-        return signal
-
-    @staticmethod
-    def _should_signal_queued_message(response_envelope: MessageEnvelope | None) -> bool:
-        """Return whether one queued ingress should interrupt the active turn."""
-        return response_envelope is not None and not is_automation_source_kind(response_envelope.source_kind)
-
     def _active_response_event_ids(self, room_id: str) -> set[str]:
         """Return still-running response event IDs for one room."""
         return {
@@ -715,35 +635,12 @@ class ResponseRunner:
     ) -> str | None:
         """Run one locked response operation with shared queued-message bookkeeping."""
         resolved_target = self._resolve_request_target(request)
-        lifecycle_lock = self._response_lifecycle_lock(resolved_target)
-        queued_signal = self._get_or_create_queued_signal(resolved_target)
-        existing_turn = queued_signal.begin_response_turn()
-        queued_human_message = (existing_turn or lifecycle_lock.locked()) and self._should_signal_queued_message(
-            request.response_envelope,
+        return await self._lifecycle_coordinator.run_locked_response(
+            target=resolved_target,
+            response_envelope=request.response_envelope,
+            pipeline_timing=request.pipeline_timing,
+            locked_operation=locked_operation,
         )
-        if queued_human_message:
-            queued_signal.add_waiting_human_message()
-        lock_acquired = False
-        try:
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("lock_wait_start")
-            await lifecycle_lock.acquire()
-            lock_acquired = True
-            if request.pipeline_timing is not None:
-                request.pipeline_timing.mark("lock_acquired")
-            try:
-                if queued_human_message:
-                    queued_signal.consume_waiting_human_message()
-                    queued_human_message = False
-                with queued_message_signal_context(queued_signal):
-                    return await locked_operation(resolved_target)
-            finally:
-                if lock_acquired:
-                    lifecycle_lock.release()
-        finally:
-            if queued_human_message:
-                queued_signal.consume_waiting_human_message()
-            queued_signal.finish_response_turn()
 
     def _build_persist_response_event_id_effect(
         self,

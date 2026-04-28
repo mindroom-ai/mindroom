@@ -116,7 +116,7 @@ visibility = [
     "mindroom.api.openai_compat",
     "mindroom.execution_preparation",
     "mindroom.history.runtime",
-    "mindroom.response_runner",
+    "mindroom.response_lifecycle",
     "mindroom.teams",
     "mindroom.thread_summary",
     "mindroom.topic_generator",
@@ -751,7 +751,6 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
-    "mindroom.ai_runtime",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.history",
@@ -763,11 +762,21 @@ depends_on = [
     "mindroom.memory",
     "mindroom.orchestration.runtime",
     "mindroom.post_response_effects",
+    "mindroom.response_lifecycle",
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.thread_summary",
     "mindroom.tool_system.runtime_context", "mindroom.tool_system.worker_routing",
 ]
+
+[[modules]]
+path = "mindroom.response_lifecycle"
+depends_on = [
+    "mindroom.ai_runtime",
+    "mindroom.hooks",
+    "mindroom.post_response_effects",
+]
+visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.routing"

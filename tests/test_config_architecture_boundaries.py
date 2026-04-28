@@ -14,6 +14,7 @@ CONCRETE_ORCHESTRATOR_IMPORT_ALLOWLIST = {
 }
 RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
 MATRIX_MESSAGE_TOOL_MODULE = Path("src/mindroom/custom_tools/matrix_message.py")
+RESPONSE_RUNNER_MODULE = Path("src/mindroom/response_runner.py")
 MATRIX_MESSAGE_LOW_LEVEL_IMPORTS = frozenset(
     {
         "mindroom.custom_tools.attachments",
@@ -171,3 +172,24 @@ def test_matrix_message_tool_uses_conversation_operations_boundary() -> None:
             )
 
     assert forbidden == []
+
+
+def test_response_runner_delegates_lifecycle_coordination() -> None:
+    """ResponseRunner should delegate lock and queued-turn state to response_lifecycle."""
+    tree = ast.parse(RESPONSE_RUNNER_MODULE.read_text(encoding="utf-8"))
+    forbidden_names = {
+        "_QueuedMessageState",
+        "_get_or_create_queued_signal",
+        "_response_lifecycle_lock",
+        "_response_lifecycle_locks",
+        "_should_signal_queued_message",
+        "_thread_queued_signals",
+    }
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) and node.name in forbidden_names:
+            found.append(f"{RESPONSE_RUNNER_MODULE}:{node.lineno}: {node.name}")
+        if isinstance(node, ast.Name) and node.id in forbidden_names:
+            found.append(f"{RESPONSE_RUNNER_MODULE}:{node.lineno}: {node.id}")
+
+    assert found == []

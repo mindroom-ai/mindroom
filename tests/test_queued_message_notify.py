@@ -447,8 +447,9 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
     response_envelope = _envelope()
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
-    queued_signal = coordinator._get_or_create_queued_signal(response_target)
+    lifecycle = coordinator._lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     await lifecycle_lock.acquire()
 
     try:
@@ -486,8 +487,9 @@ async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: P
     response_envelope = _envelope(source_kind="scheduled")
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
-    queued_signal = coordinator._get_or_create_queued_signal(response_target)
+    lifecycle = coordinator._lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     await lifecycle_lock.acquire()
 
     try:
@@ -536,12 +538,12 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
     ) -> str:
         del resolved_target
         user_id = str(request.user_id)
-        queued_signal = coordinator._get_or_create_queued_signal(response_target)
+        queued_signal = coordinator._lifecycle_coordinator._get_or_create_queued_signal(response_target)
         observed_pending[user_id] = queued_signal.pending_human_messages
         return user_id
 
     with (
-        patch.object(coordinator, "_response_lifecycle_lock", return_value=lock),
+        patch.object(coordinator._lifecycle_coordinator, "_response_lifecycle_lock", return_value=lock),
         patch.object(ResponseRunner, "generate_response_locked", new=fake_generate_response_locked),
     ):
         first_task = asyncio.create_task(
@@ -585,7 +587,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
     response_envelope = _envelope(source_kind="scheduled")
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
+    lifecycle_lock = coordinator._lifecycle_coordinator._response_lifecycle_lock(response_target)
     await lifecycle_lock.acquire()
     lifecycle_started = asyncio.Event()
 
@@ -707,8 +709,9 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
     response_envelope = _envelope()
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
-    queued_signal = coordinator._get_or_create_queued_signal(response_target)
+    lifecycle = coordinator._lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     await lifecycle_lock.acquire()
 
     try:
@@ -748,8 +751,9 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
     response_envelope = _envelope()
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
-    queued_signal = coordinator._get_or_create_queued_signal(response_target)
+    lifecycle = coordinator._lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
@@ -815,8 +819,9 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
     response_envelope = _envelope()
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle_lock = coordinator._response_lifecycle_lock(response_target)
-    queued_signal = coordinator._get_or_create_queued_signal(response_target)
+    lifecycle = coordinator._lifecycle_coordinator
+    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
+    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
@@ -914,7 +919,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
     assert bot._turn_store.is_handled("$older")
     mock_plan.assert_not_awaited()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    assert coordinator._thread_queued_signals == {}
+    assert coordinator._lifecycle_coordinator._thread_queued_signals == {}
 
 
 def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call() -> None:
