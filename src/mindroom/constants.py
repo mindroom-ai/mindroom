@@ -49,6 +49,7 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
 _ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset({"ACCOUNT_ID", "CUSTOMER_ID", "POD_NAMESPACE"})
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
     {
+        "MINDROOM_EVENT_CACHE_DATABASE_URL",
         "MINDROOM_LOCAL_CLIENT_ID",
         "MINDROOM_SANDBOX_PROXY_TOKEN",
     },
@@ -63,6 +64,8 @@ _RUNTIME_STARTUP_SECRET_SUFFIXES = (
     "_SECRET",
     "_TOKEN",
 )
+_RUNTIME_DATABASE_URL_NAMES = frozenset({"DATABASE_URL"})
+_RUNTIME_DATABASE_URL_SUFFIXES = ("_DATABASE_URL",)
 _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
     {
         *_RUNTIME_STARTUP_EXCLUDED_NAMES,
@@ -289,6 +292,8 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
 def _is_public_runtime_startup_env_name(name: str) -> bool:
     if name in _RUNTIME_STARTUP_EXCLUDED_NAMES:
         return False
+    if is_runtime_database_url_env_name(name):
+        return False
     if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _RUNTIME_STARTUP_ENV_EXTRA_KEYS):
         return False
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
@@ -296,6 +301,8 @@ def _is_public_runtime_startup_env_name(name: str) -> bool:
 
 def _is_isolated_runtime_public_env_name(name: str) -> bool:
     if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+        return False
+    if is_runtime_database_url_env_name(name):
         return False
     if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _ISOLATED_RUNTIME_ENV_EXTRA_KEYS):
         return False
@@ -491,6 +498,11 @@ def _is_known_worker_credential_env_name(name: str) -> bool:
     }
 
 
+def is_runtime_database_url_env_name(name: str) -> bool:
+    """Return whether an env name conventionally carries a database connection URL."""
+    return name in _RUNTIME_DATABASE_URL_NAMES or name.endswith(_RUNTIME_DATABASE_URL_SUFFIXES)
+
+
 def _is_execution_runtime_process_env_name(
     name: str,
 ) -> bool:
@@ -502,7 +514,7 @@ def _is_execution_runtime_process_env_name(
 def _is_allowed_execution_runtime_env_file_name(
     name: str,
 ) -> bool:
-    return name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES
+    return name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES and not is_runtime_database_url_env_name(name)
 
 
 def _execution_runtime_env_layers(

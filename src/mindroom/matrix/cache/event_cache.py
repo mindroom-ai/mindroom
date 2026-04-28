@@ -27,6 +27,10 @@ class ConversationEventCache(Protocol):
     def durable_writes_available(self) -> bool:
         """Return whether cache writes can durably persist data."""
 
+    @property
+    def is_initialized(self) -> bool:
+        """Return whether the backing storage is currently initialized."""
+
     async def initialize(self) -> None:
         """Initialize any backing storage."""
 

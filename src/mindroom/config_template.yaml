@@ -54,9 +54,16 @@ matrix_space:
 
 # Persistent Matrix thread history cache.
 # This cache is always enabled.
-# `db_path` is read at startup and changing it requires a restart.
+# SQLite is the default for local installs.
+# For shared runtime storage, set backend: postgres and provide MINDROOM_EVENT_CACHE_DATABASE_URL.
+# MindRoom auto-installs the postgres extra when psycopg is missing.
+# Set MINDROOM_NO_AUTO_INSTALL_TOOLS=1 to disable optional dependency installation.
+# Cache backend settings are read at startup and changing them requires a restart.
 cache:
+  backend: sqlite
   db_path: mindroom_data/event_cache.db
+  # database_url_env: MINDROOM_EVENT_CACHE_DATABASE_URL
+  # namespace: default
 
 # Optional debug logging for pre-provider LLM request assembly data.
 # This writes sensitive prompts, messages, tools, and model params to JSONL.

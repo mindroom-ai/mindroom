@@ -14,7 +14,12 @@ import pytest
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache.sqlite_event_cache as event_cache_module
-from mindroom.matrix.cache import event_normalization, sqlite_event_cache_events, sqlite_event_cache_threads
+from mindroom.matrix.cache import (
+    ConversationEventCache,
+    event_normalization,
+    sqlite_event_cache_events,
+    sqlite_event_cache_threads,
+)
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.conversation_cache import _cached_room_get_event as cached_room_get_event
@@ -23,7 +28,7 @@ from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.timing import DispatchPipelineTiming
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
     from pathlib import Path
 
 
@@ -140,7 +145,7 @@ def _make_relations_client(
 
 
 async def _seed_thread_cache(
-    cache: SqliteEventCache,
+    cache: ConversationEventCache,
     *,
     room_id: str,
     thread_id: str,
@@ -221,10 +226,9 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_event_cache_store_and_retrieve(tmp_path: Path) -> None:
+async def test_event_cache_store_and_retrieve(event_cache: ConversationEventCache) -> None:
     """Stored events should round-trip in timestamp order."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     try:
         await _seed_thread_cache(
@@ -262,10 +266,11 @@ async def test_event_cache_store_and_retrieve(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_recent_room_thread_ids_orders_by_latest_event_in_each_thread(tmp_path: Path) -> None:
+async def test_get_recent_room_thread_ids_orders_by_latest_event_in_each_thread(
+    event_cache: ConversationEventCache,
+) -> None:
     """Recent thread IDs should be ordered by the freshest cached event per thread, not by root timestamp."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     try:
         await _seed_thread_cache(
@@ -338,10 +343,11 @@ async def test_get_recent_room_thread_ids_orders_by_latest_event_in_each_thread(
 
 
 @pytest.mark.asyncio
-async def test_event_cache_preserves_insertion_order_for_same_timestamp_events(tmp_path: Path) -> None:
+async def test_event_cache_preserves_insertion_order_for_same_timestamp_events(
+    event_cache: ConversationEventCache,
+) -> None:
     """Cached reads should preserve the stored order when timestamps tie."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     try:
         await _seed_thread_cache(
@@ -394,10 +400,9 @@ async def test_event_cache_preserves_insertion_order_for_same_timestamp_events(t
 
 
 @pytest.mark.asyncio
-async def test_individual_event_cache_store_and_retrieve(tmp_path: Path) -> None:
+async def test_individual_event_cache_store_and_retrieve(event_cache: ConversationEventCache) -> None:
     """Individually cached events should round-trip by event ID."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     try:
         await cache.store_events_batch(
@@ -635,10 +640,9 @@ async def test_event_cache_initialize_clears_half_initialized_connection_on_fail
 
 
 @pytest.mark.asyncio
-async def test_individual_event_cache_strips_runtime_timing_marker(tmp_path: Path) -> None:
+async def test_individual_event_cache_strips_runtime_timing_marker(event_cache: ConversationEventCache) -> None:
     """Batch event caching should drop in-memory timing objects before serialization."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     reply_event = _make_text_event(
         event_id="$reply",
@@ -665,10 +669,9 @@ async def test_individual_event_cache_strips_runtime_timing_marker(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_thread_cache_store_populates_individual_event_lookup(tmp_path: Path) -> None:
+async def test_thread_cache_store_populates_individual_event_lookup(event_cache: ConversationEventCache) -> None:
     """Thread cache writes should also populate the individual event table."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     root_event = _make_text_event(
         event_id="$thread_root",
@@ -705,10 +708,9 @@ async def test_thread_cache_store_populates_individual_event_lookup(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_thread_event_cache_strips_runtime_timing_marker(tmp_path: Path) -> None:
+async def test_thread_event_cache_strips_runtime_timing_marker(event_cache: ConversationEventCache) -> None:
     """Thread cache writes should strip runtime-only timing markers before JSON storage."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     reply_event = _make_text_event(
         event_id="$reply",
@@ -745,10 +747,9 @@ async def test_thread_event_cache_strips_runtime_timing_marker(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_cached_room_get_event_cache_hit_avoids_network_call(tmp_path: Path) -> None:
+async def test_cached_room_get_event_cache_hit_avoids_network_call(event_cache: ConversationEventCache) -> None:
     """Cached room get event lookups should reconstruct nio responses without I/O."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     reply_event = _make_text_event(
         event_id="$reply",
@@ -773,10 +774,11 @@ async def test_cached_room_get_event_cache_hit_avoids_network_call(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(tmp_path: Path) -> None:
+async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(
+    event_cache: ConversationEventCache,
+) -> None:
     """Point-event cache hits should surface the latest edited content for originals."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     original_event = _make_text_event(
         event_id="$reply",
@@ -822,10 +824,11 @@ async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(tmp_path: Path) -> None:
+async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(
+    event_cache: ConversationEventCache,
+) -> None:
     """Network fetches should still project originals through cached latest edits."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     original_event = _make_text_event(
         event_id="$reply",
@@ -861,10 +864,9 @@ async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(tmp
 
 
 @pytest.mark.asyncio
-async def test_redacting_latest_edit_falls_back_to_previous_cached_edit(tmp_path: Path) -> None:
+async def test_redacting_latest_edit_falls_back_to_previous_cached_edit(event_cache: ConversationEventCache) -> None:
     """Removing the newest edit should expose the previous cached visible state."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     original_event = _make_text_event(
         event_id="$reply",
@@ -921,10 +923,9 @@ async def test_redacting_latest_edit_falls_back_to_previous_cached_edit(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_redaction_removes_individual_event_cache_entry(tmp_path: Path) -> None:
+async def test_redaction_removes_individual_event_cache_entry(event_cache: ConversationEventCache) -> None:
     """Redactions should also remove individually cached events."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     root_event = _make_text_event(
         event_id="$thread_root",
@@ -961,10 +962,11 @@ async def test_redaction_removes_individual_event_cache_entry(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_redacting_original_removes_dependent_cached_edits_from_thread_history(tmp_path: Path) -> None:
+async def test_redacting_original_removes_dependent_cached_edits_from_thread_history(
+    event_cache: ConversationEventCache,
+) -> None:
     """Redacting an original must also remove cached edits that would resurrect it."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     root_event = _make_text_event(
         event_id="$thread_root",
@@ -1032,10 +1034,11 @@ async def test_redacting_original_removes_dependent_cached_edits_from_thread_his
 
 
 @pytest.mark.asyncio
-async def test_invalidate_thread_preserves_separately_cached_latest_edit(tmp_path: Path) -> None:
+async def test_invalidate_thread_preserves_separately_cached_latest_edit(
+    event_cache: ConversationEventCache,
+) -> None:
     """Thread invalidation should not sever edit projection for separately cached edits."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     root_event = _make_text_event(
         event_id="$thread_root",
@@ -1091,10 +1094,9 @@ async def test_invalidate_thread_preserves_separately_cached_latest_edit(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_invalidate_thread_removes_event_thread_rows(tmp_path: Path) -> None:
+async def test_invalidate_thread_removes_event_thread_rows(event_cache: ConversationEventCache) -> None:
     """Thread invalidation must also clear durable event-to-thread mappings."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     root_event = _make_text_event(
         event_id="$thread_root",
@@ -1132,10 +1134,11 @@ async def test_invalidate_thread_removes_event_thread_rows(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_redaction_removes_event_thread_rows_and_blocks_late_edit_resurrection(tmp_path: Path) -> None:
+async def test_redaction_removes_event_thread_rows_and_blocks_late_edit_resurrection(
+    event_cache: ConversationEventCache,
+) -> None:
     """Redacting a reply must clear durable thread mapping and ignore late edits for that reply."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     root_event = _make_text_event(
         event_id="$thread_root",
@@ -1202,11 +1205,10 @@ async def test_redaction_removes_event_thread_rows_and_blocks_late_edit_resurrec
 
 @pytest.mark.asyncio
 async def test_store_events_batch_records_thread_root_self_mapping_from_explicit_thread_child(
-    tmp_path: Path,
+    event_cache: ConversationEventCache,
 ) -> None:
     """Explicit threaded children should also make the root resolve to its own thread id."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     reply_event = _make_text_event(
         event_id="$reply",
@@ -1231,10 +1233,11 @@ async def test_store_events_batch_records_thread_root_self_mapping_from_explicit
 
 
 @pytest.mark.asyncio
-async def test_store_events_batch_rolls_back_on_index_derivation_failure(tmp_path: Path) -> None:
+async def test_store_events_batch_rolls_back_on_index_derivation_failure(
+    event_cache: ConversationEventCache,
+) -> None:
     """Failed batch writes must not leak partial point-lookup rows into later commits."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     valid_event = _cache_source(
         _make_text_event(
@@ -1354,10 +1357,11 @@ async def test_initialize_resets_stale_old_cache_schema(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_disabled_event_cache_skips_latest_agent_message_snapshot_reads(tmp_path: Path) -> None:
+async def test_disabled_event_cache_skips_latest_agent_message_snapshot_reads(
+    event_cache: ConversationEventCache,
+) -> None:
     """Disabled caches should fail open for latest-agent-message snapshot reads."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
     try:
         await cache.store_events_batch(
             [
@@ -1389,10 +1393,9 @@ async def test_disabled_event_cache_skips_latest_agent_message_snapshot_reads(tm
 
 
 @pytest.mark.asyncio
-async def test_fetch_thread_history_cache_hit_avoids_full_fetch_calls(tmp_path: Path) -> None:
+async def test_fetch_thread_history_cache_hit_avoids_full_fetch_calls(event_cache: ConversationEventCache) -> None:
     """Cache hits should bypass the full root-plus-relations fetch path."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     root_event = _make_text_event(
         event_id="$thread_root",
@@ -1437,10 +1440,9 @@ async def test_fetch_thread_history_cache_hit_avoids_full_fetch_calls(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_fetch_thread_history_cache_miss_does_full_fetch(tmp_path: Path) -> None:
+async def test_fetch_thread_history_cache_miss_does_full_fetch(event_cache: ConversationEventCache) -> None:
     """Cache misses should scan room history and populate the cache."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
+    cache = event_cache
 
     root_event = _make_text_event(
         event_id="$thread_root",
@@ -1482,10 +1484,11 @@ async def test_fetch_thread_history_cache_miss_does_full_fetch(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_mxc_text_cache_round_trips_across_event_cache_reopen(tmp_path: Path) -> None:
+async def test_mxc_text_cache_round_trips_across_event_cache_reopen(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
     """Durable MXC text rows should survive closing and reopening the event cache."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
 
     try:
@@ -1493,7 +1496,7 @@ async def test_mxc_text_cache_round_trips_across_event_cache_reopen(tmp_path: Pa
     finally:
         await cache.close()
 
-    reopened_cache = SqliteEventCache(db_path)
+    reopened_cache = event_cache_factory()
     await reopened_cache.initialize()
     try:
         cached_text = await reopened_cache.get_mxc_text("!room:localhost", "mxc://server/sidecar")
@@ -1504,10 +1507,11 @@ async def test_mxc_text_cache_round_trips_across_event_cache_reopen(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(tmp_path: Path) -> None:
+async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
     """Cached full-history reads should reuse durable sidecar text after a restart."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     _clear_mxc_cache()
 
@@ -1561,7 +1565,7 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(tmp_pa
 
     _clear_mxc_cache()
 
-    reopened_cache = SqliteEventCache(db_path)
+    reopened_cache = event_cache_factory()
     await reopened_cache.initialize()
     second_client = MagicMock()
     second_client.download = AsyncMock(

@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mindroom.constants import resolve_config_relative_path
+from mindroom.constants import (
+    is_runtime_database_url_env_name,
+    resolve_config_relative_path,
+    runtime_mindroom_namespace,
+)
 from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
 
 if TYPE_CHECKING:
@@ -185,6 +189,10 @@ class CacheConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    backend: Literal["sqlite", "postgres"] = Field(
+        default="sqlite",
+        description="Storage backend for the always-on Matrix event cache.",
+    )
     db_path: str | None = Field(
         default=None,
         description=(
@@ -193,9 +201,64 @@ class CacheConfig(BaseModel):
             "Changing this path requires a restart because hot reload intentionally keeps the active cache file."
         ),
     )
+    database_url: str | None = Field(
+        default=None,
+        description=(
+            "PostgreSQL connection URL for the always-on Matrix event cache. Prefer database_url_env for secrets."
+        ),
+    )
+    database_url_env: str = Field(
+        default="MINDROOM_EVENT_CACHE_DATABASE_URL",
+        description=(
+            "Runtime env var that contains the PostgreSQL event-cache connection URL. "
+            "Must be DATABASE_URL or end with _DATABASE_URL so runtime secret filters withhold it."
+        ),
+    )
+    namespace: str | None = Field(
+        default=None,
+        description=(
+            "Logical namespace for PostgreSQL event-cache rows. "
+            "Defaults to MINDROOM_NAMESPACE when set, otherwise 'default'."
+        ),
+    )
+
+    @field_validator("database_url_env")
+    @classmethod
+    def validate_database_url_env(cls, env_name: str) -> str:
+        """Require custom DSN env names to match runtime secret-filter conventions."""
+        normalized = env_name.strip()
+        if normalized and not is_runtime_database_url_env_name(normalized):
+            msg = "cache.database_url_env must be DATABASE_URL or end with _DATABASE_URL"
+            raise ValueError(msg)
+        return normalized
 
     def resolve_db_path(self, runtime_paths: RuntimePaths) -> Path:
         """Resolve the configured database path for the active runtime startup."""
         if self.db_path is None:
             return runtime_paths.storage_root / "event_cache.db"
         return resolve_config_relative_path(self.db_path, runtime_paths)
+
+    def resolve_postgres_database_url(self, runtime_paths: RuntimePaths) -> str:
+        """Resolve the configured PostgreSQL connection URL for the active runtime."""
+        configured_url = (self.database_url or "").strip()
+        if configured_url:
+            return configured_url
+        env_name = self.database_url_env.strip()
+        if env_name:
+            env_url = (runtime_paths.env_value(env_name) or "").strip()
+            if env_url:
+                return env_url
+        msg = (
+            f"PostgreSQL event cache requires cache.database_url or {self.database_url_env} in the runtime environment"
+        )
+        raise ValueError(msg)
+
+    def resolve_namespace(self, runtime_paths: RuntimePaths) -> str:
+        """Resolve the logical cache namespace for shared PostgreSQL databases."""
+        configured_namespace = (self.namespace or "").strip()
+        if configured_namespace:
+            return configured_namespace
+        runtime_namespace = runtime_mindroom_namespace(runtime_paths)
+        if runtime_namespace is not None:
+            return runtime_namespace
+        return "default"

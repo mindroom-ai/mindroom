@@ -495,10 +495,17 @@ def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) ->
     """Public startup runtime payloads should not serialize the runner auth token."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "MINDROOM_EVENT_CACHE_DATABASE_URL=postgresql://cache:file-secret@db/mindroom\n"
+        "MINDROOM_CACHE_DATABASE_URL=postgresql://cache:custom-file-secret@db/mindroom\n",
+        encoding="utf-8",
+    )
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
         process_env={
+            "MINDROOM_EVENT_CACHE_DATABASE_URL": "postgresql://cache:process-secret@db/mindroom",
+            "MINDROOM_CACHE_DATABASE_URL": "postgresql://cache:custom-process-secret@db/mindroom",
             "MINDROOM_SANDBOX_PROXY_TOKEN": "secret-token",
             "MINDROOM_NAMESPACE": "alpha1234",
         },
@@ -511,6 +518,8 @@ def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) ->
         "MINDROOM_NAMESPACE": "alpha1234",
         "MINDROOM_STORAGE_PATH": str((tmp_path / "storage").resolve()),
     }
+    assert "MINDROOM_EVENT_CACHE_DATABASE_URL" not in payload["env_file_values"]
+    assert "MINDROOM_CACHE_DATABASE_URL" not in payload["env_file_values"]
 
 
 def test_public_startup_runtime_still_allows_python_execution_env(
@@ -973,13 +982,20 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text(
-        "OPENAI_API_KEY=dotenv-secret\nTEST_EXECUTION_ENV=visible-in-shell\n",
+        "OPENAI_API_KEY=dotenv-secret\n"
+        "TEST_EXECUTION_ENV=visible-in-shell\n"
+        "MINDROOM_EVENT_CACHE_DATABASE_URL=postgresql://cache:dotenv-secret@db/mindroom\n"
+        "MINDROOM_CACHE_DATABASE_URL=postgresql://cache:custom-dotenv-secret@db/mindroom\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env=dict(os.environ),
+        process_env={
+            **dict(os.environ),
+            "MINDROOM_EVENT_CACHE_DATABASE_URL": "postgresql://cache:process-secret@db/mindroom",
+            "MINDROOM_CACHE_DATABASE_URL": "postgresql://cache:custom-process-secret@db/mindroom",
+        },
     )
 
     execution_env = sandbox_exec_module.request_execution_env(
@@ -991,6 +1007,8 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
     assert execution_env["OPENAI_API_KEY"] == "dotenv-secret"
     assert execution_env["TEST_EXECUTION_ENV"] == "visible-in-shell"
     assert execution_env["MINDROOM_STORAGE_PATH"] == str((tmp_path / "storage").resolve())
+    assert "MINDROOM_EVENT_CACHE_DATABASE_URL" not in execution_env
+    assert "MINDROOM_CACHE_DATABASE_URL" not in execution_env
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in execution_env
     assert "MINDROOM_API_KEY" not in execution_env
 
