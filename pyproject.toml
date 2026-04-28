@@ -475,7 +475,7 @@ per-file-ignores."src/mindroom/tools/*" = [
 ]
 
 [tool.ty.environment]
-python-version = "3.12"
+python-version = "3.13"
 [[tool.ty.overrides]]
 include = [ "tests/" ]
 [tool.ty.overrides.rules]

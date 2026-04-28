@@ -176,7 +176,7 @@ Use the convenience script to run both frontend and backend tests:
 
 ## CI/CD Integration
 
-Backend tests run via `.github/workflows/pytest.yml` (Python 3.12).
+Backend tests run via `.github/workflows/pytest.yml` (Python 3.13).
 There is no dedicated frontend test workflow yet; frontend tests are run locally with `bun run test`.
 
 ## Troubleshooting

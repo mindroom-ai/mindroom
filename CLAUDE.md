@@ -337,7 +337,7 @@ curl -s http://localhost:9292/v1/models | head -c 200
 - Add `extra_kwargs.base_url: http://localhost:9292/v1` for those models
 - For memory, prefer `provider: openai` and an embedding model that exists (e.g., `embeddinggemma:300m`)
 
-5) Run the backend with explicit env overrides (use Python 3.13; production Dockerfile uses 3.12)
+5) Run the backend with explicit env overrides (use Python 3.13; production Dockerfile also uses 3.13)
 ```bash
 MATRIX_HOMESERVER=http://localhost:8008 \
 MATRIX_SSL_VERIFY=false \

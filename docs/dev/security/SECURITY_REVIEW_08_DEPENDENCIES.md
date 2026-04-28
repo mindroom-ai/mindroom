@@ -85,10 +85,9 @@ This report presents a comprehensive security review of dependency and supply ch
 **Images Analyzed:**
 1. `ghcr.io/astral-sh/uv:latest` - Official UV package manager
 2. `public.ecr.aws/docker/library/python:3.13-slim` - Official Python slim
-3. `public.ecr.aws/docker/library/python:3.12-slim` - Official Python slim
-4. `public.ecr.aws/docker/library/node:20-slim` - Official Node.js slim
-5. `public.ecr.aws/docker/library/node:20-alpine` - Official Node.js Alpine
-6. `public.ecr.aws/nginx/nginx:alpine` - Official Nginx Alpine
+3. `public.ecr.aws/docker/library/node:20-slim` - Official Node.js slim
+4. `public.ecr.aws/docker/library/node:20-alpine` - Official Node.js Alpine
+5. `public.ecr.aws/nginx/nginx:alpine` - Official Nginx Alpine
 
 **Assessment Results:**
 - ✅ All images from official/trusted sources
@@ -436,7 +435,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
+          python-version: '3.13'
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

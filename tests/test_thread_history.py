@@ -659,7 +659,10 @@ class TestThreadHistory:
         mock_store.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_logs_cache_store_skip_for_missing_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_fetch_thread_history_logs_cache_store_skip_for_missing_root(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Skipped homeserver refills should expose why the advisory cache was not repopulated."""
         client = AsyncMock()
         logger = MagicMock()
