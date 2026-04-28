@@ -7,13 +7,18 @@ name = "platform-backend"
 version = "0.1.0"
 description = "MindRoom SaaS Platform Backend"
 requires-python = ">=3.13"
-classifiers = [ "Programming Language :: Python :: 3 :: Only", "Programming Language :: Python :: 3.13" ]
+classifiers = [
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
 dependencies = [
   "apscheduler>=3.10",
   "cachetools>=6.2",
   "fastapi>=0.104.1",
   "prometheus-client>=0.22.1",
   "prometheus-fastapi-instrumentator>=7.1",
+  "pydantic>=2.13.3",
   "python-dotenv>=1",
   "pyyaml>=6.0.2",
   "slowapi>=0.1.9",

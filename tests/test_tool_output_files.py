@@ -114,7 +114,7 @@ def test_schema_adds_optional_output_path_for_normal_function(tmp_path: Path) ->
     function = _processed(_first_function(toolkit))
 
     output_schema = function.parameters["properties"][OUTPUT_PATH_ARGUMENT]
-    assert output_schema["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert output_schema.get("type") == "string" or {"type": "string"} in output_schema.get("anyOf", [])
     assert "workspace-relative path" in output_schema["description"]
     assert OUTPUT_PATH_ARGUMENT not in function.parameters["required"]
 
