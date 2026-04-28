@@ -1263,7 +1263,6 @@ visibility = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.message_content",
     "mindroom.matrix.stale_stream_cleanup",
-    "mindroom.streaming",
 ]
 
 [[modules]]
@@ -1646,7 +1645,6 @@ depends_on = [
     "mindroom.interactive",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
-    "mindroom.matrix.visible_body",
     "mindroom.message_target",
     "mindroom.orchestration.runtime",
     "mindroom.streaming_delivery",

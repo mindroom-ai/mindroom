@@ -64,8 +64,6 @@ async def send_message_result(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
-    *,
-    upload_nonterminal_stream_sidecar: bool = True,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     if not _can_send_to_encrypted_room(client, room_id, operation="send_message"):
@@ -95,15 +93,7 @@ async def send_message_result(
             )
             return None
 
-    if upload_nonterminal_stream_sidecar:
-        content_sent = await prepare_large_message(client, room_id, content)
-    else:
-        content_sent = await prepare_large_message(
-            client,
-            room_id,
-            content,
-            upload_nonterminal_stream_sidecar=False,
-        )
+    content_sent = await prepare_large_message(client, room_id, content)
     if cache_bypass:
         access_token = client.access_token
         if not access_token:
@@ -358,8 +348,6 @@ async def edit_message_result(
     new_content: dict[str, Any],
     new_text: str,
     extra_content: dict[str, Any] | None = None,
-    *,
-    upload_nonterminal_stream_sidecar: bool = True,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the exact delivered payload."""
     edit_content = build_edit_event_content(
@@ -369,14 +357,7 @@ async def edit_message_result(
         extra_content=extra_content,
     )
 
-    if upload_nonterminal_stream_sidecar:
-        return await send_message_result(client, room_id, edit_content)
-    return await send_message_result(
-        client,
-        room_id,
-        edit_content,
-        upload_nonterminal_stream_sidecar=False,
-    )
+    return await send_message_result(client, room_id, edit_content)
 
 
 __all__ = [

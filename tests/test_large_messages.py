@@ -15,12 +15,12 @@ from mindroom.constants import (
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
     _calculate_event_size,
-    _clear_oversized_nonterminal_streaming_sidecar_upload_rate_limits,
+    _clear_oversized_nonterminal_streaming_edit_rate_limits,
     _create_preview,
     _is_edit_message,
-    _oversized_nonterminal_streaming_sidecar_uploaded_at,
+    _oversized_nonterminal_streaming_edit_sent_at,
     prepare_large_message,
-    should_upload_oversized_nonterminal_stream_sidecar,
+    should_send_oversized_nonterminal_streaming_edit,
 )
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 
@@ -63,11 +63,11 @@ def test__is_edit_message() -> None:
     assert _is_edit_message(edit2)
 
 
-def test_oversized_nonterminal_streaming_sidecar_upload_rate_limit_prunes_expired_entries(
+def test_oversized_nonterminal_streaming_edit_rate_limit_prunes_expired_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Oversized streaming-edit sidecar upload rate state should not retain old streams forever."""
-    _clear_oversized_nonterminal_streaming_sidecar_upload_rate_limits()
+    """Oversized streaming-edit rate state should not retain old streams forever."""
+    _clear_oversized_nonterminal_streaming_edit_rate_limits()
     body = "x" * 40000
 
     def oversized_edit_content(original_event_id: str) -> dict[str, object]:
@@ -85,20 +85,20 @@ def test_oversized_nonterminal_streaming_sidecar_upload_rate_limit_prunes_expire
     monotonic_values = iter([100.0, 106.0])
     monkeypatch.setattr("mindroom.matrix.large_messages.monotonic", lambda: next(monotonic_values))
 
-    assert should_upload_oversized_nonterminal_stream_sidecar(
+    assert should_send_oversized_nonterminal_streaming_edit(
         room_id="!room:server",
         original_event_id="$old",
         edit_content=oversized_edit_content("$old"),
     )
-    assert _oversized_nonterminal_streaming_sidecar_uploaded_at == {("!room:server", "$old"): 100.0}
+    assert _oversized_nonterminal_streaming_edit_sent_at == {("!room:server", "$old"): 100.0}
 
-    assert should_upload_oversized_nonterminal_stream_sidecar(
+    assert should_send_oversized_nonterminal_streaming_edit(
         room_id="!room:server",
         original_event_id="$new",
         edit_content=oversized_edit_content("$new"),
     )
 
-    assert _oversized_nonterminal_streaming_sidecar_uploaded_at == {("!room:server", "$new"): 106.0}
+    assert _oversized_nonterminal_streaming_edit_sent_at == {("!room:server", "$new"): 106.0}
 
 
 def test__create_preview() -> None:
@@ -309,99 +309,6 @@ async def test_prepare_nonterminal_streaming_edit_uses_rich_inline_preview() -> 
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
     assert uploaded_payload == edit_content
     assert uploaded_payload["m.new_content"][_TOOL_TRACE_KEY] == tool_trace
-    assert _calculate_event_size(result) <= 64000
-
-
-@pytest.mark.asyncio
-async def test_prepare_nonterminal_streaming_edit_can_skip_sidecar_upload() -> None:
-    """Rate-limited in-progress stream edits should keep streaming previews without uploading."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-
-        async def upload(self, **_kwargs: object) -> tuple:
-            msg = "rate-limited non-terminal stream edit should not upload a sidecar"
-            raise AssertionError(msg)
-
-    text = ("streaming **markdown**\n" * 2000) + "tail"
-    edit_content = {
-        "body": f"* {text}",
-        "format": "org.matrix.custom.html",
-        "formatted_body": "<p>streaming <strong>markdown</strong></p>" * 2000,
-        "m.new_content": {
-            "body": text,
-            "format": "org.matrix.custom.html",
-            "formatted_body": "<p>streaming <strong>markdown</strong></p>" * 2000,
-            "msgtype": "m.text",
-            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
-            _TOOL_TRACE_KEY: {"version": 2, "events": [{"type": "tool_call_started", "tool_name": "save_file"}]},
-        },
-        "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
-        "msgtype": "m.text",
-    }
-
-    result = await prepare_large_message(
-        MockClient(),
-        "!room:server",
-        edit_content,
-        upload_nonterminal_stream_sidecar=False,
-    )
-
-    assert result["m.new_content"]["msgtype"] == "m.text"
-    assert result["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
-    assert result["m.new_content"]["format"] == "org.matrix.custom.html"
-    assert "Streaming preview truncated" in result["m.new_content"]["formatted_body"]
-    assert _TOOL_TRACE_KEY not in result["m.new_content"]
-    assert "io.mindroom.long_text" not in result["m.new_content"]
-    assert "url" not in result["m.new_content"]
-    assert "file" not in result["m.new_content"]
-    assert _calculate_event_size(result) <= 64000
-
-
-@pytest.mark.asyncio
-async def test_prepare_nonterminal_streaming_edit_without_sidecar_drops_oversized_optional_metadata() -> None:
-    """Preview-only stream edits must not upload when optional metadata is too large."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-
-        async def upload(self, **_kwargs: object) -> tuple:
-            msg = "preview-only non-terminal stream edit must not upload a sidecar"
-            raise AssertionError(msg)
-
-    text = ("streaming **markdown**\n" * 2000) + "tail"
-    oversized_ai_run = {"version": 1, "debug": "x" * 90000}
-    edit_content = {
-        "body": f"* {text}",
-        "format": "org.matrix.custom.html",
-        "formatted_body": "<p>streaming <strong>markdown</strong></p>" * 2000,
-        "m.new_content": {
-            "body": text,
-            "format": "org.matrix.custom.html",
-            "formatted_body": "<p>streaming <strong>markdown</strong></p>" * 2000,
-            "msgtype": "m.text",
-            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
-            AI_RUN_METADATA_KEY: oversized_ai_run,
-        },
-        "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
-        "msgtype": "m.text",
-    }
-
-    result = await prepare_large_message(
-        MockClient(),
-        "!room:server",
-        edit_content,
-        upload_nonterminal_stream_sidecar=False,
-    )
-
-    assert result[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
-    assert result["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
-    assert AI_RUN_METADATA_KEY not in result
-    assert AI_RUN_METADATA_KEY not in result["m.new_content"]
-    assert "io.mindroom.long_text" not in result["m.new_content"]
-    assert "url" not in result["m.new_content"]
-    assert "file" not in result["m.new_content"]
-    assert "Streaming preview truncated" in result["m.new_content"]["formatted_body"]
     assert _calculate_event_size(result) <= 64000
 
 
