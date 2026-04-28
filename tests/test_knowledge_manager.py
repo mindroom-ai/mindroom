@@ -4013,6 +4013,10 @@ async def test_cancelled_subprocess_refresh_reconciles_running_state(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
+    initial_state = load_published_index_state(published_index_metadata_path(key))
+    assert initial_state is not None
+    assert initial_state.refresh_job == "pending"
     wait_entered = asyncio.Event()
     release_wait = asyncio.Event()
     terminated = asyncio.Event()

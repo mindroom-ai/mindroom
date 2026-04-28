@@ -1786,11 +1786,14 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.refresh_runner"
 depends_on = [
+    "mindroom.config.main",
+    "mindroom.constants",
     "mindroom.knowledge.availability",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",
     "mindroom.runtime_resolution",
+    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
-import importlib
 import json
 import os
 import signal
@@ -18,6 +17,13 @@ from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
+if os.name != "nt":
+    import fcntl
+else:
+    fcntl = None  # type: ignore[assignment]
+
+from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -48,13 +54,10 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 logger = get_logger(__name__)
@@ -218,7 +221,6 @@ async def refresh_knowledge_binding_in_subprocess(
         execution_identity=execution_identity,
         force_reindex=force_reindex,
     )
-    runtime_env_values = importlib.import_module("mindroom.constants").runtime_env_values
     env = dict(runtime_env_values(runtime_paths))
     env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
     process = await asyncio.create_subprocess_exec(
@@ -294,9 +296,9 @@ def _refresh_file_lock_path(key: KnowledgeSourceRoot) -> Path:
 
 
 def _open_refresh_file_lock_sync(key: KnowledgeSourceRoot) -> tuple[Any, Any] | None:
-    if os.name == "nt":
+    if fcntl is None:
         return None
-    fcntl = importlib.import_module("fcntl")
+
     lock_path = _refresh_file_lock_path(key)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     return fcntl, lock_path.open("a", encoding="utf-8")
@@ -738,6 +740,9 @@ def _published_state_fingerprint(state: PublishedIndexState | None) -> tuple[obj
         state.published_revision,
         state.indexed_count,
         state.source_signature,
+        state.refresh_job,
+        state.reason,
+        state.last_error,
     )
 
 
@@ -811,8 +816,7 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
 def _execution_identity_from_payload(payload: dict[str, object] | None) -> ToolExecutionIdentity | None:
     if payload is None:
         return None
-    identity_model = importlib.import_module("mindroom.tool_system.worker_routing").ToolExecutionIdentity
-    return identity_model(
+    return ToolExecutionIdentity(
         channel=payload["channel"],  # type: ignore[arg-type]
         agent_name=payload["agent_name"],  # type: ignore[arg-type]
         requester_id=payload.get("requester_id"),  # type: ignore[arg-type]
@@ -827,14 +831,12 @@ def _execution_identity_from_payload(payload: dict[str, object] | None) -> ToolE
 
 async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshResult:
     request = _load_subprocess_refresh_request(payload)
-    constants = importlib.import_module("mindroom.constants")
-    runtime_paths = constants.resolve_runtime_paths(
+    runtime_paths = resolve_runtime_paths(
         config_path=Path(request.config_path),
         storage_path=Path(request.storage_root),
         process_env=dict(os.environ),
     )
-    config_model = importlib.import_module("mindroom.config.main").Config
-    config = config_model.validate_with_runtime(request.config_data, runtime_paths)
+    config = Config.validate_with_runtime(request.config_data, runtime_paths)
     execution_identity = _execution_identity_from_payload(request.execution_identity)
     return await refresh_knowledge_binding(
         request.base_id,
