@@ -192,7 +192,7 @@ uv sync
 ```
 
 MindRoom auto-installs the fully local sentence-transformers embedder runtime on first use when `memory.embedder.provider: sentence_transformers` is configured.
-Install `uv sync --extra matrix_e2ee` if you need Matrix E2EE support in encrypted rooms.
+Matrix E2EE support is installed by default.
 
 ```bash
 # Start MindRoom (agents + API + web dashboard)
@@ -443,7 +443,7 @@ From the developer of 10+ successful open source projects with thousands of user
 Built with:
 - [Matrix](https://matrix.org/) - The federated communication protocol
 - [Agno](https://agno.dev/) - AI agent framework
-- [matrix-nio](https://github.com/poljar/matrix-nio) - Python Matrix client
+- [mindroom-nio](https://github.com/mindroom-ai/mindroom-nio) - Python Matrix client
 
 ---
 
