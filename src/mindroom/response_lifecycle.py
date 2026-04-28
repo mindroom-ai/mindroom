@@ -3,23 +3,160 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, TypeVar, cast
 
+from mindroom.ai_runtime import queued_message_signal_context
+from mindroom.hooks import is_automation_source_kind
 from mindroom.post_response_effects import apply_post_response_effects
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from agno.db.base import BaseDb, SessionType
 
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.history import HistoryScope
     from mindroom.hooks import MessageEnvelope
+    from mindroom.message_target import MessageTarget
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
+    from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
     from .response_runner import ResponseRequest, ResponseRunner
+
+_LockedResponseResult = TypeVar("_LockedResponseResult")
+
+
+@dataclass
+class _QueuedMessageState:
+    """Track queued human ingress while one response lifecycle holds the lock."""
+
+    pending_human_messages: int = 0
+    _active_response_turns: int = 0
+    _event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def begin_response_turn(self) -> bool:
+        existing_turn = self._active_response_turns > 0
+        self._active_response_turns += 1
+        return existing_turn
+
+    def finish_response_turn(self) -> None:
+        if self._active_response_turns == 0:
+            return
+        self._active_response_turns -= 1
+
+    def add_waiting_human_message(self) -> None:
+        self.pending_human_messages += 1
+        self._event.set()
+
+    def consume_waiting_human_message(self) -> None:
+        if self.pending_human_messages == 0:
+            return
+        self.pending_human_messages -= 1
+        if self.pending_human_messages == 0:
+            self._event.clear()
+
+    def has_pending_human_messages(self) -> bool:
+        return self.pending_human_messages > 0
+
+    def has_active_response_turn(self) -> bool:
+        return self._active_response_turns > 0
+
+    async def wait(self) -> None:
+        await self._event.wait()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+
+@dataclass
+class ResponseLifecycleCoordinator:
+    """Serialize response turns and signal active turns about queued human ingress."""
+
+    _response_lifecycle_locks: dict[tuple[str, str | None], asyncio.Lock] = field(default_factory=dict)
+    _thread_queued_signals: dict[tuple[str, str | None], _QueuedMessageState] = field(default_factory=dict)
+
+    def has_active_response_for_target(self, target: MessageTarget) -> bool:
+        """Return whether one canonical conversation target already has an active turn."""
+        thread_key = (target.room_id, target.resolved_thread_id)
+        queued_signal = self._thread_queued_signals.get(thread_key)
+        if queued_signal is not None and queued_signal.has_active_response_turn():
+            return True
+        lifecycle_lock = self._response_lifecycle_locks.get(thread_key)
+        return lifecycle_lock.locked() if lifecycle_lock is not None else False
+
+    def _response_lifecycle_lock(self, target: MessageTarget) -> asyncio.Lock:
+        """Return the per-target lock that serializes one response lifecycle."""
+        lock_key = (target.room_id, target.resolved_thread_id)
+        lock = self._response_lifecycle_locks.get(lock_key)
+        if lock is not None:
+            return lock
+        if len(self._response_lifecycle_locks) >= 100:
+            for candidate, candidate_lock in list(self._response_lifecycle_locks.items()):
+                if len(self._response_lifecycle_locks) < 100:
+                    break
+                if candidate_lock.locked():
+                    continue
+                self._response_lifecycle_locks.pop(candidate, None)
+                self._thread_queued_signals.pop(candidate, None)
+        lock = asyncio.Lock()
+        self._response_lifecycle_locks[lock_key] = lock
+        return lock
+
+    def _get_or_create_queued_signal(self, target: MessageTarget) -> _QueuedMessageState:
+        """Return the queued-message signal for one canonical conversation thread."""
+        thread_key = (target.room_id, target.resolved_thread_id)
+        signal = self._thread_queued_signals.get(thread_key)
+        if signal is not None:
+            return signal
+        signal = _QueuedMessageState()
+        self._thread_queued_signals[thread_key] = signal
+        return signal
+
+    @staticmethod
+    def _should_signal_queued_message(response_envelope: MessageEnvelope | None) -> bool:
+        """Return whether one queued ingress should interrupt the active turn."""
+        return response_envelope is not None and not is_automation_source_kind(response_envelope.source_kind)
+
+    async def run_locked_response(
+        self,
+        *,
+        target: MessageTarget,
+        response_envelope: MessageEnvelope | None,
+        pipeline_timing: DispatchPipelineTiming | None,
+        locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
+    ) -> _LockedResponseResult:
+        """Run one locked response operation with shared queued-message bookkeeping."""
+        lifecycle_lock = self._response_lifecycle_lock(target)
+        queued_signal = self._get_or_create_queued_signal(target)
+        existing_turn = queued_signal.begin_response_turn()
+        queued_human_message = (existing_turn or lifecycle_lock.locked()) and self._should_signal_queued_message(
+            response_envelope,
+        )
+        if queued_human_message:
+            queued_signal.add_waiting_human_message()
+        lock_acquired = False
+        try:
+            if pipeline_timing is not None:
+                pipeline_timing.mark("lock_wait_start")
+            await lifecycle_lock.acquire()
+            lock_acquired = True
+            if pipeline_timing is not None:
+                pipeline_timing.mark("lock_acquired")
+            try:
+                if queued_human_message:
+                    queued_signal.consume_waiting_human_message()
+                    queued_human_message = False
+                with queued_message_signal_context(queued_signal):
+                    return await locked_operation(target)
+            finally:
+                if lock_acquired:
+                    lifecycle_lock.release()
+        finally:
+            if queued_human_message:
+                queued_signal.consume_waiting_human_message()
+            queued_signal.finish_response_turn()
 
 
 @dataclass(frozen=True)

@@ -5304,8 +5304,9 @@ class TestAgentBot:
         ).with_thread_root("$root_b")
 
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
-        assert coordinator._response_lifecycle_lock(first) is coordinator._response_lifecycle_lock(first)
-        assert coordinator._response_lifecycle_lock(first) is not coordinator._response_lifecycle_lock(second)
+        lifecycle = coordinator._lifecycle_coordinator
+        assert lifecycle._response_lifecycle_lock(first) is lifecycle._response_lifecycle_lock(first)
+        assert lifecycle._response_lifecycle_lock(first) is not lifecycle._response_lifecycle_lock(second)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
