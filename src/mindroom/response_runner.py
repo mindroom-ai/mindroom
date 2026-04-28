@@ -55,6 +55,7 @@ from mindroom.post_response_effects import (
     PostResponseEffectsSupport,
     ResponseOutcome,
 )
+from mindroom.response_terminal import PendingVisibleResponse, build_terminal_stream_transport_outcome
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
@@ -1305,29 +1306,19 @@ class ResponseRunner:
             delivery_failure_reason = str(error)
             self._log_delivery_failure(response_kind="team", error=error)
         if final_delivery_outcome is None and delivery_failure_reason is not None:
-            placeholder_event_id = run_message_id if request.existing_event_id is None else None
-            event_id = (
-                tracked_event_id
-                or placeholder_event_id
-                or (request.existing_event_id if request.existing_event_is_placeholder else None)
-            )
-            placeholder_only = event_id is not None and (
-                event_id == placeholder_event_id
-                or (
-                    request.existing_event_id is not None
-                    and request.existing_event_is_placeholder
-                    and event_id == request.existing_event_id
-                )
-            )
             final_delivery_outcome = await self.deps.delivery_gateway.finalize_streamed_response(
                 FinalizeStreamedResponseRequest(
                     target=delivery_target,
-                    stream_transport_outcome=StreamTransportOutcome(
-                        last_physical_stream_event_id=event_id,
+                    stream_transport_outcome=build_terminal_stream_transport_outcome(
+                        PendingVisibleResponse(
+                            tracked_event_id=tracked_event_id,
+                            run_message_id=run_message_id if request.existing_event_id is None else None,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        ),
                         terminal_status="cancelled" if delivery_cancelled else "error",
-                        rendered_body=PROGRESS_PLACEHOLDER if placeholder_only else None,
-                        visible_body_state="placeholder_only" if placeholder_only else "none",
                         failure_reason=delivery_failure_reason or "late_stream_delivery_failure",
+                        placeholder_body=PROGRESS_PLACEHOLDER,
                     ),
                     initial_delivery_kind="edited" if request.existing_event_id else "sent",
                     response_kind="team",
@@ -2038,16 +2029,19 @@ class ResponseRunner:
             raise
         except Exception as error:
             self.deps.logger.exception("Error in streaming response", error=str(error))
-            event_id = request.existing_event_id if request.existing_event_is_placeholder else None
             return await self.deps.delivery_gateway.finalize_streamed_response(
                 FinalizeStreamedResponseRequest(
                     target=runtime.resolved_target,
-                    stream_transport_outcome=StreamTransportOutcome(
-                        last_physical_stream_event_id=request.existing_event_id or event_id,
+                    stream_transport_outcome=build_terminal_stream_transport_outcome(
+                        PendingVisibleResponse(
+                            tracked_event_id=request.existing_event_id,
+                            run_message_id=None,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        ),
                         terminal_status="error",
-                        rendered_body=PROGRESS_PLACEHOLDER if event_id is not None else None,
-                        visible_body_state="placeholder_only" if event_id is not None else "none",
                         failure_reason=str(error),
+                        placeholder_body=PROGRESS_PLACEHOLDER,
                     ),
                     initial_delivery_kind="edited" if request.existing_event_id else "sent",
                     response_kind=response_kind,
