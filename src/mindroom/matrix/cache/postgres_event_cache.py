@@ -38,15 +38,15 @@ T = TypeVar("T")
 # fresh connection.
 _TRANSIENT_SQLSTATES: frozenset[str] = frozenset(
     {
-        "08000",
-        "08001",
-        "08003",
-        "08004",
-        "08006",
-        "08007",
-        "57P01",
-        "57P02",
-        "57P03",
+        "08000",  # connection_exception (generic 08xxx class)
+        "08001",  # sqlclient_unable_to_establish_sqlconnection
+        "08003",  # connection_does_not_exist
+        "08004",  # sqlserver_rejected_establishment_of_sqlconnection
+        "08006",  # connection_failure
+        "08007",  # transaction_resolution_unknown
+        "57P01",  # admin_shutdown (terminating connection due to administrator command)
+        "57P02",  # crash_shutdown (postmaster has crashed)
+        "57P03",  # cannot_connect_now (server still starting up)
     },
 )
 _TRANSIENT_MESSAGE_FRAGMENTS: tuple[str, ...] = (
