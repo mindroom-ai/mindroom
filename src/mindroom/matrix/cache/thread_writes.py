@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
@@ -30,6 +31,9 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 
 __all__ = ["_collect_sync_timeline_cache_updates"]
+
+
+_NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 
 
 def _collect_sync_timeline_cache_updates(
@@ -85,6 +89,31 @@ def _threaded_sync_event_cache_update(
     if not isinstance(event_id, str) or not event_id:
         return None
     return room_id, normalize_nio_event_for_cache(event)
+
+
+def _outbound_streaming_edit_coalesce_context(
+    *,
+    event_info: EventInfo,
+    event_id: str,
+    event_source: dict[str, object],
+) -> tuple[tuple[str, str], dict[str, object]] | None:
+    if not event_info.is_edit or not isinstance(event_info.original_event_id, str):
+        return None
+    content = event_source.get("content")
+    if not isinstance(content, dict):
+        return None
+    new_content = typing.cast("dict[str, object]", content).get("m.new_content")
+    if not isinstance(new_content, dict):
+        return None
+    if typing.cast("dict[str, object]", new_content).get(STREAM_STATUS_KEY) not in _NONTERMINAL_STREAM_STATUSES:
+        return None
+    return (
+        ("outbound_streaming_edit", event_info.original_event_id),
+        {
+            "original_event_id": event_info.original_event_id,
+            "latest_event_id": event_id,
+        },
+    )
 
 
 def _mutation_reason(
@@ -274,6 +303,13 @@ class ThreadOutboundWritePolicy:
             event_id = typing.cast("str", event_id_value)
 
             event_info = EventInfo.from_event(normalized_event_source)
+            coalesce_context = _outbound_streaming_edit_coalesce_context(
+                event_info=event_info,
+                event_id=event_id,
+                event_source=normalized_event_source,
+            )
+            coalesce_key, coalesce_log_context = coalesce_context if coalesce_context is not None else (None, None)
+            emit_timing = event_info.is_edit
             if event_info.is_reaction:
                 persisted_batch: list[tuple[str, str, dict[str, object]]] = [
                     (event_id, room_id, normalized_event_source),
@@ -289,6 +325,7 @@ class ThreadOutboundWritePolicy:
                     cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
                     failure_message="Ignoring outbound cache bookkeeping failure after successful send",
                     log_context={"event_id": event_id},
+                    emit_timing=emit_timing,
                 )
                 return
             if not is_thread_affecting_relation(event_info):
@@ -308,6 +345,9 @@ class ThreadOutboundWritePolicy:
                     cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
                     failure_message="Ignoring outbound cache bookkeeping failure after successful send",
                     log_context={"event_id": event_id},
+                    emit_timing=emit_timing,
+                    coalesce_key=coalesce_key,
+                    coalesce_log_context=coalesce_log_context,
                 )
                 return
             # Lookup-dependent outbound mutations stay on the room barrier because earlier outbound writes can create the lookup rows needed to resolve thread impact. Safe parallelization would require reservation-based routing (see ISSUE-189).
@@ -323,6 +363,9 @@ class ThreadOutboundWritePolicy:
                 cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
                 failure_message="Ignoring outbound cache bookkeeping failure after successful send",
                 log_context={"event_id": event_id},
+                emit_timing=emit_timing,
+                coalesce_key=coalesce_key,
+                coalesce_log_context=coalesce_log_context,
             )
         except asyncio.CancelledError as exc:
             raw_event_id = event_source.get("event_id")
@@ -452,6 +495,9 @@ class ThreadOutboundWritePolicy:
         cancelled_message: str,
         failure_message: str,
         log_context: dict[str, object],
+        emit_timing: bool = False,
+        coalesce_key: tuple[str, str] | None = None,
+        coalesce_log_context: dict[str, object] | None = None,
     ) -> None:
         async def safe_update() -> None:
             try:
@@ -476,6 +522,9 @@ class ThreadOutboundWritePolicy:
                 room_id,
                 safe_update,
                 name=name,
+                emit_timing=emit_timing,
+                coalesce_key=coalesce_key,
+                coalesce_log_context=coalesce_log_context,
             )
         except asyncio.CancelledError as exc:
             self._cache_ops.logger.warning(
@@ -502,6 +551,9 @@ class ThreadOutboundWritePolicy:
         cancelled_message: str,
         failure_message: str,
         log_context: dict[str, object],
+        emit_timing: bool = False,
+        coalesce_key: tuple[str, str] | None = None,
+        coalesce_log_context: dict[str, object] | None = None,
     ) -> None:
         async def safe_update() -> None:
             try:
@@ -529,6 +581,9 @@ class ThreadOutboundWritePolicy:
                 thread_id,
                 safe_update,
                 name=name,
+                emit_timing=emit_timing,
+                coalesce_key=coalesce_key,
+                coalesce_log_context=coalesce_log_context,
             )
         except asyncio.CancelledError as exc:
             self._cache_ops.logger.warning(

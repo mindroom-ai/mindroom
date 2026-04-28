@@ -15,9 +15,12 @@ from mindroom.constants import (
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
     _calculate_event_size,
+    _clear_oversized_nonterminal_streaming_edit_rate_limits,
     _create_preview,
     _is_edit_message,
+    _oversized_nonterminal_streaming_edit_sent_at,
     prepare_large_message,
+    should_send_oversized_nonterminal_streaming_edit,
 )
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 
@@ -58,6 +61,44 @@ def test__is_edit_message() -> None:
         "msgtype": "m.text",
     }
     assert _is_edit_message(edit2)
+
+
+def test_oversized_nonterminal_streaming_edit_rate_limit_prunes_expired_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oversized streaming-edit rate state should not retain old streams forever."""
+    _clear_oversized_nonterminal_streaming_edit_rate_limits()
+    body = "x" * 40000
+
+    def oversized_edit_content(original_event_id: str) -> dict[str, object]:
+        return {
+            "body": f"* {body}",
+            "m.new_content": {
+                "body": body,
+                "msgtype": "m.text",
+                STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
+            "msgtype": "m.text",
+        }
+
+    monotonic_values = iter([100.0, 106.0])
+    monkeypatch.setattr("mindroom.matrix.large_messages.monotonic", lambda: next(monotonic_values))
+
+    assert should_send_oversized_nonterminal_streaming_edit(
+        room_id="!room:server",
+        original_event_id="$old",
+        edit_content=oversized_edit_content("$old"),
+    )
+    assert _oversized_nonterminal_streaming_edit_sent_at == {("!room:server", "$old"): 100.0}
+
+    assert should_send_oversized_nonterminal_streaming_edit(
+        room_id="!room:server",
+        original_event_id="$new",
+        edit_content=oversized_edit_content("$new"),
+    )
+
+    assert _oversized_nonterminal_streaming_edit_sent_at == {("!room:server", "$new"): 106.0}
 
 
 def test__create_preview() -> None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+from time import monotonic
 from typing import Any
 
 import nio
@@ -50,6 +51,8 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
 _MATRIX_EVENT_HARD_LIMIT = 64000
+_OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS = 5.0
+_oversized_nonterminal_streaming_edit_sent_at: dict[tuple[str, str], float] = {}
 
 
 def _is_passthrough_preview_key(key: object) -> bool:
@@ -139,6 +142,47 @@ def _is_edit_message(content: dict[str, Any]) -> bool:
 def _is_nonterminal_stream_content(content: dict[str, Any]) -> bool:
     """Return whether content is an in-progress streaming payload."""
     return content.get(STREAM_STATUS_KEY) in _NONTERMINAL_STREAM_STATUSES
+
+
+def _clear_oversized_nonterminal_streaming_edit_rate_limits() -> None:
+    """Reset oversized streaming-edit rate state for tests."""
+    _oversized_nonterminal_streaming_edit_sent_at.clear()
+
+
+def _prune_expired_oversized_nonterminal_streaming_edit_rate_limits(now: float) -> None:
+    expired_keys = [
+        key
+        for key, sent_at in _oversized_nonterminal_streaming_edit_sent_at.items()
+        if now - sent_at >= _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS
+    ]
+    for key in expired_keys:
+        _oversized_nonterminal_streaming_edit_sent_at.pop(key, None)
+
+
+def should_send_oversized_nonterminal_streaming_edit(
+    *,
+    room_id: str,
+    original_event_id: str,
+    edit_content: dict[str, Any],
+) -> bool:
+    """Return whether one oversized non-terminal streaming edit may be sent now."""
+    if not original_event_id or not _is_edit_message(edit_content):
+        return True
+
+    source_content = edit_content.get("m.new_content")
+    if not isinstance(source_content, dict) or not _is_nonterminal_stream_content(source_content):
+        return True
+    if _calculate_event_size(edit_content) <= _EDIT_MESSAGE_LIMIT:
+        return True
+
+    key = (room_id, original_event_id)
+    now = monotonic()
+    _prune_expired_oversized_nonterminal_streaming_edit_rate_limits(now)
+    last_sent_at = _oversized_nonterminal_streaming_edit_sent_at.get(key)
+    if last_sent_at is not None and now - last_sent_at < _OVERSIZED_NONTERMINAL_STREAMING_EDIT_MIN_INTERVAL_SECONDS:
+        return False
+    _oversized_nonterminal_streaming_edit_sent_at[key] = now
+    return True
 
 
 def _build_nonterminal_streaming_edit_preview(

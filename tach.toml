@@ -1039,6 +1039,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.cache.thread_writes"
 depends_on = [
+    "mindroom.constants",
     "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.event_info",
     "mindroom.matrix.thread_bookkeeping",
