@@ -602,6 +602,84 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
         await cache.close()
 
 
+@pytest.mark.asyncio
+async def test_postgres_event_cache_pending_thread_flush_does_not_downgrade_newer_durable_marker(
+    postgres_event_cache_url: str,
+) -> None:
+    """An older pending thread marker must not overwrite a newer durable invalidation."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+
+    await cache.initialize()
+    try:
+        cache._runtime.record_pending_thread_invalidation(
+            room_id,
+            thread_id,
+            invalidated_at=100.0,
+            reason="older_pending_marker",
+        )
+        async with cache._runtime.acquire_db_operation(room_id, operation="test_newer_thread_marker") as db:
+            await postgres_event_cache_threads.mark_thread_stale_locked(
+                db,
+                namespace=namespace,
+                room_id=room_id,
+                thread_id=thread_id,
+                invalidated_at=200.0,
+                reason="newer_durable_marker",
+            )
+            await db.commit()
+
+        await cache.flush_pending_durable_writes(room_id)
+        state = await cache.get_thread_cache_state(room_id, thread_id)
+
+        assert state is not None
+        assert state.invalidated_at == 200.0
+        assert state.invalidation_reason == "newer_durable_marker"
+        assert cache.pending_durable_write_room_ids() == ()
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_event_cache_pending_room_flush_does_not_downgrade_newer_durable_marker(
+    postgres_event_cache_url: str,
+) -> None:
+    """An older pending room marker must not overwrite a newer durable invalidation."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+
+    await cache.initialize()
+    try:
+        cache._runtime.record_pending_room_invalidation(
+            room_id,
+            invalidated_at=100.0,
+            reason="older_pending_room_marker",
+        )
+        async with cache._runtime.acquire_db_operation(room_id, operation="test_newer_room_marker") as db:
+            await postgres_event_cache_threads.mark_room_stale_locked(
+                db,
+                namespace=namespace,
+                room_id=room_id,
+                invalidated_at=200.0,
+                reason="newer_durable_room_marker",
+            )
+            await db.commit()
+
+        await cache.flush_pending_durable_writes(room_id)
+        state = await cache.get_thread_cache_state(room_id, thread_id)
+
+        assert state is not None
+        assert state.room_invalidated_at == 200.0
+        assert state.room_invalidation_reason == "newer_durable_room_marker"
+        assert cache.pending_durable_write_room_ids() == ()
+    finally:
+        await cache.close()
+
+
 def test_postgres_transient_classifier_accepts_startup_connection_refused() -> None:
     """Startup connection-refused errors should retry later instead of disabling the cache."""
     assert _is_transient_postgres_failure(psycopg.OperationalError("connection failed: Connection refused"))
@@ -620,6 +698,44 @@ def test_postgres_transient_classifier_rejects_authentication_failures_without_s
     )
 
     assert not _is_transient_postgres_failure(exc)
+
+
+def test_postgres_pending_invalidation_records_are_monotonic() -> None:
+    """Pending invalidation buffers should keep the newest marker for each scope."""
+    runtime = PostgresEventCacheRuntime("postgresql://cache:secret@db.internal/mindroom", namespace="tenant")
+
+    runtime.record_pending_thread_invalidation(
+        "!room:localhost",
+        "$thread",
+        invalidated_at=200.0,
+        reason="newer_thread_marker",
+    )
+    runtime.record_pending_thread_invalidation(
+        "!room:localhost",
+        "$thread",
+        invalidated_at=100.0,
+        reason="older_thread_marker",
+    )
+    runtime.record_pending_room_invalidation(
+        "!room:localhost",
+        invalidated_at=200.0,
+        reason="newer_room_marker",
+    )
+    runtime.record_pending_room_invalidation(
+        "!room:localhost",
+        invalidated_at=100.0,
+        reason="older_room_marker",
+    )
+
+    thread_pending = runtime.pending_thread_invalidations("!room:localhost")
+    room_pending = runtime.pending_room_invalidation("!room:localhost")
+
+    assert thread_pending == (("$thread", runtime._pending_thread_invalidations[("!room:localhost", "$thread")]),)
+    assert thread_pending[0][1].invalidated_at == 200.0
+    assert thread_pending[0][1].reason == "newer_thread_marker"
+    assert room_pending is not None
+    assert room_pending.invalidated_at == 200.0
+    assert room_pending.reason == "newer_room_marker"
 
 
 @pytest.mark.asyncio

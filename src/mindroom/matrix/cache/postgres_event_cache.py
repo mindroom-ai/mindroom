@@ -449,7 +449,11 @@ class _PostgresEventCacheRuntime:
         reason: str,
     ) -> None:
         """Remember a best-effort stale marker that must be persisted before trusting cache rows."""
-        self._pending_thread_invalidations[(room_id, thread_id)] = _PendingInvalidation(
+        key = (room_id, thread_id)
+        existing = self._pending_thread_invalidations.get(key)
+        if existing is not None and existing.invalidated_at >= invalidated_at:
+            return
+        self._pending_thread_invalidations[key] = _PendingInvalidation(
             invalidated_at=invalidated_at,
             reason=reason,
         )
@@ -462,6 +466,9 @@ class _PostgresEventCacheRuntime:
         reason: str,
     ) -> None:
         """Remember a best-effort room stale marker that must be persisted before trusting cache rows."""
+        existing = self._pending_room_invalidations.get(room_id)
+        if existing is not None and existing.invalidated_at >= invalidated_at:
+            return
         self._pending_room_invalidations[room_id] = _PendingInvalidation(
             invalidated_at=invalidated_at,
             reason=reason,
