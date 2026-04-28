@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.constants import resolve_config_relative_path
-from mindroom.matrix_naming import managed_room_key_from_alias_localpart, room_alias_localpart
+from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
 
 if TYPE_CHECKING:
     from pathlib import Path

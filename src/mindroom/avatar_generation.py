@@ -29,7 +29,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.rooms import get_room_id
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
-from mindroom.matrix_naming import extract_server_name_from_homeserver
+from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 
 if TYPE_CHECKING:
     from pathlib import Path

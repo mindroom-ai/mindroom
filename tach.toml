@@ -164,7 +164,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.identity",
     "mindroom.matrix.rooms",
-    "mindroom.matrix_naming",
+    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]
@@ -669,7 +669,7 @@ depends_on = []
 path = "mindroom.hooks.matrix_admin"
 depends_on = [
     "mindroom.matrix.client_room_admin",
-    "mindroom.matrix_naming",
+    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]
@@ -678,7 +678,7 @@ depends_on = ["mindroom.matrix.client_session", "mindroom.constants"]
 
 [[modules]]
 path = "mindroom.matrix.room_cleanup"
-depends_on = ["mindroom.entity_resolution", "mindroom.matrix.rooms", "mindroom.matrix.client_room_admin", "mindroom.matrix.users", "mindroom.matrix_naming"]
+depends_on = ["mindroom.entity_resolution", "mindroom.matrix.rooms", "mindroom.matrix.client_room_admin", "mindroom.matrix.users", "mindroom.matrix_identifiers"]
 
 [[modules]]
 path = "mindroom.matrix.rooms"
@@ -688,7 +688,7 @@ depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.users",
-    "mindroom.matrix_naming",
+    "mindroom.matrix_identifiers",
     "mindroom.topic_generator",
 ]
 
@@ -699,7 +699,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_session",
     "mindroom.matrix.provisioning",
-    "mindroom.matrix_naming",
+    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]
@@ -723,7 +723,7 @@ depends_on = [
     "mindroom.matrix.rooms",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.matrix.users",
-    "mindroom.matrix_naming",
+    "mindroom.matrix_identifiers",
     "mindroom.memory",
     "mindroom.mcp.manager",
     "mindroom.mcp.registry",
@@ -818,7 +818,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.history.types",
     "mindroom.logging_config",
-    "mindroom.matrix_naming",
+    "mindroom.matrix_identifiers",
     "mindroom.mcp.config",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
@@ -1104,7 +1104,7 @@ path = "mindroom.constants"
 depends_on = []
 
 [[modules]]
-path = "mindroom.matrix_naming"
+path = "mindroom.matrix_identifiers"
 depends_on = ["mindroom.constants"]
 
 [[modules]]
@@ -1578,7 +1578,7 @@ depends_on = [
     "mindroom.model_loading",
     "mindroom.matrix.media",
     "mindroom.matrix.mentions",
-    "mindroom.matrix_naming",
+    "mindroom.matrix_identifiers",
 ]
 
 [[modules]]

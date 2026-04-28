@@ -1,4 +1,4 @@
-"""Matrix naming helpers that do not depend on Matrix runtime modules."""
+"""Matrix identifier helpers that do not depend on Matrix runtime modules."""
 
 from __future__ import annotations
 

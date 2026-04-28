@@ -50,7 +50,7 @@ from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
     create_agent_user,
 )
-from mindroom.matrix_naming import extract_server_name_from_homeserver
+from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager

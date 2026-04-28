@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar
 
-from mindroom import matrix_naming
+from mindroom import matrix_identifiers as _matrix_identifiers
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.state import managed_account_usernames
 
@@ -28,7 +28,7 @@ class MatrixID:
     username: str
     domain: str
 
-    AGENT_PREFIX: ClassVar[str] = matrix_naming.AGENT_USERNAME_PREFIX
+    AGENT_PREFIX: ClassVar[str] = _matrix_identifiers.AGENT_USERNAME_PREFIX
 
     @classmethod
     def parse(cls, matrix_id: str) -> MatrixID:
@@ -43,7 +43,7 @@ class MatrixID:
         runtime_paths: RuntimePaths,
     ) -> MatrixID:
         """Create a MatrixID for an agent."""
-        return cls(username=matrix_naming.agent_username_localpart(agent_name, runtime_paths), domain=domain)
+        return cls(username=_matrix_identifiers.agent_username_localpart(agent_name, runtime_paths), domain=domain)
 
     @classmethod
     def from_username(cls, username: str, domain: str) -> MatrixID:
@@ -66,7 +66,7 @@ class MatrixID:
 
         persisted_usernames = managed_account_usernames(runtime_paths)
         for account_key, active_name in _active_managed_agent_account_names(config).items():
-            expected_username = persisted_usernames.get(account_key) or matrix_naming.agent_username_localpart(
+            expected_username = persisted_usernames.get(account_key) or _matrix_identifiers.agent_username_localpart(
                 active_name,
                 runtime_paths,
             )

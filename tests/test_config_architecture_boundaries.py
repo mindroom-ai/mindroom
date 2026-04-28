@@ -8,7 +8,8 @@ from pathlib import Path
 CONFIG_MODULES = tuple(Path("src/mindroom/config").glob("*.py"))
 PRODUCTION_MODULES = tuple(Path("src/mindroom").rglob("*.py"))
 MATRIX_IDENTITY_MODULE = Path("src/mindroom/matrix/identity.py")
-MATRIX_NAMING_HELPERS = frozenset(
+LEGACY_MATRIX_NAMING_MODULE = Path("src/mindroom/matrix_naming.py")
+MATRIX_IDENTIFIER_HELPERS = frozenset(
     {
         "agent_username_localpart",
         "extract_server_name_from_homeserver",
@@ -43,14 +44,21 @@ def test_config_modules_do_not_import_matrix_runtime_modules() -> None:
     assert forbidden == []
 
 
-def test_matrix_identity_does_not_reexport_naming_helpers() -> None:
-    """Matrix identity owns Matrix IDs; pure naming helpers live in matrix_naming."""
+def test_matrix_identity_does_not_reexport_identifier_helpers() -> None:
+    """Matrix identity owns Matrix IDs; pure identifier helpers live in matrix_identifiers."""
     tree = ast.parse(MATRIX_IDENTITY_MODULE.read_text(encoding="utf-8"))
     exported_names: set[str] = set()
     direct_naming_imports: list[str] = []
+    public_identifier_module_imports: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "mindroom.matrix_naming":
-            direct_naming_imports.extend(alias.name for alias in node.names if alias.name in MATRIX_NAMING_HELPERS)
+        if isinstance(node, ast.ImportFrom) and node.module == "mindroom":
+            public_identifier_module_imports.extend(
+                alias.name
+                for alias in node.names
+                if alias.name == "matrix_identifiers" and not (alias.asname or "").startswith("_")
+            )
+        if isinstance(node, ast.ImportFrom) and node.module == "mindroom.matrix_identifiers":
+            direct_naming_imports.extend(alias.name for alias in node.names if alias.name in MATRIX_IDENTIFIER_HELPERS)
         if not isinstance(node, ast.Assign):
             continue
         if not any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets):
@@ -58,12 +66,13 @@ def test_matrix_identity_does_not_reexport_naming_helpers() -> None:
         if isinstance(node.value, ast.List):
             exported_names.update(item.value for item in node.value.elts if isinstance(item, ast.Constant))
 
+    assert public_identifier_module_imports == []
     assert sorted(direct_naming_imports) == []
-    assert sorted(exported_names & MATRIX_NAMING_HELPERS) == []
+    assert sorted(exported_names & MATRIX_IDENTIFIER_HELPERS) == []
 
 
-def test_production_code_imports_naming_helpers_from_matrix_naming() -> None:
-    """Callers use the neutral naming module instead of Matrix identity compatibility exports."""
+def test_production_code_imports_identifier_helpers_from_matrix_identifiers() -> None:
+    """Callers use the neutral identifier module instead of Matrix identity compatibility exports."""
     forbidden: list[str] = []
     for source_path in PRODUCTION_MODULES:
         if source_path == MATRIX_IDENTITY_MODULE:
@@ -72,8 +81,29 @@ def test_production_code_imports_naming_helpers_from_matrix_naming() -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom) or node.module != "mindroom.matrix.identity":
                 continue
-            imported_helpers = sorted(alias.name for alias in node.names if alias.name in MATRIX_NAMING_HELPERS)
+            imported_helpers = sorted(alias.name for alias in node.names if alias.name in MATRIX_IDENTIFIER_HELPERS)
             if imported_helpers:
                 forbidden.append(f"{source_path}:{node.lineno}: {', '.join(imported_helpers)}")
+
+    assert forbidden == []
+
+
+def test_matrix_naming_compatibility_module_does_not_exist() -> None:
+    """Pure Matrix identifier helpers live in matrix_identifiers with no legacy re-export module."""
+    forbidden: list[str] = []
+    if LEGACY_MATRIX_NAMING_MODULE.exists():
+        forbidden.append(str(LEGACY_MATRIX_NAMING_MODULE))
+
+    for source_path in PRODUCTION_MODULES:
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "mindroom.matrix_naming":
+                forbidden.append(f"{source_path}:{node.lineno}: from {node.module}")
+            if isinstance(node, ast.Import):
+                forbidden.extend(
+                    f"{source_path}:{node.lineno}: import {alias.name}"
+                    for alias in node.names
+                    if alias.name == "mindroom.matrix_naming"
+                )
 
     assert forbidden == []
