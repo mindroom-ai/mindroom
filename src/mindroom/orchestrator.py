@@ -1640,10 +1640,10 @@ async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
     """Watch skill roots for changes and clear cached skills."""
     while not orchestrator.running:  # noqa: ASYNC110
         await asyncio.sleep(0.1)
-    last_snapshot = get_skill_snapshot()
+    last_snapshot = await asyncio.to_thread(get_skill_snapshot)
     while orchestrator.running:
         await asyncio.sleep(1.0)
-        snapshot = get_skill_snapshot()
+        snapshot = await asyncio.to_thread(get_skill_snapshot)
         if snapshot != last_snapshot:
             last_snapshot = snapshot
             clear_skill_cache()

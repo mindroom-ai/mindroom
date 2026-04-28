@@ -6,7 +6,7 @@ import asyncio
 import sys
 from dataclasses import dataclass
 from importlib import util
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.hooks import HookRegistry, iter_module_hooks
@@ -36,6 +36,18 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 PluginValidationError = plugin_imports.PluginValidationError
+_CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE = 128
+
+
+class _ConfiguredPluginRootCacheKey(NamedTuple):
+    plugin_entries: tuple[tuple[str, bool], ...]
+    config_path: str
+    config_dir: str
+    storage_root: str
+    sys_path: tuple[str, ...]
+
+
+_CONFIGURED_PLUGIN_ROOT_CACHE: dict[_ConfiguredPluginRootCacheKey, tuple[Path, ...]] = {}
 
 
 @dataclass(frozen=True)
@@ -158,6 +170,11 @@ def get_configured_plugin_roots(
     runtime_paths: RuntimePaths,
 ) -> tuple[Path, ...]:
     """Resolve the enabled plugin roots for one config snapshot."""
+    cache_key = _configured_plugin_root_cache_key(config, runtime_paths)
+    cached = _CONFIGURED_PLUGIN_ROOT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     roots: list[Path] = []
     for plugin_entry in config.plugins:
         if not plugin_entry.enabled:
@@ -166,7 +183,29 @@ def get_configured_plugin_roots(
             roots.append(plugin_imports._resolve_plugin_root(plugin_entry.path, runtime_paths))
         except PluginValidationError:
             continue
-    return tuple(dict.fromkeys(roots))
+    configured_roots = tuple(dict.fromkeys(roots))
+    if len(_CONFIGURED_PLUGIN_ROOT_CACHE) >= _CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE:
+        _CONFIGURED_PLUGIN_ROOT_CACHE.clear()
+    _CONFIGURED_PLUGIN_ROOT_CACHE[cache_key] = configured_roots
+    return configured_roots
+
+
+def _configured_plugin_root_cache_key(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> _ConfiguredPluginRootCacheKey:
+    return _ConfiguredPluginRootCacheKey(
+        plugin_entries=tuple((plugin_entry.path, plugin_entry.enabled) for plugin_entry in config.plugins),
+        config_path=str(runtime_paths.config_path),
+        config_dir=str(runtime_paths.config_dir),
+        storage_root=str(runtime_paths.storage_root),
+        sys_path=tuple(str(path) for path in sys.path),
+    )
+
+
+def _clear_configured_plugin_roots_cache() -> None:
+    """Drop cached configured plugin roots after plugin runtime invalidation."""
+    _CONFIGURED_PLUGIN_ROOT_CACHE.clear()
 
 
 def prepare_plugin_reload(
@@ -272,6 +311,7 @@ def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
 
 def _clear_plugin_reload_caches() -> None:
     """Drop cached plugin manifests and imported plugin modules before one rebuild."""
+    _clear_configured_plugin_roots_cache()
     plugin_imports._PLUGIN_CACHE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.clear()
 
