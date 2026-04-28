@@ -2,11 +2,16 @@
 
 import os
 import re
+import shutil
+import subprocess
+import time
+import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping, MutableMapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -33,6 +38,9 @@ from mindroom.turn_controller import TurnController
 from mindroom.turn_policy import TurnPolicy
 from mindroom.turn_store import TurnStore
 
+if TYPE_CHECKING:
+    from mindroom.matrix.cache import ConversationEventCache
+
 __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
@@ -44,6 +52,8 @@ __all__ = [
     "create_mock_room",
     "delivered_matrix_event",
     "delivered_matrix_side_effect",
+    "event_cache",
+    "event_cache_factory",
     "install_edit_message_mock",
     "install_generate_response_mock",
     "install_runtime_cache_support",
@@ -56,6 +66,7 @@ __all__ = [
     "normalize_console_output",
     "orchestrator_runtime_paths",
     "patch_response_runner_module",
+    "postgres_event_cache_url",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
@@ -75,6 +86,122 @@ _VISIBLE_MESSAGE_IDS = count(1)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
 RuntimeBot = AgentBot | TeamBot
+
+
+def _wait_for_postgres_container(database_url: str) -> None:
+    import psycopg  # noqa: PLC0415
+
+    deadline = time.monotonic() + 30
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with psycopg.connect(database_url, connect_timeout=1):
+                return
+        except psycopg.OperationalError as exc:
+            last_error = exc
+            time.sleep(0.25)
+    msg = "Postgres test container did not become ready"
+    raise RuntimeError(msg) from last_error
+
+
+def _postgres_url_from_container_port(docker: str, container_name: str) -> str:
+    result = subprocess.run(
+        [docker, "port", container_name, "5432/tcp"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    mapped_port = result.stdout.strip().splitlines()[-1]
+    host, port = mapped_port.rsplit(":", 1)
+    return f"postgresql://cache:test@{host.removeprefix('[').removesuffix(']')}:{port}/mindroom"
+
+
+@pytest.fixture(scope="session")
+def postgres_event_cache_url() -> Iterator[str]:
+    """Start a disposable Postgres server when Docker is available."""
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker is required for Postgres event-cache integration tests")
+
+    info_result = subprocess.run(
+        [docker, "info"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if info_result.returncode != 0:
+        pytest.skip("Docker daemon is unavailable for Postgres event-cache integration tests")
+
+    container_name = f"mindroom-postgres-cache-test-{uuid.uuid4().hex}"
+    run_result = subprocess.run(
+        [
+            docker,
+            "run",
+            "--rm",
+            "-d",
+            "--name",
+            container_name,
+            "-e",
+            "POSTGRES_USER=cache",
+            "-e",
+            "POSTGRES_PASSWORD=test",
+            "-e",
+            "POSTGRES_DB=mindroom",
+            "-p",
+            "127.0.0.1::5432",
+            "postgres:15-alpine",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if run_result.returncode != 0:
+        pytest.skip(f"Could not start Postgres test container: {run_result.stderr.strip()}")
+
+    try:
+        database_url = _postgres_url_from_container_port(docker, container_name)
+        _wait_for_postgres_container(database_url)
+        yield database_url
+    finally:
+        subprocess.run(
+            [docker, "rm", "-f", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+
+@pytest.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
+def event_cache_factory(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> Callable[[], "ConversationEventCache"]:
+    """Return a cache factory for backend-neutral event-cache contract tests."""
+    backend = str(request.param)
+    if backend == "sqlite":
+        db_path = tmp_path / "event_cache.db"
+        return lambda: SqliteEventCache(db_path)
+    if backend == "postgres":
+        from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache  # noqa: PLC0415
+
+        database_url = request.getfixturevalue("postgres_event_cache_url")
+        namespace = f"test_{uuid.uuid4().hex}"
+        return lambda: PostgresEventCache(database_url=database_url, namespace=namespace)
+    msg = f"Unsupported event cache backend fixture: {backend}"
+    raise AssertionError(msg)
+
+
+@pytest_asyncio.fixture
+async def event_cache(
+    event_cache_factory: Callable[[], "ConversationEventCache"],
+) -> AsyncGenerator["ConversationEventCache", None]:
+    """Return one initialized event cache backend for backend-neutral contract tests."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        yield cache
+    finally:
+        await cache.close()
 
 
 async def _empty_async_iterator() -> AsyncGenerator[object, None]:

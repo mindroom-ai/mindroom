@@ -7,11 +7,10 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.matrix.cache import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
-from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache import AgentMessageSnapshot, AgentMessageSnapshotUnavailable, ConversationEventCache
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable
 
 
 def _message_event(
@@ -44,14 +43,14 @@ def _message_event(
 
 
 async def _read_snapshot(
-    db_path: Path,
+    cache_factory: Callable[[], ConversationEventCache],
     *,
     room_id: str,
     thread_id: str | None,
     sender: str,
     runtime_started_at: float | None,
 ) -> AgentMessageSnapshot | None:
-    cache = SqliteEventCache(db_path)
+    cache = cache_factory()
     await cache.initialize()
     try:
         return await cache.get_latest_agent_message_snapshot(
@@ -66,11 +65,10 @@ async def _read_snapshot(
 
 @pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Thread-scope reads should return the latest unedited agent message."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.replace_thread(
@@ -96,7 +94,7 @@ async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id="$thread-root",
         sender="@agent:localhost",
@@ -115,11 +113,10 @@ async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message
 
 @pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_threaded_message(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Edited threaded messages should surface the latest visible stream status."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.replace_thread(
@@ -156,7 +153,7 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id="$thread-root",
         sender="@agent:localhost",
@@ -175,11 +172,10 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
 
 @pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_room_level_message_when_thread_id_none(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Room-scope reads should skip threaded replies and stay on the room timeline."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -215,7 +211,7 @@ async def test_get_latest_agent_message_snapshot_returns_room_level_message_when
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -230,11 +226,10 @@ async def test_get_latest_agent_message_snapshot_returns_room_level_message_when
 
 @pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_none_when_sender_has_no_message(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Missing sender matches should return None instead of raising."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -255,7 +250,7 @@ async def test_get_latest_agent_message_snapshot_returns_none_when_sender_has_no
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -267,16 +262,15 @@ async def test_get_latest_agent_message_snapshot_returns_none_when_sender_has_no
 
 @pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_none_when_cache_has_no_rows(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Empty cache files should return None for any scope lookup."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id="$thread-root",
         sender="@agent:localhost",
@@ -288,11 +282,10 @@ async def test_get_latest_agent_message_snapshot_returns_none_when_cache_has_no_
 
 @pytest.mark.asyncio
 async def test_room_scope_ignores_messages_cached_before_current_runtime(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Room-scope reads should ignore stale message rows from a prior runtime."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -313,7 +306,7 @@ async def test_room_scope_ignores_messages_cached_before_current_runtime(
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -325,11 +318,10 @@ async def test_room_scope_ignores_messages_cached_before_current_runtime(
 
 @pytest.mark.asyncio
 async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Room-scope reads should keep a message whose visible edit was cached after restart."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -370,7 +362,7 @@ async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -389,11 +381,10 @@ async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
 
 @pytest.mark.asyncio
 async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_is_stale(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Room-scope reads should fail closed when the latest sender message is stale."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -429,7 +420,7 @@ async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -441,11 +432,10 @@ async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_
 
 @pytest.mark.asyncio
 async def test_accessor_accepts_old_thread_cache_without_stale_marker(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Threaded reads should trust old snapshots unless a stale marker exists."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.replace_thread(
@@ -472,7 +462,7 @@ async def test_accessor_accepts_old_thread_cache_without_stale_marker(
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id="$thread-root",
         sender="@agent:localhost",
@@ -491,11 +481,10 @@ async def test_accessor_accepts_old_thread_cache_without_stale_marker(
 
 @pytest.mark.asyncio
 async def test_accessor_reuses_thread_cache_from_prior_bot_run(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Threaded reads should trust snapshots unless an explicit stale marker exists."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.replace_thread(
@@ -522,7 +511,7 @@ async def test_accessor_reuses_thread_cache_from_prior_bot_run(
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id="$thread-root",
         sender="@agent:localhost",
@@ -541,11 +530,10 @@ async def test_accessor_reuses_thread_cache_from_prior_bot_run(
 
 @pytest.mark.asyncio
 async def test_accessor_rejects_invalidated_thread_cache(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Threaded reads should fail closed after durable invalidation."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.replace_thread(
@@ -578,7 +566,7 @@ async def test_accessor_rejects_invalidated_thread_cache(
 
     with pytest.raises(AgentMessageSnapshotUnavailable, match="thread_invalidated_after_validation"):
         await _read_snapshot(
-            db_path,
+            event_cache_factory,
             room_id="!room:localhost",
             thread_id="$thread-root",
             sender="@agent:localhost",
@@ -588,11 +576,10 @@ async def test_accessor_rejects_invalidated_thread_cache(
 
 @pytest.mark.asyncio
 async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Room-scope reads should follow Matrix timeline order, not cache write time."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -633,7 +620,7 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",
@@ -648,11 +635,10 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
 
 @pytest.mark.asyncio
 async def test_room_scope_preserves_cache_insert_order_for_same_timestamp_messages(
-    tmp_path: Path,
+    event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Room-scope reads should keep the later cached sender message when timestamps tie."""
-    db_path = tmp_path / "event_cache.db"
-    cache = SqliteEventCache(db_path)
+    cache = event_cache_factory()
     await cache.initialize()
     try:
         await cache.store_events_batch(
@@ -687,7 +673,7 @@ async def test_room_scope_preserves_cache_insert_order_for_same_timestamp_messag
         await cache.close()
 
     snapshot = await _read_snapshot(
-        db_path,
+        event_cache_factory,
         room_id="!room:localhost",
         thread_id=None,
         sender="@agent:localhost",

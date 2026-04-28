@@ -4,14 +4,16 @@ Developer note:
 - `event_cache.py` owns the storage-agnostic durable cache protocol.
 - `event_normalization.py` owns storage-agnostic event payload shaping before backend writes.
 - `sqlite_event_cache.py` owns the SQLite implementation, runtime, locking, and schema lifecycle.
+- `postgres_event_cache.py` owns the PostgreSQL implementation, runtime, advisory locking, and schema lifecycle.
 - `sqlite_event_cache_events.py` owns SQLite lookup/index rows, edits, and redaction tombstones.
 - `sqlite_event_cache_threads.py` owns thread snapshot rows, cache-state reads, and thread/room invalidation state.
 - `sqlite_agent_message_snapshot.py` owns SQLite reads for latest cached agent message snapshots.
+- `postgres_event_cache_events.py`, `postgres_event_cache_threads.py`, and `postgres_agent_message_snapshot.py` own the equivalent PostgreSQL row helpers.
 - `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_bookkeeping.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
 
 Package boundary:
 - `mindroom.matrix.cache` is the package-level import surface for cache-facing contracts and shared helpers used above the cache package.
-- `SqliteEventCache` and `_EventCacheWriteCoordinator` remain private concrete services used by `runtime_support.py` through their concrete owner modules.
+- `SqliteEventCache`, `PostgresEventCache`, and `_EventCacheWriteCoordinator` remain private concrete services used by `runtime_support.py` through their concrete owner modules.
 - `MatrixConversationCache` remains the higher-level conversation read/write facade above the cache package and may use specific cache helper submodules through narrow Tach visibility.
 
 Main invariants:

@@ -306,7 +306,8 @@ class MultiAgentOrchestrator:
         """Ensure the runtime has one initialized shared event-cache service."""
         self._runtime_support = await sync_owned_runtime_support(
             self._runtime_support,
-            db_path=config.cache.resolve_db_path(self.runtime_paths),
+            cache_config=config.cache,
+            runtime_paths=self.runtime_paths,
             logger=logger,
             background_task_owner=self._event_cache_write_task_owner,
             init_failure_reason_prefix="shared_runtime_init_failed",

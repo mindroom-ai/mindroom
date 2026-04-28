@@ -10314,7 +10314,8 @@ class TestMultiAgentOrchestrator:
         sync_owned_runtime_support.assert_awaited_once()
         assert sync_owned_runtime_support.await_args.args == (initial_support,)
         assert sync_owned_runtime_support.await_args.kwargs == {
-            "db_path": config.cache.resolve_db_path(orchestrator.runtime_paths),
+            "cache_config": config.cache,
+            "runtime_paths": orchestrator.runtime_paths,
             "logger": ANY,
             "background_task_owner": orchestrator._event_cache_write_task_owner,
             "init_failure_reason_prefix": "shared_runtime_init_failed",
