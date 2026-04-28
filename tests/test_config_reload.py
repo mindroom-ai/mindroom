@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
@@ -25,7 +26,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents
 from mindroom.orchestration.plugin_watch import watch_plugins_task
 from mindroom.orchestration.runtime import create_logged_task
-from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState
+from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState, _watch_skills_task
 from mindroom.tool_system.plugins import PluginReloadResult
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import (
@@ -51,6 +52,46 @@ def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     bot.client = mock_client
     bot.event_cache = make_event_cache_mock()
     bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock()
+
+
+@pytest.mark.asyncio
+async def test_watch_skills_task_snapshots_off_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The skills watcher should not run recursive skill snapshots on the asyncio loop."""
+
+    class DummyOrchestrator:
+        running = True
+
+    dummy_orchestrator = DummyOrchestrator()
+    snapshot_function_calls: list[object] = []
+    clear_calls = 0
+
+    def direct_snapshot_call() -> object:
+        raise AssertionError
+
+    async def fake_to_thread(function: object, *args: object, **kwargs: object) -> tuple[tuple[str, int, int], ...]:
+        del args, kwargs
+        snapshot_function_calls.append(function)
+        if len(snapshot_function_calls) == 1:
+            return (("before", 1, 1),)
+        dummy_orchestrator.running = False
+        return (("after", 2, 2),)
+
+    async def fake_sleep(delay: float) -> None:
+        del delay
+
+    def fake_clear_skill_cache() -> None:
+        nonlocal clear_calls
+        clear_calls += 1
+
+    monkeypatch.setattr(orchestrator_module, "get_skill_snapshot", direct_snapshot_call)
+    monkeypatch.setattr(orchestrator_module.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(orchestrator_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(orchestrator_module, "clear_skill_cache", fake_clear_skill_cache)
+
+    await _watch_skills_task(dummy_orchestrator)  # type: ignore[arg-type]
+
+    assert snapshot_function_calls == [direct_snapshot_call, direct_snapshot_call]
+    assert clear_calls == 1
 
 
 def _write_plugin_removal_test_files(tmp_path: Path) -> Path:

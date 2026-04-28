@@ -13,12 +13,13 @@ import pytest
 
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.plugin_imports as plugin_module
+import mindroom.tool_system.plugins as plugins_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
-from mindroom.tool_system.plugins import load_plugins, reload_plugins
+from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -367,6 +368,41 @@ def test_resolve_plugin_root_relative_to_config_dir_not_cwd(tmp_path: Path) -> N
         os.chdir(original_cwd)
 
     assert resolved == plugin_root.resolve()
+
+
+def test_get_configured_plugin_roots_memoizes_resolved_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Repeated configured-root reads should not re-resolve paths for the same config snapshot."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-plugin", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+    resolve_calls: list[str] = []
+    original_resolve_plugin_root = plugin_module._resolve_plugin_root
+
+    def counted_resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:
+        resolve_calls.append(plugin_path)
+        return original_resolve_plugin_root(plugin_path, runtime_paths)
+
+    plugins_module._clear_configured_plugin_roots_cache()
+    monkeypatch.setattr(plugin_module, "_resolve_plugin_root", counted_resolve_plugin_root)
+    try:
+        first_roots = get_configured_plugin_roots(config, runtime_paths)
+        second_roots = get_configured_plugin_roots(config, runtime_paths)
+    finally:
+        plugins_module._clear_configured_plugin_roots_cache()
+
+    assert first_roots == (plugin_root.resolve(),)
+    assert second_roots == first_roots
+    assert resolve_calls == ["./plugins/demo"]
 
 
 def test_load_plugins_uses_bound_runtime_paths(tmp_path: Path) -> None:
