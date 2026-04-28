@@ -32,6 +32,49 @@ _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
 T = TypeVar("T")
 
+# PostgreSQL SQLSTATE codes that indicate a transient connection-level failure.
+# 08xxx: connection_exception family. 57P01-57P03: server-side admin / shutdown
+# events. Operations that fail with one of these states are safe to retry on a
+# fresh connection.
+_TRANSIENT_SQLSTATES: frozenset[str] = frozenset(
+    {
+        "08000",
+        "08001",
+        "08003",
+        "08004",
+        "08006",
+        "08007",
+        "57P01",
+        "57P02",
+        "57P03",
+    },
+)
+_TRANSIENT_MESSAGE_FRAGMENTS: tuple[str, ...] = (
+    "the connection is closed",
+    "connection already closed",
+    "server closed the connection",
+    "terminating connection",
+)
+
+
+def _is_transient_db_error(exc: BaseException) -> bool:
+    """Return whether *exc* represents a transient PostgreSQL connection failure.
+
+    Transient errors include connection-establishment failures (08xxx), normal
+    server-side shutdown signals (57P01-57P03), and the ``InterfaceError`` that
+    psycopg raises when the underlying socket has already been closed.
+    """
+    if isinstance(exc, psycopg.InterfaceError):
+        return True
+    if isinstance(exc, psycopg.OperationalError):
+        diag = getattr(exc, "diag", None)
+        sqlstate = getattr(diag, "sqlstate", None) if diag is not None else None
+        if sqlstate in _TRANSIENT_SQLSTATES:
+            return True
+        message = str(exc).lower()
+        return any(fragment in message for fragment in _TRANSIENT_MESSAGE_FRAGMENTS)
+    return False
+
 logger = get_logger(__name__)
 
 
@@ -248,6 +291,8 @@ class _PostgresEventCacheRuntime:
         self._disabled_reason: str | None = None
         self._db_lock = asyncio.Lock()
         self._room_locks: OrderedDict[str, _RoomLockEntry] = OrderedDict()
+        self._reconnect_attempts = 0
+        self._unavailable_reason: str | None = None
 
     @property
     def database_url(self) -> str:
@@ -284,6 +329,21 @@ class _PostgresEventCacheRuntime:
         """Return whether the advisory cache is disabled for this runtime."""
         return self._disabled_reason is not None
 
+    @property
+    def disabled_reason(self) -> str | None:
+        """Return the reason this runtime was permanently disabled, if any."""
+        return self._disabled_reason
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        """Return the most recent transient unavailability cause, if any."""
+        return self._unavailable_reason
+
+    @property
+    def reconnect_attempts(self) -> int:
+        """Return the number of times this runtime has reopened its connection."""
+        return self._reconnect_attempts
+
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
         if self._disabled_reason is not None:
@@ -294,6 +354,37 @@ class _PostgresEventCacheRuntime:
             database_url=self.redacted_database_url,
             namespace=self._namespace,
             reason=reason,
+        )
+
+    async def handle_transient_failure(self, exc: BaseException, *, operation: str) -> None:
+        """Drop the dead connection so the next acquire opens a fresh one.
+
+        Caller must have already determined that *exc* is transient via
+        :func:`_is_transient_db_error`. Cleaning up the connection is best-effort —
+        if the close itself raises, we log and proceed with reconnection on the
+        next acquire.
+        """
+        async with self._db_lock:
+            if self._db is not None:
+                try:
+                    await self._db.close()
+                except Exception as close_exc:
+                    logger.debug(
+                        "Ignoring error while closing dead Postgres event cache connection",
+                        namespace=self._namespace,
+                        operation=operation,
+                        error=str(close_exc),
+                    )
+                self._db = None
+            self._reconnect_attempts += 1
+            self._unavailable_reason = type(exc).__name__
+        logger.info(
+            "Reconnecting Postgres event cache after transient failure",
+            database_url=self.redacted_database_url,
+            namespace=self._namespace,
+            operation=operation,
+            error=str(exc),
+            reconnect_attempts=self._reconnect_attempts,
         )
 
     async def initialize(self) -> None:
@@ -418,6 +509,21 @@ class PostgresEventCache:
         """Return whether cache writes can durably persist data."""
         return self._runtime.is_initialized and not self._runtime.is_disabled
 
+    @property
+    def disabled_reason(self) -> str | None:
+        """Return the reason this cache was permanently disabled, if any."""
+        return self._runtime.disabled_reason
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        """Return the most recent transient unavailability cause, if any."""
+        return self._runtime.unavailable_reason
+
+    @property
+    def reconnect_attempts(self) -> int:
+        """Return the total reconnection attempts for this cache instance."""
+        return self._runtime.reconnect_attempts
+
     async def initialize(self) -> None:
         """Open the PostgreSQL database and create the cache schema."""
         await self._runtime.initialize()
@@ -440,14 +546,24 @@ class PostgresEventCache:
     ) -> T:
         if self._runtime.is_disabled:
             return disabled_result
-        async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
+        for attempt in (1, 2):
             try:
-                result = await reader(db)
-                await db.commit()
-            except Exception:
-                await db.rollback()
+                async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
+                    try:
+                        result = await reader(db)
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        raise
+            except Exception as exc:
+                if attempt == 1 and _is_transient_db_error(exc):
+                    await self._runtime.handle_transient_failure(exc, operation=operation)
+                    continue
                 raise
-        return result
+            else:
+                return result
+        msg = "transient retry loop exited without returning"
+        raise RuntimeError(msg)
 
     async def _write_operation(
         self,
@@ -459,14 +575,24 @@ class PostgresEventCache:
     ) -> T:
         if self._runtime.is_disabled:
             return disabled_result
-        async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
+        for attempt in (1, 2):
             try:
-                result = await writer(db)
-                await db.commit()
-            except Exception:
-                await db.rollback()
+                async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
+                    try:
+                        result = await writer(db)
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        raise
+            except Exception as exc:
+                if attempt == 1 and _is_transient_db_error(exc):
+                    await self._runtime.handle_transient_failure(exc, operation=operation)
+                    continue
                 raise
-        return result
+            else:
+                return result
+        msg = "transient retry loop exited without returning"
+        raise RuntimeError(msg)
 
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
