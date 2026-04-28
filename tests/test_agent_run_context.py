@@ -12,7 +12,7 @@ from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetai
 
 def test_append_knowledge_availability_enrichment_adds_volatile_notice() -> None:
     """Unavailable knowledge should add one volatile system enrichment item."""
-    existing = (EnrichmentItem(key="room", text="Room context", cache_policy="ephemeral"),)
+    existing = (EnrichmentItem(key="room", text="Room context", cache_policy="stable"),)
     enriched = append_knowledge_availability_enrichment(
         existing,
         {
