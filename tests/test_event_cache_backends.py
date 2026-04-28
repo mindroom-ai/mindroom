@@ -13,6 +13,7 @@ import pytest
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.logging_config import get_logger
+from mindroom.matrix.cache import postgres_event_cache_threads
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
     PostgresEventCache,
@@ -520,6 +521,82 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
         assert state.invalidation_reason == "live_thread_mutation"
         diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_pending_room_invalidations"] == 0
+        assert diagnostics["cache_postgres_pending_thread_invalidations"] == 0
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flush(
+    postgres_event_cache_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A marker recorded while an older marker flushes must remain pending for a later operation."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    root_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="thread root",
+        origin_server_ts=1000,
+    )
+    replacement_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="replacement root",
+        origin_server_ts=2000,
+    )
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+    original_mark_thread_stale_locked = postgres_event_cache_threads.mark_thread_stale_locked
+    injected_newer_pending_marker = False
+
+    async def racing_mark_thread_stale_locked(*args: object, **kwargs: object) -> None:
+        nonlocal injected_newer_pending_marker
+        if kwargs.get("thread_id") == thread_id and kwargs.get("invalidated_at") == 200.0:
+            injected_newer_pending_marker = True
+            cache._runtime.record_pending_thread_invalidation(
+                room_id,
+                thread_id,
+                invalidated_at=300.0,
+                reason="later_live_thread_mutation",
+            )
+        await original_mark_thread_stale_locked(*args, **kwargs)
+
+    monkeypatch.setattr(
+        postgres_event_cache_threads,
+        "mark_thread_stale_locked",
+        racing_mark_thread_stale_locked,
+    )
+
+    await cache.initialize()
+    try:
+        await cache.replace_thread(room_id, thread_id, [root_event], validated_at=50.0)
+        cache._runtime.record_pending_thread_invalidation(
+            room_id,
+            thread_id,
+            invalidated_at=200.0,
+            reason="live_thread_mutation",
+        )
+
+        replaced = await cache.replace_thread_if_not_newer(
+            room_id,
+            thread_id,
+            [replacement_event],
+            fetch_started_at=150.0,
+        )
+
+        assert replaced is False
+        assert injected_newer_pending_marker is True
+        diagnostics = cache.runtime_diagnostics()
+        assert diagnostics["cache_postgres_pending_thread_invalidations"] == 1
+
+        state = await cache.get_thread_cache_state(room_id, thread_id)
+
+        assert state is not None
+        assert state.invalidated_at == 300.0
+        assert state.invalidation_reason == "later_live_thread_mutation"
+        diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_pending_thread_invalidations"] == 0
     finally:
         await cache.close()

@@ -36,7 +36,7 @@ T = TypeVar("T")
 
 logger = get_logger(__name__)
 
-_TRANSIENT_SQLSTATE_PREFIXES: tuple[str, ...] = ("08",)
+_TRANSIENT_SQLSTATE_PREFIXES: tuple[str, ...] = ("08",)  # Safe here because cache writes are idempotent upserts.
 _TRANSIENT_SQLSTATES: frozenset[str] = frozenset(
     {
         "57P01",  # admin_shutdown
@@ -447,7 +447,7 @@ class _PostgresEventCacheRuntime:
         invalidated_at: float,
         reason: str,
     ) -> None:
-        """Remember a stale marker that must be persisted before trusting cache rows."""
+        """Remember a best-effort stale marker that must be persisted before trusting cache rows."""
         self._pending_thread_invalidations[(room_id, thread_id)] = _PendingInvalidation(
             invalidated_at=invalidated_at,
             reason=reason,
@@ -460,7 +460,7 @@ class _PostgresEventCacheRuntime:
         invalidated_at: float,
         reason: str,
     ) -> None:
-        """Remember a room stale marker that must be persisted before trusting cache rows."""
+        """Remember a best-effort room stale marker that must be persisted before trusting cache rows."""
         self._pending_room_invalidations[room_id] = _PendingInvalidation(
             invalidated_at=invalidated_at,
             reason=reason,
@@ -478,18 +478,26 @@ class _PostgresEventCacheRuntime:
             if pending_room_id == room_id
         )
 
-    def forget_pending_room_invalidation(self, room_id: str, *, invalidated_at: float) -> None:
+    def forget_pending_room_invalidation(self, room_id: str, pending: _PendingInvalidation) -> None:
         """Forget one persisted room invalidation and thread markers covered by it."""
-        self._pending_room_invalidations.pop(room_id, None)
+        if self._pending_room_invalidations.get(room_id) == pending:
+            self._pending_room_invalidations.pop(room_id, None)
         self._pending_thread_invalidations = {
-            key: pending
-            for key, pending in self._pending_thread_invalidations.items()
-            if key[0] != room_id or pending.invalidated_at > invalidated_at
+            key: thread_pending
+            for key, thread_pending in self._pending_thread_invalidations.items()
+            if key[0] != room_id or thread_pending.invalidated_at > pending.invalidated_at
         }
 
-    def forget_pending_thread_invalidation(self, room_id: str, thread_id: str) -> None:
+    def forget_pending_thread_invalidation(
+        self,
+        room_id: str,
+        thread_id: str,
+        pending: _PendingInvalidation,
+    ) -> None:
         """Forget one persisted thread invalidation."""
-        self._pending_thread_invalidations.pop((room_id, thread_id), None)
+        key = (room_id, thread_id)
+        if self._pending_thread_invalidations.get(key) == pending:
+            self._pending_thread_invalidations.pop(key, None)
 
     async def _close_db_locked(self, *, operation: str) -> None:
         """Close the active connection best-effort. Caller must hold ``_db_lock``."""
@@ -677,11 +685,12 @@ class PostgresEventCache:
         disabled_result: T,
         callback: Callable[[psycopg.AsyncConnection], Awaitable[T]],
     ) -> T:
+        """Run one cache operation, flushing pending stale markers first even for reads."""
         if self._runtime.is_disabled:
             return disabled_result
         transient_error: BaseException | None = None
         for attempt in range(_MAX_TRANSIENT_OPERATION_ATTEMPTS):
-            flushed_pending: tuple[tuple[str, str | None, float], ...] = ()
+            flushed_pending: tuple[tuple[str, str | None, _PendingInvalidation], ...] = ()
             try:
                 async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
                     try:
@@ -725,8 +734,8 @@ class PostgresEventCache:
         self,
         db: psycopg.AsyncConnection,
         room_id: str,
-    ) -> tuple[tuple[str, str | None, float], ...]:
-        flushed: list[tuple[str, str | None, float]] = []
+    ) -> tuple[tuple[str, str | None, _PendingInvalidation], ...]:
+        flushed: list[tuple[str, str | None, _PendingInvalidation]] = []
         room_pending = self._runtime.pending_room_invalidation(room_id)
         thread_pending = self._runtime.pending_thread_invalidations(room_id)
         if room_pending is not None:
@@ -737,7 +746,7 @@ class PostgresEventCache:
                 invalidated_at=room_pending.invalidated_at,
                 reason=room_pending.reason,
             )
-            flushed.append(("room", None, room_pending.invalidated_at))
+            flushed.append(("room", None, room_pending))
 
         for thread_id, pending_invalidation in thread_pending:
             if room_pending is not None and pending_invalidation.invalidated_at <= room_pending.invalidated_at:
@@ -750,20 +759,20 @@ class PostgresEventCache:
                 invalidated_at=pending_invalidation.invalidated_at,
                 reason=pending_invalidation.reason,
             )
-            flushed.append(("thread", thread_id, pending_invalidation.invalidated_at))
+            flushed.append(("thread", thread_id, pending_invalidation))
         return tuple(flushed)
 
     def _forget_flushed_pending_invalidations(
         self,
         room_id: str,
-        flushed_pending: tuple[tuple[str, str | None, float], ...],
+        flushed_pending: tuple[tuple[str, str | None, _PendingInvalidation], ...],
     ) -> None:
-        for kind, thread_id, invalidated_at in flushed_pending:
+        for kind, thread_id, pending in flushed_pending:
             if kind == "room":
-                self._runtime.forget_pending_room_invalidation(room_id, invalidated_at=invalidated_at)
+                self._runtime.forget_pending_room_invalidation(room_id, pending)
                 continue
             if thread_id is not None:
-                self._runtime.forget_pending_thread_invalidation(room_id, thread_id)
+                self._runtime.forget_pending_thread_invalidation(room_id, thread_id, pending)
 
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
