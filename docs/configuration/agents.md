@@ -172,9 +172,9 @@ Per-agent values override them.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
 Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
-`accept_invites` only applies to entries under `agents`.
-The router and teams still accept authorized invites based on their existing room-lifecycle rules.
-Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an agent to join and persist a room.
+Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
+Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
+Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
 
 MindRoom compacts in one visible lifecycle.
 If the current reply needs compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
