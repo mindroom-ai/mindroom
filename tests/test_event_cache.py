@@ -226,6 +226,53 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
+    """Older stale markers should not downgrade newer thread or room invalidations."""
+    db = await event_cache_module.initialize_event_cache_db(tmp_path / "event_cache.db")
+
+    try:
+        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
+            await sqlite_event_cache_threads.mark_thread_stale_locked(
+                db,
+                room_id="!room:localhost",
+                thread_id="$thread_root",
+                reason="newer_thread_marker",
+            )
+            await sqlite_event_cache_threads.mark_room_stale_locked(
+                db,
+                room_id="!room:localhost",
+                reason="newer_room_marker",
+            )
+        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=100.0):
+            await sqlite_event_cache_threads.mark_thread_stale_locked(
+                db,
+                room_id="!room:localhost",
+                thread_id="$thread_root",
+                reason="older_thread_marker",
+            )
+            await sqlite_event_cache_threads.mark_room_stale_locked(
+                db,
+                room_id="!room:localhost",
+                reason="older_room_marker",
+            )
+        await db.commit()
+
+        state = await sqlite_event_cache_threads.load_thread_cache_state(
+            db,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+        )
+    finally:
+        await db.close()
+
+    assert state is not None
+    assert state.invalidated_at == 200.0
+    assert state.invalidation_reason == "newer_thread_marker"
+    assert state.room_invalidated_at == 200.0
+    assert state.room_invalidation_reason == "newer_room_marker"
+
+
+@pytest.mark.asyncio
 async def test_event_cache_store_and_retrieve(event_cache: ConversationEventCache) -> None:
     """Stored events should round-trip in timestamp order."""
     cache = event_cache

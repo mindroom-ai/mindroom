@@ -398,8 +398,13 @@ async def mark_thread_stale_locked(
         )
         VALUES (?, ?, NULL, ?, ?)
         ON CONFLICT(room_id, thread_id) DO UPDATE SET
-            invalidated_at = excluded.invalidated_at,
-            invalidation_reason = excluded.invalidation_reason
+            invalidated_at = MAX(thread_cache_state.invalidated_at, excluded.invalidated_at),
+            invalidation_reason = CASE
+                WHEN thread_cache_state.invalidated_at IS NULL
+                    OR excluded.invalidated_at >= thread_cache_state.invalidated_at
+                    THEN excluded.invalidation_reason
+                ELSE thread_cache_state.invalidation_reason
+            END
         """,
         (room_id, thread_id, time.time(), reason),
     )
@@ -455,8 +460,13 @@ async def mark_room_stale_locked(
         )
         VALUES (?, ?, ?)
         ON CONFLICT(room_id) DO UPDATE SET
-            invalidated_at = excluded.invalidated_at,
-            invalidation_reason = excluded.invalidation_reason
+            invalidated_at = MAX(room_cache_state.invalidated_at, excluded.invalidated_at),
+            invalidation_reason = CASE
+                WHEN room_cache_state.invalidated_at IS NULL
+                    OR excluded.invalidated_at >= room_cache_state.invalidated_at
+                    THEN excluded.invalidation_reason
+                ELSE room_cache_state.invalidation_reason
+            END
         """,
         (room_id, time.time(), reason),
     )
