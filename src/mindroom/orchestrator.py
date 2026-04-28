@@ -230,7 +230,7 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         super().__init__(config)
         self._shutdown_requested = shutdown_requested
 
-    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+    def handle_exit(self, sig: int, _frame: FrameType | None) -> None:
         """Mirror Uvicorn signal handling and surface shutdown to the orchestrator."""
         signal_number = int(sig)
         logger.info(
@@ -240,7 +240,10 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         )
         if self._shutdown_requested is not None:
             self._shutdown_requested.set()
-        super().handle_exit(sig, frame)
+        if self.should_exit and signal_number == int(signal.SIGINT):
+            self.force_exit = True
+            return
+        self.should_exit = True
 
 
 @dataclass
@@ -1774,7 +1777,7 @@ async def _wait_for_runtime_completion(
     if api_task is not None:
         monitored_tasks.add(api_task)
     done, _pending = await asyncio.wait(monitored_tasks, return_when=asyncio.FIRST_COMPLETED)
-    await _raise_completed_runtime_task_errors(
+    await _consume_completed_runtime_tasks(
         done,
         orchestrator_task=orchestrator_task,
         shutdown_wait_task=shutdown_wait_task,
@@ -1783,21 +1786,11 @@ async def _wait_for_runtime_completion(
         api_server=api_server,
     )
 
-    if api_task is not None and api_task in done:
-        return
     if shutdown_wait_task in done:
         logger.info("application_shutdown_requested")
-        if api_task is not None:
-            await _await_api_task_completion(
-                api_task,
-                shutdown_requested=shutdown_requested,
-                api_server=api_server,
-            )
-        return
-    await orchestrator_task
 
 
-async def _raise_completed_runtime_task_errors(
+async def _consume_completed_runtime_tasks(
     done: set[asyncio.Task],
     *,
     orchestrator_task: asyncio.Task[None],
@@ -1806,7 +1799,7 @@ async def _raise_completed_runtime_task_errors(
     shutdown_requested: asyncio.Event,
     api_server: _EmbeddedApiServerContext,
 ) -> None:
-    """Drain completed runtime tasks and raise the first non-cancellation failure."""
+    """Consume completed runtime tasks and raise the first non-cancellation failure."""
     failures: list[Exception] = []
     for task in (orchestrator_task, api_task, shutdown_wait_task):
         if task is None or task not in done:
