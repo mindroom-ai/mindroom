@@ -1,0 +1,11 @@
+{{- if and .Values.config.create (not .Values.config.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mindroom-runtime.configMapName" . }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+data:
+  {{ .Values.config.key }}: |
+{{ .Values.config.data | indent 4 }}
+{{- end }}

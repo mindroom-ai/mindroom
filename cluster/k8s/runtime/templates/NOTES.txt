@@ -1,0 +1,12 @@
+MindRoom runtime chart rendered.
+
+Service:
+  {{ include "mindroom-runtime.fullname" . }}:{{ .Values.service.port }}
+
+Configuration:
+  ConfigMap: {{ include "mindroom-runtime.configMapName" . }}
+  Storage PVC: {{ include "mindroom-runtime.storageClaimName" . }}
+  Worker backend: {{ .Values.workers.backend }}
+
+For production use, provide Matrix settings, runtime secrets, and either an
+existing config ConfigMap or a chart-managed config value.

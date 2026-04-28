@@ -1,0 +1,194 @@
+# Runtime-only MindRoom chart.
+# This chart intentionally avoids platform-specific defaults. Use existing
+# ConfigMaps, Secrets, PVCs, and service URLs from your own cluster.
+
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/mindroom-ai/mindroom
+  tag: latest
+  digest: ""
+  pullPolicy: Always
+
+imagePullSecrets: []
+
+deploymentAnnotations: {}
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: true
+
+podSecurityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  runAsNonRoot: true
+  fsGroupChangePolicy: OnRootMismatch
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 8765
+  annotations: {}
+
+podDisruptionBudget:
+  create: false
+  maxUnavailable: 1
+  minAvailable: ""
+
+runtime:
+  apiHost: 0.0.0.0
+  apiPort: 8765
+  logLevel: INFO
+  timezone: ""
+  timing: false
+
+config:
+  create: true
+  existingConfigMap: ""
+  key: config.yaml
+  mountPath: /app/config.yaml
+  data: |
+    agents: {}
+    models: {}
+
+storage:
+  create: true
+  existingClaim: ""
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  size: 10Gi
+  mountPath: /app/agent_data
+
+env:
+  # Raw Kubernetes EnvVar entries appended to the MindRoom container.
+  extra: []
+  # Raw Kubernetes EnvFromSource entries appended to the MindRoom container.
+  envFrom: []
+
+matrix:
+  homeserverUrl: ""
+  serverName: ""
+  startupTimeoutSeconds: ""
+  registrationToken:
+    existingSecret: ""
+    key: MATRIX_REGISTRATION_TOKEN
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 2Gi
+
+probes:
+  startup:
+    enabled: true
+    spec:
+      httpGet:
+        path: /api/ready
+        port: api
+      periodSeconds: 5
+      timeoutSeconds: 10
+      failureThreshold: 120
+  readiness:
+    enabled: true
+    spec:
+      httpGet:
+        path: /api/ready
+        port: api
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 6
+  liveness:
+    enabled: true
+    spec:
+      httpGet:
+        path: /api/health
+        port: api
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 6
+
+workers:
+  # static_runner keeps a sandbox-runner sidecar in this pod.
+  # kubernetes lets the MindRoom runtime create worker Deployments on demand.
+  backend: static_runner
+  cleanupIntervalSeconds: 30
+  sandbox:
+    executionMode: selective
+    proxyTools: shell,file,python
+    proxyToken:
+      # Prefer existingSecret in production. value creates a chart-managed Secret.
+      existingSecret: ""
+      key: MINDROOM_SANDBOX_PROXY_TOKEN
+      value: ""
+  staticRunner:
+    port: 8766
+    workerRoot: ""
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+  kubernetes:
+    namespace: ""
+    image:
+      repository: ""
+      tag: ""
+      digest: ""
+      pullPolicy: ""
+    serviceAccount:
+      create: true
+      name: ""
+      annotations: {}
+      automountServiceAccountToken: false
+    rbac:
+      create: true
+    networkPolicy:
+      create: true
+    port: 8766
+    readyTimeoutSeconds: 60
+    idleTimeoutSeconds: 1800
+    namePrefix: mindroom-worker
+    storageSubpathPrefix: workers
+    configMapName: ""
+    configKey: ""
+    configPath: ""
+    ownerDeploymentName: ""
+    nodeName: ""
+    colocateWithControlPlaneNode: false
+    extraEnv: {}
+    extraLabels: {}
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+initContainers: []
+extraContainers: []
+extraVolumes: []
+extraVolumeMounts: []
