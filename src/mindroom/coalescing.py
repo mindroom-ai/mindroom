@@ -579,7 +579,8 @@ class CoalescingGate:
                     room_id=log_key[0],
                     thread_id=log_key[1],
                     requester_user_id=log_key[2],
-                    error=str(error),
+                    exception_type=error.__class__.__name__,
+                    error_message="Coalesced dispatch failed.",
                 )
                 current_key, current_gate = self._resolve_gate_entry(log_key, gate)
                 if (

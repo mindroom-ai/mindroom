@@ -1689,7 +1689,8 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
     assert loop_exceptions == []
     mock_exception.assert_called_once()
     assert mock_exception.call_args.args == ("Coalescing timer callback failed",)
-    assert mock_exception.call_args.kwargs["error"] == "boom"
+    assert mock_exception.call_args.kwargs["exception_type"] == "RuntimeError"
+    assert mock_exception.call_args.kwargs["error_message"] == "Coalesced dispatch failed."
     assert gate.is_idle()
 
 
