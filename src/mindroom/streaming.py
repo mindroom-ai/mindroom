@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from mindroom import interactive
@@ -24,6 +24,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
 from mindroom.matrix.large_messages import should_upload_oversized_nonterminal_stream_sidecar
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.visible_body import visible_body_from_content
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import (
     SYNC_RESTART_CANCEL_MSG,
@@ -77,6 +78,7 @@ INTERRUPTED_RESPONSE_NOTE = _INTERRUPTED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
+_DELIVERED_CONTENT_TRUSTED_SENDER = "__mindroom_delivered_content__"
 
 
 class StreamingDeliveryError(Exception):
@@ -211,6 +213,38 @@ class _CommittedDeliveryState:
 def _normalize_stream_accumulated_text(text: str) -> str:
     """Normalize whitespace-only placeholder buffers to the committed empty state."""
     return text if text.strip() else ""
+
+
+def _committed_state_for_sent_content(
+    committed_state: _CommittedDeliveryState,
+    content_sent: dict[str, Any],
+) -> _CommittedDeliveryState:
+    """Adjust committed visible state to match the exact Matrix payload."""
+    new_content = content_sent.get("m.new_content")
+    if isinstance(new_content, dict):
+        visible_content = {key: value for key, value in new_content.items() if isinstance(key, str)}
+    else:
+        visible_content = {key: value for key, value in content_sent.items() if isinstance(key, str)}
+
+    long_text_meta = visible_content.get("io.mindroom.long_text")
+    if isinstance(long_text_meta, dict) and long_text_meta.get("version") == 2:
+        return committed_state
+
+    has_body = isinstance(visible_content.get("body"), str)
+    has_visible_body = isinstance(visible_content.get(STREAM_VISIBLE_BODY_KEY), str)
+    if not has_body and not has_visible_body:
+        return committed_state
+    visible_body = visible_body_from_content(
+        visible_content,
+        "",
+        sender_id=_DELIVERED_CONTENT_TRUSTED_SENDER,
+        trusted_sender_ids=(_DELIVERED_CONTENT_TRUSTED_SENDER,),
+    )
+    return replace(
+        committed_state,
+        rendered_body=visible_body,
+        visible_body_state="placeholder_only" if visible_body == _PROGRESS_PLACEHOLDER else "visible_body",
+    )
 
 
 def build_cancelled_response_update(
@@ -733,7 +767,7 @@ class StreamingResponse:
             capture.set_result(None)
             _complete_capture_completions(capture_completions)
         try:
-            send_succeeded = await self._send_content(
+            content_sent = await self._send_content(
                 client,
                 content=prepared_delivery.content,
                 display_text=prepared_delivery.display_text,
@@ -745,7 +779,7 @@ class StreamingResponse:
             if self._inflight_nonterminal_capture is capture:
                 self._inflight_nonterminal_capture = None
                 self._inflight_nonterminal_capture_state = None
-        if not send_succeeded:
+        if content_sent is None:
             if not is_final:
                 action = "send initial" if is_initial_send else "edit"
                 msg = f"Failed to {action} streaming message"
@@ -753,12 +787,16 @@ class StreamingResponse:
             return False
 
         if not is_final:
+            committed_state = _committed_state_for_sent_content(
+                prepared_delivery.committed_state,
+                content_sent,
+            )
             self._warmup_state.note_nonterminal_delivery(
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
             )
-            self._mark_delivery_committed(prepared_delivery.committed_state)
+            self._mark_delivery_committed(committed_state)
             self._mark_nonterminal_delivery(
-                prepared_delivery.committed_state,
+                committed_state,
                 boundary_refresh=boundary_refresh,
             )
         else:
@@ -910,18 +948,18 @@ class StreamingResponse:
         if self.pipeline_timing is not None and self.accumulated_text.strip():
             self.pipeline_timing.mark_first_visible_reply("stream_update")
 
-    async def _send_initial_content(self, client: nio.AsyncClient, *, content: dict[str, Any]) -> bool:
+    async def _send_initial_content(self, client: nio.AsyncClient, *, content: dict[str, Any]) -> dict[str, Any] | None:
         """Send the initial streaming event."""
         delivered = await send_message_result(client, self.room_id, content)
         if delivered is None:
-            return False
+            return None
         self.event_id = delivered.event_id
         if self.visible_event_id_callback is not None:
             self.visible_event_id_callback(delivered.event_id)
         await self._record_streaming_send(delivered.event_id, delivered.content_sent)
         self._mark_first_visible_reply_if_needed()
         logger.debug("Initial streaming message sent", event_id=self.event_id)
-        return True
+        return delivered.content_sent
 
     async def _edit_existing_content(
         self,
@@ -930,22 +968,25 @@ class StreamingResponse:
         content: dict[str, Any],
         display_text: str,
         upload_nonterminal_stream_sidecar: bool,
-    ) -> bool:
+    ) -> dict[str, Any] | None:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
-        delivered = await edit_message_result(
-            client,
-            self.room_id,
-            self.event_id,
-            content,
-            display_text,
-            upload_nonterminal_stream_sidecar=upload_nonterminal_stream_sidecar,
-        )
+        if upload_nonterminal_stream_sidecar:
+            delivered = await edit_message_result(client, self.room_id, self.event_id, content, display_text)
+        else:
+            delivered = await edit_message_result(
+                client,
+                self.room_id,
+                self.event_id,
+                content,
+                display_text,
+                upload_nonterminal_stream_sidecar=False,
+            )
         if delivered is None:
-            return False
+            return None
         await self._record_streaming_edit(delivered.event_id, content_sent=delivered.content_sent)
         self._mark_first_visible_reply_if_needed()
-        return True
+        return delivered.content_sent
 
     async def _send_content(
         self,
@@ -956,25 +997,27 @@ class StreamingResponse:
         upload_nonterminal_stream_sidecar: bool = True,
         retry_on_failure: bool = False,
         retry_without_backoff: bool = False,
-    ) -> bool:
+    ) -> dict[str, Any] | None:
         """Send a new event or edit the existing one."""
         total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
         for attempt in range(1, total_attempts + 1):
             try:
                 if self.event_id is None:
                     logger.debug("Sending initial streaming message", attempt=attempt)
-                    if await self._send_initial_content(client, content=content):
-                        return True
+                    content_sent = await self._send_initial_content(client, content=content)
+                    if content_sent is not None:
+                        return content_sent
                     logger.error("Failed to send initial streaming message", attempt=attempt)
                 else:
                     logger.debug("Editing streaming message", event_id=self.event_id, attempt=attempt)
-                    if await self._edit_existing_content(
+                    content_sent = await self._edit_existing_content(
                         client,
                         content=content,
                         display_text=display_text,
                         upload_nonterminal_stream_sidecar=upload_nonterminal_stream_sidecar,
-                    ):
-                        return True
+                    )
+                    if content_sent is not None:
+                        return content_sent
                     logger.error("Failed to edit streaming message", attempt=attempt)
             except Exception:
                 logger.warning(
@@ -993,7 +1036,7 @@ class StreamingResponse:
                     event_id=self.event_id,
                     room_id=self.room_id,
                 )
-        return False
+        return None
 
 
 class ReplacementStreamingResponse(StreamingResponse):

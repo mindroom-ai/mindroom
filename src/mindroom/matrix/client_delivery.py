@@ -95,12 +95,15 @@ async def send_message_result(
             )
             return None
 
-    content_sent = await prepare_large_message(
-        client,
-        room_id,
-        content,
-        upload_nonterminal_stream_sidecar=upload_nonterminal_stream_sidecar,
-    )
+    if upload_nonterminal_stream_sidecar:
+        content_sent = await prepare_large_message(client, room_id, content)
+    else:
+        content_sent = await prepare_large_message(
+            client,
+            room_id,
+            content,
+            upload_nonterminal_stream_sidecar=False,
+        )
     if cache_bypass:
         access_token = client.access_token
         if not access_token:
@@ -366,11 +369,13 @@ async def edit_message_result(
         extra_content=extra_content,
     )
 
+    if upload_nonterminal_stream_sidecar:
+        return await send_message_result(client, room_id, edit_content)
     return await send_message_result(
         client,
         room_id,
         edit_content,
-        upload_nonterminal_stream_sidecar=upload_nonterminal_stream_sidecar,
+        upload_nonterminal_stream_sidecar=False,
     )
 
 
