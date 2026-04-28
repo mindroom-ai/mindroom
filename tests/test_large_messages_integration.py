@@ -20,7 +20,11 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.matrix.client import edit_message_result, send_message_result
-from mindroom.matrix.large_messages import _NORMAL_MESSAGE_LIMIT, prepare_large_message
+from mindroom.matrix.large_messages import (
+    _NORMAL_MESSAGE_LIMIT,
+    _clear_oversized_nonterminal_streaming_edit_rate_limits,
+    prepare_large_message,
+)
 from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingResponse,
@@ -392,8 +396,11 @@ async def test_streaming_large_edit_records_transformed_content_to_cache() -> No
 
 
 @pytest.mark.asyncio
-async def test_streaming_multiple_edits_with_growth() -> None:
+async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test streaming with multiple edits as message grows."""
+    _clear_oversized_nonterminal_streaming_edit_rate_limits()
+    monotonic_values = iter([100.0, 106.0, 112.0])
+    monkeypatch.setattr("mindroom.matrix.large_messages.monotonic", lambda: next(monotonic_values))
     client = MockClient()
     config = MockConfig()
 

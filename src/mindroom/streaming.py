@@ -21,7 +21,8 @@ from mindroom.constants import (
 )
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
+from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import (
@@ -132,6 +133,12 @@ def _build_streaming_delivery_error(
 def _raise_nonterminal_delivery_error(error: Exception) -> NoReturn:
     """Raise one wrapped non-terminal delivery error for unified rollback handling."""
     raise _NonTerminalDeliveryError(error) from error
+
+
+def _complete_capture_completions(capture_completions: tuple[asyncio.Future[None], ...]) -> None:
+    for capture_completion in capture_completions:
+        if not capture_completion.done():
+            capture_completion.set_result(None)
 
 
 def _format_stream_error_note(error: Exception) -> str:
@@ -715,15 +722,16 @@ class StreamingResponse:
     ) -> bool:
         """Send one already-prepared non-terminal or terminal payload."""
         is_initial_send = self.event_id is None
+        if not is_final and not is_initial_send and not self._should_send_prepared_nonterminal_edit(prepared_delivery):
+            _complete_capture_completions(capture_completions)
+            return True
         capture = None
         if not is_final:
             capture = asyncio.get_running_loop().create_future()
             self._inflight_nonterminal_capture = capture
             self._inflight_nonterminal_capture_state = prepared_delivery.committed_state
             capture.set_result(None)
-            for capture_completion in capture_completions:
-                if not capture_completion.done():
-                    capture_completion.set_result(None)
+            _complete_capture_completions(capture_completions)
         try:
             send_succeeded = await self._send_content(
                 client,
@@ -755,6 +763,23 @@ class StreamingResponse:
         else:
             self.placeholder_progress_sent = False
         return True
+
+    def _should_send_prepared_nonterminal_edit(
+        self,
+        prepared_delivery: _PreparedStreamingDelivery,
+    ) -> bool:
+        """Return whether a prepared in-progress edit should hit Matrix now."""
+        assert self.event_id is not None
+        edit_content = build_edit_event_content(
+            event_id=self.event_id,
+            new_content=prepared_delivery.content,
+            new_text=prepared_delivery.display_text,
+        )
+        return should_send_oversized_nonterminal_streaming_edit(
+            room_id=self.room_id,
+            original_event_id=self.event_id,
+            edit_content=edit_content,
+        )
 
     def _prepare_delivery(
         self,

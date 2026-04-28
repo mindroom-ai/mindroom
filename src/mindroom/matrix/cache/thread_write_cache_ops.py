@@ -46,10 +46,20 @@ class ThreadMutationCacheOps:
         update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
         *,
         name: str,
+        emit_timing: bool = False,
+        coalesce_key: tuple[str, str] | None = None,
+        coalesce_log_context: dict[str, object] | None = None,
     ) -> asyncio.Task[object]:
         """Run one cache mutation under the room-ordered write barrier."""
         coordinator = self.runtime.event_cache_write_coordinator
-        return coordinator.queue_room_update(room_id, update_coro_factory, name=name)
+        return coordinator.queue_room_update(
+            room_id,
+            update_coro_factory,
+            name=name,
+            emit_timing=emit_timing,
+            coalesce_key=coalesce_key,
+            coalesce_log_context=coalesce_log_context,
+        )
 
     def queue_thread_cache_update(
         self,
@@ -58,6 +68,9 @@ class ThreadMutationCacheOps:
         update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
         *,
         name: str,
+        emit_timing: bool = False,
+        coalesce_key: tuple[str, str] | None = None,
+        coalesce_log_context: dict[str, object] | None = None,
     ) -> asyncio.Task[object]:
         """Run one thread-specific cache mutation under the same-thread write barrier."""
         coordinator = self.runtime.event_cache_write_coordinator
@@ -66,6 +79,9 @@ class ThreadMutationCacheOps:
             thread_id,
             update_coro_factory,
             name=name,
+            emit_timing=emit_timing,
+            coalesce_key=coalesce_key,
+            coalesce_log_context=coalesce_log_context,
         )
 
     async def store_events_batch(
