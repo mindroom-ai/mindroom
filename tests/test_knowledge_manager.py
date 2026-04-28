@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Event, Lock, get_ident
 from typing import TYPE_CHECKING, ClassVar
@@ -498,7 +499,10 @@ async def test_ready_index_access_does_not_refresh_unchanged_sources(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_shared_local_watch_index_refreshes_on_access_without_blocking_read(tmp_path: Path) -> None:
+async def test_shared_local_watch_index_refreshes_on_access_without_blocking_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Shared local bases with watch=true schedule refresh on access while serving last-good content."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -508,6 +512,10 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("shared local new", encoding="utf-8")
+    monkeypatch.setattr(
+        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        refresh_knowledge_binding,
+    )
     scheduler = KnowledgeRefreshScheduler()
 
     try:
@@ -520,7 +528,7 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
         assert knowledge is not None
         assert [document.content for document in knowledge.search("shared", max_results=5)] == ["shared local old"]
 
-        for _attempt in range(50):
+        for _attempt in range(500):
             await asyncio.sleep(0.01)
             refreshed = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
             if refreshed is not None and [
@@ -1218,21 +1226,21 @@ async def test_cancelled_refresh_after_refreshing_write_keeps_existing_index_sta
 
 
 @pytest.mark.asyncio
-async def test_cancelled_refresh_waiting_for_source_lock_clears_running_state(
+async def test_cancelled_refresh_waiting_for_source_lock_does_not_touch_running_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation while queued behind another refresh must not leave refresh state running."""
+    """Cancellation while queued behind another refresh must not mutate refresh metadata."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("locked refresh", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    loop = asyncio.get_running_loop()
     refreshing_write_count = 0
-    second_refreshing_saved = asyncio.Event()
     first_entered = asyncio.Event()
     release_first = asyncio.Event()
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    source_root = knowledge_registry.source_root_for_published_index_key(key)
     original_save_refreshing = knowledge_refresh_runner.mark_published_index_refresh_running
     original_reindex = KnowledgeManager.reindex_all
 
@@ -1240,8 +1248,6 @@ async def test_cancelled_refresh_waiting_for_source_lock_clears_running_state(
         nonlocal refreshing_write_count
         original_save_refreshing(*args, **kwargs)
         refreshing_write_count += 1
-        if refreshing_write_count == 2:
-            loop.call_soon_threadsafe(second_refreshing_saved.set)
 
     async def _blocked_reindex(self: KnowledgeManager) -> int:
         first_entered.set()
@@ -1254,16 +1260,16 @@ async def test_cancelled_refresh_waiting_for_source_lock_clears_running_state(
     first_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
     await first_entered.wait()
     second_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
-    await second_refreshing_saved.wait()
+    await _wait_for_refresh_lock_borrowers(source_root, 2)
 
     second_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await second_task
 
-    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_index_state(published_index_metadata_path(key))
     assert state is not None
-    assert state.refresh_job != "running"
+    assert state.refresh_job == "running"
+    assert refreshing_write_count == 1
 
     release_first.set()
     await first_task
@@ -2477,6 +2483,60 @@ async def test_shared_source_mutation_waits_for_duplicate_base_refresh(
 
     assert mutation_entered.is_set()
     assert doc.read_text(encoding="utf-8") == "mutated"
+
+
+@pytest.mark.asyncio
+async def test_refresh_uses_cross_process_source_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct refreshes should participate in the same source-root file lock as subprocess refreshes."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("index", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    expected_source_root = knowledge_registry.source_root_for_published_index_key(key)
+    locked_roots: list[knowledge_registry.KnowledgeSourceRoot] = []
+
+    @asynccontextmanager
+    async def _record_file_lock(source_root: knowledge_registry.KnowledgeSourceRoot) -> AsyncIterator[None]:
+        locked_roots.append(source_root)
+        yield
+
+    monkeypatch.setattr(knowledge_refresh_runner, "_acquire_refresh_file_lock", _record_file_lock)
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert locked_roots == [expected_source_root]
+
+
+@pytest.mark.asyncio
+async def test_mutation_lock_uses_cross_process_source_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Source mutations should participate in the same source-root file lock as refreshes."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    refresh_target = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
+    expected_source_root = knowledge_registry.source_root_for_refresh_target(refresh_target)
+    locked_roots: list[knowledge_registry.KnowledgeSourceRoot] = []
+
+    @asynccontextmanager
+    async def _record_file_lock(source_root: knowledge_registry.KnowledgeSourceRoot) -> AsyncIterator[None]:
+        locked_roots.append(source_root)
+        yield
+
+    monkeypatch.setattr(knowledge_refresh_runner, "_acquire_refresh_file_lock", _record_file_lock)
+
+    async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
+        pass
+
+    assert locked_roots == [expected_source_root]
 
 
 @pytest.mark.asyncio
@@ -3787,7 +3847,7 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The subprocess helper sends the scheduled config snapshot via a one-shot request file."""
+    """The subprocess helper sends the scheduled config snapshot via stdin."""
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     config.knowledge_bases["docs"].chunk_size = 1234
@@ -3795,22 +3855,42 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     captured_request: dict[str, object] = {}
     captured_args: tuple[object, ...] = ()
     captured_env: dict[str, str] = {}
+    captured_stdin: _Stdin | None = None
+
+    class _Stdin:
+        def __init__(self) -> None:
+            self.payload = bytearray()
+
+        def write(self, payload: bytes) -> None:
+            self.payload.extend(payload)
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
 
     class _Process:
-        returncode = 0
+        def __init__(self) -> None:
+            self.returncode = 0
+            self.stdin = _Stdin()
 
         async def wait(self) -> int:
             return 0
 
     async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _Process:
-        nonlocal captured_args, captured_env
+        nonlocal captured_args, captured_env, captured_stdin
         captured_args = args
         raw_env = kwargs["env"]
         assert isinstance(raw_env, dict)
         captured_env = raw_env
-        request_path = Path(args[-1])
-        captured_request.update(json.loads(request_path.read_text(encoding="utf-8")))
-        return _Process()
+        assert kwargs["stdin"] is asyncio.subprocess.PIPE
+        process = _Process()
+        captured_stdin = process.stdin
+        return process
 
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
     monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
@@ -3823,14 +3903,16 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     )
 
     assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge_refresh_runner")
+    assert "--request-path" not in captured_args
     assert captured_env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] == "1"
+    assert captured_stdin is not None
+    captured_request.update(json.loads(bytes(captured_stdin.payload).decode()))
     assert captured_request["base_id"] == "docs"
     assert captured_request["config_path"] == str(runtime_paths.config_path)
     assert captured_request["storage_root"] == str(runtime_paths.storage_root)
     assert "runtime_paths" not in captured_request
     assert captured_request["config_data"]["knowledge_bases"]["docs"]["chunk_size"] == 1234
     assert captured_request["execution_identity"]["requester_id"] == "@alice:localhost"
-    assert not Path(captured_args[-1]).exists()
 
 
 @pytest.mark.asyncio
