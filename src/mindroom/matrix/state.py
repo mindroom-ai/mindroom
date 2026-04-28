@@ -45,12 +45,14 @@ class MatrixState(BaseModel):
 
     @classmethod
     def load(cls, runtime_paths: constants.RuntimePaths) -> "MatrixState":
-        """Load state from file."""
-        state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
-        return _load_matrix_state_file(
-            state_file,
-            current_domain=_current_runtime_domain(runtime_paths),
-        )
+        """Load state from file.
+
+        Reads come from a process-wide cache keyed by the state file's
+        ``(path, st_mtime_ns, st_size)`` so repeated calls against an unchanged
+        file skip the YAML parse. A deep copy is returned so callers may safely
+        mutate the result before ``save`` without polluting the cache.
+        """
+        return matrix_state_for_runtime(runtime_paths).model_copy(deep=True)
 
     def save(self, runtime_paths: constants.RuntimePaths) -> None:
         """Save state to file."""
@@ -102,13 +104,24 @@ class MatrixState(BaseModel):
         self.space_room_id = room_id
 
 
-def managed_account_usernames(runtime_paths: constants.RuntimePaths) -> dict[str, str]:
-    """Return current persisted managed Matrix usernames keyed by state account key."""
+def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixState:
+    """Return persisted Matrix state for one runtime, cached by file mtime/size.
+
+    The returned object is shared across callers; **read-only callers** should
+    prefer this helper for the lowest overhead. Callers that intend to mutate
+    the result must use :py:meth:`MatrixState.load`, which returns a deep copy
+    backed by the same cache.
+    """
     state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
-    state = _load_matrix_state_file_for_accounts(
+    return _load_matrix_state_file_cached(
         *_matrix_state_cache_key(state_file),
         current_domain=_current_runtime_domain(runtime_paths),
     )
+
+
+def managed_account_usernames(runtime_paths: constants.RuntimePaths) -> dict[str, str]:
+    """Return current persisted managed Matrix usernames keyed by state account key."""
+    state = matrix_state_for_runtime(runtime_paths)
     return {key: account.username for key, account in state.accounts.items() if key.startswith("agent_")}
 
 
@@ -121,14 +134,14 @@ def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int | None, int | N
 
 
 @lru_cache(maxsize=64)
-def _load_matrix_state_file_for_accounts(
+def _load_matrix_state_file_cached(
     state_file: Path,
     mtime_ns: int | None,
     size: int | None,
     *,
     current_domain: str,
 ) -> MatrixState:
-    """Load Matrix state through a file-change-sensitive cache for account reads."""
+    """Load Matrix state through a file-change-sensitive cache."""
     del mtime_ns, size
     return _load_matrix_state_file(state_file, current_domain=current_domain)
 
