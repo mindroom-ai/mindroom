@@ -174,7 +174,7 @@ async def create_memory_instance(
 
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
-    memory = await AsyncMemory.from_config(config_dict)
+    memory = AsyncMemory.from_config(config_dict)
 
     logger.info("created_memory_instance", path=config_dict["vector_store"]["config"]["path"])
     return memory

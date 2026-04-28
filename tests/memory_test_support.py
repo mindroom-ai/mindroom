@@ -45,19 +45,26 @@ class FakeMem0ScopedMemory:
         """Return one stored memory by ID."""
         return self._entries.get(memory_id)
 
-    async def get_all(self, *, user_id: str | None = None, limit: int = 100) -> dict[str, list[MemoryResult]]:
+    async def get_all(
+        self,
+        *,
+        filters: dict[str, object] | None = None,
+        top_k: int = 100,
+    ) -> dict[str, list[MemoryResult]]:
         """Return all stored memories for a scope."""
+        user_id = filters.get("user_id") if filters is not None else None
         entries = [entry for entry in self._entries.values() if user_id is None or entry.get("user_id") == user_id]
-        return {"results": entries[:limit]}
+        return {"results": entries[:top_k]}
 
     async def search(
         self,
         query: str,
         *,
-        user_id: str | None = None,
-        limit: int = 100,
+        filters: dict[str, object] | None = None,
+        top_k: int = 100,
     ) -> dict[str, list[MemoryResult]]:
         """Return entries with a simple substring-based score."""
+        user_id = filters.get("user_id") if filters is not None else None
         lowered = query.lower()
         entries: list[MemoryResult] = []
         for entry in self._entries.values():
@@ -72,7 +79,7 @@ class FakeMem0ScopedMemory:
                     "score": 1.0 if lowered in memory_text.lower() else 0.5,
                 },
             )
-        return {"results": entries[:limit]}
+        return {"results": entries[:top_k]}
 
     async def update(self, memory_id: str, content: str) -> None:
         """Update one stored memory entry."""

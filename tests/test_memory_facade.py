@@ -275,7 +275,11 @@ class TestMemoryFacade:
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             results = await search_agent_memories("calculation", "calculator", storage_path, config, limit=5)
 
-            mock_memory.search.assert_called_once_with("calculation", user_id="agent_calculator", limit=5)
+            mock_memory.search.assert_called_once_with(
+                "calculation",
+                filters={"user_id": "agent_calculator"},
+                top_k=5,
+            )
             assert results == mock_results
 
     @pytest.mark.asyncio
@@ -641,7 +645,9 @@ class TestMemoryFacade:
     ) -> None:
         config.teams = {"finance_team": MockTeamConfig(agents=["calculator", "data_analyst", "finance"])}
 
-        def search_side_effect(query: str, user_id: str, limit: int) -> dict:  # noqa: ARG001
+        def search_side_effect(query: str, *, filters: dict[str, str], top_k: int) -> dict:  # noqa: ARG001
+            del top_k
+            user_id = filters["user_id"]
             if user_id == "agent_calculator":
                 return {"results": [{"id": "1", "memory": "Individual fact", "score": 0.9}]}
             if user_id == "team_calculator+data_analyst+finance":

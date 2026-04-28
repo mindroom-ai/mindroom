@@ -49,8 +49,8 @@ class ScopedMemoryCrud(ScopedMemoryWriter, Protocol):
     async def get_all(
         self,
         *,
-        user_id: str | None = None,
-        limit: int = 100,
+        filters: dict[str, object] | None = None,
+        top_k: int = 100,
     ) -> dict[str, list[MemoryResult]]:
         """List memories for one scoped user ID."""
 
@@ -64,8 +64,8 @@ class ScopedMemoryCrud(ScopedMemoryWriter, Protocol):
         self,
         query: str,
         *,
-        user_id: str | None = None,
-        limit: int = 100,
+        filters: dict[str, object] | None = None,
+        top_k: int = 100,
     ) -> dict[str, list[MemoryResult]] | list[MemoryResult]:
         """Search memories for one scoped user ID."""
 
