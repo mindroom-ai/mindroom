@@ -47,7 +47,13 @@ _TRANSIENT_SQLSTATES: frozenset[str] = frozenset(
 _TRANSIENT_ERROR_TEXT: tuple[str, ...] = (
     "connection is closed",
     "connection already closed",
+    "connection failed",
+    "connection refused",
+    "could not connect",
+    "network is unreachable",
+    "no route to host",
     "server closed the connection",
+    "temporary failure in name resolution",
     "terminating connection",
 )
 
@@ -460,22 +466,25 @@ class _PostgresEventCacheRuntime:
             reason=reason,
         )
 
-    def pending_room_invalidations(self, room_id: str) -> tuple[tuple[str, str | None, _PendingInvalidation], ...]:
-        """Return pending invalidations for one room as (kind, thread_id, pending)."""
-        pending: list[tuple[str, str | None, _PendingInvalidation]] = []
-        room_pending = self._pending_room_invalidations.get(room_id)
-        if room_pending is not None:
-            pending.append(("room", None, room_pending))
-        for (pending_room_id, thread_id), thread_pending in self._pending_thread_invalidations.items():
-            if pending_room_id == room_id:
-                pending.append(("thread", thread_id, thread_pending))
-        return tuple(pending)
+    def pending_room_invalidation(self, room_id: str) -> _PendingInvalidation | None:
+        """Return one pending room invalidation, if any."""
+        return self._pending_room_invalidations.get(room_id)
 
-    def forget_pending_room_invalidation(self, room_id: str) -> None:
-        """Forget one persisted room invalidation and redundant thread invalidations."""
+    def pending_thread_invalidations(self, room_id: str) -> tuple[tuple[str, _PendingInvalidation], ...]:
+        """Return pending thread invalidations for one room."""
+        return tuple(
+            (thread_id, pending)
+            for (pending_room_id, thread_id), pending in self._pending_thread_invalidations.items()
+            if pending_room_id == room_id
+        )
+
+    def forget_pending_room_invalidation(self, room_id: str, *, invalidated_at: float) -> None:
+        """Forget one persisted room invalidation and thread markers covered by it."""
         self._pending_room_invalidations.pop(room_id, None)
         self._pending_thread_invalidations = {
-            key: pending for key, pending in self._pending_thread_invalidations.items() if key[0] != room_id
+            key: pending
+            for key, pending in self._pending_thread_invalidations.items()
+            if key[0] != room_id or pending.invalidated_at > invalidated_at
         }
 
     def forget_pending_thread_invalidation(self, room_id: str, thread_id: str) -> None:
@@ -672,7 +681,7 @@ class PostgresEventCache:
             return disabled_result
         transient_error: BaseException | None = None
         for attempt in range(_MAX_TRANSIENT_OPERATION_ATTEMPTS):
-            flushed_pending: tuple[tuple[str, str | None], ...] = ()
+            flushed_pending: tuple[tuple[str, str | None, float], ...] = ()
             try:
                 async with self._runtime.acquire_db_operation(room_id, operation=operation) as db:
                     try:
@@ -716,23 +725,22 @@ class PostgresEventCache:
         self,
         db: psycopg.AsyncConnection,
         room_id: str,
-    ) -> tuple[tuple[str, str | None], ...]:
-        pending = self._runtime.pending_room_invalidations(room_id)
-        if not pending:
-            return ()
-        flushed: list[tuple[str, str | None]] = []
-        for kind, thread_id, pending_invalidation in pending:
-            if kind == "room":
-                await postgres_event_cache_threads.mark_room_stale_locked(
-                    db,
-                    namespace=self._runtime.namespace,
-                    room_id=room_id,
-                    invalidated_at=pending_invalidation.invalidated_at,
-                    reason=pending_invalidation.reason,
-                )
-                flushed.append(("room", None))
-                break
-            if thread_id is None:
+    ) -> tuple[tuple[str, str | None, float], ...]:
+        flushed: list[tuple[str, str | None, float]] = []
+        room_pending = self._runtime.pending_room_invalidation(room_id)
+        thread_pending = self._runtime.pending_thread_invalidations(room_id)
+        if room_pending is not None:
+            await postgres_event_cache_threads.mark_room_stale_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+                invalidated_at=room_pending.invalidated_at,
+                reason=room_pending.reason,
+            )
+            flushed.append(("room", None, room_pending.invalidated_at))
+
+        for thread_id, pending_invalidation in thread_pending:
+            if room_pending is not None and pending_invalidation.invalidated_at <= room_pending.invalidated_at:
                 continue
             await postgres_event_cache_threads.mark_thread_stale_locked(
                 db,
@@ -742,17 +750,17 @@ class PostgresEventCache:
                 invalidated_at=pending_invalidation.invalidated_at,
                 reason=pending_invalidation.reason,
             )
-            flushed.append(("thread", thread_id))
+            flushed.append(("thread", thread_id, pending_invalidation.invalidated_at))
         return tuple(flushed)
 
     def _forget_flushed_pending_invalidations(
         self,
         room_id: str,
-        flushed_pending: tuple[tuple[str, str | None], ...],
+        flushed_pending: tuple[tuple[str, str | None, float], ...],
     ) -> None:
-        for kind, thread_id in flushed_pending:
+        for kind, thread_id, invalidated_at in flushed_pending:
             if kind == "room":
-                self._runtime.forget_pending_room_invalidation(room_id)
+                self._runtime.forget_pending_room_invalidation(room_id, invalidated_at=invalidated_at)
                 continue
             if thread_id is not None:
                 self._runtime.forget_pending_thread_invalidation(room_id, thread_id)

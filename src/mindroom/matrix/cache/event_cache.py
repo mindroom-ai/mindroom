@@ -133,3 +133,6 @@ class ConversationEventCache(Protocol):
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
+
+    def runtime_diagnostics(self) -> dict[str, object]:
+        """Return log-safe runtime state for sync certification diagnostics."""

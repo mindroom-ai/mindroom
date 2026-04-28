@@ -46,13 +46,7 @@ class ThreadMutationCacheOps:
         """Return log-safe event-cache runtime diagnostics for sync certification."""
         if self.runtime.event_cache is None:
             return {"cache_backend": "none"}
-        diagnostics = getattr(self.runtime.event_cache, "runtime_diagnostics", None)
-        if callable(diagnostics):
-            return dict(diagnostics())
-        return {
-            "cache_backend": type(self.runtime.event_cache).__name__,
-            "cache_initialized": getattr(self.runtime.event_cache, "is_initialized", None),
-        }
+        return self.runtime.event_cache.runtime_diagnostics()
 
     def queue_room_cache_update(
         self,

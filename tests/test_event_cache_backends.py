@@ -11,7 +11,11 @@ import pytest
 
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache, PostgresEventCacheRuntime
+from mindroom.matrix.cache.postgres_event_cache import (
+    PostgresEventCache,
+    PostgresEventCacheRuntime,
+    _is_transient_postgres_failure,
+)
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.runtime_support import EventCacheRuntimeIdentity, build_event_cache
 
@@ -448,6 +452,68 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
         assert cache.runtime_diagnostics()["cache_postgres_pending_thread_invalidations"] == 0
     finally:
         await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_room_marker(
+    postgres_event_cache_url: str,
+) -> None:
+    """A pending room marker must not hide a newer pending thread marker."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    root_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="thread root",
+        origin_server_ts=1000,
+    )
+    replacement_event = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="replacement root",
+        origin_server_ts=2000,
+    )
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
+
+    await cache.initialize()
+    try:
+        await cache.replace_thread(room_id, thread_id, [root_event], validated_at=50.0)
+        cache._runtime.record_pending_room_invalidation(
+            room_id,
+            invalidated_at=100.0,
+            reason="unknown_room_mutation",
+        )
+        cache._runtime.record_pending_thread_invalidation(
+            room_id,
+            thread_id,
+            invalidated_at=200.0,
+            reason="live_thread_mutation",
+        )
+
+        replaced = await cache.replace_thread_if_not_newer(
+            room_id,
+            thread_id,
+            [replacement_event],
+            fetch_started_at=150.0,
+        )
+
+        assert replaced is False
+        state = await cache.get_thread_cache_state(room_id, thread_id)
+        assert state is not None
+        assert state.room_invalidated_at == 100.0
+        assert state.invalidated_at == 200.0
+        assert state.invalidation_reason == "live_thread_mutation"
+        diagnostics = cache.runtime_diagnostics()
+        assert diagnostics["cache_postgres_pending_room_invalidations"] == 0
+        assert diagnostics["cache_postgres_pending_thread_invalidations"] == 0
+    finally:
+        await cache.close()
+
+
+def test_postgres_transient_classifier_accepts_startup_connection_refused() -> None:
+    """Startup connection-refused errors should retry later instead of disabling the cache."""
+    assert _is_transient_postgres_failure(psycopg.OperationalError("connection failed: Connection refused"))
 
 
 def test_build_event_cache_requires_postgres_database_url(tmp_path: Path) -> None:

@@ -371,6 +371,7 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.get_thread_cache_state.return_value = None
     event_cache.get_thread_id_for_event.return_value = None
     event_cache.get_latest_agent_message_snapshot.return_value = None
+    event_cache.runtime_diagnostics.return_value = {"cache_backend": "mock"}
     event_cache.append_event.return_value = True
     event_cache.redact_event.return_value = False
     return event_cache
