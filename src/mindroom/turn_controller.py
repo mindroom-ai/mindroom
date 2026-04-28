@@ -1039,7 +1039,19 @@ class TurnController:
                 dispatch.context.thread_history = request.thread_history
                 dispatch.context.thread_id = request.thread_id
                 dispatch.context.requires_full_thread_history = False
-                payload = await payload_builder(dispatch.context)
+                payload_builder_started = time.monotonic()
+                payload_builder_outcome = "failed"
+                try:
+                    payload = await payload_builder(dispatch.context)
+                    payload_builder_outcome = "success"
+                finally:
+                    emit_elapsed_timing(
+                        "response_payload.builder",
+                        payload_builder_started,
+                        room_id=request.room_id,
+                        thread_id=request.thread_id,
+                        outcome=payload_builder_outcome,
+                    )
                 prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
                     dispatch,
                     payload,

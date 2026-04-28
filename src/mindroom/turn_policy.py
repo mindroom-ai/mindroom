@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -46,7 +47,7 @@ from mindroom.thread_utils import (
     should_agent_respond,
     thread_requires_explicit_agent_targeting,
 )
-from mindroom.timing import timed
+from mindroom.timing import emit_elapsed_timing, timed
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -141,6 +142,10 @@ class IngressHookRunner:
         target_member_names: tuple[str, ...] | None,
     ) -> PreparedHookedPayload:
         """Run message:enrich and return the model-facing payload."""
+        started = time.monotonic()
+        hook_registered = self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH)
+        item_count = 0
+
         envelope = MessageEnvelope(
             source_event_id=dispatch.envelope.source_event_id,
             room_id=dispatch.envelope.room_id,
@@ -160,7 +165,7 @@ class IngressHookRunner:
             message_received_depth=dispatch.envelope.message_received_depth,
         )
         model_prompt = payload.model_prompt
-        if self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH):
+        if hook_registered:
             context = MessageEnrichContext(
                 **self.hook_context.base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
                 envelope=envelope,
@@ -168,6 +173,7 @@ class IngressHookRunner:
                 target_member_names=target_member_names,
             )
             items = await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context)
+            item_count = len(items)
             if items:
                 enrichment_block = render_enrichment_block(items)
                 model_prompt = (
@@ -176,6 +182,14 @@ class IngressHookRunner:
                     else enrichment_block
                 )
 
+        emit_elapsed_timing(
+            "response_payload.apply_message_enrichment",
+            started,
+            room_id=dispatch.envelope.room_id,
+            target_entity_name=target_entity_name,
+            hook_registered=hook_registered,
+            enrichment_item_count=item_count,
+        )
         return PreparedHookedPayload(
             payload=DispatchPayload(
                 prompt=payload.prompt,
@@ -196,15 +210,29 @@ class IngressHookRunner:
         target_member_names: tuple[str, ...] | None,
     ) -> list[EnrichmentItem]:
         """Run system:enrich and return system-prompt enrichment items."""
-        if not self.hook_context.registry.has_hooks(EVENT_SYSTEM_ENRICH):
-            return []
+        started = time.monotonic()
+        hook_registered = self.hook_context.registry.has_hooks(EVENT_SYSTEM_ENRICH)
+
+        def finish(items: list[EnrichmentItem]) -> list[EnrichmentItem]:
+            emit_elapsed_timing(
+                "response_payload.apply_system_enrichment",
+                started,
+                room_id=dispatch.envelope.room_id,
+                target_entity_name=target_entity_name,
+                hook_registered=hook_registered,
+                enrichment_item_count=len(items),
+            )
+            return items
+
+        if not hook_registered:
+            return finish([])
         context = SystemEnrichContext(
             **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, dispatch.correlation_id),
             envelope=envelope,
             target_entity_name=target_entity_name,
             target_member_names=target_member_names,
         )
-        return await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context)
+        return finish(await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context))
 
 
 @dataclass(frozen=True)

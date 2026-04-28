@@ -9572,6 +9572,153 @@ class TestAgentBot:
         assert payload_built is True
 
     @pytest.mark.asyncio
+    async def test_execute_dispatch_action_emits_payload_builder_timing(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Dispatch execution should time the payload builder inside the locked preparation path."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        _set_turn_store_tracker(bot, MagicMock())
+        bot.logger = MagicMock()
+        _replace_turn_policy_deps(bot, logger=bot.logger)
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$thread",
+                thread_history=ThreadHistoryResult([], is_full_history=True),
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+                requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id="$thread",
+                reply_to_event_id=event.event_id,
+            ),
+            correlation_id="corr-payload-builder-timing",
+            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+        )
+
+        mock_generate_response = AsyncMock(return_value="$response")
+        install_generate_response_mock(bot, mock_generate_response)
+        _replace_turn_policy_deps(
+            bot,
+            logger=bot.logger,
+            response_runner=bot._response_runner,
+        )
+
+        async def payload_builder(_context: MessageContext) -> DispatchPayload:
+            return DispatchPayload(prompt="help me")
+
+        with patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit:
+            await bot._turn_controller._execute_response_action(
+                room,
+                event,
+                dispatch,
+                ResponseAction(kind="individual"),
+                payload_builder,
+                processing_log="processing",
+                dispatch_started_at=0.0,
+                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+            )
+
+        builder_calls = [
+            call for call in mock_emit.call_args_list if call.args and call.args[0] == "response_payload.builder"
+        ]
+        assert len(builder_calls) == 1
+        assert isinstance(builder_calls[0].args[1], float)
+        assert builder_calls[0].kwargs == {
+            "room_id": "!room:localhost",
+            "thread_id": "$thread",
+            "outcome": "success",
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_dispatch_action_emits_payload_builder_timing_on_failure(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Payload-builder timing should still emit when locked payload preparation fails."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        _set_turn_store_tracker(bot, MagicMock())
+        bot.logger = MagicMock()
+        _replace_turn_policy_deps(bot, logger=bot.logger)
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$thread",
+                thread_history=ThreadHistoryResult([], is_full_history=True),
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+                requires_full_thread_history=False,
+            ),
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id="$thread",
+                reply_to_event_id=event.event_id,
+            ),
+            correlation_id="corr-payload-builder-failure-timing",
+            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+        )
+
+        install_generate_response_mock(bot, AsyncMock(return_value="$response"))
+        _replace_turn_policy_deps(
+            bot,
+            logger=bot.logger,
+            response_runner=bot._response_runner,
+        )
+
+        async def payload_builder(_context: MessageContext) -> DispatchPayload:
+            msg = "payload failed"
+            raise RuntimeError(msg)
+
+        with (
+            patch.object(bot._turn_controller, "_finalize_dispatch_failure", new=AsyncMock(return_value="$error")),
+            patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
+        ):
+            await bot._turn_controller._execute_response_action(
+                room,
+                event,
+                dispatch,
+                ResponseAction(kind="individual"),
+                payload_builder,
+                processing_log="processing",
+                dispatch_started_at=0.0,
+                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+            )
+
+        builder_calls = [
+            call for call in mock_emit.call_args_list if call.args and call.args[0] == "response_payload.builder"
+        ]
+        assert len(builder_calls) == 1
+        assert isinstance(builder_calls[0].args[1], float)
+        assert builder_calls[0].kwargs == {
+            "room_id": "!room:localhost",
+            "thread_id": "$thread",
+            "outcome": "failed",
+        }
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.config.main.Config.from_yaml")
     @patch("mindroom.teams.resolve_agent_knowledge_access")

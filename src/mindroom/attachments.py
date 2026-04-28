@@ -8,6 +8,7 @@ import hashlib
 import json
 import mimetypes
 import re
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ import nio
 from .constants import ATTACHMENT_IDS_KEY
 from .logging_config import get_logger
 from .matrix.media import download_media_bytes, media_mime_type, resolve_image_mime_type
+from .timing import emit_elapsed_timing
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -663,16 +665,31 @@ async def resolve_thread_attachment_ids(
     is skipped, avoiding duplicate homeserver calls when the caller already
     fetched the root event for image/audio resolution.
     """
+    started = time.monotonic()
+    event_kind = "provided" if thread_root_event is not None else "fetched"
+
+    def finish(attachment_ids: list[str], outcome: str) -> list[str]:
+        emit_elapsed_timing(
+            "response_payload.resolve_thread_attachment_ids",
+            started,
+            room_id=room_id,
+            thread_id=thread_id,
+            outcome=outcome,
+            event_kind=event_kind,
+            attachment_count=len(attachment_ids),
+        )
+        return attachment_ids
+
     event = thread_root_event
     if event is None:
         response = await client.room_get_event(room_id, thread_id)
         if not isinstance(response, nio.RoomGetEventResponse):
-            return []
+            return finish([], "event_fetch_miss")
         event = response.event
 
     event_attachment_ids = parse_attachment_ids_from_event_source(event.source)
     if event_attachment_ids:
-        return event_attachment_ids
+        return finish(event_attachment_ids, "event_metadata")
 
     # Check for an existing attachment record for any media root (file, video,
     # image, or audio). Audio roots are registered by the voice handler and
@@ -684,7 +701,7 @@ async def resolve_thread_attachment_ids(
     is_image = isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
     is_audio = isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
     if not is_file_or_video and not is_image and not is_audio:
-        return []
+        return finish([], "not_media_root")
 
     existing_attachment_id = _attachment_id_for_event(event.event_id)
     existing_record = load_attachment(storage_path, existing_attachment_id)
@@ -694,7 +711,7 @@ async def resolve_thread_attachment_ids(
         and existing_record.thread_id == thread_id
         and existing_record.local_path.is_file()
     ):
-        return [existing_record.attachment_id]
+        return finish([existing_record.attachment_id], "existing_record")
 
     record: AttachmentRecord | None = None
     if is_file_or_video:
@@ -720,7 +737,9 @@ async def resolve_thread_attachment_ids(
         )
     # Audio roots cannot be re-registered here (the voice handler owns that
     # lifecycle), so ``record`` stays ``None``.
-    return [record.attachment_id] if record is not None else []
+    if record is None:
+        return finish([], "no_record")
+    return finish([record.attachment_id], "registered_record")
 
 
 def attachments_for_tool_payload(attachment_records: list[AttachmentRecord]) -> list[dict[str, Any]]:
