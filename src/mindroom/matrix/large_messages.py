@@ -87,6 +87,13 @@ def _copy_inline_streaming_preview_metadata(source_content: dict[str, Any], targ
     _copy_preview_metadata(source_content, target_content)
 
 
+def _copy_required_streaming_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
+    """Copy metadata required for preview-only streaming edits."""
+    stream_status = source_content.get(STREAM_STATUS_KEY)
+    if stream_status in _NONTERMINAL_STREAM_STATUSES:
+        target_content[STREAM_STATUS_KEY] = stream_status
+
+
 def _room_is_encrypted(client: nio.AsyncClient, room_id: str | None) -> bool:
     return bool(room_id and room_id in client.rooms and client.rooms[room_id].encrypted)
 
@@ -197,6 +204,7 @@ def _build_nonterminal_streaming_edit_preview(
     mxc_uri: str | None,
     file_info: dict[str, Any] | None,
     original_size: int,
+    include_optional_metadata: bool = True,
 ) -> dict[str, Any] | None:
     """Build an in-progress rich edit preview with optional full-content sidecar metadata."""
     preview_limit = _NONTERMINAL_STREAM_PREVIEW_BYTES
@@ -213,7 +221,10 @@ def _build_nonterminal_streaming_edit_preview(
             "format": "org.matrix.custom.html",
             "formatted_body": formatted_preview,
         }
-        _copy_inline_streaming_preview_metadata(source_content, preview_content)
+        if include_optional_metadata:
+            _copy_inline_streaming_preview_metadata(source_content, preview_content)
+        else:
+            _copy_required_streaming_preview_metadata(source_content, preview_content)
         _add_sidecar_metadata(
             preview_content,
             room_encrypted=room_encrypted,
@@ -229,7 +240,10 @@ def _build_nonterminal_streaming_edit_preview(
             "m.new_content": preview_content,
             "m.relates_to": content.get("m.relates_to", {}),
         }
-        _copy_edit_wrapper_metadata(source_content, modified_content)
+        if include_optional_metadata:
+            _copy_edit_wrapper_metadata(source_content, modified_content)
+        else:
+            _copy_required_streaming_preview_metadata(source_content, modified_content)
         if _calculate_event_size(modified_content) <= _MATRIX_EVENT_HARD_LIMIT:
             return modified_content
         if preview_limit == 0:
@@ -476,6 +490,22 @@ async def prepare_large_message(
             file_info=file_info,
             original_size=current_size,
         )
+        if modified_content is None:
+            logger.info(
+                "large_streaming_edit_preview_optional_metadata_dropped",
+                room_id=room_id,
+                original_size_bytes=current_size,
+            )
+            modified_content = _build_nonterminal_streaming_edit_preview(
+                content,
+                source_content,
+                preview_text,
+                room_encrypted=_room_is_encrypted(client, room_id),
+                mxc_uri=mxc_uri,
+                file_info=file_info,
+                original_size=current_size,
+                include_optional_metadata=False,
+            )
         if modified_content is not None:
             inner: dict[str, Any] = modified_content["m.new_content"]
             logger.info(
@@ -487,6 +517,9 @@ async def prepare_large_message(
                 has_sidecar="io.mindroom.long_text" in inner,
             )
             return modified_content
+        if not upload_nonterminal_stream_sidecar:
+            msg = "Could not build preview-only streaming edit within Matrix event size limit"
+            raise RuntimeError(msg)
 
     logger.info(
         "large_message_sidecar_upload_started",

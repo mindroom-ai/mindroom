@@ -126,6 +126,7 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 - Messages > 55,000 bytes and edits > 27,000 bytes use a fallback event
 - Full original Matrix message content is uploaded as a JSON sidecar (`message-content.json`) for regular large messages, terminal edits, and non-terminal streaming edits that are allowed to upload a fresh sidecar
 - Rate-limited non-terminal streaming edits may send preview-only events between sidecar uploads
+- Preview-only streaming edits preserve stream status but may omit optional metadata to stay below the Matrix hard event limit
 - Preview text included in message body (maximum that fits)
 - Custom metadata dict `io.mindroom.long_text` contains `version: 2`, `encoding: "matrix_event_content_json"`, original and preview sizes, and a completeness flag
 - Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity

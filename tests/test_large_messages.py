@@ -359,6 +359,53 @@ async def test_prepare_nonterminal_streaming_edit_can_skip_sidecar_upload() -> N
 
 
 @pytest.mark.asyncio
+async def test_prepare_nonterminal_streaming_edit_without_sidecar_drops_oversized_optional_metadata() -> None:
+    """Preview-only stream edits must not upload when optional metadata is too large."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+
+        async def upload(self, **_kwargs: object) -> tuple:
+            msg = "preview-only non-terminal stream edit must not upload a sidecar"
+            raise AssertionError(msg)
+
+    text = ("streaming **markdown**\n" * 2000) + "tail"
+    oversized_ai_run = {"version": 1, "debug": "x" * 90000}
+    edit_content = {
+        "body": f"* {text}",
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<p>streaming <strong>markdown</strong></p>" * 2000,
+        "m.new_content": {
+            "body": text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>streaming <strong>markdown</strong></p>" * 2000,
+            "msgtype": "m.text",
+            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+            AI_RUN_METADATA_KEY: oversized_ai_run,
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
+        "msgtype": "m.text",
+    }
+
+    result = await prepare_large_message(
+        MockClient(),
+        "!room:server",
+        edit_content,
+        upload_nonterminal_stream_sidecar=False,
+    )
+
+    assert result[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+    assert result["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+    assert AI_RUN_METADATA_KEY not in result
+    assert AI_RUN_METADATA_KEY not in result["m.new_content"]
+    assert "io.mindroom.long_text" not in result["m.new_content"]
+    assert "url" not in result["m.new_content"]
+    assert "file" not in result["m.new_content"]
+    assert "Streaming preview truncated" in result["m.new_content"]["formatted_body"]
+    assert _calculate_event_size(result) <= 64000
+
+
+@pytest.mark.asyncio
 async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_sidecar_tool_trace() -> None:
     """Huge tool traces should go to the sidecar instead of shrinking visible preview."""
 
