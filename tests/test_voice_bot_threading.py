@@ -42,6 +42,10 @@ def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Confi
     )
 
 
+async def _drain_coalescing(bot: AgentBot) -> None:
+    await bot._coalescing_gate.drain_all()
+
+
 @pytest.fixture
 def mock_home_bot() -> AgentBot:
     """Create a single-agent bot for audio threading tests."""
@@ -122,6 +126,7 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
+        await _drain_coalescing(bot)
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
@@ -173,6 +178,7 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
+        await _drain_coalescing(bot)
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
@@ -225,6 +231,7 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
+        await _drain_coalescing(bot)
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs

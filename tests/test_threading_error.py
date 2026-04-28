@@ -104,6 +104,10 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(runtime_root))
 
 
+async def _drain_coalescing(bot: AgentBot) -> None:
+    await bot._coalescing_gate.drain_all()
+
+
 def test_plain_reply_event_info_has_no_thread_routing_root() -> None:
     """Plain replies should not populate any synthetic routing root."""
     event_info = EventInfo.from_event(
@@ -7634,6 +7638,7 @@ class TestThreadingBehavior:
         ):
             # Process the message
             await bot._on_message(room, event)
+            await _drain_coalescing(bot)
 
             # Check that _generate_response was called
             bot._generate_response.assert_called_once()
@@ -7716,6 +7721,7 @@ class TestThreadingBehavior:
         ):
             # Process the message
             await bot._on_message(room, event)
+            await _drain_coalescing(bot)
 
         # Verify the bot sent messages (thinking + final)
         assert bot.client.room_send.call_count == 2
@@ -9032,6 +9038,7 @@ class TestThreadingBehavior:
             ):
                 # Process the command
                 await bot._on_message(room, event)
+                await _drain_coalescing(bot)
 
             # The bot should send an error message about needing threads
             bot.client.room_send.assert_called_once()
@@ -9150,6 +9157,7 @@ class TestThreadingBehavior:
             ):
                 # Process the command
                 await bot._on_message(room, event)
+                await _drain_coalescing(bot)
 
             # The bot should respond
             bot.client.room_send.assert_called_once()
@@ -9253,6 +9261,7 @@ class TestThreadingBehavior:
             ),
         ):
             await bot._on_message(room, event)
+            await _drain_coalescing(bot)
 
         bot.client.room_send.assert_called_once()
         content = bot.client.room_send.call_args.kwargs["content"]
@@ -9438,6 +9447,7 @@ class TestThreadingBehavior:
         ):
             # Process the message
             await bot._on_message(room, event)
+            await _drain_coalescing(bot)
 
             # Check that _generate_response was called
             bot._generate_response.assert_called_once()

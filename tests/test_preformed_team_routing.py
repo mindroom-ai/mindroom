@@ -61,6 +61,10 @@ def _make_matrix_client_mock() -> AsyncMock:
     return client
 
 
+async def _drain_coalescing(bot: AgentBot) -> None:
+    await bot._coalescing_gate.drain_all()
+
+
 @pytest.fixture
 def config_with_team() -> Config:
     """Minimal config with two agents and one predefined team in a room."""
@@ -194,6 +198,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         typing_indicator=_noop_typing_indicator,
     ):
         await bot._on_message(room, event)
+        await _drain_coalescing(bot)
 
     # Team bot should send a visible pending placeholder and the final team message.
     sent_contents = [call.kwargs["content"] for call in bot.client.room_send.call_args_list]
@@ -416,6 +421,7 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
         patch.object(bot._conversation_resolver, "fetch_thread_history", new=AsyncMock(return_value=[])),
     ):
         await bot._on_message(room, event)
+        await _drain_coalescing(bot)
 
     assert bot.client.room_send.call_count >= 1
     first_content = bot.client.room_send.call_args_list[0].kwargs["content"]

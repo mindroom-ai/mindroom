@@ -82,6 +82,11 @@ def setup_test_bot(
     return install_runtime_cache_support(bot)
 
 
+async def _drain_coalescing(*bots: AgentBot) -> None:
+    for bot in bots:
+        await bot._coalescing_gate.drain_all()
+
+
 @pytest.fixture
 def mock_research_agent() -> AgentMatrixUser:
     """Create a mock research agent user."""
@@ -170,11 +175,13 @@ class TestRoutingRegression:
 
         # Process with research bot - SHOULD respond
         await research_bot._on_message(mock_room, message_event)
+        await _drain_coalescing(research_bot)
         assert research_bot.client.room_send.call_count == 3  # thinking + 🛑 + final
         assert mock_ai_response.call_count == 1
 
         # Process with news bot - should NOT respond and NOT use router
         await news_bot._on_message(mock_room, message_event)
+        await _drain_coalescing(news_bot)
         assert news_bot.client.room_send.call_count == 0
         # Router should NOT have been called
         assert mock_suggest_agent.call_count == 0
@@ -267,6 +274,7 @@ class TestRoutingRegression:
 
         # Process with router bot (should handle routing)
         await router_bot._on_message(mock_room, message_event)
+        await _drain_coalescing(router_bot)
 
         # Router SHOULD have been called
         mock_suggest_agent.assert_called_once()
@@ -275,7 +283,9 @@ class TestRoutingRegression:
 
         # Process with other bots - they should not do anything
         await research_bot._on_message(mock_room, message_event)
+        await _drain_coalescing(research_bot)
         await news_bot._on_message(mock_room, message_event)
+        await _drain_coalescing(news_bot)
         assert research_bot.client.room_send.call_count == 0
         assert news_bot.client.room_send.call_count == 0
 
@@ -439,6 +449,7 @@ class TestRoutingRegression:
         }
 
         await router_bot._on_message(mock_room, message_event)
+        await _drain_coalescing(router_bot)
 
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
@@ -518,6 +529,7 @@ class TestRoutingRegression:
         }
 
         await router_bot._on_message(mock_room, message_event)
+        await _drain_coalescing(router_bot)
 
         mock_suggest_agent.assert_not_called()
         router_bot.client.room_send.assert_not_called()
@@ -616,6 +628,7 @@ class TestRoutingRegression:
             ),
         ):
             await router_bot._on_message(mock_room, message_event)
+            await _drain_coalescing(router_bot)
 
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
@@ -729,7 +742,9 @@ class TestRoutingRegression:
 
         # Process with both bots
         await research_bot._on_message(mock_room, message_event)
+        await _drain_coalescing(research_bot)
         await news_bot._on_message(mock_room, message_event)
+        await _drain_coalescing(news_bot)
 
         # With simplified team behavior: multiple mentions should form a team
         # The alphabetically first agent (news) handles team formation
@@ -803,6 +818,7 @@ class TestRoutingRegression:
 
         # Process router message with research bot
         await research_bot._on_message(mock_room, router_message)
+        await _drain_coalescing(research_bot)
 
         # Research bot SHOULD respond
         assert research_bot.client.room_send.call_count == 3  # thinking + 🛑 + final

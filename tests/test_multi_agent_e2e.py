@@ -70,6 +70,10 @@ def _visible_message(*, sender: str, body: str, event_id: str, timestamp: int) -
     )
 
 
+async def _drain_coalescing(bot: AgentBot) -> None:
+    await bot._coalescing_gate.drain_all()
+
+
 @pytest.fixture
 def mock_calculator_agent() -> AgentMatrixUser:
     """Create a mock calculator agent user."""
@@ -176,6 +180,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
                 visible_body_state="visible_body",
             )
             await bot._on_message(room, message_event)
+            await _drain_coalescing(bot)
 
         # Verify AI was called with separate raw and model-facing prompts.
         mock_ai.assert_called_once()
@@ -248,6 +253,7 @@ async def test_agent_ignores_other_agents(
         mock_ai = AsyncMock()
         with patch("mindroom.response_runner.stream_agent_response", new=mock_ai):
             await bot._on_message(room, message_event)
+            await _drain_coalescing(bot)
 
             # Should not process the message
             mock_ai.assert_not_called()
@@ -377,6 +383,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 should_use_streaming=AsyncMock(return_value=False),
             ):
                 await bot._on_message(room, message_event)
+                await _drain_coalescing(bot)
 
             # Should process the message as only agent in thread
             mock_ai.assert_called_once()
@@ -450,6 +457,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 should_use_streaming=AsyncMock(return_value=False),
             ):
                 await bot._on_message(room, message_event_2)
+                await _drain_coalescing(bot)
 
             # Should form team and send team response when multiple agents in thread
             mock_ai.assert_not_called()
@@ -525,6 +533,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 should_use_streaming=AsyncMock(return_value=False),
             ):
                 await bot._on_message(room, message_event_with_mention)
+                await _drain_coalescing(bot)
 
             # Should process the message with explicit mention
             mock_ai.assert_called_once()

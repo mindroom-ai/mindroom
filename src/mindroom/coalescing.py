@@ -39,7 +39,6 @@ __all__ = [
 
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
-_COALESCING_FLUSH_WARNING_SECONDS = 5.0
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"hook", "hook_dispatch"})
 logger = get_logger(__name__)
 
@@ -99,8 +98,20 @@ class PendingEvent:
 class _GateEntry:
     phase: GatePhase = GatePhase.DEBOUNCE
     pending: list[PendingEvent] = field(default_factory=list)
-    timer_task: asyncio.Task[None] | None = None
+    immediate: list[_ImmediateDispatch] = field(default_factory=list)
+    deferred_pending: list[PendingEvent] = field(default_factory=list)
+    drain_task: asyncio.Task[None] | None = None
+    wake_event: asyncio.Event = field(default_factory=asyncio.Event)
+    wake_generation: int = 0
+    debounce_deadline: float | None = None
     grace_deadline: float | None = None
+    force_flush_pending: bool = False
+
+
+@dataclass
+class _ImmediateDispatch:
+    pending_event: PendingEvent
+    flush_pending_first: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,16 +130,6 @@ class CoalescedBatch:
     media_events: list[MediaDispatchEvent]
     original_sender: str | None = None
     raw_audio_fallback: bool = False
-
-
-@dataclass(frozen=True)
-class _FlushDiagnostics:
-    """Stable metadata for one flush attempt."""
-
-    batch: CoalescedBatch
-    pending_count: int
-    timing_scope: str
-    log_context: dict[str, object]
 
 
 def _event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
@@ -419,267 +420,185 @@ class CoalescingGate:
                 return current_key, current_gate
         return None, None
 
-    @staticmethod
-    def _oldest_pending_age_ms(pending_events: list[PendingEvent]) -> float:
-        """Return the oldest queued event age in milliseconds."""
-        oldest_enqueue_time = min(pending_event.enqueue_time for pending_event in pending_events)
-        return round((time.time() - oldest_enqueue_time) * 1000, 1)
-
-    @staticmethod
-    def _source_event_ids(pending_events: list[PendingEvent]) -> list[str]:
-        """Return source event IDs for diagnostics."""
-        return [pending_event.event.event_id for pending_event in pending_events]
-
-    def _log_enqueued_event(
-        self,
-        key: CoalescingKey,
-        pending_event: PendingEvent,
-        *,
-        pending_count: int,
-    ) -> None:
-        """Log one enqueue without message content."""
-        logger.info(
-            "coalescing_gate_message_enqueued",
-            room_id=key[0],
-            thread_id=key[1],
-            requester_user_id=key[2],
-            event_id=pending_event.event.event_id,
-            pending_count=pending_count,
-            source_kind=pending_event.source_kind,
-            timing_scope=event_timing_scope(pending_event.event.event_id),
-        )
-
-    def _flush_diagnostics(
-        self,
-        key: CoalescingKey,
-        pending_events: list[PendingEvent],
-        *,
-        bypass_grace: bool,
-    ) -> _FlushDiagnostics:
-        """Build the batch and structured logging context for one flush."""
-        batch = build_coalesced_batch(key, pending_events)
-        pending_count = len(pending_events)
-        timing_scope = event_timing_scope(batch.primary_event.event_id)
-        return _FlushDiagnostics(
-            batch=batch,
-            pending_count=pending_count,
-            timing_scope=timing_scope,
-            log_context={
-                "room_id": key[0],
-                "thread_id": key[1],
-                "requester_user_id": key[2],
-                "pending_count": pending_count,
-                "oldest_pending_age_ms": self._oldest_pending_age_ms(pending_events),
-                "bypass_grace": bypass_grace,
-                "source_event_ids": self._source_event_ids(pending_events),
-                "timing_scope": timing_scope,
-            },
-        )
-
-    @staticmethod
-    def _log_flush_finished(
-        flush_context: dict[str, object],
-        *,
-        flush_start: float,
-        outcome: str,
-    ) -> None:
-        """Log the end of one flush attempt, escalating slow flushes."""
-        duration_ms = round((time.monotonic() - flush_start) * 1000, 1)
-        log_context = {
-            **flush_context,
-            "duration_ms": duration_ms,
-            "outcome": outcome,
-        }
-        if duration_ms >= _COALESCING_FLUSH_WARNING_SECONDS * 1000:
-            logger.warning("coalescing_gate_flush_slow", **log_context)
-            return
-        logger.info("coalescing_gate_flush_finished", **log_context)
-
-    async def enqueue(self, key: CoalescingKey, pending_event: PendingEvent) -> None:
-        """Queue one pending event and schedule its eventual flush."""
-        enqueue_start = time.monotonic()
-        # Path 1: bypass — explicitly exempt automation
-        if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
-            await self._dispatch_batch(build_coalesced_batch(key, [pending_event]))
-            emit_elapsed_timing(
-                "coalescing_gate.enqueue",
-                enqueue_start,
-                path="bypass",
-                source_kind=pending_event.source_kind,
-                timing_scope=event_timing_scope(pending_event.event.event_id),
-            )
-            return
-
-        # Path 2: command interrupt — flush pending, dispatch command solo
-        if is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
-            gate = self._gates.get(key)
-            if gate is not None:
-                self._cancel_timer(gate)
-            await self._flush(key, bypass_grace=True)
-            await self._dispatch_batch(build_coalesced_batch(key, [pending_event]))
-            emit_elapsed_timing(
-                "coalescing_gate.enqueue",
-                enqueue_start,
-                path="command_interrupt",
-                source_kind=pending_event.source_kind,
-                timing_scope=event_timing_scope(pending_event.event.event_id),
-            )
-            return
-
+    def _get_or_create_gate(self, key: CoalescingKey) -> _GateEntry:
         gate = self._gates.get(key)
         if gate is None:
             gate = _GateEntry()
             self._gates[key] = gate
+        return gate
+
+    @staticmethod
+    def _gate_work_count(gate: _GateEntry) -> int:
+        return len(gate.pending) + len(gate.deferred_pending) + len(gate.immediate)
+
+    @staticmethod
+    def _oldest_pending_age_ms(gate: _GateEntry) -> float | None:
+        pending_events = [
+            *gate.pending,
+            *gate.deferred_pending,
+            *(immediate.pending_event for immediate in gate.immediate),
+        ]
+        if not pending_events:
+            return None
+        oldest_enqueue_time = min(pending_event.enqueue_time for pending_event in pending_events)
+        return round((time.time() - oldest_enqueue_time) * 1000, 1)
+
+    def _log_enqueue(
+        self,
+        key: CoalescingKey,
+        gate: _GateEntry,
+        *,
+        enqueue_start: float,
+        path: str,
+        source_kind: str,
+    ) -> None:
+        logger.debug(
+            "coalescing_gate_enqueue",
+            room_id=key[0],
+            thread_id=key[1],
+            requester_user_id=key[2],
+            path=path,
+            source_kind=source_kind,
+            pending_count=self._gate_work_count(gate),
+            oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
+            duration_ms=round((time.monotonic() - enqueue_start) * 1000, 1),
+        )
+
+    def _ensure_drain_task(self, key: CoalescingKey, gate: _GateEntry) -> None:
+        if gate.drain_task is not None and not gate.drain_task.done():
+            return
+        gate.drain_task = asyncio.create_task(
+            self._drain_gate(key, gate),
+            name=f"coalescing_drain:{key[0]}:{key[1] or 'room'}:{key[2]}",
+        )
+
+    def _schedule_drain(self, key: CoalescingKey, gate: _GateEntry) -> None:
+        self._ensure_drain_task(key, gate)
+        self._wake(gate)
+
+    @staticmethod
+    def _wake(gate: _GateEntry) -> None:
+        gate.wake_generation += 1
+        gate.wake_event.set()
+
+    def _set_debounce_deadline(self, gate: _GateEntry) -> None:
+        gate.phase = GatePhase.DEBOUNCE
+        gate.debounce_deadline = time.monotonic() + max(self._debounce_seconds(), 0.0)
+        gate.grace_deadline = None
+
+    def _record_enqueue(
+        self,
+        key: CoalescingKey,
+        gate: _GateEntry,
+        pending_event: PendingEvent,
+        enqueue_start: float,
+        *,
+        path: str,
+        flush_outcome: str | None = None,
+    ) -> None:
+        self._log_enqueue(
+            key,
+            gate,
+            enqueue_start=enqueue_start,
+            path=path,
+            source_kind=pending_event.source_kind,
+        )
+        emit_elapsed_timing(
+            "coalescing_gate.enqueue",
+            enqueue_start,
+            path=path,
+            source_kind=pending_event.source_kind,
+            pending_count=self._gate_work_count(gate),
+            flush_outcome=flush_outcome,
+            oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
+            timing_scope=event_timing_scope(pending_event.event.event_id),
+        )
+
+    async def enqueue(self, key: CoalescingKey, pending_event: PendingEvent) -> None:
+        """Queue one pending event and schedule its eventual flush.
+
+        This method is the Matrix ingress boundary for live coalescing.
+        It mutates bounded in-memory state, wakes one owned drain task for the
+        key, and returns without awaiting dispatch or model generation.
+        """
+        enqueue_start = time.monotonic()
+        # Path 1: bypass — explicitly exempt automation
+        if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
+            gate = self._get_or_create_gate(key)
+            gate.immediate.append(_ImmediateDispatch(pending_event))
+            self._schedule_drain(key, gate)
+            self._record_enqueue(key, gate, pending_event, enqueue_start, path="bypass")
+            return
+
+        # Path 2: command interrupt — flush pending, dispatch command solo
+        if is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
+            gate = self._get_or_create_gate(key)
+            gate.immediate.append(_ImmediateDispatch(pending_event, flush_pending_first=True))
+            if gate.phase is not GatePhase.IN_FLIGHT and gate.pending:
+                gate.force_flush_pending = True
+                gate.debounce_deadline = time.monotonic()
+                gate.grace_deadline = None
+            self._schedule_drain(key, gate)
+            self._record_enqueue(key, gate, pending_event, enqueue_start, path="command_interrupt")
+            return
+
+        gate = self._get_or_create_gate(key)
 
         # Path 3: grace-phase handling
         if gate.phase is GatePhase.GRACE:
             if _is_media_event(pending_event.event):
                 gate.pending.append(pending_event)
-                self._log_enqueued_event(key, pending_event, pending_count=len(gate.pending))
-                self._schedule_grace(key)
-                emit_elapsed_timing(
-                    "coalescing_gate.enqueue",
-                    enqueue_start,
-                    path="grace_media_extend",
-                    source_kind=pending_event.source_kind,
-                    pending_count=len(gate.pending),
-                    timing_scope=event_timing_scope(pending_event.event.event_id),
-                )
+                self._schedule_grace(gate)
+                self._schedule_drain(key, gate)
+                self._record_enqueue(key, gate, pending_event, enqueue_start, path="grace_media_extend")
                 return
             # Text during grace → flush existing batch, start new turn
-            self._cancel_timer(gate)
-            await self._flush(key, bypass_grace=True)
-            gate = self._gates.get(key)
-            if gate is None:
-                gate = _GateEntry()
-                self._gates[key] = gate
+            gate.deferred_pending.append(pending_event)
+            gate.force_flush_pending = True
+            gate.debounce_deadline = time.monotonic()
+            gate.grace_deadline = None
+            self._schedule_drain(key, gate)
+            self._record_enqueue(key, gate, pending_event, enqueue_start, path="grace_text_split")
+            return
 
         # Path 4: normal append + schedule
         gate.pending.append(pending_event)
-        self._log_enqueued_event(key, pending_event, pending_count=len(gate.pending))
         if gate.phase is GatePhase.IN_FLIGHT:
-            emit_elapsed_timing(
-                "coalescing_gate.enqueue",
-                enqueue_start,
-                path="in_flight_buffer",
-                source_kind=pending_event.source_kind,
-                pending_count=len(gate.pending),
-                timing_scope=event_timing_scope(pending_event.event.event_id),
-            )
+            self._schedule_drain(key, gate)
+            self._record_enqueue(key, gate, pending_event, enqueue_start, path="in_flight_buffer")
             return
         if self._debounce_seconds() <= 0:
-            pending_count = len(gate.pending)
-            flush_outcome = await self._flush(key)
-            emit_elapsed_timing(
-                "coalescing_gate.enqueue",
+            gate.debounce_deadline = time.monotonic()
+            self._schedule_drain(key, gate)
+            self._record_enqueue(
+                key,
+                gate,
+                pending_event,
                 enqueue_start,
                 path="zero_debounce",
-                source_kind=pending_event.source_kind,
-                pending_count=pending_count,
-                flush_outcome=flush_outcome,
-                timing_scope=event_timing_scope(pending_event.event.event_id),
+                flush_outcome="scheduled_drain",
             )
             return
-        self._reset_timer(key, delay=self._debounce_seconds(), phase=GatePhase.DEBOUNCE)
-        emit_elapsed_timing(
-            "coalescing_gate.enqueue",
-            enqueue_start,
-            path="debounce_schedule",
-            source_kind=pending_event.source_kind,
-            pending_count=len(gate.pending),
-            timing_scope=event_timing_scope(pending_event.event.event_id),
-        )
+        self._set_debounce_deadline(gate)
+        self._schedule_drain(key, gate)
+        self._record_enqueue(key, gate, pending_event, enqueue_start, path="debounce_schedule")
 
     async def drain_all(self) -> None:
-        """Flush every active gate, canceling timers and awaiting dispatch.
-
-        Invariant: ``prepare_for_sync_shutdown`` sets ``_sync_shutting_down``
-        before calling this, so the ``_flush`` finally block always takes the
-        recursive-flush path (not ``_reset_timer``).  If that invariant were
-        violated, a newly scheduled timer task could be orphaned when we
-        clear ``gate.timer_task`` below — but it would self-cancel harmlessly
-        via the ``timer_task is asyncio.current_task()`` stale guard.
-
-        There is a narrow race: if a timer callback has already returned from
-        ``asyncio.sleep`` but not yet entered ``_flush`` when we cancel it,
-        the cancellation hits during the flush's ``await _dispatch_batch``.
-        The ``_flush`` finally block resets phase, but the batch events are
-        lost.  This only occurs during shutdown, where the Matrix timeline
-        retains messages for replay on restart, so the trade-off is accepted.
-        """
-        tasks_to_await: list[asyncio.Task[None]] = []
-        for gate in self._gates.values():
-            if gate.timer_task is not None and not gate.timer_task.done():
-                # Only cancel tasks that are sleeping (not running a dispatch).
-                if gate.phase is not GatePhase.IN_FLIGHT:
-                    gate.timer_task.cancel()
-                tasks_to_await.append(gate.timer_task)
+        """Flush every active gate and await owned drain tasks."""
+        for key, gate in list(self._gates.items()):
+            gate.force_flush_pending = True
+            gate.debounce_deadline = time.monotonic()
+            gate.grace_deadline = None
+            self._ensure_drain_task(key, gate)
+            self._wake(gate)
+        tasks_to_await = [
+            gate.drain_task
+            for gate in self._gates.values()
+            if gate.drain_task is not None and not gate.drain_task.done()
+        ]
         if tasks_to_await:
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
-        for gate in self._gates.values():
-            gate.timer_task = None
-        if self._gates:
-            await asyncio.gather(
-                *(self._flush(key, bypass_grace=True) for key in list(self._gates)),
-                return_exceptions=True,
-            )
         self._gates.clear()
-
-    def _cancel_timer(self, gate: _GateEntry) -> None:
-        """Cancel a pending timer. Preserves the task reference during IN_FLIGHT."""
-        if gate.timer_task is not None and not gate.timer_task.done() and gate.phase is not GatePhase.IN_FLIGHT:
-            gate.timer_task.cancel()
-        if gate.phase is not GatePhase.IN_FLIGHT:
-            gate.timer_task = None
-        gate.grace_deadline = None
-
-    def _reset_timer(self, key: CoalescingKey, *, delay: float, phase: GatePhase) -> None:
-        """Cancel the current timer and schedule a new one."""
-        gate = self._gates[key]
-        if gate.timer_task is not None and not gate.timer_task.done():
-            gate.timer_task.cancel()
-        gate.phase = phase
-
-        async def _timer_callback() -> None:
-            try:
-                await asyncio.sleep(max(delay, 0.0))
-            except asyncio.CancelledError:
-                return
-            current_key: CoalescingKey | None = None
-            try:
-                current_key, current_gate = self._resolve_gate_entry(key, gate)
-                if current_key is None or current_gate is None or current_gate.timer_task is not asyncio.current_task():
-                    return
-                # Keep timer_task alive through the flush so drain_all can await it.
-                await self._flush(current_key, bypass_grace=phase is GatePhase.GRACE)
-                current_key, current_gate = self._resolve_gate_entry(current_key, gate)
-                if (
-                    current_key is not None
-                    and current_gate is not None
-                    and current_gate.timer_task is asyncio.current_task()
-                ):
-                    current_gate.timer_task = None
-            except asyncio.CancelledError:
-                return
-            except Exception as error:
-                log_key = current_key or key
-                logger.exception(
-                    "Coalescing timer callback failed",
-                    room_id=log_key[0],
-                    thread_id=log_key[1],
-                    requester_user_id=log_key[2],
-                    exception_type=error.__class__.__name__,
-                    error_message="Coalesced dispatch failed.",
-                )
-                current_key, current_gate = self._resolve_gate_entry(log_key, gate)
-                if (
-                    current_key is not None
-                    and current_gate is not None
-                    and current_gate.timer_task is asyncio.current_task()
-                ):
-                    current_gate.timer_task = None
-
-        gate.timer_task = asyncio.create_task(_timer_callback())
 
     def _upload_grace_hard_cap_seconds(self) -> float:
         grace_seconds = max(self._upload_grace_seconds(), 0.0)
@@ -688,85 +607,205 @@ class CoalescingGate:
             min(grace_seconds * _UPLOAD_GRACE_HARD_CAP_MULTIPLIER, _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS),
         )
 
-    def _schedule_grace(self, key: CoalescingKey) -> None:
-        gate = self._gates[key]
+    def _schedule_grace(self, gate: _GateEntry) -> None:
         if gate.grace_deadline is None:
             gate.grace_deadline = time.monotonic() + self._upload_grace_hard_cap_seconds()
         grace_seconds = max(self._upload_grace_seconds(), 0.0)
         remaining_seconds = max(gate.grace_deadline - time.monotonic(), 0.0)
-        saved_deadline = gate.grace_deadline
-        self._reset_timer(key, delay=min(grace_seconds, remaining_seconds), phase=GatePhase.GRACE)
-        self._gates[key].grace_deadline = saved_deadline
+        gate.phase = GatePhase.GRACE
+        gate.debounce_deadline = time.monotonic() + min(grace_seconds, remaining_seconds)
 
-    async def _flush(self, key: CoalescingKey, *, bypass_grace: bool = False) -> str | None:
-        """Execute one gate flush cycle."""
-        flush_start = time.monotonic()
-        gate = self._gates.get(key)
-        if gate is None or not gate.pending or gate.phase is GatePhase.IN_FLIGHT:
+    async def _wait_for_deadline(self, gate: _GateEntry, deadline: float) -> bool:
+        """Return True when ingress woke the drain before the deadline."""
+        while True:
+            delay = deadline - time.monotonic()
+            if delay <= 0:
+                return False
+            wake_generation = gate.wake_generation
+            gate.wake_event.clear()
+            if gate.debounce_deadline != deadline or gate.wake_generation != wake_generation:
+                return True
+            try:
+                await asyncio.wait_for(gate.wake_event.wait(), timeout=delay)
+            except TimeoutError:
+                return False
+            else:
+                return True
+
+    async def _flush_pending(self, key: CoalescingKey, gate: _GateEntry, *, bypass_grace: bool) -> str | None:
+        """Claim currently pending coalesced events and dispatch them."""
+        if not gate.pending or gate.phase is GatePhase.IN_FLIGHT:
             return None
         pending_events = list(gate.pending)
-        diagnostics = self._flush_diagnostics(key, pending_events, bypass_grace=bypass_grace)
-        logger.info("coalescing_gate_flush_started", **diagnostics.log_context)
-        if (
-            not bypass_grace
-            and gate.phase is not GatePhase.GRACE
-            and self._upload_grace_seconds() > 0
-            and not self._is_shutting_down()
-            and _pending_has_only_text(gate.pending)
-        ):
-            self._schedule_grace(key)
-            self._log_flush_finished(
-                diagnostics.log_context,
-                flush_start=flush_start,
-                outcome="scheduled_grace",
-            )
-            emit_elapsed_timing(
-                "coalescing_gate.flush",
-                flush_start,
-                outcome="scheduled_grace",
-                pending_count=diagnostics.pending_count,
-                timing_scope=diagnostics.timing_scope,
-            )
-            return "scheduled_grace"
-        # Set IN_FLIGHT before _cancel_timer so the running timer task
-        # (which may be the current task) is not self-cancelled.
-        gate.phase = GatePhase.IN_FLIGHT
-        self._cancel_timer(gate)
         gate.pending.clear()
+        gate.force_flush_pending = False
+        return await self._dispatch_events(key, gate, pending_events, bypass_grace=bypass_grace)
+
+    async def _dispatch_events(
+        self,
+        key: CoalescingKey,
+        gate: _GateEntry,
+        pending_events: list[PendingEvent],
+        *,
+        bypass_grace: bool,
+    ) -> str:
+        """Dispatch a claimed batch while buffering new ingress on the same gate."""
+        flush_start = time.monotonic()
+        gate.phase = GatePhase.IN_FLIGHT
+        pending_count = len(pending_events)
+        gate.debounce_deadline = None
+        gate.grace_deadline = None
+        batch = build_coalesced_batch(key, pending_events)
+        timing_scope = event_timing_scope(batch.primary_event.event_id)
         dispatched = False
         try:
             dispatch_batch_start = time.monotonic()
-            await self._dispatch_batch(diagnostics.batch)
+            await self._dispatch_batch(batch)
             dispatched = True
             emit_elapsed_timing(
                 "coalescing_gate.flush.dispatch_batch",
                 dispatch_batch_start,
-                pending_count=diagnostics.pending_count,
+                pending_count=pending_count,
                 bypass_grace=bypass_grace,
-                timing_scope=diagnostics.timing_scope,
+                timing_scope=timing_scope,
             )
             return "dispatched"
         finally:
-            outcome = "dispatched" if dispatched else "failed"
             emit_elapsed_timing(
                 "coalescing_gate.flush",
                 flush_start,
-                outcome=outcome,
-                pending_count=diagnostics.pending_count,
+                outcome="dispatched" if dispatched else "failed",
+                pending_count=pending_count,
                 bypass_grace=bypass_grace,
-                timing_scope=diagnostics.timing_scope,
+                timing_scope=timing_scope,
             )
-            self._log_flush_finished(
-                diagnostics.log_context,
-                flush_start=flush_start,
-                outcome=outcome,
-            )
-            current_key, gate = self._resolve_gate_entry(key, gate)
-            if gate is not None and current_key is not None:
-                gate.phase = GatePhase.DEBOUNCE
+            current_key, current_gate = self._resolve_gate_entry(key, gate)
+            if current_key is not None and current_gate is not None:
+                current_gate.phase = GatePhase.DEBOUNCE
+                current_gate.grace_deadline = None
+                current_gate.debounce_deadline = None
+                if current_gate.deferred_pending:
+                    current_gate.pending.extend(current_gate.deferred_pending)
+                    current_gate.deferred_pending.clear()
+                if current_gate.pending:
+                    if self._is_shutting_down() or current_gate.force_flush_pending or self._debounce_seconds() <= 0:
+                        current_gate.debounce_deadline = time.monotonic()
+                    else:
+                        self._set_debounce_deadline(current_gate)
+
+    async def _drain_gate(self, key: CoalescingKey, gate: _GateEntry) -> None:  # noqa: C901, PLR0912, PLR0915
+        """Own debounce, grace, and dispatch for one coalescing key."""
+        drain_start = time.monotonic()
+        current_key: CoalescingKey | None = key
+        outcome = "finished"
+        logger.debug(
+            "coalescing_drain_start",
+            room_id=key[0],
+            thread_id=key[1],
+            requester_user_id=key[2],
+            pending_count=self._gate_work_count(gate),
+            oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
+        )
+        try:
+            while True:
+                current_key, current_gate = self._resolve_gate_entry(current_key or key, gate)
+                if current_key is None or current_gate is None:
+                    return
+                gate = current_gate
+
+                if gate.immediate:
+                    immediate = gate.immediate[0]
+                    if immediate.flush_pending_first and gate.pending:
+                        await self._flush_pending(current_key, gate, bypass_grace=True)
+                        continue
+                    gate.immediate.pop(0)
+                    await self._dispatch_events(
+                        current_key,
+                        gate,
+                        [immediate.pending_event],
+                        bypass_grace=True,
+                    )
+                    continue
+
+                if gate.deferred_pending and not gate.pending:
+                    gate.pending.extend(gate.deferred_pending)
+                    gate.deferred_pending.clear()
+                    self._set_debounce_deadline(gate)
+
                 if not gate.pending:
                     self._gates.pop(current_key, None)
-                elif self._is_shutting_down() or self._debounce_seconds() <= 0:
-                    await self._flush(current_key, bypass_grace=self._is_shutting_down())
-                else:
-                    self._reset_timer(current_key, delay=self._debounce_seconds(), phase=GatePhase.DEBOUNCE)
+                    return
+
+                if self._is_shutting_down() or gate.force_flush_pending:
+                    await self._flush_pending(current_key, gate, bypass_grace=True)
+                    continue
+
+                if gate.phase is GatePhase.GRACE:
+                    deadline = gate.debounce_deadline or time.monotonic()
+                    if await self._wait_for_deadline(gate, deadline):
+                        continue
+                    await self._flush_pending(current_key, gate, bypass_grace=True)
+                    continue
+
+                if gate.debounce_deadline is None:
+                    self._set_debounce_deadline(gate)
+                deadline = gate.debounce_deadline or time.monotonic()
+                if await self._wait_for_deadline(gate, deadline):
+                    continue
+                flush_start = time.monotonic()
+                if (
+                    self._upload_grace_seconds() > 0
+                    and not self._is_shutting_down()
+                    and _pending_has_only_text(gate.pending)
+                ):
+                    self._schedule_grace(gate)
+                    emit_elapsed_timing(
+                        "coalescing_gate.flush",
+                        flush_start,
+                        outcome="scheduled_grace",
+                        pending_count=len(gate.pending),
+                        oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
+                        timing_scope=event_timing_scope(
+                            build_coalesced_batch(current_key, gate.pending).primary_event.event_id,
+                        ),
+                    )
+                    continue
+                await self._flush_pending(current_key, gate, bypass_grace=False)
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except Exception as error:
+            outcome = "failed"
+            log_key = current_key or key
+            logger.exception(
+                "Coalescing drain failed",
+                room_id=log_key[0],
+                thread_id=log_key[1],
+                requester_user_id=log_key[2],
+                pending_count=self._gate_work_count(gate),
+                oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
+                exception_type=error.__class__.__name__,
+                error_message="Coalesced dispatch failed.",
+            )
+        finally:
+            resolved_key, resolved_gate = self._resolve_gate_entry(current_key or key, gate)
+            if resolved_key is not None and resolved_gate is not None:
+                if resolved_gate.drain_task is asyncio.current_task():
+                    resolved_gate.drain_task = None
+                if self._gate_work_count(resolved_gate) == 0:
+                    self._gates.pop(resolved_key, None)
+                elif outcome in {"failed", "cancelled"} and not self._is_shutting_down():
+                    self._ensure_drain_task(resolved_key, resolved_gate)
+                    self._wake(resolved_gate)
+            logger.debug(
+                "coalescing_drain_finish",
+                room_id=(resolved_key or current_key or key)[0],
+                thread_id=(resolved_key or current_key or key)[1],
+                requester_user_id=(resolved_key or current_key or key)[2],
+                outcome=outcome,
+                pending_count=self._gate_work_count(resolved_gate) if resolved_gate is not None else 0,
+                oldest_pending_age_ms=(
+                    self._oldest_pending_age_ms(resolved_gate) if resolved_gate is not None else None
+                ),
+                duration_ms=round((time.monotonic() - drain_start) * 1000, 1),
+            )

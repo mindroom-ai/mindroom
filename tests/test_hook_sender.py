@@ -1557,6 +1557,7 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
 
     try:
         await bot._on_message(room, event)
+        await bot._coalescing_gate.drain_all()
     finally:
         assert "$question123" in interactive._active_questions
         interactive._active_questions.clear()

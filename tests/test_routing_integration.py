@@ -31,6 +31,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+async def _drain_coalescing(*bots: AgentBot) -> None:
+    for bot in bots:
+        await bot._coalescing_gate.drain_all()
+
+
 class TestRoutingIntegration:
     """Integration tests for routing behavior with multiple agents."""
 
@@ -144,6 +149,7 @@ class TestRoutingIntegration:
         # Process message with both bots
         await research_bot._on_message(mock_room, user_message)
         await news_bot._on_message(mock_room, user_message)
+        await _drain_coalescing(research_bot, news_bot)
 
         # Only research bot should respond (streaming makes 2 calls)
         assert research_bot.client.room_send.call_count >= 1  # At least initial message

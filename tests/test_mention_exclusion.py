@@ -112,6 +112,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
     )
 
     await general_bot._on_message(room, event)
+    await general_bot._coalescing_gate.drain_all()
 
     # GeneralAgent should NOT generate a response because ResearchAgent is mentioned
     general_bot._generate_response.assert_not_called()
@@ -208,6 +209,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
 
     with patch("mindroom.turn_policy.decide_team_formation", return_value=TeamResolution.none()):
         await general_bot._on_message(room, event)
+        await general_bot._coalescing_gate.drain_all()
 
     # GeneralAgent SHOULD generate a response because it's mentioned
     general_bot._generate_response.assert_called_once()

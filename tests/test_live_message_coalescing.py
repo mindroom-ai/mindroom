@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from mindroom.bot import AgentBot
 from mindroom.coalescing import (
+    CoalescedBatch,
     CoalescingGate,
     GatePhase,
     PendingEvent,
@@ -346,7 +347,7 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
     room = _make_room()
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
     second = _text_event(event_id="$m2", body="second", server_timestamp=1001)
-    calls: list[tuple[str, list[str]]] = []
+    calls: list[tuple[str, str, list[str]]] = []
 
     async def record_dispatch(
         _room: nio.MatrixRoom,
@@ -357,7 +358,7 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         handled_turn: HandledTurnState | None = None,
     ) -> None:
         _ = media_events, handled_turn
-        calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
+        calls.append((dispatched_event.event_id, dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
         await bot._turn_controller._enqueue_for_dispatch(
@@ -376,6 +377,7 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
 
     assert calls == [
         (
+            "$m2",
             "The user sent the following messages in quick succession. "
             "Treat them as one turn and respond once:\n\nfirst\nsecond",
             ["$m1", "$m2"],
@@ -597,6 +599,7 @@ async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_tur
             requester_user_id="@user:localhost",
         )
 
+        await _wait_for(lambda: len(calls) >= 1)
         assert calls == [("first turn", ["$m1"])]
 
         await _wait_for(lambda: len(calls) == 2)
@@ -892,6 +895,7 @@ async def test_command_mid_batch_flushes_pending_then_processes_command(tmp_path
             source_kind="message",
             requester_user_id="@user:localhost",
         )
+        await _wait_for(lambda: len(calls) == 2)
 
     assert calls == [
         ("tell me more", ["$m1"]),
@@ -994,6 +998,7 @@ async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -
             source_kind="message",
             requester_user_id="@user:localhost",
         )
+        await _wait_for(lambda: len(calls) == 2)
 
     assert calls == [
         ("first", ["$m1"]),
@@ -1059,6 +1064,63 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
     assert calls == [["$m1"], ["$m2", "$m3"]]
 
 
+@pytest.mark.asyncio
+async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path: Path) -> None:
+    """A blocked coalescing drain must not hold later Matrix ingress callbacks."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
+    second = _text_event(event_id="$m2", body="second", server_timestamp=1001, thread_id="$m1")
+    entered_first_dispatch = asyncio.Event()
+    release_first_dispatch = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+    ) -> None:
+        _ = media_events
+        source_event_ids = _handled_turn_source_event_ids(handled_turn)
+        calls.append(source_event_ids)
+        if source_event_ids == ["$m1"]:
+            entered_first_dispatch.set()
+            await release_first_dispatch.wait()
+
+    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await asyncio.wait_for(
+            bot._turn_controller._enqueue_for_dispatch(
+                first,
+                room,
+                source_kind="message",
+                requester_user_id="@user:localhost",
+            ),
+            timeout=0.05,
+        )
+        await entered_first_dispatch.wait()
+
+        await asyncio.wait_for(
+            bot._turn_controller._enqueue_for_dispatch(
+                second,
+                room,
+                source_kind="message",
+                requester_user_id="@user:localhost",
+            ),
+            timeout=0.05,
+        )
+
+        retargeted_key = ("!room:localhost", "$m1", "@user:localhost")
+        assert [pending.event.event_id for pending in bot._coalescing_gate._gates[retargeted_key].pending] == ["$m2"]
+
+        release_first_dispatch.set()
+        await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
+
+    assert bot._coalescing_gate.is_idle()
+
+
 def test_scheduled_events_not_coalescing_exempt() -> None:
     """Scheduled turns should pass through the gate while hook ingress still bypasses it."""
     scheduled = _text_event(event_id="$scheduled", body="scheduled", source_kind="scheduled")
@@ -1097,6 +1159,7 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
             source_kind=source_kind,
             requester_user_id="@user:localhost",
         )
+        await _wait_for(lambda: len(calls) == 1)
 
     assert calls == [f"{source_kind} task"]
 
@@ -1393,6 +1456,7 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
 
         release_first_dispatch.set()
         await first_task
+        await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
 
     assert calls == [["$m1"], ["$m2", "$m3"]]
     assert bot._coalescing_gate.is_idle()
@@ -1458,7 +1522,7 @@ async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing(
     ]
     assert len(immediate_flush_calls) == 1
     assert immediate_flush_calls[0].kwargs["pending_count"] == 1
-    assert immediate_flush_calls[0].kwargs["flush_outcome"] == "dispatched"
+    assert immediate_flush_calls[0].kwargs["flush_outcome"] == "scheduled_drain"
 
 
 @pytest.mark.asyncio
@@ -1488,7 +1552,7 @@ async def test_zero_debounce_with_upload_grace_logs_scheduled_grace_outcome() ->
         if call.args and call.args[0] == "coalescing_gate.enqueue" and call.kwargs.get("path") == "zero_debounce"
     ]
     assert len(zero_debounce_calls) == 1
-    assert zero_debounce_calls[0].kwargs["flush_outcome"] == "scheduled_grace"
+    assert zero_debounce_calls[0].kwargs["flush_outcome"] == "scheduled_drain"
 
 
 @pytest.mark.asyncio
@@ -1683,10 +1747,7 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
         is_shutting_down=lambda: False,
     )
 
-    with (
-        patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit,
-        pytest.raises(RuntimeError, match="boom"),
-    ):
+    with patch("mindroom.coalescing.emit_elapsed_timing") as mock_emit:
         await gate.enqueue(
             ("!room:localhost", None, "@user:localhost"),
             PendingEvent(
@@ -1695,6 +1756,7 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
                 source_kind="message",
             ),
         )
+        await _wait_for(gate.is_idle)
 
     flush_calls = [call for call in mock_emit.call_args_list if call.args and call.args[0] == "coalescing_gate.flush"]
     assert len(flush_calls) == 1
@@ -1803,10 +1865,245 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
 
     assert loop_exceptions == []
     mock_exception.assert_called_once()
-    assert mock_exception.call_args.args == ("Coalescing timer callback failed",)
+    assert mock_exception.call_args.args == ("Coalescing drain failed",)
     assert mock_exception.call_args.kwargs["exception_type"] == "RuntimeError"
     assert mock_exception.call_args.kwargs["error_message"] == "Coalesced dispatch failed."
+    assert "pending_count" in mock_exception.call_args.kwargs
+    assert "oldest_pending_age_ms" in mock_exception.call_args.kwargs
     assert gate.is_idle()
+
+
+@pytest.mark.asyncio
+async def test_failed_drain_does_not_poison_future_ingress() -> None:
+    """A failed drain should log, clean up, and allow later events to dispatch."""
+    room = _make_room()
+    dispatched_source_event_ids: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        source_event_ids = list(batch.source_event_ids)
+        if source_event_ids == ["$m1"]:
+            msg = "boom"
+            raise RuntimeError(msg)
+        dispatched_source_event_ids.append(source_event_ids)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+        await gate.enqueue(
+            ("!room:localhost", None, "@user:localhost"),
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="first"),
+                room=room,
+                source_kind="message",
+            ),
+        )
+        await _wait_for(lambda: mock_exception.called)
+
+    assert gate.is_idle()
+
+    await gate.enqueue(
+        ("!room:localhost", None, "@user:localhost"),
+        PendingEvent(
+            event=_text_event(event_id="$m2", body="second"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await _wait_for(lambda: dispatched_source_event_ids == [["$m2"]])
+
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
+async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_another_event() -> None:
+    """Ingress buffered behind a failed dispatch should get its own follow-up drain."""
+    room = _make_room()
+    entered_first_dispatch = asyncio.Event()
+    release_first_dispatch = asyncio.Event()
+    dispatched_source_event_ids: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        source_event_ids = list(batch.source_event_ids)
+        if source_event_ids == ["$m1"]:
+            entered_first_dispatch.set()
+            await release_first_dispatch.wait()
+            msg = "boom"
+            raise RuntimeError(msg)
+        dispatched_source_event_ids.append(source_event_ids)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+        await gate.enqueue(
+            ("!room:localhost", None, "@user:localhost"),
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="first"),
+                room=room,
+                source_kind="message",
+            ),
+        )
+        await entered_first_dispatch.wait()
+        await gate.enqueue(
+            ("!room:localhost", None, "@user:localhost"),
+            PendingEvent(
+                event=_text_event(event_id="$m2", body="second"),
+                room=room,
+                source_kind="message",
+            ),
+        )
+
+        release_first_dispatch.set()
+        await _wait_for(lambda: mock_exception.called)
+        await _wait_for(lambda: dispatched_source_event_ids == [["$m2"]])
+
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_drain_cleans_state_for_later_message() -> None:
+    """A cancelled in-flight dispatch should not prevent a fresh later drain."""
+    room = _make_room()
+    entered_first_dispatch = asyncio.Event()
+    never_release = asyncio.Event()
+    dispatched_source_event_ids: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        source_event_ids = list(batch.source_event_ids)
+        dispatched_source_event_ids.append(source_event_ids)
+        if source_event_ids == ["$m1"]:
+            entered_first_dispatch.set()
+            await never_release.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.enqueue(
+        ("!room:localhost", None, "@user:localhost"),
+        PendingEvent(
+            event=_text_event(event_id="$m1", body="first"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await entered_first_dispatch.wait()
+
+    drain_task = next(iter(gate._gates.values())).drain_task
+    assert drain_task is not None
+    drain_task.cancel()
+    await asyncio.gather(drain_task, return_exceptions=True)
+
+    assert gate.is_idle()
+
+    await gate.enqueue(
+        ("!room:localhost", None, "@user:localhost"),
+        PendingEvent(
+            event=_text_event(event_id="$m2", body="second"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await _wait_for(lambda: dispatched_source_event_ids == [["$m1"], ["$m2"]])
+
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_another_event() -> None:
+    """Ingress buffered behind a cancelled dispatch should get its own follow-up drain."""
+    room = _make_room()
+    entered_first_dispatch = asyncio.Event()
+    never_release = asyncio.Event()
+    dispatched_source_event_ids: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        source_event_ids = list(batch.source_event_ids)
+        dispatched_source_event_ids.append(source_event_ids)
+        if source_event_ids == ["$m1"]:
+            entered_first_dispatch.set()
+            await never_release.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.enqueue(
+        ("!room:localhost", None, "@user:localhost"),
+        PendingEvent(
+            event=_text_event(event_id="$m1", body="first"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await entered_first_dispatch.wait()
+    await gate.enqueue(
+        ("!room:localhost", None, "@user:localhost"),
+        PendingEvent(
+            event=_text_event(event_id="$m2", body="second"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+
+    drain_task = next(iter(gate._gates.values())).drain_task
+    assert drain_task is not None
+    drain_task.cancel()
+    await asyncio.gather(drain_task, return_exceptions=True)
+    await _wait_for(lambda: dispatched_source_event_ids == [["$m1"], ["$m2"]])
+
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
+async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
+    """Drain diagnostics should include enqueue, start, finish, count, and age fields."""
+    room = _make_room()
+    gate = CoalescingGate(
+        dispatch_batch=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    with patch("mindroom.coalescing.logger.debug") as mock_debug:
+        await gate.enqueue(
+            ("!room:localhost", None, "@user:localhost"),
+            PendingEvent(
+                event=_text_event(event_id="$m1", body="first"),
+                room=room,
+                source_kind="message",
+            ),
+        )
+        await _wait_for(gate.is_idle)
+
+    debug_events = [call.args[0] for call in mock_debug.call_args_list if call.args]
+    assert "coalescing_gate_enqueue" in debug_events
+    assert "coalescing_drain_start" in debug_events
+    assert "coalescing_drain_finish" in debug_events
+    for event_name in ("coalescing_gate_enqueue", "coalescing_drain_start", "coalescing_drain_finish"):
+        event_call = next(call for call in mock_debug.call_args_list if call.args and call.args[0] == event_name)
+        assert "pending_count" in event_call.kwargs
+        assert "oldest_pending_age_ms" in event_call.kwargs
+    enqueue_call = next(
+        call for call in mock_debug.call_args_list if call.args and call.args[0] == "coalescing_gate_enqueue"
+    )
+    assert "duration_ms" in enqueue_call.kwargs
 
 
 @pytest.mark.asyncio
@@ -1964,8 +2261,7 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        # Zero debounce flushes synchronously — should already be dispatched
-        await asyncio.sleep(0.01)
+        await _wait_for(lambda: len(calls) == 1)
 
     assert calls == [("immediate", ["$m1"])]
     assert bot._coalescing_gate.is_idle()
@@ -2004,6 +2300,7 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
             source_kind="message",
             requester_user_id="@user:localhost",
         )
+        await _wait_for(lambda: len(calls) == 2)
 
     assert calls == [
         ("!help", ["$c1"]),

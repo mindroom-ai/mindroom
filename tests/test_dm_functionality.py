@@ -37,6 +37,10 @@ def _config(path: Path, **kwargs: object) -> Config:
     return _bind_runtime_paths(Config(**kwargs), path)
 
 
+async def _drain_coalescing(bot: AgentBot) -> None:
+    await bot._coalescing_gate.drain_all()
+
+
 class TestDMResponseLogic:
     """Test agent response logic in DM rooms."""
 
@@ -390,6 +394,7 @@ class TestDMIntegration:
 
             # Process the message
             await bot._on_message(room, event)
+            await _drain_coalescing(bot)
 
             # Verify the bot decided to respond even though not configured for the room
             bot._generate_response.assert_called_once()
@@ -479,6 +484,7 @@ class TestDMIntegration:
 
             # Process the message
             await bot._on_message(room, event)
+            await _drain_coalescing(bot)
 
             # Verify the bot decided to respond in the DM room
             bot._generate_response.assert_called_once()

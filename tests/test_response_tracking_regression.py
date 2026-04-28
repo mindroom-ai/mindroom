@@ -31,6 +31,10 @@ from tests.conftest import (
 )
 
 
+async def _drain_coalescing(bot: AgentBot) -> None:
+    await bot._coalescing_gate.drain_all()
+
+
 @pytest.fixture
 def mock_router_agent() -> AgentMatrixUser:
     """Create a mock router agent user."""
@@ -215,6 +219,7 @@ class TestResponseTrackingRegression:
         with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
             # Call _on_message which should detect unknown command and respond
             await bot._on_message(mock_room, unknown_command_event)
+            await _drain_coalescing(bot)
 
         bot._send_response.assert_awaited_once()
         assert "❌ Unknown command" in bot._send_response.await_args.args[2]

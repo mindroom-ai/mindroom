@@ -33,6 +33,10 @@ def _delivery_resolution(response_event_id: str | None) -> str | None:
     return response_event_id
 
 
+async def _drain_coalescing(bot: AgentBot) -> None:
+    await bot._coalescing_gate.drain_all()
+
+
 @pytest.mark.asyncio
 async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     """Test that agents regenerate their response on each consecutive edit."""
@@ -118,6 +122,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     # Process original message with mocked AI response
     with patch("mindroom.response_runner.ai_response", AsyncMock(return_value="Original: 4")):
         await bot._on_message(room, original_event)
+        await _drain_coalescing(bot)
 
     # Verify bot responded
     assert bot.client.room_send.call_count == 2  # thinking + final
@@ -161,6 +166,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
         new=AsyncMock(return_value=_delivery_resolution("$response123")),
     ) as mock_generate_response:
         await bot._on_message(room, edit1_event)
+        await _drain_coalescing(bot)
 
     assert mock_generate_response.await_count == 1
 
@@ -200,6 +206,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
         new=AsyncMock(return_value=_delivery_resolution("$response123")),
     ) as mock_generate_response:
         await bot._on_message(room, edit2_event)
+        await _drain_coalescing(bot)
 
     assert mock_generate_response.await_count == 1
 
@@ -239,5 +246,6 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
         new=AsyncMock(return_value=_delivery_resolution("$response123")),
     ) as mock_generate_response:
         await bot._on_message(room, edit3_event)
+        await _drain_coalescing(bot)
 
     assert mock_generate_response.await_count == 1
