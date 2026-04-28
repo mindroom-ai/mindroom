@@ -44,7 +44,7 @@ from mindroom.matrix.stale_stream_cleanup import (
     auto_resume_interrupted_threads,
     cleanup_stale_streaming_messages,
 )
-from mindroom.matrix.state import MatrixState
+from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix.users import (
     INTERNAL_USER_ACCOUNT_KEY,
     INTERNAL_USER_AGENT_NAME,
@@ -1475,7 +1475,7 @@ class MultiAgentOrchestrator:
             return authorized_user_ids
         assert router_bot.client is not None
 
-        state = MatrixState.load(runtime_paths=self.runtime_paths)
+        state = matrix_state_for_runtime(self.runtime_paths)
         user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
         if config.mindroom_user is None or not user_account:
             return authorized_user_ids

@@ -18,7 +18,7 @@ from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms, should_persist_invited_rooms
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.matrix.state import MatrixState, managed_account_usernames
+from mindroom.matrix.state import managed_account_usernames, matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.matrix_identifiers import agent_username_localpart
 
@@ -85,7 +85,7 @@ async def _cleanup_orphaned_bots_in_room(
     """
     # Never evict bots from the root space — the router is the creator/admin
     # and no agents are explicitly configured for it, so every bot looks orphaned.
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
     if state.space_room_id and room_id == state.space_room_id:
         logger.debug("orphaned_bot_cleanup_skipped_root_space", room_id=room_id)
         return []
