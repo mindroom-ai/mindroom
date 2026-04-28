@@ -67,8 +67,10 @@ def _is_transient_db_error(exc: BaseException) -> bool:
     if isinstance(exc, psycopg.InterfaceError):
         return True
     if isinstance(exc, psycopg.OperationalError):
-        diag = getattr(exc, "diag", None)
-        sqlstate = getattr(diag, "sqlstate", None) if diag is not None else None
+        sqlstate = getattr(exc, "sqlstate", None)
+        if sqlstate is None:
+            diag = getattr(exc, "diag", None)
+            sqlstate = getattr(diag, "sqlstate", None) if diag is not None else None
         if sqlstate in _TRANSIENT_SQLSTATES:
             return True
         message = str(exc).lower()
@@ -360,9 +362,9 @@ class _PostgresEventCacheRuntime:
         """Drop the dead connection so the next acquire opens a fresh one.
 
         Caller must have already determined that *exc* is transient via
-        :func:`_is_transient_db_error`. Cleaning up the connection is best-effort —
-        if the close itself raises, we log and proceed with reconnection on the
-        next acquire.
+        :func:`_is_transient_db_error`. Cleaning up the connection is best
+        effort: if the close itself raises, we log and proceed with reconnection
+        on the next acquire.
         """
         async with self._db_lock:
             if self._db is not None:

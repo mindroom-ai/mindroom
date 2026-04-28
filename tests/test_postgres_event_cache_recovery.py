@@ -55,8 +55,17 @@ async def test_is_transient_db_error_classifies_admin_shutdown() -> None:
     assert _is_transient_db_error(err)
 
 
-async def test_is_transient_db_error_classifies_sqlstate() -> None:
-    """SQLSTATE-only classification path should also flag transient codes."""
+async def test_is_transient_db_error_classifies_typed_psycopg_errors() -> None:
+    """Real psycopg typed errors should be classified by their ``sqlstate`` attribute."""
+    assert _is_transient_db_error(psycopg.errors.AdminShutdown("admin"))
+    assert _is_transient_db_error(psycopg.errors.CrashShutdown("crash"))
+    assert _is_transient_db_error(psycopg.errors.CannotConnectNow("starting"))
+    assert _is_transient_db_error(psycopg.errors.ConnectionFailure("conn fail"))
+    assert not _is_transient_db_error(psycopg.errors.SyntaxError("bad sql"))
+
+
+async def test_is_transient_db_error_classifies_sqlstate_via_diag() -> None:
+    """Errors that only expose ``diag.sqlstate`` (no top-level attr) should still classify."""
 
     class _FakeDiag:
         def __init__(self, sqlstate: str) -> None:
