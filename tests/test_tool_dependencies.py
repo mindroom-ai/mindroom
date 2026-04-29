@@ -133,6 +133,16 @@ def test_core_runtime_imports_are_declared_as_base_dependencies() -> None:
         )
 
 
+def test_vertexai_claude_google_auth_is_declared_as_base_dependency() -> None:
+    """Vertex Claude model loading should not rely on Google tool extras."""
+    base_dependencies = _base_dependency_names()
+
+    assert "google-auth" in base_dependencies, (
+        "vertexai_claude model loading imports google.auth.load_credentials_from_file directly "
+        "and must declare google-auth in project.dependencies"
+    )
+
+
 def test_full_runtime_image_keeps_sentence_transformers_runtime_only() -> None:
     """The full image should not preinstall the runtime-only sentence_transformers extra."""
     dockerfile = Path("local/instances/deploy/Dockerfile.mindroom").read_text(encoding="utf-8")
