@@ -1415,7 +1415,6 @@ async def test_pending_dispatch_policy_controls_prepared_bypass_without_erasing_
     dispatch_event = build_batch_dispatch_event(calls[0])
     assert isinstance(dispatch_event, PreparedTextEvent)
     assert dispatch_event.source_kind_override == "voice"
-    assert dispatch_event.dispatch_policy_source_kind_override is None
 
 
 @pytest.mark.asyncio
@@ -3144,7 +3143,6 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
     assert handoff.ingress.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
     assert isinstance(dispatch_event, PreparedTextEvent)
     assert dispatch_event.source_kind_override is None
-    assert dispatch_event.dispatch_policy_source_kind_override is None
 
 
 def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None:
@@ -3642,7 +3640,6 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
         },
         server_timestamp=1000,
         source_kind_override="voice",
-        dispatch_policy_source_kind_override=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
     )
     dispatch = _prepared_dispatch(
         event_id="$voice_command",

@@ -108,6 +108,7 @@ def _bot(tmp_path: Path) -> AgentBot:
 def _envelope(
     *,
     source_kind: str = "message",
+    dispatch_policy_source_kind: str | None = None,
     source_event_id: str = "$event",
     target: MessageTarget | None = None,
 ) -> MessageEnvelope:
@@ -127,6 +128,7 @@ def _envelope(
         mentioned_agents=(),
         agent_name="general",
         source_kind=source_kind,
+        dispatch_policy_source_kind=dispatch_policy_source_kind,
     )
 
 
@@ -169,7 +171,7 @@ def _reserved_follow_up_case(
 ) -> SimpleNamespace:
     target = MessageTarget.resolve(room.room_id, "$thread", event_id)
     envelope = _envelope(
-        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         source_event_id=event_id,
         target=target,
     )
@@ -179,7 +181,6 @@ def _reserved_follow_up_case(
         body=body,
         source={"content": {"body": body}},
         server_timestamp=1234,
-        source_kind_override=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
     )
     dispatch = PreparedDispatch(
         requester_user_id="@user:localhost",
@@ -1034,7 +1035,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$command")
     envelope = _envelope(
-        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         source_event_id="$command",
         target=target,
     )
@@ -1044,7 +1045,6 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
         body="!help",
         source={"content": {"body": "!help"}},
         server_timestamp=1234,
-        source_kind_override=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
     )
     dispatch = PreparedDispatch(
         requester_user_id="@user:localhost",
@@ -1091,7 +1091,7 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$older")
     envelope = _envelope(
-        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         source_event_id="$older",
         target=target,
     )
@@ -1101,7 +1101,6 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
         body="older follow-up",
         source={"content": {"body": "older follow-up"}},
         server_timestamp=1234,
-        source_kind_override=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
     )
     dispatch = PreparedDispatch(
         requester_user_id="@user:localhost",
@@ -1309,7 +1308,7 @@ async def test_reserved_follow_up_cleanup_when_text_normalization_raises(tmp_pat
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$normalize")
     envelope = _envelope(
-        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         source_event_id="$normalize",
         target=target,
     )
@@ -1349,7 +1348,7 @@ async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path:
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$prepare")
     envelope = _envelope(
-        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         source_event_id="$prepare",
         target=target,
     )
@@ -1391,7 +1390,7 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$handoff")
     envelope = _envelope(
-        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         source_event_id="$handoff",
         target=target,
     )
@@ -1409,7 +1408,8 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
                 PendingEvent(
                     event=event,
                     room=room,
-                    source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                    source_kind="message",
+                    dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
                     dispatch_metadata=_queued_notice_metadata(reservation),
                 ),
             ],
@@ -1479,7 +1479,7 @@ def test_queued_human_reservation_is_idempotent(tmp_path: Path) -> None:
     bot = _bot(tmp_path)
     target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
     envelope = _envelope(
-        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         source_event_id="$event",
         target=target,
     )
@@ -1508,7 +1508,7 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
     room.room_id = "!room:localhost"
     target = MessageTarget.resolve(room.room_id, "$thread", "$reserved")
     envelope = _envelope(
-        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         source_event_id="$reserved",
         target=target,
     )
@@ -1526,7 +1526,8 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
                     PendingEvent(
                         event=_prepared_text_event(event_id="$reserved"),
                         room=room,
-                        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                        source_kind="message",
+                        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
                         dispatch_metadata=_queued_notice_metadata(reservation),
                     ),
                     PendingEvent(

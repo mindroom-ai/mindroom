@@ -34,7 +34,6 @@ class PreparedTextEvent:
     server_timestamp: int | float | None = None
     is_synthetic: bool = False
     source_kind_override: str | None = None
-    dispatch_policy_source_kind_override: str | None = None
 
 
 type MediaDispatchEvent = (

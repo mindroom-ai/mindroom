@@ -7963,7 +7963,8 @@ class TestAgentBot:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name=bot.agent_name,
-            source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            source_kind="message",
+            dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         )
 
         with (
