@@ -8924,6 +8924,11 @@ class TestAgentBot:
                 return_value=True,
             ) as mock_has_active_response,
             patch.object(
+                bot._response_runner,
+                "signal_waiting_human_message",
+                return_value=True,
+            ) as mock_signal_waiting_human_message,
+            patch.object(
                 bot._turn_controller,
                 "_dispatch_text_message",
                 new=AsyncMock(),
@@ -8935,6 +8940,10 @@ class TestAgentBot:
         mock_has_active_response.assert_called_once()
         active_target = mock_has_active_response.call_args.args[0]
         assert active_target.resolved_thread_id == target.resolved_thread_id
+        mock_signal_waiting_human_message.assert_called_once()
+        signal_target = mock_signal_waiting_human_message.call_args.kwargs["target"]
+        assert signal_target.resolved_thread_id == target.resolved_thread_id
+        assert mock_signal_waiting_human_message.call_args.kwargs["response_envelope"] is envelope
         mock_dispatch.assert_not_awaited()
         mock_enqueue.assert_awaited_once()
         key, pending_event = mock_enqueue.await_args.args

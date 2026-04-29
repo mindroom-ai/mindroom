@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -10,7 +11,12 @@ from agno.db.base import SessionType
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai_runtime import queued_message_signal_context
-from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit, is_automation_source_kind
+from mindroom.hooks import (
+    EVENT_SESSION_STARTED,
+    SessionHookContext,
+    emit,
+    is_automation_source_kind,
+)
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
@@ -74,25 +80,38 @@ class _QueuedMessageState:
         return self._event.is_set()
 
 
+class _QueuedHumanNotice(enum.Enum):
+    NONE = "none"
+    WAITING = "waiting"
+    PRE_SIGNALED = "pre_signaled"
+
+
 @dataclass
 class ResponseLifecycleCoordinator:
     """Serialize response turns and signal active turns about queued human ingress."""
 
     _response_lifecycle_locks: dict[tuple[str, str | None], asyncio.Lock] = field(default_factory=dict)
     _thread_queued_signals: dict[tuple[str, str | None], _QueuedMessageState] = field(default_factory=dict)
+    _pre_signaled_human_message_ids: dict[tuple[str, str | None], set[str]] = field(default_factory=dict)
 
-    def has_active_response_for_target(self, target: MessageTarget) -> bool:
-        """Return whether one canonical conversation target already has an active turn."""
-        thread_key = (target.room_id, target.resolved_thread_id)
+    @staticmethod
+    def _thread_key(target: MessageTarget) -> tuple[str, str | None]:
+        return (target.room_id, target.resolved_thread_id)
+
+    def _has_active_response_for_thread_key(self, thread_key: tuple[str, str | None]) -> bool:
         queued_signal = self._thread_queued_signals.get(thread_key)
         if queued_signal is not None and queued_signal.has_active_response_turn():
             return True
         lifecycle_lock = self._response_lifecycle_locks.get(thread_key)
         return lifecycle_lock.locked() if lifecycle_lock is not None else False
 
+    def has_active_response_for_target(self, target: MessageTarget) -> bool:
+        """Return whether one canonical conversation target already has an active turn."""
+        return self._has_active_response_for_thread_key(self._thread_key(target))
+
     def _response_lifecycle_lock(self, target: MessageTarget) -> asyncio.Lock:
         """Return the per-target lock that serializes one response lifecycle."""
-        lock_key = (target.room_id, target.resolved_thread_id)
+        lock_key = self._thread_key(target)
         lock = self._response_lifecycle_locks.get(lock_key)
         if lock is not None:
             return lock
@@ -104,13 +123,14 @@ class ResponseLifecycleCoordinator:
                     continue
                 self._response_lifecycle_locks.pop(candidate, None)
                 self._thread_queued_signals.pop(candidate, None)
+                self._pre_signaled_human_message_ids.pop(candidate, None)
         lock = asyncio.Lock()
         self._response_lifecycle_locks[lock_key] = lock
         return lock
 
     def _get_or_create_queued_signal(self, target: MessageTarget) -> _QueuedMessageState:
         """Return the queued-message signal for one canonical conversation thread."""
-        thread_key = (target.room_id, target.resolved_thread_id)
+        thread_key = self._thread_key(target)
         signal = self._thread_queued_signals.get(thread_key)
         if signal is not None:
             return signal
@@ -119,9 +139,111 @@ class ResponseLifecycleCoordinator:
         return signal
 
     @staticmethod
-    def _should_signal_queued_message(response_envelope: MessageEnvelope | None) -> bool:
+    def _should_signal_queued_message(
+        response_envelope: MessageEnvelope | None,
+    ) -> bool:
         """Return whether one queued ingress should interrupt the active turn."""
         return response_envelope is not None and not is_automation_source_kind(response_envelope.source_kind)
+
+    def _remember_pre_signaled_human_message(
+        self,
+        *,
+        thread_key: tuple[str, str | None],
+        source_event_id: str,
+    ) -> bool:
+        pre_signaled_ids = self._pre_signaled_human_message_ids.setdefault(thread_key, set())
+        if source_event_id in pre_signaled_ids:
+            return False
+        pre_signaled_ids.add(source_event_id)
+        return True
+
+    def signal_waiting_human_message(
+        self,
+        *,
+        target: MessageTarget,
+        response_envelope: MessageEnvelope | None,
+    ) -> bool:
+        """Notify an active turn that human ingress is queued before dispatch owns the event."""
+        if response_envelope is None or not self._should_signal_queued_message(response_envelope):
+            return False
+        thread_key = self._thread_key(target)
+        if not self._has_active_response_for_thread_key(thread_key):
+            return False
+        if not self._remember_pre_signaled_human_message(
+            thread_key=thread_key,
+            source_event_id=response_envelope.source_event_id,
+        ):
+            return False
+        self._get_or_create_queued_signal(target).add_waiting_human_message()
+        return True
+
+    def _is_pre_signaled_human_message(
+        self,
+        *,
+        thread_key: tuple[str, str | None],
+        response_envelope: MessageEnvelope | None,
+    ) -> bool:
+        if response_envelope is None:
+            return False
+        return response_envelope.source_event_id in self._pre_signaled_human_message_ids.get(thread_key, set())
+
+    def _consume_pre_signaled_human_message(
+        self,
+        *,
+        thread_key: tuple[str, str | None],
+        response_envelope: MessageEnvelope | None,
+        queued_signal: _QueuedMessageState,
+    ) -> None:
+        if response_envelope is None:
+            return
+        pre_signaled_ids = self._pre_signaled_human_message_ids.get(thread_key)
+        if pre_signaled_ids is None or response_envelope.source_event_id not in pre_signaled_ids:
+            return
+        pre_signaled_ids.remove(response_envelope.source_event_id)
+        if not pre_signaled_ids:
+            self._pre_signaled_human_message_ids.pop(thread_key, None)
+        queued_signal.consume_waiting_human_message()
+
+    def _begin_response_turn_notice(
+        self,
+        *,
+        thread_key: tuple[str, str | None],
+        lifecycle_lock: asyncio.Lock,
+        queued_signal: _QueuedMessageState,
+        response_envelope: MessageEnvelope | None,
+    ) -> _QueuedHumanNotice:
+        existing_turn = queued_signal.begin_response_turn()
+        if self._is_pre_signaled_human_message(
+            thread_key=thread_key,
+            response_envelope=response_envelope,
+        ):
+            return _QueuedHumanNotice.PRE_SIGNALED
+        if not (existing_turn or lifecycle_lock.locked()):
+            return _QueuedHumanNotice.NONE
+        if not self._should_signal_queued_message(response_envelope):
+            return _QueuedHumanNotice.NONE
+        queued_signal.add_waiting_human_message()
+        return _QueuedHumanNotice.WAITING
+
+    def _consume_queued_human_notice(
+        self,
+        *,
+        notice: _QueuedHumanNotice,
+        thread_key: tuple[str, str | None],
+        response_envelope: MessageEnvelope | None,
+        queued_signal: _QueuedMessageState,
+    ) -> _QueuedHumanNotice:
+        if notice is _QueuedHumanNotice.NONE:
+            return notice
+        if notice is _QueuedHumanNotice.PRE_SIGNALED:
+            self._consume_pre_signaled_human_message(
+                thread_key=thread_key,
+                response_envelope=response_envelope,
+                queued_signal=queued_signal,
+            )
+        else:
+            queued_signal.consume_waiting_human_message()
+        return _QueuedHumanNotice.NONE
 
     async def run_locked_response(
         self,
@@ -134,12 +256,13 @@ class ResponseLifecycleCoordinator:
         """Run one locked response operation with shared queued-message bookkeeping."""
         lifecycle_lock = self._response_lifecycle_lock(target)
         queued_signal = self._get_or_create_queued_signal(target)
-        existing_turn = queued_signal.begin_response_turn()
-        queued_human_message = (existing_turn or lifecycle_lock.locked()) and self._should_signal_queued_message(
-            response_envelope,
+        thread_key = self._thread_key(target)
+        notice = self._begin_response_turn_notice(
+            thread_key=thread_key,
+            lifecycle_lock=lifecycle_lock,
+            queued_signal=queued_signal,
+            response_envelope=response_envelope,
         )
-        if queued_human_message:
-            queued_signal.add_waiting_human_message()
         lock_acquired = False
         try:
             if pipeline_timing is not None:
@@ -149,17 +272,24 @@ class ResponseLifecycleCoordinator:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_acquired")
             try:
-                if queued_human_message:
-                    queued_signal.consume_waiting_human_message()
-                    queued_human_message = False
+                notice = self._consume_queued_human_notice(
+                    notice=notice,
+                    thread_key=thread_key,
+                    response_envelope=response_envelope,
+                    queued_signal=queued_signal,
+                )
                 with queued_message_signal_context(queued_signal):
                     return await locked_operation(target)
             finally:
                 if lock_acquired:
                     lifecycle_lock.release()
         finally:
-            if queued_human_message:
-                queued_signal.consume_waiting_human_message()
+            self._consume_queued_human_notice(
+                notice=notice,
+                thread_key=thread_key,
+                response_envelope=response_envelope,
+                queued_signal=queued_signal,
+            )
             queued_signal.finish_response_turn()
 
 

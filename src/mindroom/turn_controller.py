@@ -1311,6 +1311,10 @@ class TurnController:
                     coalescing_bypassed=True,
                     coalescing_bypass_reason="active_thread_follow_up",
                 )
+            self.deps.response_runner.signal_waiting_human_message(
+                target=target,
+                response_envelope=envelope,
+            )
             await self._enqueue_for_dispatch(
                 prepared_event,
                 room,

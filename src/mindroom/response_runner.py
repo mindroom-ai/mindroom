@@ -517,6 +517,18 @@ class ResponseRunner:
         """Return whether one canonical conversation target already has an active turn."""
         return self._lifecycle_coordinator.has_active_response_for_target(target)
 
+    def signal_waiting_human_message(
+        self,
+        *,
+        target: MessageTarget,
+        response_envelope: MessageEnvelope | None,
+    ) -> bool:
+        """Notify an active response that human ingress is queued behind dispatch ownership."""
+        return self._lifecycle_coordinator.signal_waiting_human_message(
+            target=target,
+            response_envelope=response_envelope,
+        )
+
     async def _run_in_tool_context(
         self,
         *,

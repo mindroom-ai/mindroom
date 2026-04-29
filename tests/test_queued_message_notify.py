@@ -94,14 +94,14 @@ def _bot(tmp_path: Path) -> AgentBot:
     return bot
 
 
-def _envelope(*, source_kind: str = "message") -> MessageEnvelope:
+def _envelope(*, source_kind: str = "message", source_event_id: str = "$event") -> MessageEnvelope:
     target = MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id=None,
         reply_to_event_id="$event",
     )
     return MessageEnvelope(
-        source_event_id="$event",
+        source_event_id=source_event_id,
         room_id="!room:localhost",
         target=target,
         requester_id="@user:localhost",
@@ -882,6 +882,67 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
 
     assert observed_pending == [True, False]
     assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_pre_signaled_human_follow_up_reaches_active_turn_before_dispatch(tmp_path: Path) -> None:
+    """Gate-owned follow-ups should still notify the active response before their dispatch starts."""
+    bot = _bot(tmp_path)
+    active_envelope = _envelope(source_event_id="$active")
+    follow_up_envelope = _envelope(source_event_id="$followup")
+    response_target = active_envelope.target
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    active_started = asyncio.Event()
+    active_saw_follow_up = asyncio.Event()
+    allow_active_to_finish = asyncio.Event()
+    follow_up_observed_pending: list[bool] = []
+
+    async def active_operation(_target: MessageTarget) -> str:
+        active_started.set()
+        await queued_signal.wait()
+        if queued_signal.has_pending_human_messages():
+            active_saw_follow_up.set()
+        await allow_active_to_finish.wait()
+        return "$active-response"
+
+    active_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=response_target,
+            response_envelope=active_envelope,
+            pipeline_timing=None,
+            locked_operation=active_operation,
+        ),
+    )
+    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+
+    assert lifecycle.signal_waiting_human_message(
+        target=response_target,
+        response_envelope=follow_up_envelope,
+    )
+    await asyncio.wait_for(active_saw_follow_up.wait(), timeout=0.2)
+    allow_active_to_finish.set()
+    assert await active_task == "$active-response"
+    assert queued_signal.pending_human_messages == 1
+
+    async def follow_up_operation(_target: MessageTarget) -> str:
+        follow_up_observed_pending.append(queued_signal.has_pending_human_messages())
+        return "$followup-response"
+
+    assert (
+        await lifecycle.run_locked_response(
+            target=response_target,
+            response_envelope=follow_up_envelope,
+            pipeline_timing=None,
+            locked_operation=follow_up_operation,
+        )
+        == "$followup-response"
+    )
+
+    assert follow_up_observed_pending == [False]
+    assert not queued_signal.is_set()
+    assert lifecycle._pre_signaled_human_message_ids == {}
 
 
 @pytest.mark.asyncio
