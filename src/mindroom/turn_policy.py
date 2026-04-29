@@ -58,12 +58,8 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.conversation_resolver import (
-        DispatchEvent,
-        MediaDispatchEvent,
-        MessageContext,
-        TextDispatchEvent,
-    )
+    from mindroom.conversation_resolver import MessageContext
+    from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, TextDispatchEvent
     from mindroom.message_target import MessageTarget
 
 

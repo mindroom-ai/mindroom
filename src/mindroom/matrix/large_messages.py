@@ -16,12 +16,15 @@ from nio import crypto
 
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    ATTACHMENT_IDS_KEY,
+    HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.message_builder import markdown_to_html
@@ -34,11 +37,16 @@ _EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
         "m.mentions",
+        "com.mindroom.hook_source",
         "com.mindroom.skip_mentions",
+        "com.mindroom.source_kind",
+        ATTACHMENT_IDS_KEY,
+        HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
         ORIGINAL_SENDER_KEY,
         AI_RUN_METADATA_KEY,
         STREAM_STATUS_KEY,
         STREAM_WARMUP_SUFFIX_KEY,
+        VOICE_RAW_AUDIO_FALLBACK_KEY,
     },
 )
 _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(

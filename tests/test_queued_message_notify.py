@@ -1416,7 +1416,7 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
         )
         with (
             patch(
-                "mindroom.turn_controller.build_batch_dispatch_event",
+                "mindroom.turn_controller.build_dispatch_handoff",
                 side_effect=RuntimeError("handoff failed"),
             ),
             pytest.raises(RuntimeError, match="handoff failed"),
@@ -1458,11 +1458,11 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
             ),
             pytest.raises(asyncio.CancelledError),
         ):
-            await bot._turn_controller._enqueue_active_thread_follow_up(
-                room=room,
-                prepared_event=event,
-                target=target,
-                envelope=envelope,
+                await bot._turn_controller._enqueue_active_thread_follow_up(
+                    room=room,
+                    event=event,
+                    target=target,
+                    envelope=envelope,
                 coalescing_thread_id="$thread",
                 requester_user_id="@user:localhost",
                 dispatch_timing=None,

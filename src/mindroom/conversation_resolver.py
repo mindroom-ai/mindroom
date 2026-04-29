@@ -11,8 +11,14 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.coalescing import PreparedTextEvent
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
+from mindroom.dispatch_handoff import (
+    DispatchEvent,
+    DispatchPayloadMetadata,
+    MediaDispatchEvent,
+    PreparedTextEvent,
+    TextDispatchEvent,
+)
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
@@ -36,18 +42,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache, ThreadReadResult
 
-type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
-type MediaDispatchEvent = (
-    nio.RoomMessageImage
-    | nio.RoomEncryptedImage
-    | nio.RoomMessageFile
-    | nio.RoomEncryptedFile
-    | nio.RoomMessageVideo
-    | nio.RoomEncryptedVideo
-)
-type DispatchEvent = TextDispatchEvent | MediaDispatchEvent
-
-
 def should_skip_mentions(event_source: dict[str, Any]) -> bool:
     """Return whether mentions in this message should be ignored."""
     content = event_source.get("content", {})
@@ -58,6 +52,31 @@ def should_skip_mentions(event_source: dict[str, Any]) -> bool:
 
     new_content = content.get("m.new_content")
     return isinstance(new_content, dict) and bool(new_content.get("com.mindroom.skip_mentions", False))
+
+
+def _source_with_payload_metadata(
+    event_source: dict[str, Any],
+    payload_metadata: DispatchPayloadMetadata | None,
+) -> dict[str, Any]:
+    """Return event source overlaid with trusted handoff payload metadata."""
+    if payload_metadata is None:
+        return event_source
+    content = event_source.get("content")
+    if not isinstance(content, dict):
+        content = {}
+    else:
+        content = dict(content)
+    if payload_metadata.mentioned_user_ids is not None:
+        content["m.mentions"] = {"user_ids": list(payload_metadata.mentioned_user_ids)}
+    if payload_metadata.formatted_bodies is not None:
+        if payload_metadata.formatted_bodies:
+            content["formatted_body"] = "<br>".join(payload_metadata.formatted_bodies)
+            content["format"] = "org.matrix.custom.html"
+        else:
+            content.pop("formatted_body", None)
+    if payload_metadata.skip_mentions is not None:
+        content["com.mindroom.skip_mentions"] = payload_metadata.skip_mentions
+    return {**event_source, "content": content}
 
 
 @dataclass
@@ -107,6 +126,8 @@ class ConversationResolver:
         *,
         event: DispatchEvent,
         source_kind: str | None = None,
+        hook_source: str | None = None,
+        message_received_depth: int | None = None,
     ) -> tuple[str, str | None, int]:
         """Return source-kind and hook ingress metadata for one inbound event."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -131,16 +152,18 @@ class ConversationResolver:
             else:
                 resolved_source_kind = "message"
 
-        hook_source: str | None = None
-        message_received_depth = 0
+        resolved_hook_source: str | None = hook_source
+        resolved_message_received_depth = message_received_depth or 0
         if isinstance(content, dict) and source_kind_sender_is_trusted:
-            hook_source_override = content.get("com.mindroom.hook_source")
-            if isinstance(hook_source_override, str) and hook_source_override:
-                hook_source = hook_source_override
-            depth_override = content.get(HOOK_MESSAGE_RECEIVED_DEPTH_KEY)
-            if isinstance(depth_override, int) and not isinstance(depth_override, bool) and depth_override > 0:
-                message_received_depth = depth_override
-        return resolved_source_kind, hook_source, message_received_depth
+            if resolved_hook_source is None:
+                hook_source_override = content.get("com.mindroom.hook_source")
+                if isinstance(hook_source_override, str) and hook_source_override:
+                    resolved_hook_source = hook_source_override
+            if resolved_message_received_depth <= 0:
+                depth_override = content.get(HOOK_MESSAGE_RECEIVED_DEPTH_KEY)
+                if isinstance(depth_override, int) and not isinstance(depth_override, bool) and depth_override > 0:
+                    resolved_message_received_depth = depth_override
+        return resolved_source_kind, resolved_hook_source, resolved_message_received_depth
 
     def build_message_target(
         self,
@@ -201,6 +224,8 @@ class ConversationResolver:
         body: str | None = None,
         source_kind: str | None = None,
         dispatch_policy_source_kind: str | None = None,
+        hook_source: str | None = None,
+        message_received_depth: int | None = None,
     ) -> MessageEnvelope:
         """Build the normalized inbound envelope consumed by message hooks."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
@@ -209,6 +234,8 @@ class ConversationResolver:
         resolved_source_kind, hook_source, message_received_depth = self._envelope_ingress_metadata(
             event=event,
             source_kind=source_kind,
+            hook_source=hook_source,
+            message_received_depth=message_received_depth,
         )
         resolved_target = target or self.build_message_target(
             room_id=room_id,
@@ -248,6 +275,8 @@ class ConversationResolver:
         body: str | None = None,
         source_kind: str | None = None,
         dispatch_policy_source_kind: str | None = None,
+        hook_source: str | None = None,
+        message_received_depth: int | None = None,
     ) -> MessageEnvelope:
         """Build one lightweight ingress envelope without extracting thread context."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
@@ -255,6 +284,8 @@ class ConversationResolver:
         resolved_source_kind, hook_source, message_received_depth = self._envelope_ingress_metadata(
             event=event,
             source_kind=source_kind,
+            hook_source=hook_source,
+            message_received_depth=message_received_depth,
         )
         return MessageEnvelope(
             source_event_id=event.event_id,
@@ -450,6 +481,8 @@ class ConversationResolver:
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
+        *,
+        payload_metadata: DispatchPayloadMetadata | None = None,
     ) -> MessageContext:
         """Extract lightweight routing context without hydrating full thread history."""
         return await self.extract_message_context_impl(
@@ -457,15 +490,19 @@ class ConversationResolver:
             event,
             full_history=False,
             dispatch_safe=True,
+            payload_metadata=payload_metadata,
         )
 
     async def extract_trusted_router_relay_context(
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
+        *,
+        payload_metadata: DispatchPayloadMetadata | None = None,
     ) -> MessageContext:
         """Extract minimal context for router relays and defer thread hydration until after lock."""
         resolved_event_source = await resolve_event_source_content(event.source, self._client())
+        resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
         config = self.deps.runtime.config
 
         if should_skip_mentions(resolved_event_source):
@@ -512,6 +549,7 @@ class ConversationResolver:
         event: DispatchEvent,
         *,
         full_history: bool = True,
+        payload_metadata: DispatchPayloadMetadata | None = None,
     ) -> MessageContext:
         """Extract message context, optionally using a lightweight thread snapshot."""
         return await self.extract_message_context_impl(
@@ -519,6 +557,7 @@ class ConversationResolver:
             event,
             full_history=full_history,
             dispatch_safe=False,
+            payload_metadata=payload_metadata,
         )
 
     async def extract_message_context_impl(
@@ -528,9 +567,11 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
+        payload_metadata: DispatchPayloadMetadata | None = None,
     ) -> MessageContext:
         """Resolve event metadata, mentions, and thread history for one inbound turn."""
         resolved_event_source = await resolve_event_source_content(event.source, self._client())
+        resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
         config = self.deps.runtime.config
 
         if should_skip_mentions(resolved_event_source):
@@ -591,6 +632,8 @@ class ConversationResolver:
         room: nio.MatrixRoom,
         event: DispatchEvent,
         context: MessageContext,
+        *,
+        payload_metadata: DispatchPayloadMetadata | None = None,
     ) -> None:
         """Replace lightweight thread snapshots with full planning history once a reply is required."""
         if not context.requires_full_thread_history or context.thread_id is None:
@@ -601,6 +644,7 @@ class ConversationResolver:
             event,
             full_history=True,
             dispatch_safe=True,
+            payload_metadata=payload_metadata,
         )
         context.thread_history = full_context.thread_history
         context.is_thread = full_context.is_thread

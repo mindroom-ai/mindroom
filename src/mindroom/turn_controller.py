@@ -22,10 +22,20 @@ from mindroom.coalescing import (
     CoalescedBatch,
     CoalescingGate,
     CoalescingKey,
-    PendingDispatchMetadata,
     PendingEvent,
+)
+from mindroom.dispatch_handoff import (
+    DispatchEvent,
+    DispatchHandoff,
+    DispatchIngressMetadata,
+    DispatchPayloadMetadata,
+    MediaDispatchEvent,
+    PendingDispatchMetadata,
     PreparedTextEvent,
-    build_batch_dispatch_event,
+    TextDispatchEvent,
+    build_dispatch_handoff,
+    merge_payload_metadata,
+    payload_metadata_from_source,
 )
 from mindroom.commands.handler import (
     CommandHandlerContext,
@@ -106,17 +116,10 @@ if TYPE_CHECKING:
 
 type DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
 
-type _MediaDispatchEvent = (
-    nio.RoomMessageImage
-    | nio.RoomEncryptedImage
-    | nio.RoomMessageFile
-    | nio.RoomEncryptedFile
-    | nio.RoomMessageVideo
-    | nio.RoomEncryptedVideo
-)
+type _MediaDispatchEvent = MediaDispatchEvent
 type _InboundMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
-type _TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
-type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
+type _TextDispatchEvent = TextDispatchEvent
+type _DispatchEvent = DispatchEvent
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 
@@ -136,10 +139,10 @@ def _queued_notice_dispatch_metadata(
     )
 
 
-def _queued_notice_reservation_from_batch(
-    batch: CoalescedBatch,
+def _queued_notice_reservation_from_metadata(
+    dispatch_metadata: tuple[PendingDispatchMetadata, ...],
 ) -> QueuedHumanNoticeReservation | None:
-    reservations = [item.payload for item in batch.dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
+    reservations = [item.payload for item in dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
     if not reservations:
         return None
     if len(reservations) > 1:
@@ -322,9 +325,15 @@ class TurnController:
         event: _TextDispatchEvent,
         requester_user_id: str,
         thread_history: Sequence[ResolvedVisibleMessage],
+        *,
+        source_kind: str | None = None,
     ) -> bool:
         """Return True when a newer unresponded message from the same requester exists."""
-        if isinstance(event, PreparedTextEvent) and is_automation_source_kind(event.source_kind_override or ""):
+        if is_automation_source_kind(source_kind or "") or (
+            source_kind is None
+            and isinstance(event, PreparedTextEvent)
+            and is_automation_source_kind(event.source_kind_override or "")
+        ):
             return False
         event_ts = event.server_timestamp
         if event_ts is None or not thread_history:
@@ -398,7 +407,7 @@ class TurnController:
         self,
         *,
         room: nio.MatrixRoom,
-        prepared_event: PreparedTextEvent,
+        event: _DispatchEvent,
         target: MessageTarget,
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
@@ -417,9 +426,12 @@ class TurnController:
         )
         try:
             await self._enqueue_for_dispatch(
-                prepared_event,
+                event,
                 room,
-                source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                source_kind=envelope.source_kind,
+                dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                hook_source=envelope.hook_source,
+                message_received_depth=envelope.message_received_depth,
                 requester_user_id=requester_user_id,
                 coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
@@ -458,7 +470,7 @@ class TurnController:
         ):
             await self._enqueue_active_thread_follow_up(
                 room=room,
-                prepared_event=prepared_event,
+                event=dispatch_event,
                 target=target,
                 envelope=envelope,
                 coalescing_thread_id=coalescing_thread_id,
@@ -468,6 +480,56 @@ class TurnController:
             return
         await self._enqueue_for_dispatch(
             dispatch_event,
+            room,
+            source_kind=envelope.source_kind,
+            dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
+            hook_source=envelope.hook_source,
+            message_received_depth=envelope.message_received_depth,
+            requester_user_id=requester_user_id,
+            coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
+        )
+
+    async def _enqueue_media_for_dispatch(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: _MediaDispatchEvent,
+        requester_user_id: str,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> None:
+        """Queue one media event with the same active-follow-up policy as text."""
+        source_kind = "image" if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage) else "media"
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
+        target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=coalescing_thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        envelope = self.deps.resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=event,
+            requester_user_id=requester_user_id,
+            thread_id=coalescing_thread_id,
+            source_kind=source_kind,
+        )
+        if self._should_bypass_coalescing_for_active_thread_follow_up(
+            target=target,
+            source_kind=envelope.source_kind,
+            sender_id=event.sender,
+        ):
+            await self._enqueue_active_thread_follow_up(
+                room=room,
+                event=event,
+                target=target,
+                envelope=envelope,
+                coalescing_thread_id=coalescing_thread_id,
+                requester_user_id=requester_user_id,
+                dispatch_timing=dispatch_timing,
+            )
+            return
+        await self._enqueue_for_dispatch(
+            event,
             room,
             source_kind=envelope.source_kind,
             requester_user_id=requester_user_id,
@@ -486,6 +548,8 @@ class TurnController:
         if self.deps.agent_name != ROUTER_AGENT_NAME:
             return False
         if command_parser.parse(event.body.strip()) is not None:
+            return False
+        if is_v2_sidecar_text_preview(event.source):
             return False
 
         mentioned_agents, _am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
@@ -561,6 +625,9 @@ class TurnController:
         room: nio.MatrixRoom,
         *,
         source_kind: str,
+        dispatch_policy_source_kind: str | None = None,
+        hook_source: str | None = None,
+        message_received_depth: int = 0,
         requester_user_id: str | None = None,
         coalescing_key: CoalescingKey | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
@@ -575,7 +642,12 @@ class TurnController:
             sender=event.sender,
             source=event.source,
         )
-        if self._is_trusted_internal_relay_event(event):
+        source_kind_allows_relay_detection = source_kind in {
+            "",
+            "message",
+            COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
+        }
+        if source_kind_allows_relay_detection and self._is_trusted_internal_relay_event(event):
             if dispatch_timing is not None:
                 dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
             source_kind = COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
@@ -594,6 +666,9 @@ class TurnController:
                 event=event,
                 room=room,
                 source_kind=source_kind,
+                dispatch_policy_source_kind=dispatch_policy_source_kind,
+                hook_source=hook_source,
+                message_received_depth=message_received_depth,
                 dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation),
             ),
         )
@@ -651,18 +726,31 @@ class TurnController:
         *,
         event_label: str,
         handled_turn: HandledTurnState,
+        ingress_metadata: DispatchIngressMetadata | None = None,
+        payload_metadata: DispatchPayloadMetadata | None = None,
     ) -> PreparedDispatch | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
-        if self._is_trusted_router_relay_event(event):
-            context = await self.deps.resolver.extract_trusted_router_relay_context(room, event)
+        if (
+            ingress_metadata is not None
+            and ingress_metadata.source_kind == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+        ) or (ingress_metadata is None and self._is_trusted_router_relay_event(event)):
+            context = await self.deps.resolver.extract_trusted_router_relay_context(
+                room,
+                event,
+                payload_metadata=payload_metadata,
+            )
             emit_elapsed_timing(
                 "dispatch_handoff.prepare_dispatch.extract_context",
                 extract_context_start,
                 path="trusted_router_relay",
             )
         else:
-            context = await self.deps.resolver.extract_dispatch_context(room, event)
+            context = await self.deps.resolver.extract_dispatch_context(
+                room,
+                event,
+                payload_metadata=payload_metadata,
+            )
             emit_elapsed_timing(
                 "dispatch_handoff.prepare_dispatch.extract_context",
                 extract_context_start,
@@ -688,9 +776,19 @@ class TurnController:
             requester_user_id=requester_user_id,
             context=context,
             target=target,
-            dispatch_policy_source_kind=event.dispatch_policy_source_kind_override
-            if isinstance(event, PreparedTextEvent)
+            attachment_ids=list(payload_metadata.attachment_ids)
+            if payload_metadata is not None and payload_metadata.attachment_ids is not None
             else None,
+            source_kind=ingress_metadata.source_kind if ingress_metadata is not None else None,
+            dispatch_policy_source_kind=(
+                ingress_metadata.dispatch_policy_source_kind
+                if ingress_metadata is not None
+                else None
+            ),
+            hook_source=ingress_metadata.hook_source if ingress_metadata is not None else None,
+            message_received_depth=(
+                ingress_metadata.message_received_depth if ingress_metadata is not None else None
+            ),
         )
         emit_elapsed_timing(
             "dispatch_handoff.prepare_dispatch.build_message_envelope",
@@ -1272,11 +1370,11 @@ class TurnController:
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
-        reservation = _queued_notice_reservation_from_batch(batch)
+        reservation = _queued_notice_reservation_from_metadata(batch.dispatch_metadata)
         try:
-            dispatch_event = build_batch_dispatch_event(batch)
-            timing_scope = event_timing_scope(dispatch_event.event_id)
-            dispatch_timing = get_dispatch_pipeline_timing(dispatch_event.source)
+            handoff = build_dispatch_handoff(batch)
+            timing_scope = event_timing_scope(handoff.event.event_id)
+            dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
             if dispatch_timing is not None:
                 dispatch_timing.mark("gate_exit")
             retarget_start = time.monotonic()
@@ -1290,8 +1388,8 @@ class TurnController:
                 self.deps.resolver.build_message_target(
                     room_id=batch.room.room_id,
                     thread_id=batch_coalescing_key[1],
-                    reply_to_event_id=dispatch_event.event_id,
-                    event_source=dispatch_event.source,
+                    reply_to_event_id=handoff.event.event_id,
+                    event_source=handoff.event.source,
                 ).resolved_thread_id,
                 batch.requester_user_id,
             )
@@ -1306,26 +1404,10 @@ class TurnController:
             async with self.deps.resolver.turn_thread_cache_scope():
                 dispatch_start = time.monotonic()
                 handled_turn = HandledTurnState.create(
-                    batch.source_event_ids,
-                    source_event_prompts=batch.source_event_prompts,
+                    handoff.source_event_ids,
+                    source_event_prompts=dict(handoff.source_event_prompts),
                 )
-                if reservation is None:
-                    await self._dispatch_text_message(
-                        batch.room,
-                        dispatch_event,
-                        batch.requester_user_id,
-                        media_events=batch.media_events or None,
-                        handled_turn=handled_turn,
-                    )
-                else:
-                    await self._dispatch_text_message(
-                        batch.room,
-                        dispatch_event,
-                        batch.requester_user_id,
-                        media_events=batch.media_events or None,
-                        handled_turn=handled_turn,
-                        queued_notice_reservation=reservation,
-                    )
+                await self._dispatch_handoff(handoff, handled_turn=handled_turn)
                 reservation = None
                 emit_elapsed_timing(
                     "coalescing.handle_batch.dispatch_text_message",
@@ -1336,6 +1418,25 @@ class TurnController:
         finally:
             if reservation is not None:
                 reservation.cancel()
+
+    async def _dispatch_handoff(
+        self,
+        handoff: DispatchHandoff,
+        *,
+        handled_turn: HandledTurnState,
+    ) -> None:
+        """Dispatch one coalesced handoff and own opaque metadata cleanup."""
+        reservation = _queued_notice_reservation_from_metadata(handoff.dispatch_metadata)
+        await self._dispatch_text_message(
+            handoff.room,
+            handoff.event,
+            handoff.requester_user_id,
+            media_events=list(handoff.media_events) or None,
+            handled_turn=handled_turn,
+            queued_notice_reservation=reservation,
+            ingress_metadata=handoff.ingress,
+            payload_metadata=handoff.payload,
+        )
 
     async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle one inbound text event."""
@@ -1454,6 +1555,8 @@ class TurnController:
         media_events: list[_MediaDispatchEvent] | None = None,
         handled_turn: HandledTurnState | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
+        ingress_metadata: DispatchIngressMetadata | None = None,
+        payload_metadata: DispatchPayloadMetadata | None = None,
     ) -> None:
         """Run the normal text or command dispatch pipeline for a prepared text event."""
         raw_event: _TextDispatchEvent
@@ -1473,13 +1576,24 @@ class TurnController:
             event = await self.deps.normalizer.resolve_text_event(
                 TextNormalizationRequest(event=raw_event),
             )
+            hydrated_payload_metadata = payload_metadata_from_source(event.source)
+            payload_metadata = (
+                hydrated_payload_metadata
+                if payload_metadata is None
+                else merge_payload_metadata(payload_metadata, hydrated_payload_metadata)
+            )
             dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
             attach_dispatch_pipeline_timing(event.source, dispatch_timing)
             timing_scope_token = timing_scope_context.set(event_timing_scope(event.event_id))
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_start")
             dispatch_started_at = time.monotonic()
-            handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
+            if handled_turn is None:
+                handled_turn = HandledTurnState.from_source_event_id(event.event_id)
+            elif raw_event is not event and event.event_id in handled_turn.source_event_ids:
+                refreshed_prompts = dict(handled_turn.source_event_prompts or {})
+                refreshed_prompts[event.event_id] = event.body
+                handled_turn = handled_turn.with_source_event_prompts(refreshed_prompts)
 
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_start")
@@ -1489,6 +1603,8 @@ class TurnController:
                 requester_user_id,
                 event_label="message",
                 handled_turn=handled_turn,
+                ingress_metadata=ingress_metadata,
+                payload_metadata=payload_metadata,
             )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_ready")
@@ -1511,6 +1627,7 @@ class TurnController:
                 event,
                 requester_user_id,
                 dispatch.context.replay_guard_history,
+                source_kind=dispatch.envelope.source_kind,
             ):
                 self._mark_source_events_responded(handled_turn)
                 return
@@ -1520,21 +1637,35 @@ class TurnController:
             ):
                 return
             content = event.source.get("content") if isinstance(event.source, dict) else None
-            message_attachment_ids = parse_attachment_ids_from_event_source(event.source)
+            message_attachment_ids = (
+                list(payload_metadata.attachment_ids)
+                if payload_metadata is not None and payload_metadata.attachment_ids is not None
+                else parse_attachment_ids_from_event_source(event.source)
+            )
             message_extra_content: dict[str, Any] = {}
             if message_attachment_ids:
                 message_extra_content[ATTACHMENT_IDS_KEY] = message_attachment_ids
-            if isinstance(content, dict):
+            if payload_metadata is not None and payload_metadata.original_sender is not None:
+                message_extra_content[ORIGINAL_SENDER_KEY] = payload_metadata.original_sender
+            elif isinstance(content, dict):
                 original_sender = content.get(ORIGINAL_SENDER_KEY)
                 if isinstance(original_sender, str):
                     message_extra_content[ORIGINAL_SENDER_KEY] = original_sender
+            if payload_metadata is not None and payload_metadata.raw_audio_fallback:
+                message_extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+            elif isinstance(content, dict):
                 raw_audio_fallback = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY)
                 if isinstance(raw_audio_fallback, bool) and raw_audio_fallback:
                     message_extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
-            await self.deps.resolver.hydrate_dispatch_context(room, event, dispatch.context)
+            await self.deps.resolver.hydrate_dispatch_context(
+                room,
+                event,
+                dispatch.context,
+                payload_metadata=payload_metadata,
+            )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_plan_start")
             plan = await self.deps.turn_policy.plan_turn(
@@ -1698,12 +1829,11 @@ class TurnController:
 
         if await self._dispatch_special_media_as_text(room, prechecked_event):
             return
-        event = prechecked_event.event
-        await self._enqueue_for_dispatch(
-            event,
-            room,
-            source_kind="image" if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage) else "media",
+        await self._enqueue_media_for_dispatch(
+            room=room,
+            event=prechecked_event.event,
             requester_user_id=prechecked_event.requester_user_id,
+            dispatch_timing=dispatch_timing,
         )
 
     async def _dispatch_special_media_as_text(

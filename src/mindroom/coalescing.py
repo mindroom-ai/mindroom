@@ -6,21 +6,33 @@ import asyncio
 import enum
 import time
 from collections import deque
-from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, TypeGuard, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, cast
 
 import nio
 
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .commands.parsing import command_parser
-from .constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from .dispatch_handoff import (
+    DispatchEvent,
+    MediaDispatchEvent,
+    PendingDispatchMetadata,
+    PreparedTextEvent,
+    TextDispatchEvent,
+    build_batch_dispatch_event,
+    dispatch_prompt_for_event,
+    is_media_dispatch_event,
+)
 from .dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    HOOK_DISPATCH_SOURCE_KIND,
+    HOOK_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     is_voice_event,
 )
 from .logging_config import get_logger
-from .matrix.media import extract_media_caption
 from .timing import emit_elapsed_timing, event_timing_scope
 
 if TYPE_CHECKING:
@@ -52,8 +64,9 @@ COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP = ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
     {
-        "hook",
-        "hook_dispatch",
+        HOOK_SOURCE_KIND,
+        HOOK_DISPATCH_SOURCE_KIND,
+        SCHEDULED_SOURCE_KIND,
         COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
     },
@@ -77,48 +90,7 @@ class _QueueKind(enum.Enum):
     BYPASS = "bypass"
 
 
-type MediaDispatchEvent = (
-    # Voice messages are normalized into PreparedTextEvent before coalescing,
-    # so this contract only includes routed image/file/video events.
-    nio.RoomMessageImage
-    | nio.RoomEncryptedImage
-    | nio.RoomMessageFile
-    | nio.RoomEncryptedFile
-    | nio.RoomMessageVideo
-    | nio.RoomEncryptedVideo
-)
-type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
-type DispatchEvent = TextDispatchEvent | MediaDispatchEvent
 type CoalescingKey = tuple[str, str | None, str]
-
-
-@dataclass(frozen=True)
-class PreparedTextEvent:
-    """Canonical inbound text event for dispatch.
-
-    Produced by voice normalization, coalesced-batch synthesis, and the
-    ``_resolve_text_dispatch_event`` preparation step in ``bot.py``.
-    Satisfies the ``CommandEvent`` protocol used by command handling.
-    """
-
-    sender: str
-    event_id: str
-    body: str
-    source: dict[str, Any]
-    server_timestamp: int | float | None = None
-    is_synthetic: bool = False
-    source_kind_override: str | None = None
-    dispatch_policy_source_kind_override: str | None = None
-
-
-@dataclass
-class PendingDispatchMetadata:
-    """Opaque metadata that must be closed if claimed work cannot dispatch."""
-
-    kind: str
-    payload: object
-    close: Callable[[], None]
-    requires_solo_batch: bool = False
 
 
 @dataclass
@@ -128,6 +100,9 @@ class PendingEvent:
     event: DispatchEvent
     room: nio.MatrixRoom
     source_kind: str
+    dispatch_policy_source_kind: str | None = None
+    hook_source: str | None = None
+    message_received_depth: int = 0
     enqueue_time: float = field(default_factory=time.time)
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
@@ -160,6 +135,9 @@ class CoalescedBatch:
     pending_events: tuple[PendingEvent, ...]
     prompt: str
     source_kind: str
+    dispatch_policy_source_kind: str | None
+    hook_source: str | None
+    message_received_depth: int
     attachment_ids: list[str]
     source_event_ids: list[str]
     source_event_prompts: dict[str, str]
@@ -222,30 +200,10 @@ def is_command_event(
     return command_parser.parse(event.body) is not None
 
 
-def _is_media_event(event: DispatchEvent) -> TypeGuard[MediaDispatchEvent]:
-    return isinstance(
-        event,
-        nio.RoomMessageImage
-        | nio.RoomEncryptedImage
-        | nio.RoomMessageFile
-        | nio.RoomEncryptedFile
-        | nio.RoomMessageVideo
-        | nio.RoomEncryptedVideo,
-    )
-
-
 def _pending_has_only_text(pending_events: list[PendingEvent]) -> bool:
     return bool(pending_events) and all(
         isinstance(pending_event.event, nio.RoomMessageText | PreparedTextEvent) for pending_event in pending_events
     )
-
-
-def _event_batch_sort_key(pending_event: PendingEvent, enqueue_order: int) -> tuple[float, int]:
-    enqueue_time_ms = pending_event.enqueue_time * 1000.0
-    server_timestamp = pending_event.event.server_timestamp
-    if isinstance(server_timestamp, int | float):
-        return (float(server_timestamp), enqueue_order)
-    return (enqueue_time_ms, enqueue_order)
 
 
 def coalesced_prompt(message_bodies: list[str]) -> str:
@@ -258,19 +216,6 @@ def coalesced_prompt(message_bodies: list[str]) -> str:
         "Treat them as one turn and respond once:\n\n"
         f"{combined_body}"
     )
-
-
-def _dispatch_prompt_for_event(event: DispatchEvent) -> str:
-    if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
-        msg = "Raw audio must be normalized into PreparedTextEvent before coalescing"
-        raise TypeError(msg)
-    if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-        return extract_media_caption(event, default="[Attached image]")
-    if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo):
-        return extract_media_caption(event, default="[Attached video]")
-    if isinstance(event, nio.RoomMessageFile | nio.RoomEncryptedFile):
-        return extract_media_caption(event, default="[Attached file]")
-    return event.body
 
 
 def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, bool]:
@@ -295,11 +240,38 @@ _SOURCE_KIND_PRIORITY: dict[str, int] = {"voice": 0, "image": 1, "media": 2}
 
 
 def _batch_source_kind(ordered_pending_events: list[PendingEvent]) -> str:
-    resolved_source_kinds = [
-        _effective_source_kind(pending_event.event, pending_event.source_kind) or pending_event.source_kind
-        for pending_event in ordered_pending_events
-    ]
+    resolved_source_kinds = [pending_event.source_kind for pending_event in ordered_pending_events]
     return min(resolved_source_kinds, key=lambda sk: _SOURCE_KIND_PRIORITY.get(sk, 999))
+
+
+def _batch_dispatch_policy_source_kind(ordered_pending_events: list[PendingEvent]) -> str | None:
+    resolved_policy_kinds = {
+        pending_event.dispatch_policy_source_kind
+        for pending_event in ordered_pending_events
+        if pending_event.dispatch_policy_source_kind is not None
+    }
+    if not resolved_policy_kinds:
+        return None
+    if len(resolved_policy_kinds) == 1:
+        return next(iter(resolved_policy_kinds))
+    msg = "Coalesced batch carried multiple dispatch policy source kinds"
+    raise ValueError(msg)
+
+
+def _batch_hook_source(ordered_pending_events: list[PendingEvent]) -> str | None:
+    hook_sources = {
+        pending_event.hook_source for pending_event in ordered_pending_events if pending_event.hook_source is not None
+    }
+    if not hook_sources:
+        return None
+    if len(hook_sources) == 1:
+        return next(iter(hook_sources))
+    msg = "Coalesced batch carried multiple hook sources"
+    raise ValueError(msg)
+
+
+def _batch_message_received_depth(ordered_pending_events: list[PendingEvent]) -> int:
+    return max((pending_event.message_received_depth for pending_event in ordered_pending_events), default=0)
 
 
 def _batch_dispatch_metadata(
@@ -324,20 +296,14 @@ def _close_pending_event_metadata(pending_events: list[PendingEvent]) -> None:
 
 def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> dict[str, str]:
     return {
-        pending_event.event.event_id: _dispatch_prompt_for_event(pending_event.event)
+        pending_event.event.event_id: dispatch_prompt_for_event(pending_event.event)
         for pending_event in ordered_pending_events
     }
 
 
 def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]) -> CoalescedBatch:
     """Build one normalized dispatch batch from queued pending events."""
-    ordered_pending_events = [
-        pending_event
-        for _, pending_event in sorted(
-            enumerate(pending_events),
-            key=lambda item: _event_batch_sort_key(item[1], item[0]),
-        )
-    ]
+    ordered_pending_events = list(pending_events)
     primary_pending_event = ordered_pending_events[-1]
     original_sender, raw_audio_fallback = _batch_metadata(ordered_pending_events)
     return CoalescedBatch(
@@ -346,9 +312,12 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
         requester_user_id=key[2],
         pending_events=tuple(ordered_pending_events),
         prompt=coalesced_prompt(
-            [_dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],
+            [dispatch_prompt_for_event(pending_event.event) for pending_event in ordered_pending_events],
         ),
         source_kind=_batch_source_kind(ordered_pending_events),
+        dispatch_policy_source_kind=_batch_dispatch_policy_source_kind(ordered_pending_events),
+        hook_source=_batch_hook_source(ordered_pending_events),
+        message_received_depth=_batch_message_received_depth(ordered_pending_events),
         attachment_ids=merge_attachment_ids(
             *(
                 parse_attachment_ids_from_event_source(pending_event.event.source)
@@ -358,113 +327,13 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
         source_event_ids=[pending_event.event.event_id for pending_event in ordered_pending_events],
         source_event_prompts=_batch_source_event_prompts(ordered_pending_events),
         media_events=[
-            pending_event.event for pending_event in ordered_pending_events if _is_media_event(pending_event.event)
+            pending_event.event
+            for pending_event in ordered_pending_events
+            if is_media_dispatch_event(pending_event.event)
         ],
         original_sender=original_sender,
         raw_audio_fallback=raw_audio_fallback,
         dispatch_metadata=_batch_dispatch_metadata(ordered_pending_events),
-    )
-
-
-def _collect_batch_mentions_and_formatted_bodies(
-    batch: CoalescedBatch,
-) -> tuple[list[str], list[str]]:
-    """Collect deduplicated user IDs and formatted_body parts from all batch events."""
-    all_user_ids: list[str] = []
-    seen_user_ids: set[str] = set()
-    formatted_parts: list[str] = []
-    for pe in batch.pending_events:
-        content = _event_content_dict(pe.event)
-        if content is None:
-            continue
-        raw_mentions = content.get("m.mentions")
-        if isinstance(raw_mentions, dict):
-            mentions = cast("dict[str, Any]", raw_mentions)
-            for uid in mentions.get("user_ids", []):
-                if isinstance(uid, str) and uid not in seen_user_ids:
-                    all_user_ids.append(uid)
-                    seen_user_ids.add(uid)
-        fb = content.get("formatted_body")
-        if isinstance(fb, str) and fb:
-            formatted_parts.append(fb)
-    return all_user_ids, formatted_parts
-
-
-def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
-    """Build a merged ``source`` dict for a multi-event synthetic dispatch event.
-
-    Combines ``m.mentions``, ``formatted_body``, relay/voice metadata, and
-    attachment IDs from all events in the batch so downstream dispatch
-    (mention detection, attachment handling) sees complete information.
-    """
-    primary_source: dict[str, Any] = batch.primary_event.source if isinstance(batch.primary_event.source, dict) else {}
-    merged: dict[str, Any] = dict(primary_source)
-    primary_content: dict[str, Any] = dict(merged.get("content", {})) if isinstance(merged.get("content"), dict) else {}
-
-    all_user_ids, formatted_parts = _collect_batch_mentions_and_formatted_bodies(batch)
-    if all_user_ids:
-        primary_content["m.mentions"] = {"user_ids": all_user_ids}
-    if formatted_parts:
-        primary_content["formatted_body"] = "<br>".join(formatted_parts)
-        primary_content["format"] = "org.matrix.custom.html"
-
-    # Preserve original_sender and voice_raw_audio_fallback from any event
-    if batch.original_sender is not None:
-        primary_content[ORIGINAL_SENDER_KEY] = batch.original_sender
-    if batch.raw_audio_fallback:
-        primary_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
-
-    # Flow attachment IDs from the batch (must be a list for parse_attachment_ids_from_event_source)
-    if batch.attachment_ids:
-        primary_content[ATTACHMENT_IDS_KEY] = batch.attachment_ids
-
-    merged["content"] = primary_content
-    return merged
-
-
-def _single_prepared_dispatch_event(event: PreparedTextEvent, source_kind: str) -> PreparedTextEvent:
-    """Apply queue policy to one prepared text event without erasing its modality."""
-    if source_kind == "message":
-        return event
-    if event.source_kind_override == source_kind:
-        return event
-    if source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP:
-        return replace(event, dispatch_policy_source_kind_override=source_kind)
-    return replace(event, source_kind_override=source_kind)
-
-
-def build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
-    """Return the dispatch event for one coalesced batch.
-
-    Single-event batches reuse the primary event directly.
-    Multi-event batches produce a ``PreparedTextEvent`` with the combined prompt.
-    """
-    if len(batch.pending_events) == 1 and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent):
-        if isinstance(batch.primary_event, PreparedTextEvent):
-            return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)
-        if isinstance(batch.primary_event, nio.RoomMessageText) and batch.source_kind != "message":
-            return PreparedTextEvent(
-                sender=batch.primary_event.sender,
-                event_id=batch.primary_event.event_id,
-                body=batch.primary_event.body,
-                source=batch.primary_event.source,
-                server_timestamp=batch.primary_event.server_timestamp,
-                source_kind_override=None
-                if batch.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
-                else batch.source_kind,
-                dispatch_policy_source_kind_override=batch.source_kind
-                if batch.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
-                else None,
-            )
-        return batch.primary_event
-    return PreparedTextEvent(
-        sender=batch.primary_event.sender,
-        event_id=batch.primary_event.event_id,
-        body=batch.prompt,
-        source=_merge_batch_source(batch),
-        server_timestamp=batch.primary_event.server_timestamp,
-        is_synthetic=True,
-        source_kind_override=batch.source_kind,
     )
 
 
@@ -606,7 +475,7 @@ class CoalescingGate:
         count = candidate_count
         while count < len(gate.queue):
             queued = gate.queue[count]
-            if queued.kind is not _QueueKind.NORMAL or not _is_media_event(queued.pending_event.event):
+            if queued.kind is not _QueueKind.NORMAL or not is_media_dispatch_event(queued.pending_event.event):
                 break
             count += 1
         return count
@@ -622,6 +491,8 @@ class CoalescingGate:
 
     @staticmethod
     def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
+        if pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP:
+            return _QueueKind.BYPASS
         if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
             return _QueueKind.BYPASS
         if is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):

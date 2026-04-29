@@ -23,6 +23,7 @@ from mindroom.coalescing import (
     build_coalesced_batch,
     is_coalescing_exempt_source_kind,
 )
+from mindroom.dispatch_handoff import build_dispatch_handoff
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -326,6 +327,7 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), media_events or []))
@@ -359,6 +361,7 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.event_id, dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
@@ -436,6 +439,7 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
@@ -481,6 +485,7 @@ async def test_text_first_image_during_debounce_dispatches_without_upload_grace_
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
 
@@ -519,6 +524,7 @@ async def test_text_first_image_during_grace_dispatches_once(tmp_path: Path) -> 
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
@@ -569,6 +575,7 @@ async def test_text_first_multiple_images_during_grace_dispatch_once(tmp_path: P
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = handled_turn
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
@@ -618,6 +625,7 @@ async def test_text_during_upload_grace_flushes_pending_batch_and_starts_new_tur
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
@@ -667,6 +675,7 @@ async def test_image_after_grace_expires_dispatches_as_second_batch(tmp_path: Pa
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = handled_turn
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
@@ -710,6 +719,7 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
@@ -752,8 +762,8 @@ def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> N
     assert batch.media_events == []
 
 
-def test_build_coalesced_batch_sorts_synthetic_events_using_milliseconds() -> None:
-    """Sort mixed batches by origin_server_ts even when a synthetic event is present."""
+def test_build_coalesced_batch_preserves_fifo_order_with_synthetic_events() -> None:
+    """Preserve queue order even when Matrix timestamps disagree."""
     room = _make_room()
     real_event = _text_event(event_id="$real", body="real", server_timestamp=1_712_350_002_000)
     synthetic_event = PreparedTextEvent(
@@ -772,8 +782,8 @@ def test_build_coalesced_batch_sorts_synthetic_events_using_milliseconds() -> No
         ],
     )
 
-    assert batch.source_event_ids == ["$real", "$synthetic"]
-    assert batch.prompt.endswith("real\nsynthetic")
+    assert batch.source_event_ids == ["$synthetic", "$real"]
+    assert batch.prompt.endswith("synthetic\nreal")
 
 
 def test_build_coalesced_batch_prefers_media_source_kind_over_text_primary() -> None:
@@ -835,6 +845,7 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
@@ -881,6 +892,7 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
@@ -919,6 +931,7 @@ async def test_command_mid_batch_flushes_pending_then_processes_command(tmp_path
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
@@ -961,6 +974,7 @@ async def test_command_flush_does_not_leave_stale_timer_for_next_message(tmp_pat
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
@@ -1018,6 +1032,7 @@ async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
@@ -1093,6 +1108,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
@@ -1231,6 +1247,7 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events
         source_event_ids = _handled_turn_source_event_ids(handled_turn)
@@ -1272,13 +1289,13 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
     assert bot._coalescing_gate.is_idle()
 
 
-def test_scheduled_events_not_coalescing_exempt() -> None:
-    """Scheduled turns should pass through the gate while hook ingress still bypasses it."""
+def test_automation_source_kinds_are_coalescing_exempt() -> None:
+    """Dispatch automation source kinds as FIFO barriers."""
     scheduled = _text_event(event_id="$scheduled", body="scheduled", source_kind="scheduled")
     hook = _text_event(event_id="$hook", body="hook", source_kind="hook")
     hook_dispatch = _text_event(event_id="$hook_dispatch", body="hook dispatch", source_kind="hook_dispatch")
 
-    assert is_coalescing_exempt_source_kind(scheduled, "scheduled") is False
+    assert is_coalescing_exempt_source_kind(scheduled, "scheduled") is True
     assert is_coalescing_exempt_source_kind(hook, "hook") is True
     assert is_coalescing_exempt_source_kind(hook_dispatch, "hook_dispatch") is True
 
@@ -1299,6 +1316,7 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append(dispatched_event.body)
@@ -1316,8 +1334,8 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
 
 
 @pytest.mark.asyncio
-async def test_pending_source_kind_controls_prepared_override_queue_policy() -> None:
-    """The queue-owned source kind should classify prepared events inside the gate."""
+async def test_pending_dispatch_policy_controls_prepared_bypass_without_erasing_modality() -> None:
+    """The queue-owned policy should classify prepared events inside the gate."""
     room = _make_room()
     event = PreparedTextEvent(
         sender="@user:localhost",
@@ -1344,16 +1362,18 @@ async def test_pending_source_kind_controls_prepared_override_queue_policy() -> 
         PendingEvent(
             event=event,
             room=room,
-            source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            source_kind="voice",
+            dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
         ),
     )
     await _wait_for(lambda: len(calls) == 1)
 
-    assert calls[0].source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert calls[0].source_kind == "voice"
+    assert calls[0].dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
     dispatch_event = build_batch_dispatch_event(calls[0])
     assert isinstance(dispatch_event, PreparedTextEvent)
     assert dispatch_event.source_kind_override == "voice"
-    assert dispatch_event.dispatch_policy_source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert dispatch_event.dispatch_policy_source_kind_override is None
 
 
 @pytest.mark.asyncio
@@ -1383,6 +1403,7 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
         queued_notice_reservation: object | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn, queued_notice_reservation
         calls.append(dispatched_event)
@@ -1468,6 +1489,7 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
@@ -1519,6 +1541,7 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
@@ -1561,6 +1584,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
@@ -1593,6 +1617,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_upload_grace(tmp_path: P
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
@@ -1632,6 +1657,7 @@ async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path:
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
@@ -1690,6 +1716,7 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
@@ -2653,6 +2680,7 @@ async def test_upload_grace_hard_cap_prevents_indefinite_extension(tmp_path: Pat
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append(_handled_turn_source_event_ids(handled_turn))
@@ -2746,6 +2774,7 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
@@ -2779,6 +2808,7 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
         *,
         media_events: list[object] | None = None,
         handled_turn: HandledTurnState | None = None,
+        **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn)))
@@ -3060,15 +3090,19 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
             PendingEvent(
                 event=event,
                 room=room,
-                source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                source_kind="message",
+                dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
             ),
         ],
     )
+    handoff = build_dispatch_handoff(batch)
     dispatch_event = build_batch_dispatch_event(batch)
 
+    assert handoff.ingress.source_kind == "message"
+    assert handoff.ingress.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
     assert isinstance(dispatch_event, PreparedTextEvent)
     assert dispatch_event.source_kind_override is None
-    assert dispatch_event.dispatch_policy_source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert dispatch_event.dispatch_policy_source_kind_override is None
 
 
 def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None:
@@ -3082,15 +3116,17 @@ def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None
             PendingEvent(
                 event=event,
                 room=room,
-                source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                source_kind="message",
+                dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
             ),
         ],
     )
+    handoff = build_dispatch_handoff(batch)
     dispatch_event = build_batch_dispatch_event(batch)
 
-    assert isinstance(dispatch_event, PreparedTextEvent)
-    assert dispatch_event.source_kind_override is None
-    assert dispatch_event.dispatch_policy_source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert handoff.ingress.source_kind == "message"
+    assert handoff.ingress.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert isinstance(dispatch_event, nio.RoomMessageText)
 
 
 def test_batch_dispatch_event_preserves_original_sender() -> None:
@@ -3294,7 +3330,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         is_synthetic=True,
         source_kind_override="scheduled",
     )
-    dispatch = _prepared_dispatch(event_id="$s1", body="scheduled task output")
+    dispatch = _prepared_dispatch(event_id="$s1", body="scheduled task output", source_kind="scheduled")
 
     # A newer unresponded message from the same sender exists
     newer_msg = ResolvedVisibleMessage(
@@ -3343,7 +3379,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         is_synthetic=True,
         source_kind_override="hook",
     )
-    dispatch = _prepared_dispatch(event_id="$h1", body="hook result")
+    dispatch = _prepared_dispatch(event_id="$h1", body="hook result", source_kind="hook")
 
     newer_msg = ResolvedVisibleMessage(
         sender="@mindroom_test_agent:localhost",
@@ -3392,7 +3428,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         is_synthetic=True,
         source_kind_override="scheduled",
     )
-    dispatch = _prepared_dispatch(event_id="$s1", body="scheduled fire 1")
+    dispatch = _prepared_dispatch(event_id="$s1", body="scheduled fire 1", source_kind="scheduled")
 
     # Second scheduled fire is newer and unresponded
     second_fire_msg = ResolvedVisibleMessage(

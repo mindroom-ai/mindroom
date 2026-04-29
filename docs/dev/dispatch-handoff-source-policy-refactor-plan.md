@@ -10,6 +10,21 @@ This should stop `PreparedTextEvent.source_kind_override` from becoming the plac
 
 The central invariant is that `source_kind` describes what arrived, while `dispatch_policy_source_kind` describes how this turn should be treated.
 
+## Implementation Progress
+
+- [x] Step 1 adds a neutral `dispatch_handoff.py` module with shared dispatch event and handoff types.
+- [x] Step 2 builds `DispatchHandoff` values from `CoalescedBatch` outside `coalescing.py`.
+- [x] Step 3 refreshes sidecar payload metadata and source-event prompts after raw text hydration.
+- [x] Step 4 threads `DispatchHandoff` through `TurnController.handle_coalesced_batch()`.
+- [x] Step 5 passes handoff ingress and payload metadata into context extraction and envelope creation.
+- [x] Step 6 removes production reads of dispatch policy from `PreparedTextEvent`.
+- [x] Step 7 updates newer-message guards to use dispatch source metadata for automation turns.
+- [x] Step 8 routes text, sidecar text, voice text, and standalone media through the shared active-follow-up enqueue decision.
+- [x] Step 9 makes scheduled, hook, hook-dispatch, and trusted internal relay source kinds FIFO bypass barriers.
+- [x] Step 10 keeps resolver and lifecycle modules independent of the full coalescing handoff object.
+- [ ] Add the remaining final-envelope and model-payload regressions listed in the test plan.
+- [ ] Complete the accountability searches and full validation commands.
+
 ## Current Problem
 
 The current implementation keeps finding bugs because `source_kind` is used for multiple concepts.

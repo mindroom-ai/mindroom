@@ -17,7 +17,7 @@ from mindroom.attachments import (
     register_image_attachment,
     resolve_thread_attachment_ids,
 )
-from mindroom.coalescing import PreparedTextEvent
+from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedTextEvent
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import resolve_visible_event_source
 from mindroom.matrix.event_info import EventInfo
@@ -39,16 +39,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-
-type MediaDispatchEvent = (
-    nio.RoomMessageImage
-    | nio.RoomEncryptedImage
-    | nio.RoomMessageFile
-    | nio.RoomEncryptedFile
-    | nio.RoomMessageVideo
-    | nio.RoomEncryptedVideo
-)
-
 
 @dataclass(frozen=True)
 class TextNormalizationRequest:
