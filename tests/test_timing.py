@@ -27,15 +27,15 @@ def _mock_timing_logger(monkeypatch: pytest.MonkeyPatch) -> Mock:
 
 
 def _assert_timing_logged(logger: Mock, label: str, *, scope: str | None = None) -> None:
-    logger.info.assert_called_once()
-    assert logger.info.call_args.args == ("timing_elapsed",)
-    assert logger.info.call_args.kwargs["label"] == label
-    assert isinstance(logger.info.call_args.kwargs["duration_ms"], float)
-    assert logger.info.call_args.kwargs["duration_ms"] >= 0
+    logger.debug.assert_called_once()
+    assert logger.debug.call_args.args == ("timing_elapsed",)
+    assert logger.debug.call_args.kwargs["label"] == label
+    assert isinstance(logger.debug.call_args.kwargs["duration_ms"], float)
+    assert logger.debug.call_args.kwargs["duration_ms"] >= 0
     if scope is None:
-        assert "timing_scope" not in logger.info.call_args.kwargs
+        assert "timing_scope" not in logger.debug.call_args.kwargs
     else:
-        assert logger.info.call_args.kwargs["timing_scope"] == scope
+        assert logger.debug.call_args.kwargs["timing_scope"] == scope
 
 
 def test_timed_sync_logs_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,7 +242,7 @@ def test_emit_timing_event_logs_when_enabled(monkeypatch: pytest.MonkeyPatch) ->
     finally:
         timing_scope.reset(token)
 
-    logger.info.assert_called_once_with(
+    logger.debug.assert_called_once_with(
         "custom_timing_event",
         value=42,
         ok=True,
@@ -276,7 +276,7 @@ def test_timed_routes_elapsed_logging_through_shared_helper(monkeypatch: pytest.
     assert emit_elapsed_timing.call_args.args[0] == "delegated_label"
     assert isinstance(emit_elapsed_timing.call_args.args[1], float)
     assert emit_elapsed_timing.call_args.kwargs["timing_scope"] == "scope-123"
-    logger.info.assert_not_called()
+    logger.debug.assert_not_called()
 
 
 def _timing_probe_labels(
@@ -304,7 +304,7 @@ def _timing_probe_labels(
 
         labels = [
             call.kwargs["label"]
-            for call in timing_module.logger.info.call_args_list
+            for call in timing_module.logger.debug.call_args_list
             if call.args == ("timing_elapsed",)
         ]
         print(json.dumps(labels))
@@ -377,9 +377,9 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
 
     timing.emit_summary(logger, outcome="edited")
 
-    logger.info.assert_called_once()
-    assert logger.info.call_args.args == ("Dispatch pipeline timing",)
-    summary = logger.info.call_args.kwargs
+    logger.debug.assert_called_once()
+    assert logger.debug.call_args.args == ("Dispatch pipeline timing",)
+    summary = logger.debug.call_args.kwargs
     assert summary["first_visible_kind"] == "stream_update"
     assert summary["seg_ingress_ms"] == 1000.0
     assert summary["seg_coalescing_ms"] == 2000.0
