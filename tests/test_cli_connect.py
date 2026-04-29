@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 import mindroom.cli.connect as cli_connect
-from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,6 +66,24 @@ def test_persist_local_provisioning_env_writes_credentials_only(tmp_path: Path) 
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in content
     assert "MINDROOM_NAMESPACE=a1b2c3d4" in content
     assert "MINDROOM_OWNER_USER_ID=" not in content
+
+
+def test_persist_local_provisioning_env_writes_owner_when_available(tmp_path: Path) -> None:
+    """Persisted owner MXID lets a later config init replace authorization placeholders."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\nrouter:\n  model: default\n")
+
+    env_path = cli_connect.persist_local_provisioning_env(
+        provisioning_url="https://provisioning.example",
+        client_id="client-123",
+        client_secret="secret-123",  # noqa: S106
+        namespace="a1b2c3d4",
+        owner_user_id="@alice:mindroom.chat",
+        config_path=config_path,
+    )
+
+    content = env_path.read_text()
+    assert f"{OWNER_MATRIX_USER_ID_ENV}=@alice:mindroom.chat" in content
 
 
 def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path) -> None:

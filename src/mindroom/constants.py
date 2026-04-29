@@ -873,6 +873,7 @@ STREAM_STATUS_ERROR = "error"
 # automatically replace this token with the owner Matrix user ID returned
 # by the provisioning service.
 OWNER_MATRIX_USER_ID_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
+OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 
 
 # Canonical mapping from provider name to the environment variable it requires.
