@@ -1007,6 +1007,33 @@ async def test_command_during_upload_grace_flushes_immediately(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_already_queued_command_barrier_flushes_normal_without_debounce() -> None:
+    """A queued command barrier should flush older normal work without waiting for debounce."""
+    room = _make_room()
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
+    command = _text_event(event_id="$cmd", body="!help", server_timestamp=1001)
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 5.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue(key, PendingEvent(event=first, room=room, source_kind="message"))
+    await gate.enqueue(key, PendingEvent(event=command, room=room, source_kind="message"))
+
+    await _wait_for(lambda: calls == [["$m1"], ["$cmd"]], deadline_seconds=0.2)
+
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
 async def test_messages_during_active_response_wait_and_batch_after_completion(tmp_path: Path) -> None:
     """Hold threaded follow-ups while the first-turn response is in flight, then batch them."""
     bot = _make_bot(tmp_path)
@@ -1065,7 +1092,49 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
 
 
 @pytest.mark.asyncio
-async def test_command_during_active_dispatch_only_flushes_preceding_pending() -> None:
+async def test_in_flight_command_barrier_flushes_buffered_normal_without_debounce() -> None:
+    """A command queued during active dispatch should wake and flush older buffered work promptly."""
+    room = _make_room()
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
+    before_command = _text_event(event_id="$m2", body="before command", server_timestamp=1001)
+    command = _text_event(event_id="$cmd", body="!help", server_timestamp=1002)
+    entered_first_dispatch = asyncio.Event()
+    release_first_dispatch = asyncio.Event()
+    debounce_seconds = 0.0
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        source_event_ids = list(batch.source_event_ids)
+        calls.append(source_event_ids)
+        if source_event_ids == ["$m1"]:
+            entered_first_dispatch.set()
+            await release_first_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: debounce_seconds,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue(key, PendingEvent(event=first, room=room, source_kind="message"))
+    await entered_first_dispatch.wait()
+    debounce_seconds = 5.0
+    await gate.enqueue(key, PendingEvent(event=before_command, room=room, source_kind="message"))
+    await gate.enqueue(key, PendingEvent(event=command, room=room, source_kind="message"))
+    await asyncio.sleep(0.05)
+
+    assert calls == [["$m1"]]
+
+    release_first_dispatch.set()
+    await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$cmd"]], deadline_seconds=0.2)
+
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
+async def test_command_during_active_dispatch_preserves_fifo_order() -> None:
     """A command should not pull later in-flight-buffered messages ahead of itself."""
     room = _make_room()
     first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
@@ -1152,7 +1221,9 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
         )
 
         retargeted_key = ("!room:localhost", "$m1", "@user:localhost")
-        assert [pending.event.event_id for pending in bot._coalescing_gate._gates[retargeted_key].pending] == ["$m2"]
+        assert [
+            queued.pending_event.event.event_id for queued in bot._coalescing_gate._gates[retargeted_key].queue
+        ] == ["$m2"]
 
         release_first_dispatch.set()
         await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
@@ -1201,6 +1272,35 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
         await _wait_for(lambda: len(calls) == 1)
 
     assert calls == [f"{source_kind} task"]
+
+
+@pytest.mark.asyncio
+async def test_bypass_preserves_fifo_order_behind_existing_normal_work() -> None:
+    """Hook-originated bypass events dispatch solo without jumping ahead of queued user work."""
+    room = _make_room()
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
+    hook = _text_event(event_id="$hook", body="hook", server_timestamp=1001, source_kind="hook")
+    second = _text_event(event_id="$m2", body="second", server_timestamp=1002)
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.02,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue(key, PendingEvent(event=first, room=room, source_kind="message"))
+    await gate.enqueue(key, PendingEvent(event=hook, room=room, source_kind="hook"))
+    await gate.enqueue(key, PendingEvent(event=second, room=room, source_kind="message"))
+
+    await _wait_for(lambda: calls == [["$m1"], ["$hook"], ["$m2"]])
+
+    assert gate.is_idle()
 
 
 @pytest.mark.asyncio
@@ -1491,7 +1591,7 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
 
         gate = bot._coalescing_gate._gates[retargeted_key]
         assert gate.phase is GatePhase.IN_FLIGHT
-        assert [pending.event.event_id for pending in gate.pending] == ["$m2", "$m3"]
+        assert [queued.pending_event.event.event_id for queued in gate.queue] == ["$m2", "$m3"]
 
         release_first_dispatch.set()
         await first_task
