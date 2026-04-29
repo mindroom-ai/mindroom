@@ -7994,6 +7994,83 @@ class TestAgentBot:
         mock_has_active_response.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_resolve_response_action_uses_active_follow_up_policy_without_erasing_voice(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Gate-owned voice follow-ups should keep voice source kind and active-response policy."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        ids = config.get_ids(runtime_paths)
+        room.users = {
+            bot.matrix_id.full_id: MagicMock(),
+            ids[ROUTER_AGENT_NAME].full_id: MagicMock(),
+            ids["general"].full_id: MagicMock(),
+        }
+        target = MessageTarget.resolve(room.room_id, "$thread", "$event")
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        envelope = MessageEnvelope(
+            source_event_id="$followup",
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="stop if you see this",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="voice",
+            dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        )
+
+        with (
+            patch(
+                "mindroom.turn_policy.decide_team_formation",
+                new=AsyncMock(return_value=TeamResolution.none()),
+            ),
+            patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
+            patch.object(
+                bot._response_runner,
+                "has_active_response_for_target",
+                return_value=False,
+            ) as mock_has_active_response,
+        ):
+            action = await bot._turn_policy.resolve_response_action(
+                context,
+                room,
+                "@user:localhost",
+                "stop if you see this",
+                False,
+                target=target,
+                source_envelope=envelope,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+            )
+
+        assert action.kind == "individual"
+        assert envelope.source_kind == "voice"
+        mock_should_respond.assert_called_once()
+        mock_has_active_response.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_resolve_response_action_requires_explicit_mention_in_multi_human_thread_even_after_prior_team_mentions(
         self,
         tmp_path: Path,

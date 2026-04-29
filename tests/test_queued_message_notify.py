@@ -562,7 +562,7 @@ async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: P
     bot = _bot(tmp_path)
     response_envelope = _envelope(source_kind="scheduled")
     response_target = response_envelope.target
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    coordinator = unwrap_extracted_collaborator(bot._turn_controller.deps.response_runner)
     lifecycle = coordinator._lifecycle_coordinator
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
@@ -1425,6 +1425,52 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
     finally:
         queued_signal.finish_response_turn()
 
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(tmp_path: Path) -> None:
+    """Cancellation during enqueue handoff should not leak the reserved notice."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, "$thread", "$cancelled")
+    envelope = _envelope(source_kind="message", source_event_id="$cancelled", target=target)
+    event = _prepared_text_event(event_id="$cancelled")
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is not None
+        assert queued_signal.pending_human_messages == 1
+        with (
+            patch.object(
+                bot._turn_controller.deps.response_runner,
+                "reserve_waiting_human_message",
+                return_value=reservation,
+            ),
+            patch.object(
+                bot._turn_controller,
+                "_enqueue_for_dispatch",
+                new=AsyncMock(side_effect=asyncio.CancelledError),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await bot._turn_controller._enqueue_active_thread_follow_up(
+                room=room,
+                prepared_event=event,
+                target=target,
+                envelope=envelope,
+                coalescing_thread_id="$thread",
+                requester_user_id="@user:localhost",
+                dispatch_timing=None,
+            )
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert queued_signal.pending_human_messages == 0
     assert not queued_signal.is_set()
 
 

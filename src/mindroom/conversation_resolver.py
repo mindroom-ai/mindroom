@@ -200,6 +200,7 @@ class ConversationResolver:
         agent_name: str | None = None,
         body: str | None = None,
         source_kind: str | None = None,
+        dispatch_policy_source_kind: str | None = None,
     ) -> MessageEnvelope:
         """Build the normalized inbound envelope consumed by message hooks."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
@@ -232,6 +233,7 @@ class ConversationResolver:
             source_kind=resolved_source_kind,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
         )
 
     def build_ingress_envelope(
@@ -245,6 +247,7 @@ class ConversationResolver:
         agent_name: str | None = None,
         body: str | None = None,
         source_kind: str | None = None,
+        dispatch_policy_source_kind: str | None = None,
     ) -> MessageEnvelope:
         """Build one lightweight ingress envelope without extracting thread context."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
@@ -271,6 +274,7 @@ class ConversationResolver:
             source_kind=resolved_source_kind,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
         )
 
     async def coalescing_thread_id(

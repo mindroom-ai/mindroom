@@ -425,6 +425,10 @@ class TurnController:
                 coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
             )
+        except asyncio.CancelledError:
+            if queued_notice_reservation is not None:
+                queued_notice_reservation.cancel()
+            raise
         except Exception:
             if queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
@@ -685,6 +689,9 @@ class TurnController:
             requester_user_id=requester_user_id,
             context=context,
             target=target,
+            dispatch_policy_source_kind=event.dispatch_policy_source_kind_override
+            if isinstance(event, PreparedTextEvent)
+            else None,
         )
         emit_elapsed_timing(
             "dispatch_handoff.prepare_dispatch.build_message_envelope",

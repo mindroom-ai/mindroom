@@ -108,6 +108,7 @@ class PreparedTextEvent:
     server_timestamp: int | float | None = None
     is_synthetic: bool = False
     source_kind_override: str | None = None
+    dispatch_policy_source_kind_override: str | None = None
 
 
 @dataclass
@@ -421,6 +422,17 @@ def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
     return merged
 
 
+def _single_prepared_dispatch_event(event: PreparedTextEvent, source_kind: str) -> PreparedTextEvent:
+    """Apply queue policy to one prepared text event without erasing its modality."""
+    if source_kind == "message":
+        return event
+    if event.source_kind_override == source_kind:
+        return event
+    if source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP:
+        return replace(event, dispatch_policy_source_kind_override=source_kind)
+    return replace(event, source_kind_override=source_kind)
+
+
 def build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     """Return the dispatch event for one coalesced batch.
 
@@ -429,11 +441,7 @@ def build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     """
     if len(batch.pending_events) == 1 and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent):
         if isinstance(batch.primary_event, PreparedTextEvent):
-            if batch.source_kind == "message":
-                return batch.primary_event
-            if batch.primary_event.source_kind_override == batch.source_kind:
-                return batch.primary_event
-            return replace(batch.primary_event, source_kind_override=batch.source_kind)
+            return _single_prepared_dispatch_event(batch.primary_event, batch.source_kind)
         if isinstance(batch.primary_event, nio.RoomMessageText) and batch.source_kind != "message":
             return PreparedTextEvent(
                 sender=batch.primary_event.sender,
@@ -441,7 +449,12 @@ def build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
                 body=batch.primary_event.body,
                 source=batch.primary_event.source,
                 server_timestamp=batch.primary_event.server_timestamp,
-                source_kind_override=batch.source_kind,
+                source_kind_override=None
+                if batch.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+                else batch.source_kind,
+                dispatch_policy_source_kind_override=batch.source_kind
+                if batch.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+                else None,
             )
         return batch.primary_event
     return PreparedTextEvent(

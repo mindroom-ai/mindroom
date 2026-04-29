@@ -164,6 +164,7 @@ class IngressHookRunner:
             source_kind=dispatch.envelope.source_kind,
             hook_source=dispatch.envelope.hook_source,
             message_received_depth=dispatch.envelope.message_received_depth,
+            dispatch_policy_source_kind=dispatch.envelope.dispatch_policy_source_kind,
         )
         model_prompt = payload.model_prompt
         if hook_registered:
@@ -595,6 +596,7 @@ class TurnPolicy:
             self.deps.runtime_paths,
         ):
             return False
-        if source_envelope.source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
+        policy_source_kind = source_envelope.dispatch_policy_source_kind or source_envelope.source_kind
+        if policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
             return True
         return has_active_response_for_target(target) if has_active_response_for_target is not None else False

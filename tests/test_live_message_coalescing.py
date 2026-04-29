@@ -266,6 +266,8 @@ def _prepared_dispatch(
     requester_user_id: str = "@user:localhost",
     body: str = "hello",
     thread_id: str | None = None,
+    source_kind: str = "message",
+    dispatch_policy_source_kind: str | None = None,
 ) -> PreparedDispatch:
     history: list[ResolvedVisibleMessage] = []
     context = MessageContext(
@@ -297,7 +299,8 @@ def _prepared_dispatch(
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="test_agent",
-            source_kind="message",
+            source_kind=source_kind,
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
         ),
     )
 
@@ -1349,7 +1352,8 @@ async def test_pending_source_kind_controls_prepared_override_queue_policy() -> 
     assert calls[0].source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
     dispatch_event = build_batch_dispatch_event(calls[0])
     assert isinstance(dispatch_event, PreparedTextEvent)
-    assert dispatch_event.source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert dispatch_event.source_kind_override == "voice"
+    assert dispatch_event.dispatch_policy_source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
 
 
 @pytest.mark.asyncio
@@ -3040,7 +3044,7 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
 
 
 def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
-    """Single prepared events must still carry gate source-kind classification into dispatch."""
+    """Single prepared events should carry active policy separately from source kind."""
     room = _make_room()
     event = PreparedTextEvent(
         sender="@user:localhost",
@@ -3063,11 +3067,12 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
     dispatch_event = build_batch_dispatch_event(batch)
 
     assert isinstance(dispatch_event, PreparedTextEvent)
-    assert dispatch_event.source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert dispatch_event.source_kind_override is None
+    assert dispatch_event.dispatch_policy_source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
 
 
 def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None:
-    """Single text events with bypass classification should expose that source kind to dispatch."""
+    """Single text active follow-ups should expose policy without changing source kind."""
     room = _make_room()
     event = _text_event(event_id="$relay", body="@agent relay", server_timestamp=1000)
 
@@ -3084,7 +3089,8 @@ def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None
     dispatch_event = build_batch_dispatch_event(batch)
 
     assert isinstance(dispatch_event, PreparedTextEvent)
-    assert dispatch_event.source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert dispatch_event.source_kind_override is None
+    assert dispatch_event.dispatch_policy_source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
 
 
 def test_batch_dispatch_event_preserves_original_sender() -> None:
@@ -3538,6 +3544,50 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
         await bot._turn_controller._dispatch_text_message(room, command_event, "@user:localhost")
 
     handle_cmd_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: Path) -> None:
+    """Voice active follow-ups should force response policy without becoming commands."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    voice_command_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice_command",
+        body="!schedule tomorrow at 9am turn off the lights",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "!schedule tomorrow at 9am turn off the lights",
+                "com.mindroom.source_kind": "voice",
+            },
+        },
+        server_timestamp=1000,
+        source_kind_override="voice",
+        dispatch_policy_source_kind_override=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+    )
+    dispatch = _prepared_dispatch(
+        event_id="$voice_command",
+        body="!schedule tomorrow at 9am turn off the lights",
+        thread_id="$thread",
+        source_kind="voice",
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+    )
+
+    plan_mock = AsyncMock(return_value=_respond_dispatch_plan())
+    execute_command_mock = AsyncMock()
+    execute_response_mock = AsyncMock()
+    with (
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_policy, "plan_turn", new=plan_mock),
+        patch.object(bot._turn_controller, "_execute_command", new=execute_command_mock),
+        patch.object(bot._turn_controller, "_execute_response_action", new=execute_response_mock),
+    ):
+        await bot._turn_controller._dispatch_text_message(room, voice_command_event, "@user:localhost")
+
+    execute_command_mock.assert_not_awaited()
+    plan_mock.assert_awaited_once()
+    execute_response_mock.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
