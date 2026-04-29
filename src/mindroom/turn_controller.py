@@ -237,9 +237,7 @@ class TurnController:
 
     def _should_trust_internal_payload_metadata(self, event: _DispatchEvent) -> bool:
         """Return whether internal payload keys on one event should be treated as authoritative."""
-        if self._sender_is_trusted_for_ingress_metadata(event.sender):
-            return True
-        return isinstance(event, PreparedTextEvent) and event.is_synthetic
+        return self._sender_is_trusted_for_ingress_metadata(event.sender)
 
     def _is_trusted_internal_relay_event(self, event: _DispatchEvent) -> bool:
         """Return whether one agent-authored relay should bypass user-turn coalescing."""
@@ -269,6 +267,25 @@ class TurnController:
             self.deps.runtime_paths,
         )
         return sender_agent_name == ROUTER_AGENT_NAME
+
+    def _should_use_trusted_router_relay_context(
+        self,
+        event: _DispatchEvent,
+        *,
+        ingress_metadata: DispatchIngressMetadata | None,
+        payload_metadata: DispatchPayloadMetadata | None,
+    ) -> bool:
+        """Return whether dispatch context should use trusted router relay semantics."""
+        if ingress_metadata is None:
+            return self._is_trusted_router_relay_event(event)
+        if ingress_metadata.source_kind != COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY:
+            return False
+        sender_agent_name = extract_agent_name(event.sender, self.deps.runtime.config, self.deps.runtime_paths)
+        if sender_agent_name != ROUTER_AGENT_NAME:
+            return False
+        if payload_metadata is not None:
+            return payload_metadata.original_sender is not None
+        return self._is_trusted_internal_relay_event(event)
 
     def _precheck_event(
         self,
@@ -417,6 +434,7 @@ class TurnController:
         coalescing_thread_id: str | None,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
+        trust_internal_payload_metadata: bool | None = None,
     ) -> None:
         """Queue an active-thread follow-up while preserving its mid-turn notice."""
         if dispatch_timing is not None:
@@ -439,6 +457,7 @@ class TurnController:
                 requester_user_id=requester_user_id,
                 coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
                 queued_notice_reservation=queued_notice_reservation,
+                trust_internal_payload_metadata=trust_internal_payload_metadata,
             )
         except asyncio.CancelledError:
             if queued_notice_reservation is not None:
@@ -459,6 +478,7 @@ class TurnController:
         coalescing_thread_id: str | None,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
+        trust_internal_payload_metadata: bool | None = None,
     ) -> None:
         """Queue one normalized text event with shared active-follow-up handling."""
         target = self.deps.resolver.build_message_target(
@@ -480,6 +500,7 @@ class TurnController:
                 coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=requester_user_id,
                 dispatch_timing=dispatch_timing,
+                trust_internal_payload_metadata=trust_internal_payload_metadata,
             )
             return
         await self._enqueue_for_dispatch(
@@ -491,6 +512,7 @@ class TurnController:
             message_received_depth=envelope.message_received_depth,
             requester_user_id=requester_user_id,
             coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
+            trust_internal_payload_metadata=trust_internal_payload_metadata,
         )
 
     async def _enqueue_media_for_dispatch(
@@ -742,7 +764,11 @@ class TurnController:
     ) -> PreparedDispatch | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
-        if self._is_trusted_router_relay_event(event):
+        if self._should_use_trusted_router_relay_context(
+            event,
+            ingress_metadata=ingress_metadata,
+            payload_metadata=payload_metadata,
+        ):
             context_kwargs = {"payload_metadata": payload_metadata} if payload_metadata is not None else {}
             context = await self.deps.resolver.extract_trusted_router_relay_context(
                 room,
@@ -1442,6 +1468,7 @@ class TurnController:
             queued_notice_reservation=reservation,
             ingress_metadata=handoff.ingress,
             payload_metadata=handoff.payload,
+            trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
         )
 
     async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
@@ -1563,6 +1590,7 @@ class TurnController:
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
+        trust_hydrated_internal_metadata: bool | None = None,
     ) -> None:
         """Run the normal text or command dispatch pipeline for a prepared text event."""
         raw_event: _TextDispatchEvent
@@ -1582,9 +1610,10 @@ class TurnController:
             event = await self.deps.normalizer.resolve_text_event(
                 TextNormalizationRequest(event=raw_event),
             )
-            trust_internal_payload_metadata = self._sender_is_trusted_for_ingress_metadata(event.sender) or (
-                isinstance(event, PreparedTextEvent)
-                and (event.is_synthetic or event.source_kind_override not in {None, "message"})
+            trust_internal_payload_metadata = (
+                self._should_trust_internal_payload_metadata(event)
+                if trust_hydrated_internal_metadata is None
+                else trust_hydrated_internal_metadata
             )
             hydrated_payload_metadata = payload_metadata_from_source(
                 event.source,
@@ -1593,7 +1622,11 @@ class TurnController:
             payload_metadata = (
                 hydrated_payload_metadata
                 if payload_metadata is None
-                else merge_payload_metadata(payload_metadata, hydrated_payload_metadata)
+                else merge_payload_metadata(
+                    payload_metadata,
+                    hydrated_payload_metadata,
+                    trust_hydrated_internal_metadata=trust_internal_payload_metadata,
+                )
             )
             dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
             attach_dispatch_pipeline_timing(event.source, dispatch_timing)
@@ -1926,6 +1959,7 @@ class TurnController:
             coalescing_thread_id=normalized_voice.effective_thread_id,
             requester_user_id=prechecked_event.requester_user_id,
             dispatch_timing=dispatch_timing,
+            trust_internal_payload_metadata=True,
         )
 
     async def _dispatch_file_sidecar_text_preview(

@@ -2325,7 +2325,8 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
                 source_kind="message",
             ),
         )
-        await _wait_for(gate.is_idle)
+        await gate.drain_all()
+        assert gate.is_idle()
 
     flush_calls = [call for call in mock_emit.call_args_list if call.args and call.args[0] == "coalescing_gate.flush"]
     assert len(flush_calls) == 1
@@ -3087,7 +3088,7 @@ def test_batch_dispatch_event_merges_mentions_across_events() -> None:
 
 
 def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
-    """A voice + text batch must preserve raw_audio_fallback in the synthetic source."""
+    """A trusted voice + text batch must preserve system-owned fallback metadata."""
     room = _make_room()
     voice_event = PreparedTextEvent(
         sender="@user:localhost",
@@ -3107,7 +3108,12 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
     batch = build_coalesced_batch(
         ("!room:localhost", None, "@user:localhost"),
         [
-            PendingEvent(event=voice_event, room=room, source_kind="voice"),
+            PendingEvent(
+                event=voice_event,
+                room=room,
+                source_kind="voice",
+                trust_internal_payload_metadata=True,
+            ),
             PendingEvent(event=text_event, room=room, source_kind="message"),
         ],
     )
@@ -3985,6 +3991,57 @@ async def test_gate_final_envelope_preserves_raw_trusted_relay_source_kind(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_trusted_router_relay_context_uses_handoff_ingress_metadata(tmp_path: Path) -> None:
+    """Coalesced relay dispatch should choose router relay context from handoff metadata."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    relay_event = _text_event(
+        event_id="$router-relay",
+        body="router relay",
+        sender="@mindroom_router:localhost",
+        original_sender="@external:example.org",
+    )
+    trusted_context = MessageContext(
+        am_i_mentioned=False,
+        is_thread=False,
+        thread_id=None,
+        thread_history=[],
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+        replay_guard_history=[],
+    )
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "extract_trusted_router_relay_context",
+            new=AsyncMock(return_value=trusted_context),
+        ) as trusted_context_mock,
+        patch.object(
+            bot._conversation_resolver,
+            "extract_dispatch_context",
+            new=AsyncMock(return_value=trusted_context),
+        ) as normal_context_mock,
+    ):
+        envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
+            bot,
+            room,
+            [
+                (
+                    relay_event,
+                    "trusted_internal_relay",
+                    None,
+                    {"requester_user_id": "@external:example.org"},
+                ),
+            ],
+        )
+
+    trusted_context_mock.assert_awaited_once()
+    normal_context_mock.assert_not_awaited()
+    assert envelopes[0].source_kind == "trusted_internal_relay"
+
+
+@pytest.mark.asyncio
 async def test_gate_final_envelope_preserves_hook_metadata_with_original_sender(tmp_path: Path) -> None:
     """Hook dispatch should not become a trusted relay just because original sender is present."""
     bot = _make_bot(tmp_path, debounce_ms=0)
@@ -4159,6 +4216,127 @@ async def test_untrusted_raw_payload_metadata_spoofing_does_not_reach_envelope_o
     assert envelopes[0].attachment_ids == ()
     assert payload_requests[0].current_attachment_ids == []
     assert captured_extra_content == [None]
+
+
+@pytest.mark.asyncio
+async def test_untrusted_coalesced_payload_metadata_spoofing_does_not_reach_envelope_or_payload(
+    tmp_path: Path,
+) -> None:
+    """Synthetic coalesced user batches should not trust internal keys from primary content."""
+    bot = _make_bot(tmp_path, debounce_ms=10)
+    room = _make_room()
+    first = _text_event(event_id="$coalesced-first", body="first")
+    second = _text_event(event_id="$coalesced-spoof", body="@test_agent second", server_timestamp=1001)
+    second_content = second.source["content"]
+    assert isinstance(second_content, dict)
+    second_content["m.mentions"] = {"user_ids": ["@mindroom_test_agent:localhost"]}
+    second_content[ATTACHMENT_IDS_KEY] = ["spoofed-attachment"]
+    second_content[ORIGINAL_SENDER_KEY] = "@spoofed:localhost"
+    second_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+    second_content["com.mindroom.skip_mentions"] = True
+    captured_extra_content: list[object] = []
+
+    envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [
+            (first, "message", None, {}),
+            (second, "message", None, {}),
+        ],
+        captured_plan_extra_content=captured_extra_content,
+    )
+
+    assert len(envelopes) == 1
+    assert envelopes[0].mentioned_agents == ("test_agent",)
+    assert envelopes[0].requester_id == "@user:localhost"
+    assert envelopes[0].attachment_ids == ()
+    assert payload_requests[0].current_attachment_ids == []
+    assert captured_extra_content == [None]
+
+
+@pytest.mark.asyncio
+async def test_untrusted_synthetic_voice_payload_metadata_spoofing_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    """Synthetic voice wrappers should not imply trusted internal payload metadata."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    spoofed_voice = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice-spoof",
+        body="voice transcript",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "voice transcript",
+                ATTACHMENT_IDS_KEY: ["spoofed-attachment"],
+                ORIGINAL_SENDER_KEY: "@spoofed:localhost",
+                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+                "com.mindroom.skip_mentions": True,
+            },
+        },
+        server_timestamp=1000,
+        is_synthetic=True,
+        source_kind_override="voice",
+    )
+    captured_extra_content: list[object] = []
+
+    envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [(spoofed_voice, "voice", None, {})],
+        captured_plan_extra_content=captured_extra_content,
+    )
+
+    assert envelopes[0].source_kind == "voice"
+    assert envelopes[0].attachment_ids == ()
+    assert payload_requests[0].current_attachment_ids == []
+    assert captured_extra_content == [None]
+
+
+@pytest.mark.asyncio
+async def test_trusted_voice_normalized_payload_metadata_reaches_envelope_and_payload(
+    tmp_path: Path,
+) -> None:
+    """Voice normalizer-owned internal metadata should remain trusted when explicitly marked."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    voice_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice-trusted",
+        body="voice transcript",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "voice transcript",
+                ATTACHMENT_IDS_KEY: ["voice-attachment"],
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+            },
+        },
+        server_timestamp=1000,
+        is_synthetic=True,
+        source_kind_override="voice",
+    )
+    captured_extra_content: list[object] = []
+
+    envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [(voice_event, "voice", None, {"trust_internal_payload_metadata": True})],
+        captured_plan_extra_content=captured_extra_content,
+    )
+
+    assert envelopes[0].source_kind == "voice"
+    assert envelopes[0].attachment_ids == ("voice-attachment",)
+    assert payload_requests[0].current_attachment_ids == ["voice-attachment"]
+    assert captured_extra_content == [
+        {
+            ATTACHMENT_IDS_KEY: ["voice-attachment"],
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+        },
+    ]
 
 
 @pytest.mark.asyncio

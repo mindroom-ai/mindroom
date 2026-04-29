@@ -621,6 +621,58 @@ async def test_prepare_voice_message_includes_original_sender_and_attachment_met
 
 
 @pytest.mark.asyncio
+async def test_prepare_voice_message_sanitizes_user_authored_internal_metadata(tmp_path) -> None:  # noqa: ANN001
+    """Voice normalization should trust only system-owned internal metadata."""
+    config = _attach_runtime_paths(
+        Config(
+            authorization={"default_room_access": True},
+            voice={"enabled": True},
+        ),
+        tmp_path,
+    )
+    room = _make_room("@mindroom_router:example.com", "@alice:example.com")
+    event = _make_voice_event(
+        sender="@alice:example.com",
+        source={
+            "content": {
+                "body": "voice.ogg",
+                ATTACHMENT_IDS_KEY: ["spoofed-attachment"],
+                ORIGINAL_SENDER_KEY: "@spoofed:example.com",
+                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+                "com.mindroom.skip_mentions": True,
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        },
+    )
+    client = MagicMock()
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = "🎤 sanitized transcript"
+        prepared = await _prepare_voice_message_with_runtime(
+            client,
+            tmp_path,
+            room,
+            event,
+            config,
+            sender_domain="example.com",
+            thread_id=None,
+        )
+
+    assert prepared is not None
+    content = prepared.source["content"]
+    expected_attachment_id = _attachment_id_for_event("$voice_event")
+    assert content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert content[ATTACHMENT_IDS_KEY] == [expected_attachment_id]
+    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in content
+    assert "com.mindroom.skip_mentions" not in content
+    assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$thread_root"}
+
+
+@pytest.mark.asyncio
 async def test_prepare_voice_message_marks_raw_audio_fallback_and_thread(tmp_path) -> None:  # noqa: ANN001
     """Fallback normalization should keep thread metadata and the raw-audio flag."""
     config = _attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path)

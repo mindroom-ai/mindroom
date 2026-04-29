@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 import nio
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+    ORIGINAL_SENDER_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 
@@ -92,6 +97,7 @@ class DispatchHandoff:
     requester_user_id: str
     ingress: DispatchIngressMetadata
     payload: DispatchPayloadMetadata = field(default_factory=DispatchPayloadMetadata)
+    trust_hydrated_internal_metadata: bool = False
     source_event_ids: tuple[str, ...] = ()
     source_event_prompts: Mapping[str, str] = field(default_factory=dict)
     media_events: tuple[MediaDispatchEvent, ...] = ()
@@ -175,8 +181,8 @@ def _batch_payload_metadata(batch: CoalescedBatch) -> DispatchPayloadMetadata:
     )
     return DispatchPayloadMetadata(
         attachment_ids=None if single_raw_sidecar_preview else tuple(batch.attachment_ids),
-        original_sender=batch.original_sender,
-        raw_audio_fallback=batch.raw_audio_fallback,
+        original_sender=None if single_raw_sidecar_preview else batch.original_sender,
+        raw_audio_fallback=None if single_raw_sidecar_preview else batch.raw_audio_fallback,
         mentioned_user_ids=None if single_raw_sidecar_preview else mentioned_user_ids,
         formatted_bodies=None if single_raw_sidecar_preview else formatted_bodies,
         skip_mentions=None if single_raw_sidecar_preview else skip_mentions,
@@ -203,6 +209,8 @@ def payload_metadata_from_source(
     if not trust_internal_metadata:
         return DispatchPayloadMetadata(
             attachment_ids=(),
+            original_sender=None,
+            raw_audio_fallback=False,
             mentioned_user_ids=mentioned_user_ids,
             formatted_bodies=formatted_bodies,
             skip_mentions=False,
@@ -223,26 +231,59 @@ def payload_metadata_from_source(
 def merge_payload_metadata(
     base: DispatchPayloadMetadata,
     hydrated: DispatchPayloadMetadata,
+    *,
+    trust_hydrated_internal_metadata: bool = True,
 ) -> DispatchPayloadMetadata:
     """Fill unknown handoff metadata from hydrated text content."""
+    attachment_ids = base.attachment_ids
+    original_sender = base.original_sender
+    raw_audio_fallback = base.raw_audio_fallback
+    skip_mentions = base.skip_mentions
+    if trust_hydrated_internal_metadata:
+        if attachment_ids is None:
+            attachment_ids = hydrated.attachment_ids
+        if original_sender is None:
+            original_sender = hydrated.original_sender
+        if raw_audio_fallback is None:
+            raw_audio_fallback = hydrated.raw_audio_fallback
+        if skip_mentions is None:
+            skip_mentions = hydrated.skip_mentions
+    else:
+        attachment_ids = attachment_ids if attachment_ids is not None else ()
+        raw_audio_fallback = raw_audio_fallback if raw_audio_fallback is not None else False
+        skip_mentions = skip_mentions if skip_mentions is not None else False
+
     return DispatchPayloadMetadata(
-        attachment_ids=base.attachment_ids if base.attachment_ids is not None else hydrated.attachment_ids,
-        original_sender=base.original_sender if base.original_sender is not None else hydrated.original_sender,
-        raw_audio_fallback=base.raw_audio_fallback
-        if base.raw_audio_fallback is not None
-        else hydrated.raw_audio_fallback,
+        attachment_ids=attachment_ids,
+        original_sender=original_sender,
+        raw_audio_fallback=raw_audio_fallback,
         mentioned_user_ids=base.mentioned_user_ids
         if base.mentioned_user_ids is not None
         else hydrated.mentioned_user_ids,
         formatted_bodies=base.formatted_bodies if base.formatted_bodies is not None else hydrated.formatted_bodies,
-        skip_mentions=base.skip_mentions if base.skip_mentions is not None else hydrated.skip_mentions,
+        skip_mentions=skip_mentions,
     )
+
+
+_SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS: frozenset[str] = frozenset(
+    {
+        ATTACHMENT_IDS_KEY,
+        HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+        ORIGINAL_SENDER_KEY,
+        VOICE_RAW_AUDIO_FALLBACK_KEY,
+        "com.mindroom.hook_source",
+        "com.mindroom.skip_mentions",
+        "com.mindroom.source_kind",
+    },
+)
 
 
 def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
     primary_source: dict[str, Any] = batch.primary_event.source if isinstance(batch.primary_event.source, dict) else {}
     merged: dict[str, Any] = dict(primary_source)
     primary_content: dict[str, Any] = dict(merged.get("content", {})) if isinstance(merged.get("content"), dict) else {}
+    for key in _SYNTHETIC_BATCH_INTERNAL_CONTENT_KEYS:
+        primary_content.pop(key, None)
     payload = _batch_payload_metadata(batch)
     if payload.mentioned_user_ids:
         primary_content["m.mentions"] = {"user_ids": list(payload.mentioned_user_ids)}
@@ -295,6 +336,9 @@ def build_dispatch_handoff(batch: CoalescedBatch) -> DispatchHandoff:
             message_received_depth=batch.message_received_depth,
         ),
         payload=_batch_payload_metadata(batch),
+        trust_hydrated_internal_metadata=any(
+            pending_event.trust_internal_payload_metadata for pending_event in batch.pending_events
+        ),
         source_event_ids=tuple(batch.source_event_ids),
         source_event_prompts=dict(batch.source_event_prompts),
         media_events=tuple(batch.media_events),
