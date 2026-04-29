@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    is_automation_source_kind,
+    is_voice_event,
+)
+
 from .context import (
     AfterResponseContext,
     AgentLifecycleContext,
@@ -36,12 +43,8 @@ from .enrichment import (
 )
 from .execution import emit, emit_collect, emit_final_response_transform, emit_gate, emit_transform
 from .ingress import (
-    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     HookIngressPolicy,
     hook_ingress_policy,
-    is_automation_source_kind,
-    is_voice_event,
     should_handle_interactive_text_response,
 )
 from .registry import HookRegistry, HookRegistryPlugin, HookRegistryState

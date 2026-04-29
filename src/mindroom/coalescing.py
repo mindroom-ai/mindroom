@@ -14,7 +14,7 @@ import nio
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .commands.parsing import command_parser
 from .constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
-from .hooks.ingress import (
+from .dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     is_voice_event,

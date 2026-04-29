@@ -11,11 +11,11 @@ from agno.db.base import SessionType
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai_runtime import queued_message_signal_context
+from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.hooks import (
     EVENT_SESSION_STARTED,
     SessionHookContext,
     emit,
-    is_automation_source_kind,
 )
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings

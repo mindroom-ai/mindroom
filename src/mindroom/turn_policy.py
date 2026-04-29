@@ -12,8 +12,11 @@ from mindroom.authorization import (
     is_sender_allowed_for_agent_reply,
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.hooks import (
+from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    is_automation_source_kind,
+)
+from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_RECEIVED,
     EVENT_SYSTEM_ENRICH,
@@ -26,7 +29,6 @@ from mindroom.hooks import (
     SystemEnrichContext,
     emit,
     emit_collect,
-    is_automation_source_kind,
     render_enrichment_block,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload

@@ -13,6 +13,7 @@ from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wai
 
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -26,7 +27,6 @@ from mindroom.hooks import (
     MessageEnvelope,
     ReactionReceivedContext,
     emit,
-    is_automation_source_kind,
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
