@@ -10538,7 +10538,7 @@ class TestAgentBot:
         async def payload_builder(_context: MessageContext) -> DispatchPayload:
             return DispatchPayload(prompt="help me")
 
-        with patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit:
+        with patch("mindroom.timing.emit_elapsed_timing") as mock_emit:
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
@@ -10612,7 +10612,7 @@ class TestAgentBot:
 
         with (
             patch.object(bot._turn_controller, "_finalize_dispatch_failure", new=AsyncMock(return_value="$error")),
-            patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
+            patch("mindroom.timing.emit_elapsed_timing") as mock_emit,
         ):
             await bot._turn_controller._execute_response_action(
                 room,

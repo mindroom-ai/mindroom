@@ -85,6 +85,7 @@ from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
     create_dispatch_pipeline_timing,
+    elapsed_timing,
     emit_elapsed_timing,
     event_timing_scope,
     get_dispatch_pipeline_timing,
@@ -1278,19 +1279,14 @@ class TurnController:
                 dispatch.context.thread_history = request.thread_history
                 dispatch.context.thread_id = request.thread_id
                 dispatch.context.requires_full_thread_history = False
-                payload_builder_started = time.monotonic()
-                payload_builder_outcome = "failed"
-                try:
+                with elapsed_timing(
+                    "response_payload.builder",
+                    room_id=request.room_id,
+                    thread_id=request.thread_id,
+                    outcome="failed",
+                ) as payload_builder_timing:
                     payload = await payload_builder(dispatch.context)
-                    payload_builder_outcome = "success"
-                finally:
-                    emit_elapsed_timing(
-                        "response_payload.builder",
-                        payload_builder_started,
-                        room_id=request.room_id,
-                        thread_id=request.thread_id,
-                        outcome=payload_builder_outcome,
-                    )
+                    payload_builder_timing["outcome"] = "success"
                 prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
                     dispatch,
                     payload,
@@ -1409,44 +1405,40 @@ class TurnController:
             dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
             if dispatch_timing is not None:
                 dispatch_timing.mark("gate_exit")
-            retarget_start = time.monotonic()
-            batch_coalescing_key = await self._coalescing_key_for_event(
-                batch.room,
-                batch.primary_event,
-                batch.requester_user_id,
-            )
-            canonical_key = (
-                batch.room.room_id,
-                self.deps.resolver.build_message_target(
-                    room_id=batch.room.room_id,
-                    thread_id=batch_coalescing_key[1],
-                    reply_to_event_id=handoff.event.event_id,
-                    event_source=handoff.event.source,
-                ).resolved_thread_id,
-                batch.requester_user_id,
-            )
-            self.deps.coalescing_gate.retarget(batch_coalescing_key, canonical_key)
-            emit_elapsed_timing(
+            with elapsed_timing(
                 "coalescing.handle_batch.retarget",
-                retarget_start,
-                original_thread_id=batch_coalescing_key[1],
-                resolved_thread_id=canonical_key[1],
                 timing_scope=timing_scope,
-            )
-            async with self.deps.resolver.turn_thread_cache_scope():
-                dispatch_start = time.monotonic()
-                handled_turn = HandledTurnState.create(
-                    handoff.source_event_ids,
-                    source_event_prompts=dict(handoff.source_event_prompts),
+            ) as retarget_timing:
+                batch_coalescing_key = await self._coalescing_key_for_event(
+                    batch.room,
+                    batch.primary_event,
+                    batch.requester_user_id,
                 )
-                await self._dispatch_handoff(handoff, handled_turn=handled_turn)
-                reservation = None
-                emit_elapsed_timing(
+                canonical_key = (
+                    batch.room.room_id,
+                    self.deps.resolver.build_message_target(
+                        room_id=batch.room.room_id,
+                        thread_id=batch_coalescing_key[1],
+                        reply_to_event_id=handoff.event.event_id,
+                        event_source=handoff.event.source,
+                    ).resolved_thread_id,
+                    batch.requester_user_id,
+                )
+                self.deps.coalescing_gate.retarget(batch_coalescing_key, canonical_key)
+                retarget_timing["original_thread_id"] = batch_coalescing_key[1]
+                retarget_timing["resolved_thread_id"] = canonical_key[1]
+            async with self.deps.resolver.turn_thread_cache_scope():
+                with elapsed_timing(
                     "coalescing.handle_batch.dispatch_text_message",
-                    dispatch_start,
                     source_event_count=len(batch.source_event_ids),
                     timing_scope=timing_scope,
-                )
+                ):
+                    handled_turn = HandledTurnState.create(
+                        handoff.source_event_ids,
+                        source_event_prompts=dict(handoff.source_event_prompts),
+                    )
+                    await self._dispatch_handoff(handoff, handled_turn=handled_turn)
+                    reservation = None
         finally:
             if reservation is not None:
                 reservation.cancel()

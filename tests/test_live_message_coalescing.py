@@ -2223,7 +2223,7 @@ async def test_handle_coalesced_batch_timing_events_include_dispatch_scope(tmp_p
 
     with (
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()),
-        patch("mindroom.turn_controller.emit_elapsed_timing") as mock_emit,
+        patch("mindroom.timing.emit_elapsed_timing") as mock_emit,
     ):
         await bot._turn_controller.handle_coalesced_batch(batch)
 
