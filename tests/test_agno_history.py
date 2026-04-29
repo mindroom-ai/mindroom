@@ -2798,6 +2798,32 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
     assert 'run_id="run-big"' in summary_input
 
 
+def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema() -> None:
+    root_request = "Look into how the automatic memory flush in mindroom is supposed to work."
+    run = _completed_run(
+        "run-big-metadata",
+        messages=[
+            Message(role="user", content=root_request),
+            Message(role="assistant", content="I will investigate."),
+        ],
+    )
+    run.metadata = {
+        "matrix_event_id": "$root",
+        "thread_id": "$root",
+        "tools_schema": [{"name": f"tool_{index}", "description": "x" * 2000} for index in range(30)],
+    }
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=280,
+    )
+
+    assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
+    assert root_request in summary_input
+    assert "tools_schema" not in summary_input
+
+
 def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -> None:
     run = _completed_run("run-1")
 
