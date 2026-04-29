@@ -1,4 +1,5 @@
 {{- if and .Values.config.create (not .Values.config.existingConfigMap) }}
+{{- $configData := default (include "mindroom-runtime.defaultConfig" .) .Values.config.data -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,5 +8,5 @@ metadata:
     {{- include "mindroom-runtime.labels" . | nindent 4 }}
 data:
   {{ .Values.config.key }}: |
-{{ .Values.config.data | indent 4 }}
+{{ $configData | indent 4 }}
 {{- end }}

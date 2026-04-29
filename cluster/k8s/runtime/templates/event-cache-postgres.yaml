@@ -1,0 +1,159 @@
+{{- if and (eq .Values.eventCache.backend "postgres") .Values.eventCache.postgres.create }}
+{{- $name := include "mindroom-runtime.eventCachePostgresName" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+  {{- with .Values.eventCache.postgres.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: postgres
+      port: {{ .Values.eventCache.postgres.service.port }}
+      targetPort: postgres
+      protocol: TCP
+  selector:
+    {{- include "mindroom-runtime.eventCachePostgresSelectorLabels" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ $name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mindroom-runtime.eventCachePostgresSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mindroom-runtime.eventCachePostgresSelectorLabels" . | nindent 8 }}
+        {{- with .Values.eventCache.postgres.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.eventCache.postgres.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.eventCache.postgres.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.eventCache.postgres.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.eventCache.postgres.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.eventCache.postgres.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgres
+          image: {{ include "mindroom-runtime.eventCachePostgresImage" . | quote }}
+          imagePullPolicy: {{ .Values.eventCache.postgres.image.pullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: {{ .Values.eventCache.postgres.service.port }}
+              protocol: TCP
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.eventCache.postgres.auth.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.eventCache.postgres.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mindroom-runtime.eventCachePostgresPasswordSecretName" . }}
+                  key: {{ .Values.eventCache.postgres.auth.passwordKey }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - {{ .Values.eventCache.postgres.auth.username | quote }}
+                - -d
+                - {{ .Values.eventCache.postgres.auth.database | quote }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - {{ .Values.eventCache.postgres.auth.username | quote }}
+                - -d
+                - {{ .Values.eventCache.postgres.auth.database | quote }}
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.eventCache.postgres.resources | nindent 12 }}
+          {{- with .Values.eventCache.postgres.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: {{ include "mindroom-runtime.eventCachePostgresVolumeName" . }}
+              mountPath: /var/lib/postgresql/data
+      {{- if not .Values.eventCache.postgres.persistence.enabled }}
+      volumes:
+        - name: {{ include "mindroom-runtime.eventCachePostgresVolumeName" . }}
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.eventCache.postgres.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: {{ include "mindroom-runtime.eventCachePostgresVolumeName" . }}
+        labels:
+          {{- include "mindroom-runtime.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.eventCache.postgres.persistence.accessModes | nindent 10 }}
+        {{- if .Values.eventCache.postgres.persistence.storageClassName }}
+        storageClassName: {{ .Values.eventCache.postgres.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.eventCache.postgres.persistence.size | quote }}
+  {{- end }}
+{{- if .Values.eventCache.postgres.networkPolicy.create }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mindroom-runtime.eventCachePostgresNetworkPolicyName" . }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mindroom-runtime.eventCachePostgresSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.eventCache.postgres.service.port }}
+{{- end }}
+{{- end }}

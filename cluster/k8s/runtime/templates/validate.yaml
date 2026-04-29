@@ -1,0 +1,15 @@
+{{- if not (or (eq .Values.eventCache.backend "postgres") (eq .Values.eventCache.backend "sqlite")) -}}
+{{- fail "eventCache.backend must be either postgres or sqlite" -}}
+{{- end -}}
+{{- if and (eq .Values.eventCache.backend "postgres") (not .Values.eventCache.databaseUrlEnv) -}}
+{{- fail "eventCache.databaseUrlEnv is required when eventCache.backend=postgres" -}}
+{{- end -}}
+{{- if and (eq .Values.eventCache.backend "postgres") (not (regexMatch "(^DATABASE_URL$|_DATABASE_URL$)" .Values.eventCache.databaseUrlEnv)) -}}
+{{- fail "eventCache.databaseUrlEnv must be DATABASE_URL or end with _DATABASE_URL" -}}
+{{- end -}}
+{{- if and (eq .Values.eventCache.backend "postgres") .Values.eventCache.postgres.create .Values.eventCache.databaseUrl.existingSecret (not .Values.eventCache.postgres.auth.existingSecret) (not .Values.eventCache.postgres.auth.password) -}}
+{{- fail "eventCache.postgres.auth.password or eventCache.postgres.auth.existingSecret is required when chart-managed PostgreSQL uses an existing database URL Secret" -}}
+{{- end -}}
+{{- if and (eq .Values.eventCache.backend "postgres") .Values.eventCache.postgres.create (not .Values.eventCache.postgres.auth.existingSecret) (not .Values.eventCache.databaseUrl.existingSecret) (eq .Values.eventCache.postgres.auth.passwordKey (include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" .)) -}}
+{{- fail "eventCache.postgres.auth.passwordKey must differ from the event-cache database URL secret key" -}}
+{{- end -}}

@@ -1,6 +1,6 @@
 # Runtime-only MindRoom chart.
-# This chart intentionally avoids platform-specific defaults. Use existing
-# ConfigMaps, Secrets, PVCs, and service URLs from your own cluster.
+# This chart intentionally avoids platform-specific defaults.
+# It can create MindRoom runtime storage and event-cache resources, while Matrix, ingress, model gateways, and deployment-specific secrets come from your own cluster.
 
 nameOverride: ""
 fullnameOverride: ""
@@ -18,8 +18,8 @@ imagePullSecrets: []
 deploymentAnnotations: {}
 podAnnotations: {}
 podLabels: {}
-# Leave empty for the chart default. Set this when adopting an existing
-# Deployment whose selector is immutable.
+# Leave empty for the chart default.
+# Set this when adopting an existing Deployment whose selector is immutable.
 selectorLabels: {}
 priorityClassName: ""
 nodeSelector: {}
@@ -65,9 +65,70 @@ config:
   existingConfigMap: ""
   key: config.yaml
   mountPath: /app/config.yaml
-  data: |
-    agents: {}
-    models: {}
+  # Leave empty to render the chart's minimal default config, including the event-cache settings below.
+  # Set this when you want full control over the generated config file.
+  data: ""
+
+eventCache:
+  # The runtime chart defaults to PostgreSQL because Kubernetes deployments need a restart-safe cache backend.
+  # Set this to sqlite for lightweight installs.
+  backend: postgres
+  # Logical namespace for rows in a shared PostgreSQL event-cache database.
+  # Defaults to the Helm release namespace.
+  namespace: ""
+  databaseUrlEnv: MINDROOM_EVENT_CACHE_DATABASE_URL
+  databaseUrl:
+    # Use this for an externally managed PostgreSQL database, or when adopting an existing Secret for a chart-managed database.
+    # The secret should contain a full psycopg-compatible connection string.
+    existingSecret: ""
+    key: ""
+  sqlite:
+    dbPath: ""
+  postgres:
+    create: true
+    nameOverride: ""
+    # Leave empty for the chart default.
+    # Set this when adopting an existing StatefulSet whose selector is immutable.
+    selectorLabels: {}
+    image:
+      repository: postgres
+      tag: "17"
+      pullPolicy: IfNotPresent
+    service:
+      port: 5432
+      annotations: {}
+    auth:
+      database: mindroom_cache
+      username: mindroom_cache
+      # Existing password Secret for a chart-managed PostgreSQL database.
+      existingSecret: ""
+      # Leave empty to generate and preserve a random password during Helm upgrades.
+      # Set a value for deterministic helm template output.
+      password: ""
+      passwordKey: password
+    persistence:
+      enabled: true
+      volumeName: data
+      accessModes:
+        - ReadWriteOnce
+      storageClassName: ""
+      size: 20Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 1Gi
+    podAnnotations: {}
+    podLabels: {}
+    podSecurityContext: {}
+    securityContext: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    networkPolicy:
+      create: true
+      name: ""
 
 storage:
   create: true

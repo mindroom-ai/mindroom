@@ -64,7 +64,32 @@ jobs:
         run: helm lint "$RUNTIME_CHART_DIR"
 
       - name: Render runtime chart
-        run: helm template mindroom-runtime "$RUNTIME_CHART_DIR" --namespace mindroom
+        run: |
+          render_dir="$(mktemp -d)"
+          helm template mindroom-runtime "$RUNTIME_CHART_DIR" \
+            --namespace mindroom \
+            > "$render_dir/default.yaml"
+          helm template mindroom-runtime "$RUNTIME_CHART_DIR" \
+            --namespace mindroom \
+            --set eventCache.backend=sqlite \
+            > "$render_dir/sqlite.yaml"
+          helm template mindroom-runtime "$RUNTIME_CHART_DIR" \
+            --namespace mindroom \
+            --set eventCache.postgres.create=false \
+            --set eventCache.databaseUrl.existingSecret=event-cache-database-url \
+            --set eventCache.databaseUrl.key=DATABASE_URL \
+            > "$render_dir/external-postgres.yaml"
+          helm template mindroom-runtime "$RUNTIME_CHART_DIR" \
+            --namespace mindroom \
+            --set selectorLabels.app=existing-runtime \
+            --set eventCache.postgres.nameOverride=existing-event-cache-postgres \
+            --set eventCache.postgres.selectorLabels.app=existing-event-cache-postgres \
+            --set eventCache.postgres.persistence.volumeName=existing-event-cache-postgres-data \
+            --set eventCache.postgres.auth.existingSecret=existing-event-cache-secrets \
+            --set eventCache.postgres.auth.passwordKey=POSTGRES_PASSWORD \
+            --set eventCache.databaseUrl.existingSecret=existing-event-cache-secrets \
+            --set eventCache.databaseUrl.key=DATABASE_URL \
+            > "$render_dir/adoption.yaml"
 
       - name: Package runtime chart
         run: |
