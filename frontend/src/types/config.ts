@@ -1,7 +1,7 @@
 import type { PROVIDERS } from "@/lib/providers";
 
 export type ProviderType = keyof typeof PROVIDERS;
-export type MemoryBackend = "mem0" | "file";
+export type MemoryBackend = "mem0" | "file" | "none";
 export type WorkerScope = "shared" | "user" | "user_agent";
 export type PrivateWorkerScope = Exclude<WorkerScope, "shared">;
 export type AgentPolicySource =

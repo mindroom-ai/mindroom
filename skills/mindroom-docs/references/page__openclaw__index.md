@@ -123,7 +123,9 @@ OpenClaw-compatible agents use the same memory system as every other MindRoom ag
 
 - `memory.backend: mem0` for vector memory (global default)
 - `memory.backend: file` for file-first memory (global default)
+- `memory.backend: none` or `memory: none` to disable built-in durable memory globally
 - `memory_backend: file` on an individual agent to override the global default
+- `memory_backend: none` on an individual agent to keep that agent stateless
 - agents that use file memory store it under `agents/<name>/workspace/`, not under the shared global `memory.file.path` tree
 - `context_files` and OpenClaw-style knowledge paths should point into that same canonical workspace if you want one consistent file-first workflow
 - optional `knowledge_bases` for semantic recall over arbitrary workspace folders

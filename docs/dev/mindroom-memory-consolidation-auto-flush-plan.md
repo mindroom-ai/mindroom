@@ -129,7 +129,7 @@ Cross-thread memory is eventually consistent:
 
 ```yaml
 memory:
-  backend: file # file | mem0
+  backend: file # file | mem0 | none
   auto_flush:
     enabled: false  # disabled by default
     flush_interval_seconds: 1800

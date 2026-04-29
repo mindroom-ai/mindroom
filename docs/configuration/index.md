@@ -163,7 +163,7 @@ agents:
     worker_scope: user_agent       # Optional: Reuse one proxied runtime per requester+agent
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
-    memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
+    memory_backend: file           # Optional: Per-agent memory backend override (mem0, file, or none)
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into each freshly built agent instance
       - SOUL.md
@@ -299,7 +299,7 @@ Sandbox-proxied execution is stricter than direct local execution: ordinary runt
 
 # Memory system configuration (optional)
 memory:
-  backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
+  backend: mem0                    # Global default backend (mem0, file, or none); agents can override with memory_backend
   team_reads_member_memory: false  # Default: false (when true, team reads can access member agent memories)
   embedder:
     provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
@@ -467,6 +467,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](agents.md))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](agents.md))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
+- `memory.backend: none`, `memory: none`, or `agents.<name>.memory_backend: none` disables built-in durable memory for the effective agent without disabling Agno Learning
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to

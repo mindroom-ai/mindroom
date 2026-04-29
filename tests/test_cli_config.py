@@ -1335,6 +1335,24 @@ class TestDoctor:
         assert "anthropic (1 model)" in result.output
         assert "API key valid" in result.output
 
+    def test_doctor_reports_disabled_memory_backend(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor should distinguish disabled memory from file-backed memory."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"{_VALID_CONFIG}memory: none\n")
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        assert result.exit_code == 0
+        assert "Memory backend: disabled" in result.output
+        assert "Memory backend: file" not in result.output
+
     def test_doctor_uses_active_config_sibling_env_from_exported_config_path(
         self,
         tmp_path: Path,

@@ -453,12 +453,24 @@ def _check_single_provider(
 
 def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check memory LLM and embedder configuration. Returns (passed, failed, warnings)."""
-    if not config.uses_mem0_memory():
-        console.print("[green]✓[/green] Memory backend: file (markdown)")
+    backends = (
+        {config.memory.backend}
+        if not config.agents
+        else {config.get_agent_memory_backend(agent_name) for agent_name in config.agents}
+    )
+    if "mem0" not in backends:
+        if backends == {"none"}:
+            console.print("[green]✓[/green] Memory backend: disabled")
+        elif backends == {"file"}:
+            console.print("[green]✓[/green] Memory backend: file (markdown)")
+        else:
+            labels = "/".join("disabled" if backend == "none" else backend for backend in sorted(backends))
+            console.print(f"[green]✓[/green] Memory backend: mixed (per-agent {labels})")
         return 1, 0, 0
 
-    if config.uses_file_memory():
-        console.print("[green]✓[/green] Memory backend: mixed (per-agent mem0/file)")
+    if len(backends) > 1:
+        labels = "/".join("disabled" if backend == "none" else backend for backend in sorted(backends))
+        console.print(f"[green]✓[/green] Memory backend: mixed (per-agent {labels})")
 
     p1, f1, w1 = _check_memory_llm(config, runtime_paths=runtime_paths)
     p2, f2, w2 = _check_memory_embedder(config, runtime_paths=runtime_paths)

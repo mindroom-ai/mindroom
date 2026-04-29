@@ -26,6 +26,7 @@ import {
   Agent,
   AgentPrivateConfig,
   AgentPrivateKnowledgeConfig,
+  MemoryBackend,
   getDefaultPrivateConfig,
   resolveEffectiveDefaultTools,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
@@ -660,7 +661,7 @@ export function AgentEditor() {
               value={field.value ?? "inherit"}
               onValueChange={(value) => {
                 const resolved =
-                  value === "inherit" ? undefined : (value as "mem0" | "file");
+                  value === "inherit" ? undefined : (value as MemoryBackend);
                 field.onChange(resolved);
                 handleFieldChange("memory_backend", resolved);
               }}
@@ -674,6 +675,7 @@ export function AgentEditor() {
                 </SelectItem>
                 <SelectItem value="mem0">Mem0 (vector memory)</SelectItem>
                 <SelectItem value="file">File (markdown memory)</SelectItem>
+                <SelectItem value="none">Disabled (stateless)</SelectItem>
               </SelectContent>
             </Select>
           )}

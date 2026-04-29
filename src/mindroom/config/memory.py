@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from mindroom.config.models import EmbedderConfig
 
-MemoryBackend = Literal["mem0", "file"]
+MemoryBackend = Literal["mem0", "file", "none"]
 
 
 class _MemoryEmbedderConfig(BaseModel):
@@ -156,9 +156,19 @@ class MemoryAutoFlushConfig(BaseModel):
 class MemoryConfig(BaseModel):
     """Memory system configuration."""
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_shorthand(cls, data: object) -> object:
+        """Normalize memory: none shorthand into the structured config shape."""
+        if data == "none":
+            return {"backend": "none"}
+        return data
+
     backend: MemoryBackend = Field(
         default="mem0",
-        description="Memory backend: 'mem0' (vector memory) or 'file' (markdown memory files)",
+        description=(
+            "Memory backend: 'mem0' (vector memory), 'file' (markdown memory files), or 'none' (disabled memory)"
+        ),
     )
     team_reads_member_memory: bool = Field(
         default=False,

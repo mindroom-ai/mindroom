@@ -23,6 +23,13 @@ def use_file_memory_backend(config: Config, *, agent_name: str | None = None) ->
     return config.get_agent_memory_backend(agent_name) == "file"
 
 
+def use_disabled_memory_backend(config: Config, *, agent_name: str | None = None) -> bool:
+    """Return whether the resolved backend disables memory."""
+    if agent_name is None:
+        return config.memory.backend == "none"
+    return config.get_agent_memory_backend(agent_name) == "none"
+
+
 def caller_uses_file_memory_backend(config: Config, caller_context: str | list[str]) -> bool:
     """Return whether the caller context resolves to file-backed memory."""
     if isinstance(caller_context, str):
@@ -30,10 +37,23 @@ def caller_uses_file_memory_backend(config: Config, caller_context: str | list[s
     return team_uses_file_memory_backend(config, caller_context)
 
 
+def caller_uses_disabled_memory_backend(config: Config, caller_context: str | list[str]) -> bool:
+    """Return whether the caller context resolves to disabled memory."""
+    if isinstance(caller_context, str):
+        return use_disabled_memory_backend(config, agent_name=caller_context)
+    return team_uses_disabled_memory_backend(config, caller_context)
+
+
 def team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> bool:
     """Return whether all team members resolve to file-backed memory."""
     config.assert_team_agents_supported(agent_names)
     return all(use_file_memory_backend(config, agent_name=agent_name) for agent_name in agent_names)
+
+
+def team_uses_disabled_memory_backend(config: Config, agent_names: list[str]) -> bool:
+    """Return whether all team members resolve to disabled memory."""
+    config.assert_team_agents_supported(agent_names)
+    return all(use_disabled_memory_backend(config, agent_name=agent_name) for agent_name in agent_names)
 
 
 def effective_storage_paths_for_context(
