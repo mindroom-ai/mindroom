@@ -25,6 +25,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     create_mock_room,
+    drain_coalescing,
     install_generate_response_mock,
     install_runtime_cache_support,
     install_send_response_mock,
@@ -86,11 +87,6 @@ async def _execute_command(
 ) -> None:
     """Execute one command through the current planner owner."""
     await bot._turn_controller._execute_command(room, event, requester_user_id, command)
-
-
-async def _drain_coalescing(bot: AgentBot) -> None:
-    """Run queued coalescing dispatch before asserting post-dispatch effects."""
-    await bot._coalescing_gate.drain_all()
 
 
 @pytest.fixture
@@ -521,7 +517,7 @@ class TestCommandHandling:
 
         # Call _on_message
         await bot._on_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         # Verify the agent didn't try to process the command
         bot._generate_response.assert_not_called()
@@ -580,7 +576,7 @@ class TestCommandHandling:
 
             with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
                 await bot._on_message(room, event)
-                await _drain_coalescing(bot)
+                await drain_coalescing(bot)
 
             # Verify the command was handled
             bot._turn_controller._execute_command.assert_called_once()
@@ -636,7 +632,7 @@ class TestCommandHandling:
 
             with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
                 await bot._on_message(room, event)
-                await _drain_coalescing(bot)
+                await drain_coalescing(bot)
 
             bot._turn_controller._execute_command.assert_called_once()
             bot.logger.info.assert_any_call(
@@ -697,7 +693,7 @@ class TestCommandHandling:
             )
 
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
             bot._turn_controller._execute_command.assert_not_called()
 
@@ -778,7 +774,7 @@ class TestCommandHandling:
                 patch("mindroom.turn_controller.is_dm_room", return_value=False),
             ):
                 await bot._on_message(room, event)
-                await _drain_coalescing(bot)
+                await drain_coalescing(bot)
 
             bot._send_response.assert_called_once()
             assert bot._send_response.await_args.args[2] == "❌ Unknown command. Try !help for available commands."
@@ -854,7 +850,7 @@ class TestCommandHandling:
             )
 
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
             # Verify the agent processed the message
             bot._generate_response.assert_called_once()
@@ -924,7 +920,7 @@ class TestCommandHandling:
                 mock_extract.return_value = "router"
                 # Call _on_message
                 await bot._on_message(room, event)
-                await _drain_coalescing(bot)
+                await drain_coalescing(bot)
 
             # Verify the agent didn't try to process the error message
             bot._generate_response.assert_not_called()
@@ -1054,7 +1050,7 @@ class TestCommandHandling:
             patch("mindroom.turn_controller.extract_agent_name", return_value="router"),
         ):
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         # Verify finance agent did NOT process the message
         bot._generate_response.assert_not_called()
@@ -1168,7 +1164,7 @@ class TestCommandHandling:
             )
 
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         # Verify news agent did NOT form a team or respond
         bot._generate_response.assert_not_called()
@@ -1293,7 +1289,7 @@ class TestCommandHandling:
             )
 
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         # Verify finance agent did NOT respond to router's error
         bot._generate_response.assert_not_called()
@@ -1362,7 +1358,7 @@ class TestCommandHandling:
             mock_extract.return_value = "router"
             # Call _on_message
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         # Verify the agent didn't try to process the message
         bot._generate_response.assert_not_called()
@@ -1435,7 +1431,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         await bot._on_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         bot._turn_controller._append_live_event_with_timing.assert_not_awaited()
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
@@ -1508,7 +1504,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         await bot._on_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
             "!test:server",
@@ -1595,7 +1591,7 @@ class TestRouterSkipsSingleAgent:
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
 
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         # Verify router didn't attempt to route
         bot._turn_controller._execute_router_relay.assert_not_called()
@@ -1688,7 +1684,7 @@ class TestRouterSkipsSingleAgent:
             ]
 
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         # Verify router DID attempt to route
         bot._turn_controller._execute_router_relay.assert_called_once()
@@ -1863,7 +1859,7 @@ class TestRouterSkipsSingleAgent:
         ):
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         # Router should handle the command even with a single agent
         # This ensures commands work properly in single-agent rooms
@@ -1935,7 +1931,7 @@ class TestRouterSkipsSingleAgent:
         ):
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         # Router MUST handle schedule commands even with a single agent
         # This is a regression test to ensure commands work in single-agent rooms
@@ -2022,7 +2018,7 @@ class TestRouterSkipsSingleAgent:
             mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             mock_agents_in_thread.return_value = []
             await bot._on_message(room, voice_event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         # Voice transcriptions should work: router skips routing but doesn't interfere
         # This is a regression test to ensure voice works in single-agent rooms
@@ -2101,6 +2097,6 @@ class TestRouterSkipsSingleAgent:
                 config.get_ids(runtime_paths_for(config))["calculator"],
             ]
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         bot._turn_controller._execute_command.assert_called_once()

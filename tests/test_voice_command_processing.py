@@ -29,6 +29,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.voice_handler import prepare_voice_message
 from tests.conftest import (
     bind_runtime_paths,
+    drain_coalescing,
     install_generate_response_mock,
     install_runtime_cache_support,
     install_send_response_mock,
@@ -121,11 +122,6 @@ def _install_voice_thread_dispatch_mocks(
     bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
 
 
-async def _drain_coalescing(*bots: AgentBot) -> None:
-    for bot in bots:
-        await bot._coalescing_gate.drain_all()
-
-
 def _make_visible_router_echo_scenario(
     tmp_path: Path,
     *,
@@ -215,7 +211,7 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     ):
         bot.client = MagicMock()
         await bot._on_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     mock_handle.assert_called_once()
     command = mock_handle.await_args.kwargs["command"]
@@ -767,7 +763,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
         await bot._on_media_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
@@ -839,7 +835,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
         await bot._on_media_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     mock_download_audio.assert_called_once()
     bot._generate_response.assert_called_once()
@@ -899,7 +895,7 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         mock_voice.return_value = f"{VOICE_PREFIX}turn on the lights"
         for bot in bots:
             await bot._on_media_message(room, event)
-        await _drain_coalescing(*bots)
+        await drain_coalescing(*bots)
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
@@ -943,7 +939,7 @@ async def test_router_visible_voice_echo_is_deduplicated_on_redelivery(tmp_path)
         mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
         await bot._on_media_message(room, event)
         await bot._on_media_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_called_once()
     assert mock_download_audio.await_count == 1
@@ -1002,7 +998,7 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     assert bot._delivery_gateway.send_text.await_count == 2
     echo_request = bot._delivery_gateway.send_text.call_args_list[0].args[0]
@@ -1040,13 +1036,13 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         assert not bot._turn_store.is_handled(event.event_id)
         assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
 
         await bot._on_media_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     response_texts = [call.args[0].response_text for call in bot._delivery_gateway.send_text.call_args_list]
     assert response_texts == [
@@ -1082,7 +1078,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     assert not bot._turn_store.is_handled(event.event_id)
     assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
@@ -1102,7 +1098,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await restarted_bot._on_media_message(restarted_room, restarted_event)
-        await _drain_coalescing(restarted_bot)
+        await drain_coalescing(restarted_bot)
 
     response_texts = [call.args[0].response_text for call in restarted_bot._delivery_gateway.send_text.call_args_list]
     assert response_texts == ["@home could you help with this?"]
@@ -1166,7 +1162,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_called_once()
     request = bot._delivery_gateway.send_text.call_args.args[0]
@@ -1249,7 +1245,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         mock_voice.return_value = f"{VOICE_PREFIX}@research summarize this audio"
         for bot in bots:
             await bot._on_media_message(room, event)
-        await _drain_coalescing(*bots)
+        await drain_coalescing(*bots)
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
@@ -1326,7 +1322,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         for bot in bots:
             await bot._on_media_message(room, event)
-        await _drain_coalescing(*bots)
+        await drain_coalescing(*bots)
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1

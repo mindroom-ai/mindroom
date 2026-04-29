@@ -18,15 +18,12 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_event,
+    drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
 )
-
-
-async def _drain_coalescing(bot: AgentBot) -> None:
-    await bot._coalescing_gate.drain_all()
 
 
 @pytest.mark.asyncio
@@ -118,7 +115,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
 
     with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
         await bot._on_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     # Verify error message was sent
     assert len(sent_messages) == 1
@@ -254,7 +251,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
         ),
     ):
         await bot._on_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     assert not error_messages
     assert len(sent_messages) == 1
@@ -356,7 +353,7 @@ async def test_unknown_command_with_reply_stays_plain_reply(tmp_path: Path) -> N
 
     with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
         await bot._on_message(room, event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
     assert len(sent_messages) == 1
     msg = sent_messages[0]

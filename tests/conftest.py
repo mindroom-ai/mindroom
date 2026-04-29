@@ -52,6 +52,7 @@ __all__ = [
     "create_mock_room",
     "delivered_matrix_event",
     "delivered_matrix_side_effect",
+    "drain_coalescing",
     "event_cache",
     "event_cache_factory",
     "install_edit_message_mock",
@@ -86,6 +87,12 @@ _VISIBLE_MESSAGE_IDS = count(1)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
 RuntimeBot = AgentBot | TeamBot
+
+
+async def drain_coalescing(*bots: RuntimeBot) -> None:
+    """Run queued coalescing dispatch before asserting post-dispatch effects."""
+    for bot in bots:
+        await bot._coalescing_gate.drain_all()
 
 
 def _wait_for_postgres_container(database_url: str) -> None:

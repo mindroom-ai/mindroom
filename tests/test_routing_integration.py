@@ -20,6 +20,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
     runtime_paths_for,
@@ -29,11 +30,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
-
-
-async def _drain_coalescing(*bots: AgentBot) -> None:
-    for bot in bots:
-        await bot._coalescing_gate.drain_all()
 
 
 class TestRoutingIntegration:
@@ -149,7 +145,7 @@ class TestRoutingIntegration:
         # Process message with both bots
         await research_bot._on_message(mock_room, user_message)
         await news_bot._on_message(mock_room, user_message)
-        await _drain_coalescing(research_bot, news_bot)
+        await drain_coalescing(research_bot, news_bot)
 
         # Only research bot should respond (streaming makes 2 calls)
         assert research_bot.client.room_send.call_count >= 1  # At least initial message

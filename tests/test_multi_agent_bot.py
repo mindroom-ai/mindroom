@@ -128,6 +128,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    drain_coalescing,
     install_edit_message_mock,
     install_generate_response_mock,
     install_runtime_cache_support,
@@ -225,11 +226,6 @@ def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> st
     if isinstance(outcome, str) or outcome is None:
         return outcome
     return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
-
-
-async def _drain_coalescing(*bots: AgentBot) -> None:
-    for bot in bots:
-        await bot._coalescing_gate.drain_all()
 
 
 async def _run_orchestrator_start_until_ready(orchestrator: MultiAgentOrchestrator) -> None:
@@ -763,10 +759,10 @@ class TestAgentBot:
         """Invoke the target handler by name."""
         if handler_name == "message":
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
         elif handler_name in {"image", "voice", "file"}:
             await bot._on_media_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
         elif handler_name == "reaction":
             await bot._on_reaction(room, event)
         else:  # pragma: no cover - defensive guard for test helper misuse
@@ -1704,7 +1700,7 @@ class TestAgentBot:
         mock_event.sender = "@mindroom_calculator:localhost"  # Bot's own ID
 
         await bot._on_message(mock_room, mock_event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         # Should not send any response
         bot.client.room_send.assert_not_called()
@@ -1727,7 +1723,7 @@ class TestAgentBot:
         mock_event.sender = "@mindroom_general:localhost"  # Another agent
 
         await bot._on_message(mock_room, mock_event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         # Should not send any response
         bot.client.room_send.assert_not_called()
@@ -1836,7 +1832,7 @@ class TestAgentBot:
             patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
         ):
             await bot._on_message(mock_room, mock_event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         # Should call AI and send response based on streaming mode
         if enable_streaming:
@@ -5430,7 +5426,7 @@ class TestAgentBot:
         mock_event.source = {"content": {"body": "Hello everyone!"}}
 
         await bot._on_message(mock_room, mock_event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         # Should not send any response
         bot.client.room_send.assert_not_called()
@@ -5886,7 +5882,7 @@ class TestAgentBot:
             ),
         ):
             await bot._on_media_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
@@ -6071,7 +6067,7 @@ class TestAgentBot:
             ) as mock_resolve_media,
         ):
             await bot._on_media_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         mock_resolve_media.assert_called_once()
         assert mock_resolve_media.call_args.args[1] == [current_attachment_id, history_attachment_id]
@@ -6276,7 +6272,7 @@ class TestAgentBot:
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=None),
         ):
             await bot._on_media_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         bot._generate_response.assert_not_called()
         tracker.record_handled_turn.assert_not_called()
@@ -6350,7 +6346,7 @@ class TestAgentBot:
             ),
         ):
             await bot._on_media_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
@@ -6439,7 +6435,7 @@ class TestAgentBot:
             ),
         ):
             await bot._on_media_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         bot._generate_response.assert_not_called()
         tracker.record_handled_turn.assert_not_called()
@@ -6511,7 +6507,7 @@ class TestAgentBot:
                 config.get_ids(runtime_paths_for(config))["calculator"],
             ]
             await bot._on_media_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         bot._turn_controller._execute_router_relay.assert_called_once_with(
             room,
@@ -6657,7 +6653,7 @@ class TestAgentBot:
                 config.get_ids(runtime_paths_for(config))["calculator"],
             ]
             await bot._on_media_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         bot._turn_controller._execute_router_relay.assert_called_once()
         mock_register_file.assert_not_awaited()
@@ -6960,7 +6956,7 @@ class TestAgentBot:
         ):
             await router_bot._on_media_message(router_room, file_event)
             await general_bot._on_media_message(general_room, file_event)
-            await _drain_coalescing(router_bot, general_bot)
+            await drain_coalescing(router_bot, general_bot)
 
         mock_register.assert_awaited_once()
         assert mock_register.await_args.kwargs["room_id"] == "!test:localhost"
@@ -7044,9 +7040,9 @@ class TestAgentBot:
             ),
         ):
             await bot._on_message(room, text_event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
             await bot._on_media_message(room, image_event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         assert bot._turn_controller._execute_router_relay.await_count == 2
         first_call = bot._turn_controller._execute_router_relay.await_args_list[0].kwargs
@@ -7121,9 +7117,9 @@ class TestAgentBot:
             ),
         ):
             await bot._on_message(room, text_event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
             await bot._on_media_message(room, image_event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         bot._turn_controller._execute_router_relay.assert_not_awaited()
 
@@ -7203,7 +7199,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True),
         ):
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         mock_resolve_attachment_ids.assert_awaited_once()
         bot._generate_response.assert_awaited_once()
@@ -8921,7 +8917,7 @@ class TestAgentBot:
             patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
         ):
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         mock_has_active_response.assert_called_once()
         active_target = mock_has_active_response.call_args.args[0]
@@ -9160,7 +9156,7 @@ class TestAgentBot:
             patch.object(bot._turn_controller, "_log_dispatch_latency"),
         ):
             await bot._on_media_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         bot._generate_response.assert_not_called()
         bot._edit_message.assert_not_awaited()
@@ -10282,7 +10278,7 @@ class TestAgentBot:
         }
 
         await bot._on_message(mock_room, mock_event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         # Should respond as only agent in thread
         if enable_streaming:
@@ -10335,7 +10331,7 @@ class TestAgentBot:
         }
 
         await bot._on_message(mock_room, mock_event_2)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         # Should form team and send a structured streaming team response
         mock_stream_agent_response.assert_not_called()
@@ -10376,7 +10372,7 @@ class TestAgentBot:
         mock_ai_response.return_value = "Mentioned response"
 
         await bot._on_message(mock_room, mock_event_with_mention)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         # Should respond when explicitly mentioned
         if enable_streaming:
@@ -10423,7 +10419,7 @@ class TestAgentBot:
         }
 
         await bot._on_message(mock_room, mock_event)
-        await _drain_coalescing(bot)
+        await drain_coalescing(bot)
 
         # Should not send any message since it already responded
         bot.client.room_send.assert_not_called()

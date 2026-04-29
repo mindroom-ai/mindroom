@@ -23,16 +23,13 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
     install_runtime_cache_support,
     install_send_response_mock,
     runtime_paths_for,
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
-
-
-async def _drain_coalescing(bot: AgentBot) -> None:
-    await bot._coalescing_gate.drain_all()
 
 
 @pytest.fixture
@@ -219,7 +216,7 @@ class TestResponseTrackingRegression:
         with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
             # Call _on_message which should detect unknown command and respond
             await bot._on_message(mock_room, unknown_command_event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
         bot._send_response.assert_awaited_once()
         assert "❌ Unknown command" in bot._send_response.await_args.args[2]

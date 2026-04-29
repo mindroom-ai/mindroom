@@ -19,6 +19,7 @@ from mindroom.thread_utils import should_agent_respond
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
     install_generate_response_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -35,10 +36,6 @@ def _bind_runtime_paths(config: Config, path: Path) -> Config:
 
 def _config(path: Path, **kwargs: object) -> Config:
     return _bind_runtime_paths(Config(**kwargs), path)
-
-
-async def _drain_coalescing(bot: AgentBot) -> None:
-    await bot._coalescing_gate.drain_all()
 
 
 class TestDMResponseLogic:
@@ -394,7 +391,7 @@ class TestDMIntegration:
 
             # Process the message
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
             # Verify the bot decided to respond even though not configured for the room
             bot._generate_response.assert_called_once()
@@ -484,7 +481,7 @@ class TestDMIntegration:
 
             # Process the message
             await bot._on_message(room, event)
-            await _drain_coalescing(bot)
+            await drain_coalescing(bot)
 
             # Verify the bot decided to respond in the DM room
             bot._generate_response.assert_called_once()

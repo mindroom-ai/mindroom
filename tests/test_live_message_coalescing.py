@@ -463,6 +463,44 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_text_first_image_during_debounce_dispatches_without_upload_grace_delay(tmp_path: Path) -> None:
+    """Do not add upload-grace delay once media already joined during debounce."""
+    bot = _make_bot(tmp_path, debounce_ms=20, upload_grace_ms=200)
+    room = _make_room()
+    text_event = _text_event(event_id="$m1", body="describe this", server_timestamp=1000)
+    image_event = _image_event(event_id="$img1", server_timestamp=1001)
+    calls: list[tuple[list[str], int]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+    ) -> None:
+        calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
+
+    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_controller._enqueue_for_dispatch(
+            text_event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await asyncio.sleep(0.005)
+        await bot._turn_controller._enqueue_for_dispatch(
+            image_event,
+            room,
+            source_kind="image",
+            requester_user_id="@user:localhost",
+        )
+        await _wait_for(lambda: calls == [(["$m1", "$img1"], 1)], deadline_seconds=0.12)
+
+    assert bot._coalescing_gate.is_idle()
+
+
+@pytest.mark.asyncio
 async def test_text_first_image_during_grace_dispatches_once(tmp_path: Path) -> None:
     """Hold a text-only batch briefly so a late image joins the first dispatch."""
     bot = _make_bot(tmp_path, debounce_ms=10, upload_grace_ms=40)

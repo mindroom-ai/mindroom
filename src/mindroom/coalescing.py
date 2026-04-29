@@ -105,7 +105,6 @@ class PendingEvent:
 
 @dataclass
 class _QueuedEvent:
-    sequence: int
     kind: _QueueKind
     pending_event: PendingEvent
 
@@ -119,7 +118,6 @@ class _GateEntry:
     wake_generation: int = 0
     deadline: float | None = None
     grace_deadline: float | None = None
-    next_sequence: int = 0
     drain_all_requested: bool = False
 
 
@@ -465,15 +463,6 @@ class CoalescingGate:
         return count
 
     @staticmethod
-    def _front_text_run_length(gate: _GateEntry) -> int:
-        count = 0
-        for queued in gate.queue:
-            if queued.kind is not _QueueKind.NORMAL or _is_media_event(queued.pending_event.event):
-                break
-            count += 1
-        return count
-
-    @staticmethod
     def _extend_candidate_with_grace_media(gate: _GateEntry, candidate_count: int) -> int:
         count = candidate_count
         while count < len(gate.queue):
@@ -585,8 +574,7 @@ class CoalescingGate:
         enqueue_start = time.monotonic()
         gate = self._get_or_create_gate(key)
         kind = self._queue_kind(pending_event)
-        gate.queue.append(_QueuedEvent(gate.next_sequence, kind, pending_event))
-        gate.next_sequence += 1
+        gate.queue.append(_QueuedEvent(kind, pending_event))
         self._schedule_drain(key, gate)
         path = self._enqueue_path(kind)
         self._record_enqueue(
@@ -816,11 +804,7 @@ class CoalescingGate:
                 await self._wait_for_debounce(gate)
                 bypass_grace = self._is_shutting_down() or gate.drain_all_requested
                 use_upload_grace = not bypass_grace and self._upload_grace_seconds() > 0
-                candidate_count = (
-                    self._front_text_run_length(gate) if use_upload_grace else self._front_normal_run_length(gate)
-                )
-                if candidate_count == 0:
-                    candidate_count = self._front_normal_run_length(gate)
+                candidate_count = self._front_normal_run_length(gate)
                 if candidate_count == 0:
                     continue
                 candidate_events = self._queue_pending_events(gate, candidate_count)
