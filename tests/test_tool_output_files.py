@@ -51,6 +51,21 @@ def _processed(function: Function) -> Function:
     return copied
 
 
+def _processed_strict(function: Function) -> Function:
+    copied = function.model_copy(deep=True)
+    copied.process_entrypoint(strict=True)
+    return copied
+
+
+def _assert_output_path_schema_is_optional(function: Function) -> None:
+    output_schema = function.parameters["properties"][OUTPUT_PATH_ARGUMENT]
+    assert output_schema["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert output_schema["default"] is None
+    assert output_schema["description"].startswith("Optional")
+    assert "workspace-relative path" in output_schema["description"]
+    assert OUTPUT_PATH_ARGUMENT not in function.parameters["required"]
+
+
 def _receipt(result: object) -> dict[str, object]:
     assert isinstance(result, dict)
     envelope = result.get("mindroom_tool_output")
@@ -113,10 +128,18 @@ def test_schema_adds_optional_output_path_for_normal_function(tmp_path: Path) ->
 
     function = _processed(_first_function(toolkit))
 
-    output_schema = function.parameters["properties"][OUTPUT_PATH_ARGUMENT]
-    assert output_schema.get("type") == "string" or {"type": "string"} in output_schema.get("anyOf", [])
-    assert "workspace-relative path" in output_schema["description"]
-    assert OUTPUT_PATH_ARGUMENT not in function.parameters["required"]
+    _assert_output_path_schema_is_optional(function)
+
+
+def test_schema_keeps_output_path_optional_after_strict_processing(tmp_path: Path) -> None:
+    toolkit = _EchoToolkit()
+    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+
+    function = _processed_strict(_first_function(toolkit))
+
+    assert function.parameters["additionalProperties"] is False
+    assert "text" in function.parameters["required"]
+    _assert_output_path_schema_is_optional(function)
 
 
 def test_schema_handles_strict_or_additional_properties_false_function(tmp_path: Path) -> None:
@@ -137,8 +160,7 @@ def test_schema_handles_strict_or_additional_properties_false_function(tmp_path:
     wrap_function_for_output_files(function, _policy(tmp_path))
 
     assert function.parameters["additionalProperties"] is False
-    assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
-    assert OUTPUT_PATH_ARGUMENT not in function.parameters["required"]
+    _assert_output_path_schema_is_optional(function)
 
 
 def test_schema_handles_skip_entrypoint_processing_function(tmp_path: Path) -> None:
@@ -165,7 +187,30 @@ def test_schema_handles_skip_entrypoint_processing_function(tmp_path: Path) -> N
 
     assert _receipt(result.result)["status"] == "saved_to_file"
     assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "saved"
-    assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
+    _assert_output_path_schema_is_optional(function)
+
+
+def test_schema_handles_skip_entrypoint_processing_function_in_strict_mode(tmp_path: Path) -> None:
+    def decorated_style_tool(**kwargs: object) -> object:
+        return kwargs["text"]
+
+    function = Function(
+        name="decorated_style_tool",
+        entrypoint=decorated_style_tool,
+        parameters={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+        skip_entrypoint_processing=True,
+    )
+    wrap_function_for_output_files(function, _policy(tmp_path))
+
+    function = _processed_strict(function)
+
+    assert function.parameters["additionalProperties"] is False
+    assert "text" in function.parameters["required"]
+    _assert_output_path_schema_is_optional(function)
 
 
 def test_omitted_output_path_returns_original_result_unchanged(tmp_path: Path) -> None:
@@ -176,6 +221,22 @@ def test_omitted_output_path_returns_original_result_unchanged(tmp_path: Path) -
     result = FunctionCall(
         function=_first_function(toolkit),
         arguments={"text": "hi"},
+        call_id="call-1",
+    ).execute()
+
+    assert result.result is raw_result
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("raw_output_path", ["", "   \t\n"])
+def test_empty_output_path_returns_original_result_unchanged(tmp_path: Path, raw_output_path: str) -> None:
+    raw_result = {"raw": "value"}
+    toolkit = _EchoToolkit(result=raw_result)
+    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+
+    result = FunctionCall(
+        function=_first_function(toolkit),
+        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: raw_output_path},
         call_id="call-1",
     ).execute()
 
@@ -369,7 +430,6 @@ def test_existing_regular_file_is_overwritten_atomically_and_receipt_marks_overw
     [
         "/tmp/out.txt",
         "../escape.txt",
-        "",
         ".",
         "bad\x00path",
         "$HOME/out.txt",

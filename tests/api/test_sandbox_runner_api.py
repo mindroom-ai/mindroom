@@ -611,11 +611,13 @@ async def test_execute_request_inprocess_marks_tool_failures(
 
 
 @pytest.mark.asyncio
-async def test_execute_request_inprocess_ignores_null_tool_output_path(
+@pytest.mark.parametrize("raw_output_path", [None, "", "   \t\n"])
+async def test_execute_request_inprocess_ignores_empty_tool_output_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    raw_output_path: object,
 ) -> None:
-    """Null output paths should behave like omitted output paths."""
+    """Null or blank output paths should behave like omitted output paths."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -634,7 +636,7 @@ async def test_execute_request_inprocess_ignores_null_tool_output_path(
         return {"called": True}
 
     def _unexpected_output_root_resolution(**_kwargs: object) -> Path | None:
-        pytest.fail("null mindroom_output_path must not resolve a tool output workspace root")
+        pytest.fail("empty mindroom_output_path must not resolve a tool output workspace root")
 
     def _fake_resolve_entrypoint(**kwargs: object) -> tuple[_FakeToolkit, object]:
         assert kwargs["tool_output_workspace_root"] is None
@@ -652,7 +654,7 @@ async def test_execute_request_inprocess_ignores_null_tool_output_path(
             tool_name="file",
             function_name="list_files",
             args=[],
-            kwargs={sandbox_runner_module.OUTPUT_PATH_ARGUMENT: None},
+            kwargs={sandbox_runner_module.OUTPUT_PATH_ARGUMENT: raw_output_path},
         ),
         runtime_paths,
         sandbox_runner_module._runtime_config_or_empty(runtime_paths),
