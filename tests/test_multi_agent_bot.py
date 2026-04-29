@@ -9000,9 +9000,9 @@ class TestAgentBot:
             ) as mock_has_active_response,
             patch.object(
                 bot._response_runner,
-                "signal_waiting_human_message",
-                return_value=True,
-            ) as mock_signal_waiting_human_message,
+                "reserve_waiting_human_message",
+                return_value=MagicMock(),
+            ) as mock_reserve_waiting_human_message,
             patch.object(
                 bot._turn_controller,
                 "_dispatch_text_message",
@@ -9015,10 +9015,10 @@ class TestAgentBot:
         mock_has_active_response.assert_called_once()
         active_target = mock_has_active_response.call_args.args[0]
         assert active_target.resolved_thread_id == target.resolved_thread_id
-        mock_signal_waiting_human_message.assert_called_once()
-        signal_target = mock_signal_waiting_human_message.call_args.kwargs["target"]
+        mock_reserve_waiting_human_message.assert_called_once()
+        signal_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
         assert signal_target.resolved_thread_id == target.resolved_thread_id
-        assert mock_signal_waiting_human_message.call_args.kwargs["response_envelope"] is envelope
+        assert mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"] is envelope
         mock_dispatch.assert_not_awaited()
         mock_enqueue.assert_awaited_once()
         key, pending_event = mock_enqueue.await_args.args
@@ -9026,6 +9026,7 @@ class TestAgentBot:
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert pending_event.queued_notice_reservation is mock_reserve_waiting_human_message.return_value
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_enqueues_prepared_text(

@@ -335,6 +335,7 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
     ):
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
+        await bot._coalescing_gate.drain_all()
 
     mock_interactive.assert_awaited_once()
     assert mock_schedule.await_args.kwargs["scheduled_by"] == "@alice:example.com"
@@ -418,6 +419,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     ):
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
+        await bot._coalescing_gate.drain_all()
 
     mock_interactive.assert_awaited_once()
     assert (
@@ -506,6 +508,7 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
     ) as mock_interactive:
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
+        await bot._coalescing_gate.drain_all()
 
     mock_interactive.assert_awaited_once()
     bot._send_response.assert_awaited_once()

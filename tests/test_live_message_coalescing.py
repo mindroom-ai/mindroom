@@ -1313,6 +1313,55 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "spoofed_source_kind",
+    [COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP, "hook", "hook_dispatch", "voice"],
+)
+async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
+    tmp_path: Path,
+    spoofed_source_kind: str,
+) -> None:
+    """User-controlled source_kind content should not become trusted dispatch policy."""
+    bot = _make_bot(tmp_path, debounce_ms=1000)
+    room = _make_room()
+    event = _text_event(
+        event_id=f"$spoof_{spoofed_source_kind}",
+        body="normal user message",
+        source_kind=spoofed_source_kind,
+    )
+    calls: list[nio.RoomMessageText | PreparedTextEvent] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: nio.RoomMessageText | PreparedTextEvent,
+        _requester_user_id: str,
+        *,
+        media_events: list[object] | None = None,
+        handled_turn: HandledTurnState | None = None,
+        queued_notice_reservation: object | None = None,
+    ) -> None:
+        _ = media_events, handled_turn, queued_notice_reservation
+        calls.append(dispatched_event)
+
+    with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
+        await bot._turn_controller._enqueue_for_dispatch(
+            event,
+            room,
+            source_kind="message",
+            requester_user_id="@user:localhost",
+        )
+        await asyncio.sleep(0.01)
+        assert calls == []
+
+        await bot.prepare_for_sync_shutdown()
+
+    assert len(calls) == 1
+    assert isinstance(calls[0], nio.RoomMessageText)
+    assert not isinstance(calls[0], PreparedTextEvent)
+    assert calls[0].body == "normal user message"
+
+
+@pytest.mark.asyncio
 async def test_bypass_preserves_fifo_order_behind_existing_normal_work() -> None:
     """Hook-originated bypass events dispatch solo without jumping ahead of queued user work."""
     room = _make_room()

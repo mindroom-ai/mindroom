@@ -36,6 +36,8 @@ from .enrichment import (
 )
 from .execution import emit, emit_collect, emit_final_response_transform, emit_gate, emit_transform
 from .ingress import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     HookIngressPolicy,
     hook_ingress_policy,
     is_automation_source_kind,
@@ -82,6 +84,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 __all__ = [
+    "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND",
     "BUILTIN_EVENT_NAMES",
     "EVENT_AGENT_STARTED",
     "EVENT_AGENT_STOPPED",
@@ -101,6 +104,7 @@ __all__ = [
     "EVENT_SYSTEM_ENRICH",
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
+    "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "AfterResponseContext",
     "AgentLifecycleContext",
     "BeforeResponseContext",

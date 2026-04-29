@@ -14,13 +14,19 @@ import nio
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .commands.parsing import command_parser
 from .constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
-from .hooks.ingress import is_voice_event
+from .hooks.ingress import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    is_voice_event,
+)
 from .logging_config import get_logger
 from .matrix.media import extract_media_caption
 from .timing import emit_elapsed_timing, event_timing_scope
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 
 __all__ = [
     "COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP",
@@ -43,8 +49,8 @@ __all__ = [
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
-COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP = "active_thread_follow_up"
-COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY = "trusted_internal_relay"
+COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP = ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         "hook",
@@ -113,6 +119,7 @@ class PendingEvent:
     room: nio.MatrixRoom
     source_kind: str
     enqueue_time: float = field(default_factory=time.time)
+    queued_notice_reservation: QueuedHumanNoticeReservation | None = None
 
 
 @dataclass
@@ -149,6 +156,7 @@ class CoalescedBatch:
     media_events: list[MediaDispatchEvent]
     original_sender: str | None = None
     raw_audio_fallback: bool = False
+    queued_notice_reservation: QueuedHumanNoticeReservation | None = None
 
 
 @dataclass(frozen=True)
@@ -174,9 +182,9 @@ def _effective_source_kind(
     event: DispatchEvent,
     fallback_source_kind: str | None = None,
 ) -> str | None:
-    content = _event_content_dict(event)
-    source_kind = content.get("com.mindroom.source_kind") if content is not None else None
-    return source_kind if isinstance(source_kind, str) else fallback_source_kind
+    if isinstance(event, PreparedTextEvent) and event.source_kind_override is not None:
+        return event.source_kind_override
+    return fallback_source_kind
 
 
 def is_coalescing_exempt_source_kind(
@@ -282,6 +290,30 @@ def _batch_source_kind(ordered_pending_events: list[PendingEvent]) -> str:
     return min(resolved_source_kinds, key=lambda sk: _SOURCE_KIND_PRIORITY.get(sk, 999))
 
 
+def _batch_queued_notice_reservation(
+    ordered_pending_events: list[PendingEvent],
+) -> QueuedHumanNoticeReservation | None:
+    reservations = [
+        pending_event.queued_notice_reservation
+        for pending_event in ordered_pending_events
+        if pending_event.queued_notice_reservation is not None
+    ]
+    if not reservations:
+        return None
+    if len(ordered_pending_events) == 1:
+        return reservations[0]
+    for reservation in reservations:
+        reservation.cancel()
+    msg = "Queued-human notice reservations must dispatch as solo batches"
+    raise ValueError(msg)
+
+
+def _cancel_pending_event_reservations(pending_events: list[PendingEvent]) -> None:
+    for pending_event in pending_events:
+        if pending_event.queued_notice_reservation is not None:
+            pending_event.queued_notice_reservation.cancel()
+
+
 def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> dict[str, str]:
     return {
         pending_event.event.event_id: _dispatch_prompt_for_event(pending_event.event)
@@ -322,6 +354,7 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
         ],
         original_sender=original_sender,
         raw_audio_fallback=raw_audio_fallback,
+        queued_notice_reservation=_batch_queued_notice_reservation(ordered_pending_events),
     )
 
 
@@ -388,10 +421,11 @@ def build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     Multi-event batches produce a ``PreparedTextEvent`` with the combined prompt.
     """
     if len(batch.pending_events) == 1 and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent):
-        if (
-            isinstance(batch.primary_event, PreparedTextEvent)
-            and batch.primary_event.source_kind_override != batch.source_kind
-        ):
+        if isinstance(batch.primary_event, PreparedTextEvent):
+            if batch.source_kind == "message":
+                return batch.primary_event
+            if batch.primary_event.source_kind_override == batch.source_kind:
+                return batch.primary_event
             return replace(batch.primary_event, source_kind_override=batch.source_kind)
         if isinstance(batch.primary_event, nio.RoomMessageText) and batch.source_kind != "message":
             return PreparedTextEvent(
@@ -872,19 +906,34 @@ class CoalescingGate:
         gate.phase = GatePhase.IN_FLIGHT
         gate.deadline = None
         gate.grace_deadline = None
-        diagnostics = self._flush_diagnostics(key, pending_events, bypass_grace=bypass_grace)
-        logger.info("coalescing_gate_flush_started", **diagnostics.log_context)
+        pending_count = len(pending_events)
+        timing_scope = event_timing_scope(pending_events[-1].event.event_id)
+        log_context: dict[str, object] = {
+            "room_id": key[0],
+            "thread_id": key[1],
+            "requester_user_id": key[2],
+            "pending_count": pending_count,
+            "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
+            "bypass_grace": bypass_grace,
+            "source_event_ids": self._source_event_ids(pending_events),
+            "timing_scope": timing_scope,
+        }
         dispatched = False
         try:
+            diagnostics = self._flush_diagnostics(key, pending_events, bypass_grace=bypass_grace)
+            pending_count = diagnostics.pending_count
+            timing_scope = diagnostics.timing_scope
+            log_context = diagnostics.log_context
+            logger.info("coalescing_gate_flush_started", **log_context)
             dispatch_batch_start = time.monotonic()
             await self._dispatch_batch(diagnostics.batch)
             dispatched = True
             emit_elapsed_timing(
                 "coalescing_gate.flush.dispatch_batch",
                 dispatch_batch_start,
-                pending_count=diagnostics.pending_count,
+                pending_count=pending_count,
                 bypass_grace=bypass_grace,
-                timing_scope=diagnostics.timing_scope,
+                timing_scope=timing_scope,
             )
             return "dispatched"
         finally:
@@ -893,12 +942,12 @@ class CoalescingGate:
                 "coalescing_gate.flush",
                 flush_start,
                 outcome=outcome,
-                pending_count=diagnostics.pending_count,
+                pending_count=pending_count,
                 bypass_grace=bypass_grace,
-                timing_scope=diagnostics.timing_scope,
+                timing_scope=timing_scope,
             )
             self._log_flush_finished(
-                diagnostics.log_context,
+                log_context,
                 flush_start=flush_start,
                 outcome=outcome,
             )
@@ -919,8 +968,10 @@ class CoalescingGate:
         try:
             await self._dispatch_events(key, gate, pending_events, bypass_grace=bypass_grace)
         except asyncio.CancelledError:
+            _cancel_pending_event_reservations(pending_events)
             raise
         except Exception as error:
+            _cancel_pending_event_reservations(pending_events)
             current_key, current_gate = self._resolve_gate_entry(key, gate)
             self._log_dispatch_failure(current_key or key, current_gate or gate, error)
 

@@ -11,6 +11,8 @@ from .types import EVENT_MESSAGE_RECEIVED
 if TYPE_CHECKING:
     from .context import MessageEnvelope
 
+ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND = "active_thread_follow_up"
+TRUSTED_INTERNAL_RELAY_SOURCE_KIND = "trusted_internal_relay"
 AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset({"scheduled", "hook", "hook_dispatch"})
 
 

@@ -1131,6 +1131,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
 
     assert isinstance(event, nio.RoomMessageFile)
     await bot._on_media_message(room, event)
+    await bot._coalescing_gate.drain_all()
 
     assert captured_bodies == ["@mindroom_code:localhost what is 99+1?"]
     assert bot._turn_policy.plan_turn.await_args.args[1].body == "@mindroom_code:localhost what is 99+1?"

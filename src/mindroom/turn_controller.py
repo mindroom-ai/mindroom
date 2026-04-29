@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
@@ -360,6 +361,41 @@ class TurnController:
             return False
         return self.deps.response_runner.has_active_response_for_target(target)
 
+    async def _enqueue_active_thread_follow_up(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        prepared_event: PreparedTextEvent,
+        target: MessageTarget,
+        envelope: MessageEnvelope,
+        coalescing_thread_id: str | None,
+        requester_user_id: str,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> None:
+        """Queue an active-thread follow-up while preserving its mid-turn notice."""
+        if dispatch_timing is not None:
+            dispatch_timing.note(
+                coalescing_bypassed=True,
+                coalescing_bypass_reason="active_thread_follow_up",
+            )
+        queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
+            target=target,
+            response_envelope=envelope,
+        )
+        try:
+            await self._enqueue_for_dispatch(
+                prepared_event,
+                room,
+                source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                requester_user_id=requester_user_id,
+                coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
+                queued_notice_reservation=queued_notice_reservation,
+            )
+        except Exception:
+            if queued_notice_reservation is not None:
+                queued_notice_reservation.cancel()
+            raise
+
     async def _should_skip_router_before_shared_ingress_work(
         self,
         room: nio.MatrixRoom,
@@ -449,6 +485,7 @@ class TurnController:
         source_kind: str,
         requester_user_id: str | None = None,
         coalescing_key: CoalescingKey | None = None,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> None:
         """Route one inbound event through the live coalescing gate."""
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
@@ -479,6 +516,7 @@ class TurnController:
                 event=event,
                 room=room,
                 source_kind=source_kind,
+                queued_notice_reservation=queued_notice_reservation,
             ),
         )
         emit_elapsed_timing(
@@ -592,10 +630,6 @@ class TurnController:
         )
         if suppressed:
             self._mark_source_events_responded(handled_turn)
-            self.deps.response_runner.clear_waiting_human_message(
-                target=target,
-                response_envelope=envelope,
-            )
             return None
 
         sender_agent_name = extract_agent_name(requester_user_id, self.deps.runtime.config, self.deps.runtime_paths)
@@ -964,6 +998,7 @@ class TurnController:
         dispatch_started_at: float,
         handled_turn: HandledTurnState,
         matrix_run_metadata: dict[str, Any] | None = None,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
         action = self.deps.turn_policy.effective_response_action(action)
@@ -1095,6 +1130,7 @@ class TurnController:
                     requires_full_thread_history=False,
                     on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
                     pipeline_timing=request.pipeline_timing,
+                    queued_notice_reservation=request.queued_notice_reservation,
                 )
 
             if action.kind == "team":
@@ -1115,6 +1151,7 @@ class TurnController:
                         requires_full_thread_history=dispatch.context.requires_full_thread_history,
                         prepare_after_lock=prepare_request_after_lock,
                         pipeline_timing=dispatch_timing,
+                        queued_notice_reservation=queued_notice_reservation,
                     ),
                     team_agents=action.form_team.eligible_members,
                     team_mode=action.form_team.mode.value,
@@ -1135,6 +1172,7 @@ class TurnController:
                         requires_full_thread_history=dispatch.context.requires_full_thread_history,
                         prepare_after_lock=prepare_request_after_lock,
                         pipeline_timing=dispatch_timing,
+                        queued_notice_reservation=queued_notice_reservation,
                     ),
                 )
         except PostLockRequestPreparationError as error:
@@ -1153,60 +1191,77 @@ class TurnController:
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
-        dispatch_event = build_batch_dispatch_event(batch)
-        timing_scope = event_timing_scope(dispatch_event.event_id)
-        dispatch_timing = get_dispatch_pipeline_timing(dispatch_event.source)
-        if dispatch_timing is not None:
-            dispatch_timing.mark("gate_exit")
-        retarget_start = time.monotonic()
-        batch_coalescing_key = await self._coalescing_key_for_event(
-            batch.room,
-            batch.primary_event,
-            batch.requester_user_id,
-        )
-        canonical_key = (
-            batch.room.room_id,
-            self.deps.resolver.build_message_target(
-                room_id=batch.room.room_id,
-                thread_id=batch_coalescing_key[1],
-                reply_to_event_id=dispatch_event.event_id,
-                event_source=dispatch_event.source,
-            ).resolved_thread_id,
-            batch.requester_user_id,
-        )
-        self.deps.coalescing_gate.retarget(batch_coalescing_key, canonical_key)
-        emit_elapsed_timing(
-            "coalescing.handle_batch.retarget",
-            retarget_start,
-            original_thread_id=batch_coalescing_key[1],
-            resolved_thread_id=canonical_key[1],
-            timing_scope=timing_scope,
-        )
-        async with self.deps.resolver.turn_thread_cache_scope():
-            dispatch_start = time.monotonic()
-            await self._dispatch_text_message(
+        reservation = batch.queued_notice_reservation
+        try:
+            dispatch_event = build_batch_dispatch_event(batch)
+            timing_scope = event_timing_scope(dispatch_event.event_id)
+            dispatch_timing = get_dispatch_pipeline_timing(dispatch_event.source)
+            if dispatch_timing is not None:
+                dispatch_timing.mark("gate_exit")
+            retarget_start = time.monotonic()
+            batch_coalescing_key = await self._coalescing_key_for_event(
                 batch.room,
-                dispatch_event,
+                batch.primary_event,
                 batch.requester_user_id,
-                media_events=batch.media_events or None,
-                handled_turn=HandledTurnState.create(
-                    batch.source_event_ids,
-                    source_event_prompts=batch.source_event_prompts,
-                ),
             )
+            canonical_key = (
+                batch.room.room_id,
+                self.deps.resolver.build_message_target(
+                    room_id=batch.room.room_id,
+                    thread_id=batch_coalescing_key[1],
+                    reply_to_event_id=dispatch_event.event_id,
+                    event_source=dispatch_event.source,
+                ).resolved_thread_id,
+                batch.requester_user_id,
+            )
+            self.deps.coalescing_gate.retarget(batch_coalescing_key, canonical_key)
             emit_elapsed_timing(
-                "coalescing.handle_batch.dispatch_text_message",
-                dispatch_start,
-                source_event_count=len(batch.source_event_ids),
+                "coalescing.handle_batch.retarget",
+                retarget_start,
+                original_thread_id=batch_coalescing_key[1],
+                resolved_thread_id=canonical_key[1],
                 timing_scope=timing_scope,
             )
+            async with self.deps.resolver.turn_thread_cache_scope():
+                dispatch_start = time.monotonic()
+                handled_turn = HandledTurnState.create(
+                    batch.source_event_ids,
+                    source_event_prompts=batch.source_event_prompts,
+                )
+                if reservation is None:
+                    await self._dispatch_text_message(
+                        batch.room,
+                        dispatch_event,
+                        batch.requester_user_id,
+                        media_events=batch.media_events or None,
+                        handled_turn=handled_turn,
+                    )
+                else:
+                    await self._dispatch_text_message(
+                        batch.room,
+                        dispatch_event,
+                        batch.requester_user_id,
+                        media_events=batch.media_events or None,
+                        handled_turn=handled_turn,
+                        queued_notice_reservation=reservation,
+                    )
+                reservation = None
+                emit_elapsed_timing(
+                    "coalescing.handle_batch.dispatch_text_message",
+                    dispatch_start,
+                    source_event_count=len(batch.source_event_ids),
+                    timing_scope=timing_scope,
+                )
+        finally:
+            if reservation is not None:
+                reservation.cancel()
 
     async def handle_text_event(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle one inbound text event."""
         async with self.deps.resolver.turn_thread_cache_scope():
             await self._handle_message_inner(room, event)
 
-    async def _handle_message_inner(  # noqa: C901, PLR0911
+    async def _handle_message_inner(  # noqa: PLR0911
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
@@ -1310,21 +1365,14 @@ class TurnController:
             source_kind=envelope.source_kind,
             sender_id=prepared_event.sender,
         ):
-            if dispatch_timing is not None:
-                dispatch_timing.note(
-                    coalescing_bypassed=True,
-                    coalescing_bypass_reason="active_thread_follow_up",
-                )
-            self.deps.response_runner.signal_waiting_human_message(
+            await self._enqueue_active_thread_follow_up(
+                room=room,
+                prepared_event=prepared_event,
                 target=target,
-                response_envelope=envelope,
-            )
-            await self._enqueue_for_dispatch(
-                prepared_event,
-                room,
-                source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                envelope=envelope,
+                coalescing_thread_id=coalescing_thread_id,
                 requester_user_id=prechecked_event.requester_user_id,
-                coalescing_key=(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
+                dispatch_timing=dispatch_timing,
             )
         else:
             await self._enqueue_for_dispatch(
@@ -1343,6 +1391,7 @@ class TurnController:
         *,
         media_events: list[_MediaDispatchEvent] | None = None,
         handled_turn: HandledTurnState | None = None,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> None:
         """Run the normal text or command dispatch pipeline for a prepared text event."""
         raw_event: _TextDispatchEvent
@@ -1355,14 +1404,16 @@ class TurnController:
             msg = "requester_user_id is required when dispatching a raw event"
             raise TypeError(msg)
         router_event: _DispatchEvent = raw_event
-        event = await self.deps.normalizer.resolve_text_event(
-            TextNormalizationRequest(event=raw_event),
-        )
+        reservation = queued_notice_reservation
         dispatch: PreparedDispatch | None = None
-        dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
-        attach_dispatch_pipeline_timing(event.source, dispatch_timing)
-        timing_scope_token = timing_scope_context.set(event_timing_scope(event.event_id))
+        timing_scope_token = None
         try:
+            event = await self.deps.normalizer.resolve_text_event(
+                TextNormalizationRequest(event=raw_event),
+            )
+            dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
+            attach_dispatch_pipeline_timing(event.source, dispatch_timing)
+            timing_scope_token = timing_scope_context.set(event_timing_scope(event.event_id))
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_start")
             dispatch_started_at = time.monotonic()
@@ -1542,14 +1593,13 @@ class TurnController:
                 dispatch_started_at=dispatch_started_at,
                 handled_turn=handled_turn,
                 matrix_run_metadata=matrix_run_metadata,
+                queued_notice_reservation=reservation,
             )
         finally:
-            if dispatch is not None:
-                self.deps.response_runner.clear_waiting_human_message(
-                    target=dispatch.target,
-                    response_envelope=dispatch.envelope,
-                )
-            timing_scope_context.reset(timing_scope_token)
+            if reservation is not None:
+                reservation.cancel()
+            if timing_scope_token is not None:
+                timing_scope_context.reset(timing_scope_token)
 
     async def handle_media_event(
         self,

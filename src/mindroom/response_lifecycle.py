@@ -83,7 +83,28 @@ class _QueuedMessageState:
 class _QueuedHumanNotice(enum.Enum):
     NONE = "none"
     WAITING = "waiting"
-    PRE_SIGNALED = "pre_signaled"
+
+
+@dataclass(slots=True)
+class QueuedHumanNoticeReservation:
+    """Owned reservation for a queued-human notice created before dispatch starts."""
+
+    _state: _QueuedMessageState
+    _active: bool = True
+
+    def _release_waiting_human_message(self) -> None:
+        if not self._active:
+            return
+        self._state.consume_waiting_human_message()
+        self._active = False
+
+    def consume(self) -> None:
+        """Mark the reservation as owned by the response lifecycle."""
+        self._release_waiting_human_message()
+
+    def cancel(self) -> None:
+        """Release a reservation that will not reach response lifecycle ownership."""
+        self._release_waiting_human_message()
 
 
 @dataclass
@@ -92,7 +113,6 @@ class ResponseLifecycleCoordinator:
 
     _response_lifecycle_locks: dict[tuple[str, str | None], asyncio.Lock] = field(default_factory=dict)
     _thread_queued_signals: dict[tuple[str, str | None], _QueuedMessageState] = field(default_factory=dict)
-    _pre_signaled_human_message_ids: dict[tuple[str, str | None], set[str]] = field(default_factory=dict)
 
     @staticmethod
     def _thread_key(target: MessageTarget) -> tuple[str, str | None]:
@@ -123,7 +143,6 @@ class ResponseLifecycleCoordinator:
                     continue
                 self._response_lifecycle_locks.pop(candidate, None)
                 self._thread_queued_signals.pop(candidate, None)
-                self._pre_signaled_human_message_ids.pop(candidate, None)
         lock = asyncio.Lock()
         self._response_lifecycle_locks[lock_key] = lock
         return lock
@@ -145,97 +164,33 @@ class ResponseLifecycleCoordinator:
         """Return whether one queued ingress should interrupt the active turn."""
         return response_envelope is not None and not is_automation_source_kind(response_envelope.source_kind)
 
-    def _remember_pre_signaled_human_message(
-        self,
-        *,
-        thread_key: tuple[str, str | None],
-        source_event_id: str,
-    ) -> bool:
-        pre_signaled_ids = self._pre_signaled_human_message_ids.setdefault(thread_key, set())
-        if source_event_id in pre_signaled_ids:
-            return False
-        pre_signaled_ids.add(source_event_id)
-        return True
-
-    def signal_waiting_human_message(
+    def reserve_waiting_human_message(
         self,
         *,
         target: MessageTarget,
         response_envelope: MessageEnvelope | None,
-    ) -> bool:
-        """Notify an active turn that human ingress is queued before dispatch owns the event."""
+    ) -> QueuedHumanNoticeReservation | None:
+        """Reserve an active-turn notice before queued dispatch owns the follow-up."""
         if response_envelope is None or not self._should_signal_queued_message(response_envelope):
-            return False
+            return None
         thread_key = self._thread_key(target)
         if not self._has_active_response_for_thread_key(thread_key):
-            return False
-        if not self._remember_pre_signaled_human_message(
-            thread_key=thread_key,
-            source_event_id=response_envelope.source_event_id,
-        ):
-            return False
-        self._get_or_create_queued_signal(target).add_waiting_human_message()
-        return True
-
-    def _is_pre_signaled_human_message(
-        self,
-        *,
-        thread_key: tuple[str, str | None],
-        response_envelope: MessageEnvelope | None,
-    ) -> bool:
-        if response_envelope is None:
-            return False
-        return response_envelope.source_event_id in self._pre_signaled_human_message_ids.get(thread_key, set())
-
-    def _consume_pre_signaled_human_message(
-        self,
-        *,
-        thread_key: tuple[str, str | None],
-        response_envelope: MessageEnvelope | None,
-        queued_signal: _QueuedMessageState,
-    ) -> bool:
-        if response_envelope is None:
-            return False
-        pre_signaled_ids = self._pre_signaled_human_message_ids.get(thread_key)
-        if pre_signaled_ids is None or response_envelope.source_event_id not in pre_signaled_ids:
-            return False
-        pre_signaled_ids.remove(response_envelope.source_event_id)
-        if not pre_signaled_ids:
-            self._pre_signaled_human_message_ids.pop(thread_key, None)
-        queued_signal.consume_waiting_human_message()
-        return True
-
-    def clear_waiting_human_message(
-        self,
-        *,
-        target: MessageTarget,
-        response_envelope: MessageEnvelope | None,
-    ) -> bool:
-        """Clear an enqueue-time queued-human notice if dispatch exits before lifecycle ownership."""
-        thread_key = self._thread_key(target)
-        queued_signal = self._thread_queued_signals.get(thread_key)
-        if queued_signal is None:
-            return False
-        return self._consume_pre_signaled_human_message(
-            thread_key=thread_key,
-            response_envelope=response_envelope,
-            queued_signal=queued_signal,
-        )
+            return None
+        queued_signal = self._get_or_create_queued_signal(target)
+        queued_signal.add_waiting_human_message()
+        return QueuedHumanNoticeReservation(queued_signal)
 
     def _begin_response_turn_notice(
         self,
         *,
-        thread_key: tuple[str, str | None],
         lifecycle_lock: asyncio.Lock,
         queued_signal: _QueuedMessageState,
         response_envelope: MessageEnvelope | None,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None,
     ) -> _QueuedHumanNotice:
         existing_turn = queued_signal.begin_response_turn()
-        if self._is_pre_signaled_human_message(
-            thread_key=thread_key,
-            response_envelope=response_envelope,
-        ):
-            return _QueuedHumanNotice.PRE_SIGNALED
+        if queued_notice_reservation is not None:
+            return _QueuedHumanNotice.NONE
         if not (existing_turn or lifecycle_lock.locked()):
             return _QueuedHumanNotice.NONE
         if not self._should_signal_queued_message(response_envelope):
@@ -247,20 +202,11 @@ class ResponseLifecycleCoordinator:
         self,
         *,
         notice: _QueuedHumanNotice,
-        thread_key: tuple[str, str | None],
-        response_envelope: MessageEnvelope | None,
         queued_signal: _QueuedMessageState,
     ) -> _QueuedHumanNotice:
         if notice is _QueuedHumanNotice.NONE:
             return notice
-        if notice is _QueuedHumanNotice.PRE_SIGNALED:
-            self._consume_pre_signaled_human_message(
-                thread_key=thread_key,
-                response_envelope=response_envelope,
-                queued_signal=queued_signal,
-            )
-        else:
-            queued_signal.consume_waiting_human_message()
+        queued_signal.consume_waiting_human_message()
         return _QueuedHumanNotice.NONE
 
     async def run_locked_response(
@@ -268,18 +214,18 @@ class ResponseLifecycleCoordinator:
         *,
         target: MessageTarget,
         response_envelope: MessageEnvelope | None,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None,
         pipeline_timing: DispatchPipelineTiming | None,
         locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
     ) -> _LockedResponseResult:
         """Run one locked response operation with shared queued-message bookkeeping."""
         lifecycle_lock = self._response_lifecycle_lock(target)
         queued_signal = self._get_or_create_queued_signal(target)
-        thread_key = self._thread_key(target)
         notice = self._begin_response_turn_notice(
-            thread_key=thread_key,
             lifecycle_lock=lifecycle_lock,
             queued_signal=queued_signal,
             response_envelope=response_envelope,
+            queued_notice_reservation=queued_notice_reservation,
         )
         lock_acquired = False
         try:
@@ -290,10 +236,10 @@ class ResponseLifecycleCoordinator:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_acquired")
             try:
+                if queued_notice_reservation is not None:
+                    queued_notice_reservation.consume()
                 notice = self._consume_queued_human_notice(
                     notice=notice,
-                    thread_key=thread_key,
-                    response_envelope=response_envelope,
                     queued_signal=queued_signal,
                 )
                 with queued_message_signal_context(queued_signal):
@@ -304,8 +250,6 @@ class ResponseLifecycleCoordinator:
         finally:
             self._consume_queued_human_notice(
                 notice=notice,
-                thread_key=thread_key,
-                response_envelope=response_envelope,
                 queued_signal=queued_signal,
             )
             queued_signal.finish_response_turn()
