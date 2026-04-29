@@ -284,6 +284,7 @@ def _backend(
     worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     resource_requests: dict[str, str] | None = None,
     resource_limits: dict[str, str] | None = None,
+    extra_annotations: dict[str, str] | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = _KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -306,6 +307,7 @@ def _backend(
         colocate_with_control_plane_node=colocate_with_control_plane_node,
         extra_env={},
         extra_labels={"mindroom.ai/tenant": "test"},
+        extra_annotations=extra_annotations or {},
         owner_deployment_name=owner_deployment_name,
         resource_requests=resource_requests if resource_requests is not None else {"memory": "256Mi", "cpu": "100m"},
         resource_limits=resource_limits if resource_limits is not None else {"memory": "1Gi", "cpu": "500m"},
@@ -812,6 +814,60 @@ def test_kubernetes_backend_renders_configured_resources_on_worker_container(tmp
     container = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"]["requests"] == {"memory": "2Gi", "cpu": "500m"}
     assert container["resources"]["limits"] == {"memory": "8Gi", "cpu": "2"}
+
+
+def test_kubernetes_backend_config_reads_worker_annotations_from_env(tmp_path: Path) -> None:
+    """Worker pod annotations are configurable through runtime env."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_WORKER_BACKEND=kubernetes\n"
+            "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+            'MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON={"cluster-autoscaler.kubernetes.io/safe-to-evict":"false"}\n'
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+
+    config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config.extra_annotations == {
+        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
+    }
+
+
+def test_kubernetes_backend_renders_configured_annotations_on_worker_pod_template(tmp_path: Path) -> None:
+    """Configured annotations land on the rendered worker pod template."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        extra_annotations={
+            "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
+            ANNOTATION_STARTUP_MANIFEST_HASH: "user-supplied-value",
+        },
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    annotations = apps_api.created_bodies[0]["spec"]["template"]["metadata"]["annotations"]
+    startup_manifest = _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)
+    committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
+    assert annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] == "false"
+    assert annotations[ANNOTATION_STARTUP_MANIFEST_HASH] == startup_manifest_sha256(
+        committed_runtime,
+        tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
+    )
+    assert annotations[ANNOTATION_STARTUP_MANIFEST_HASH] != "user-supplied-value"
 
 
 def test_kubernetes_backend_rejects_unknown_worker_keys_for_scoped_mounts() -> None:

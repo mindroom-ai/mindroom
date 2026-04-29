@@ -526,9 +526,11 @@ class KubernetesResourceManager:
             dedicated_root=Path(f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")),
             local_dedicated_root=(self.storage_root / state_subpath).resolve(),
         )
+        template_annotations = dict(self.config.extra_annotations)
+        template_annotations[ANNOTATION_STARTUP_MANIFEST_HASH] = startup_manifest_hash
         template_metadata = {
             "labels": worker_labels,
-            "annotations": {ANNOTATION_STARTUP_MANIFEST_HASH: startup_manifest_hash},
+            "annotations": template_annotations,
         }
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
