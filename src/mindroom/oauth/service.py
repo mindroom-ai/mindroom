@@ -129,7 +129,7 @@ def oauth_success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePa
 
 
 def build_oauth_authorize_url(
-    provider_id: str,
+    provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     *,
     agent_name: str | None = None,
@@ -137,7 +137,7 @@ def build_oauth_authorize_url(
     connect_token: str | None = None,
 ) -> str:
     """Build an authenticated MindRoom URL that starts a provider OAuth flow."""
-    base_url = mindroom_public_base_url(runtime_paths)
+    base_url = mindroom_public_base_url(runtime_paths, provider)
     params: dict[str, str] = {}
     if connect_token:
         params["connect_token"] = connect_token
@@ -146,7 +146,7 @@ def build_oauth_authorize_url(
     if execution_scope and not connect_token:
         params["execution_scope"] = execution_scope
     query = f"?{urlencode(params)}" if params else ""
-    return f"{base_url}/api/oauth/{provider_id}/authorize{query}"
+    return f"{base_url}/api/oauth/{provider.id}/authorize{query}"
 
 
 def build_oauth_connect_instruction(
@@ -160,7 +160,7 @@ def build_oauth_connect_instruction(
     execution_scope = worker_target.worker_scope if worker_target is not None else None
     connect_token = issue_oauth_connect_token(provider, worker_target) if worker_target is not None else None
     connect_url = build_oauth_authorize_url(
-        provider.id,
+        provider,
         runtime_paths,
         agent_name=agent_name,
         execution_scope=execution_scope,
