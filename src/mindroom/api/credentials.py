@@ -842,12 +842,18 @@ async def validate_credentials(
 ) -> dict[str, Any]:
     """Test if credentials are valid for a service."""
     service = _validated_service(service)
+    _reject_oauth_token_service(_oauth_service_match(request, service))
     # This is a placeholder - actual testing would depend on the service
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target)
 
     if not credentials:
         raise HTTPException(status_code=404, detail=f"No credentials found for {service}")
+    if _looks_like_oauth_credentials(credentials):
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth token credentials must be managed through the OAuth connect flow.",
+        )
 
     # For now, just check if credentials exist
     # In the future, we could implement actual validation per service

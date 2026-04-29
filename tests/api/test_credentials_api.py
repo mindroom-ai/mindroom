@@ -409,6 +409,7 @@ class TestCredentialsAPI:
             "/api/credentials/removed_oauth_provider/api-key?key_name=access_token&include_value=true",
         )
         copy_response = client.post("/api/credentials/copied_service/copy-from/removed_oauth_provider")
+        test_response = client.post("/api/credentials/removed_oauth_provider/test")
 
         assert response.status_code == 200
         assert response.json() == {"service": "removed_oauth_provider", "credentials": {}}
@@ -419,6 +420,8 @@ class TestCredentialsAPI:
         assert "OAuth token credentials" in api_key_response.json()["detail"]
         assert copy_response.status_code == 400
         assert "OAuth token credentials" in copy_response.json()["detail"]
+        assert test_response.status_code == 400
+        assert "OAuth token credentials" in test_response.json()["detail"]
 
     def test_oauth_token_service_rejects_generic_credential_writes(
         self,
@@ -460,6 +463,7 @@ class TestCredentialsAPI:
             client.delete("/api/credentials/google_drive_oauth"),
             client.post("/api/credentials/copied_service/copy-from/google_drive_oauth"),
             client.post("/api/credentials/google_drive_oauth/copy-from/google_drive"),
+            client.post("/api/credentials/google_drive_oauth/test"),
         ]
 
         for response in responses:
