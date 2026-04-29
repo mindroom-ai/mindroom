@@ -4031,6 +4031,7 @@ def test_api_key_authenticated_teams_access(api_key_client: TestClient) -> None:
         "/api/google/callback?code=test-code&state=missing",
         "/api/homeassistant/callback?code=test-code&state=missing",
         "/api/integrations/spotify/callback?code=test-code&state=missing",
+        "/api/oauth/google_drive/callback?code=test-code&state=missing",
     ],
 )
 def test_api_key_keeps_oauth_callbacks_open(

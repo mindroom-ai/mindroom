@@ -1,0 +1,297 @@
+"""Generic OAuth API routes."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, cast
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field
+
+from mindroom.api import config_lifecycle
+from mindroom.api.auth import verify_user
+from mindroom.api.credentials import (
+    consume_pending_oauth_request,
+    issue_pending_oauth_state,
+    load_credentials_for_target,
+    resolve_request_credentials_target,
+)
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.oauth import OAuthClaimValidationError, OAuthProvider, OAuthProviderError, load_oauth_providers
+from mindroom.oauth.service import (
+    consume_oauth_connect_token,
+    oauth_connect_target_payload,
+    oauth_success_redirect_url,
+    sanitized_oauth_token_result,
+)
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope, resolve_worker_target
+
+if TYPE_CHECKING:
+    from mindroom.api.credentials import RequestCredentialsTarget
+    from mindroom.constants import RuntimePaths
+
+router = APIRouter(prefix="/api/oauth", tags=["oauth"])
+
+
+class OAuthConnectResponse(BaseModel):
+    """Authorization URL for an OAuth provider."""
+
+    provider: str
+    auth_url: str
+
+
+class OAuthStatusResponse(BaseModel):
+    """Credential status for an OAuth provider."""
+
+    provider: str
+    display_name: str
+    credential_service: str
+    connected: bool
+    has_client_config: bool
+    email: str | None = None
+    hosted_domain: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+
+
+def _load_provider(request: Request, provider_id: str) -> tuple[OAuthProvider, RuntimePaths]:
+    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    providers = load_oauth_providers(config, runtime_paths)
+    provider = providers.get(provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=f"Unknown OAuth provider: {provider_id}")
+    return provider, runtime_paths
+
+
+def _issue_authorization_url(
+    request: Request,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    agent_name: str | None,
+    connect_token: str | None = None,
+) -> OAuthConnectResponse:
+    if connect_token:
+        try:
+            connect_target = consume_oauth_connect_token(provider, connect_token)
+        except OAuthProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        state = issue_pending_oauth_state(
+            request,
+            provider.id,
+            connect_target.agent_name,
+            payload=oauth_connect_target_payload(connect_target),
+        )
+        try:
+            auth_url = provider.authorization_uri(runtime_paths, state=state)
+        except OAuthProviderError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return OAuthConnectResponse(provider=provider.id, auth_url=auth_url)
+
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=(provider.credential_service,),
+        allow_private_scopes=True,
+    )
+    try:
+        state = issue_pending_oauth_state(
+            request,
+            provider.id,
+            agent_name,
+            payload=_target_binding_payload(provider, target),
+        )
+        auth_url = provider.authorization_uri(target.runtime_paths, state=state)
+    except OAuthProviderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return OAuthConnectResponse(provider=provider.id, auth_url=auth_url)
+
+
+def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsTarget) -> dict[str, str]:
+    worker_target = resolve_worker_target(
+        target.worker_scope,
+        target.agent_name,
+        execution_identity=target.execution_identity,
+    )
+    return {
+        "provider": provider.id,
+        "credential_service": provider.credential_service,
+        "agent_name": target.agent_name or "",
+        "worker_scope": target.worker_scope or "unscoped",
+        "worker_key": worker_target.worker_key or "",
+    }
+
+
+def _state_payload_target_mode(payload: dict[str, str] | None) -> str:
+    if payload is None:
+        return ""
+    return payload.get("target_mode", "")
+
+
+def _worker_scope_from_payload(payload: dict[str, str]) -> WorkerScope | None:
+    value = payload.get("worker_scope")
+    if value in ("shared", "user", "user_agent"):
+        return cast("WorkerScope", value)
+    if value == "unscoped":
+        return None
+    raise HTTPException(status_code=400, detail="OAuth state has an invalid worker scope")
+
+
+def _worker_target_from_payload(provider: OAuthProvider, payload: dict[str, str]) -> ResolvedWorkerTarget:
+    if payload.get("provider") != provider.id or payload.get("credential_service") != provider.credential_service:
+        raise HTTPException(status_code=400, detail="OAuth state does not match this provider")
+    worker_key = payload.get("worker_key")
+    if not worker_key:
+        raise HTTPException(status_code=400, detail="OAuth state is missing a credential target")
+    agent_name = payload.get("agent_name") or None
+    return ResolvedWorkerTarget(
+        worker_scope=_worker_scope_from_payload(payload),
+        routing_agent_name=agent_name,
+        execution_identity=None,
+        tenant_id=None,
+        account_id=None,
+        worker_key=worker_key,
+    )
+
+
+def _verify_pending_target_binding(
+    provider: OAuthProvider,
+    pending_payload: dict[str, str] | None,
+    target: RequestCredentialsTarget,
+) -> None:
+    if pending_payload != _target_binding_payload(provider, target):
+        raise HTTPException(status_code=409, detail="OAuth state no longer matches the requested credential target")
+
+
+def _claim_str(credentials: dict[str, Any], key: str) -> str | None:
+    claims = credentials.get("_oauth_claims")
+    if not isinstance(claims, dict):
+        return None
+    value = claims.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+@router.post("/{provider_id}/connect")
+async def connect(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthConnectResponse:
+    """Start a provider OAuth flow and return the external authorization URL."""
+    provider, runtime_paths = _load_provider(request, provider_id)
+    return _issue_authorization_url(request, provider, runtime_paths, agent_name=agent_name)
+
+
+@router.get("/{provider_id}/authorize")
+async def authorize(
+    provider_id: str,
+    request: Request,
+    agent_name: str | None = None,
+    connect_token: str | None = None,
+) -> RedirectResponse:
+    """Start a provider OAuth flow from a browser-openable MindRoom URL."""
+    provider, runtime_paths = _load_provider(request, provider_id)
+    response = _issue_authorization_url(
+        request,
+        provider,
+        runtime_paths,
+        agent_name=agent_name,
+        connect_token=connect_token,
+    )
+    return RedirectResponse(url=response.auth_url)
+
+
+@router.get("/{provider_id}/callback")
+async def callback(provider_id: str, request: Request) -> RedirectResponse:
+    """Handle a provider OAuth callback and store scoped credentials."""
+    error = request.query_params.get("error")
+    if error:
+        raise HTTPException(status_code=400, detail=f"OAuth provider returned an error: {error}")
+
+    code = request.query_params.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="No authorization code received")
+
+    state = request.query_params.get("state")
+    if not state:
+        raise HTTPException(status_code=400, detail="No OAuth state received")
+
+    await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+    provider, runtime_paths = _load_provider(request, provider_id)
+    pending = consume_pending_oauth_request(request, provider.id, state)
+    worker_target: ResolvedWorkerTarget | None = None
+    target: RequestCredentialsTarget | None = None
+    if _state_payload_target_mode(pending.payload) == "worker_key":
+        if pending.payload is None:
+            raise HTTPException(status_code=400, detail="OAuth state is missing a credential target")
+        worker_target = _worker_target_from_payload(provider, pending.payload)
+    else:
+        target = resolve_request_credentials_target(
+            request,
+            agent_name=pending.agent_name,
+            service_names=(provider.credential_service,),
+            execution_scope_override_provided=pending.execution_scope_override_provided,
+            execution_scope_override=pending.execution_scope_override,
+            allow_private_scopes=True,
+        )
+        _verify_pending_target_binding(provider, pending.payload, target)
+
+    try:
+        token_result = await provider.exchange_code(code, runtime_paths)
+        provider.validate_claims(token_result, runtime_paths)
+        safe_result = sanitized_oauth_token_result(provider, token_result)
+        if target is not None:
+            worker_target = resolve_worker_target(
+                target.worker_scope,
+                target.agent_name,
+                execution_identity=target.execution_identity,
+            )
+        save_scoped_credentials(
+            provider.credential_service,
+            safe_result.token_data,
+            credentials_manager=(
+                target.base_manager if target is not None else get_runtime_credentials_manager(runtime_paths)
+            ),
+            worker_target=worker_target,
+        )
+    except OAuthClaimValidationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except OAuthProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="OAuth callback failed") from exc
+
+    return RedirectResponse(url=oauth_success_redirect_url(provider, runtime_paths))
+
+
+@router.get("/{provider_id}/status")
+async def status(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthStatusResponse:
+    """Return scoped connection status for one provider."""
+    provider, runtime_paths = _load_provider(request, provider_id)
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=(provider.credential_service,),
+        allow_private_scopes=True,
+    )
+    credentials = load_credentials_for_target(provider.credential_service, target) or {}
+    connected = bool(credentials.get("token") or credentials.get("refresh_token"))
+    return OAuthStatusResponse(
+        provider=provider.id,
+        display_name=provider.display_name,
+        credential_service=provider.credential_service,
+        connected=connected,
+        has_client_config=provider.client_config(runtime_paths) is not None,
+        email=_claim_str(credentials, "email"),
+        hosted_domain=_claim_str(credentials, "hd"),
+        capabilities=list(provider.status_capabilities),
+    )
+
+
+@router.post("/{provider_id}/disconnect")
+async def disconnect(provider_id: str, request: Request, agent_name: str | None = None) -> dict[str, str]:
+    """Remove scoped credentials for one provider."""
+    provider, _runtime_paths = _load_provider(request, provider_id)
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=(provider.credential_service,),
+        allow_private_scopes=True,
+    )
+    target.target_manager.delete_credentials(provider.credential_service)
+    return {"status": "disconnected", "provider": provider.id}

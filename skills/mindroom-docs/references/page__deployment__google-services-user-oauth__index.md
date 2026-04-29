@@ -1,6 +1,7 @@
 # Google Services OAuth (Individual Setup)
 
-This guide is for one person running MindRoom and creating their own Google OAuth app.
+This guide is for one person running MindRoom and creating their own Google OAuth app for the legacy Google Services dashboard integration.
+For personal-agent Google Drive access through the generic OAuth framework, use the Google Drive section below.
 
 For team/shared deployments, use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md).
 
@@ -126,6 +127,61 @@ After editing `config.yaml`, restart MindRoom to reload configuration.
 
 1. In MindRoom frontend, click **Disconnect Google Account**.
 1. Optional: also revoke app access in [Google Account Permissions](https://myaccount.google.com/permissions).
+
+## Google Drive for Personal Agents
+
+The generic Google Drive OAuth provider is separate from the legacy `/api/google/*` Google Services integration.
+It stores credentials under the scoped `google_drive` service for the authenticated requester and selected agent.
+Use it when a private personal agent needs to search or read a user's Drive files without sharing that token with other users or agents.
+
+The generic callback path is:
+
+```
+/api/oauth/google_drive/callback
+```
+
+The default local callback URL is:
+
+```
+http://localhost:8765/api/oauth/google_drive/callback
+```
+
+Enable only the Google Drive API when the agent only needs Drive file search and read access.
+The built-in provider requests Drive read scopes plus OpenID email/profile scopes for identity validation.
+It does not request Gmail, Calendar, or Sheets scopes.
+
+Configure MindRoom with these environment variables:
+
+```
+MINDROOM_PORT=8765
+GOOGLE_DRIVE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_DRIVE_CLIENT_SECRET=your-client-secret
+GOOGLE_DRIVE_REDIRECT_URI=http://localhost:8765/api/oauth/google_drive/callback
+```
+
+Optional deployment restrictions can be configured without changing MindRoom core:
+
+```
+GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.com,example.org
+GOOGLE_DRIVE_ALLOWED_HOSTED_DOMAINS=example.com
+```
+
+Add the tool to a private agent:
+
+```
+agents:
+  drive_assistant:
+    display_name: Drive Assistant
+    role: Search and read my Drive files
+    worker_scope: user_agent
+    tools:
+      - google_drive
+```
+
+If credentials are missing, the tool returns a MindRoom connect URL for the selected agent.
+That URL contains an opaque connect token for the current worker credential target instead of exposing the Matrix requester in the URL.
+The user opens that URL, completes Google OAuth, and retries the original request.
+Tokens are stored in MindRoom credential storage for the resolved requester and agent scope, not in `config.yaml`.
 
 ## Troubleshooting
 

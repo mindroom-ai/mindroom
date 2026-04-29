@@ -26,6 +26,8 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 - [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - one-time setup for shared/team deployments
 - [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - single-user bring-your-own OAuth app setup
 
+For private personal-agent tools, use the generic [OAuth Framework](https://docs.mindroom.chat/oauth-framework/index.md) and the Google Drive section in the individual setup guide.
+
 ## Quick Start
 
 ### Hosted Matrix + local MindRoom (simplest)

@@ -1,7 +1,8 @@
 # Google Services OAuth (Admin Setup)
 
-This is the one-time setup for a shared Google OAuth app in MindRoom.
+This is the one-time setup for a shared Google OAuth app in MindRoom's legacy Google Services dashboard integration.
 After you finish these steps, users only click **Login with Google** in the frontend.
+For private personal-agent Google Drive access, use the generic `/api/oauth/google_drive/*` provider instead of this shared `/api/google/*` flow.
 
 ## Who This Is For
 
@@ -26,6 +27,9 @@ Your full callback URL is:
 ```
 <your-mindroom-origin>/api/google/callback
 ```
+
+The generic Google Drive provider uses `<your-mindroom-origin>/api/oauth/google_drive/callback` and its own `GOOGLE_DRIVE_*` environment variables.
+Do not mix that callback with the legacy Google Services callback.
 
 ## Step 1: Create a Google Cloud Project
 

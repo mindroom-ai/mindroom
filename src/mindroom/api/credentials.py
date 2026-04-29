@@ -320,6 +320,7 @@ def resolve_request_credentials_target(
     service_names: tuple[str, ...] = (),
     execution_scope_override_provided: bool | None = None,
     execution_scope_override: WorkerScope | None = None,
+    allow_private_scopes: bool = False,
 ) -> RequestCredentialsTarget:
     """Resolve the credential storage target for one authenticated dashboard request."""
     _reject_raw_worker_targeting(request)
@@ -381,7 +382,7 @@ def resolve_request_credentials_target(
         execution_scope=execution_scope,
         execution_scope_override_provided=execution_scope_override_provided,
     )
-    if not dashboard_credentials_supported_for_scope(execution_scope):
+    if not allow_private_scopes and not dashboard_credentials_supported_for_scope(execution_scope):
         raise HTTPException(
             status_code=400,
             detail=(

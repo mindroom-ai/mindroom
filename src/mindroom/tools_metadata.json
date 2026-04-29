@@ -7282,6 +7282,82 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "google_drive",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow listing recent Google Drive files.",
+          "label": "List Files",
+          "name": "list_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow searching Google Drive metadata.",
+          "label": "Search Files",
+          "name": "search_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow reading Google Drive file contents.",
+          "label": "Read Files",
+          "name": "read_file",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 10485760,
+          "description": "Maximum non-Google-Workspace file size to read in bytes.",
+          "label": "Max Read Size",
+          "name": "max_read_size",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "default_execution_target": "primary",
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
+      ],
+      "description": "Search and read files from the connected user's Google Drive",
+      "display_name": "Google Drive",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/google_drive",
+      "function_names": [
+        "list_files",
+        "search_files",
+        "read_file"
+      ],
+      "helper_text": null,
+      "icon": "SiGoogledrive",
+      "icon_color": "text-green-600",
+      "name": "google_drive",
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [

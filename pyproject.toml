@@ -199,6 +199,12 @@ google_calendar = [
   "google-auth-httplib2>=0.2",
   "google-auth-oauthlib>=1.2.2",
 ]
+google_drive = [
+  "google-api-python-client>=2.178",
+  "google-auth>=2.40.3",
+  "google-auth-httplib2>=0.2",
+  "google-auth-oauthlib>=1.2.2",
+]
 google_maps = [
   "google-maps-places",
   "googlemaps",

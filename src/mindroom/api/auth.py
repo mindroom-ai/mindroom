@@ -144,6 +144,11 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
     return token or None
 
 
+def _is_standalone_public_path(path: str) -> bool:
+    """Return whether one unauthenticated standalone callback path may enter its handler."""
+    return path in _STANDALONE_PUBLIC_PATHS or (path.startswith("/api/oauth/") and path.endswith("/callback"))
+
+
 def _get_request_token(
     request: Request,
     authorization: str | None,
@@ -381,7 +386,7 @@ async def verify_user(
     mindroom_api_key = auth_state.settings.mindroom_api_key
 
     if auth_state.supabase_auth is None:
-        if allow_public_paths and request.url.path in _STANDALONE_PUBLIC_PATHS:
+        if allow_public_paths and _is_standalone_public_path(request.url.path):
             auth_user = {"user_id": "standalone", "email": None}
             request.scope["auth_user"] = auth_user
             return auth_user

@@ -320,6 +320,18 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.oauth"
+depends_on = [
+    "mindroom.api.auth",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.credentials",
+    "mindroom.credentials",
+    "mindroom.oauth",
+    "mindroom.oauth.service",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
 path = "mindroom.api.main"
 depends_on = [
     "mindroom.agent_policy",
@@ -333,6 +345,7 @@ depends_on = [
     "mindroom.api.knowledge",
     "mindroom.api.matrix_operations",
     "mindroom.api.openai_compat",
+    "mindroom.api.oauth",
     "mindroom.api.schedules",
     "mindroom.api.skills",
     "mindroom.api.tools",
