@@ -93,7 +93,8 @@ def google_drive_oauth_provider() -> OAuthProvider:
         authorization_url="https://accounts.google.com/o/oauth2/v2/auth",
         token_url="https://oauth2.googleapis.com/token",  # noqa: S106
         scopes=GOOGLE_DRIVE_OAUTH_SCOPES,
-        credential_service="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
         client_id_env=(
             "GOOGLE_DRIVE_CLIENT_ID",
             "MINDROOM_OAUTH_GOOGLE_DRIVE_CLIENT_ID",

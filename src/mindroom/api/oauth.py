@@ -20,7 +20,6 @@ from mindroom.api.credentials import (
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider, OAuthProviderError, load_oauth_providers
 from mindroom.oauth.service import (
-    OAUTH_CREDENTIAL_FIELDS,
     OAuthConnectTarget,
     consume_oauth_connect_token,
     oauth_connect_target_payload,
@@ -49,6 +48,7 @@ class OAuthStatusResponse(BaseModel):
     provider: str
     display_name: str
     credential_service: str
+    tool_config_service: str | None = None
     connected: bool
     has_client_config: bool
     email: str | None = None
@@ -358,6 +358,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         provider=provider.id,
         display_name=provider.display_name,
         credential_service=provider.credential_service,
+        tool_config_service=provider.tool_config_service,
         connected=connected,
         has_client_config=provider.client_config(runtime_paths) is not None,
         email=_claim_str(credentials, "email"),
@@ -377,12 +378,5 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
         service_names=(provider.credential_service,),
         allow_private_scopes=True,
     )
-    existing_credentials = target.target_manager.load_credentials(provider.credential_service) or {}
-    remaining_credentials = {
-        key: value for key, value in existing_credentials.items() if key not in OAUTH_CREDENTIAL_FIELDS
-    }
-    if remaining_credentials:
-        target.target_manager.save_credentials(provider.credential_service, remaining_credentials)
-    else:
-        target.target_manager.delete_credentials(provider.credential_service)
+    target.target_manager.delete_credentials(provider.credential_service)
     return {"status": "disconnected", "provider": provider.id}

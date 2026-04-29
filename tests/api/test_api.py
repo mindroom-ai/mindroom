@@ -1653,11 +1653,9 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert tool["status"] == "requires_config"
 
     scoped_manager.save_credentials(
-        "google_drive",
+        "google_drive_oauth",
         {
             "token": "drive-token",
-            "list_files": True,
-            "max_read_size": 1048576,
             "_source": "oauth",
         },
     )
@@ -1751,6 +1749,7 @@ def test_get_tools_uses_one_runtime_snapshot(
             credentials_manager=MagicMock(),
             worker_target=None,
             allowed_shared_services=None,
+            auth_provider_credential_services={},
         )
 
     with (

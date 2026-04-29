@@ -133,7 +133,8 @@ After editing `config.yaml`, restart MindRoom to reload configuration.
 ## Google Drive for Personal Agents
 
 The generic Google Drive OAuth provider is separate from the legacy `/api/google/*` Google Services integration.
-It stores credentials under the scoped `google_drive` service for the authenticated requester and selected agent.
+It stores OAuth tokens under the scoped `google_drive_oauth` service for the authenticated requester and selected agent.
+It stores editable tool settings, such as capability toggles and file-size limits, under the separate `google_drive` service.
 Use it when a private personal agent needs to search or read a user's Drive files without sharing that token with other users or agents.
 
 The generic callback path is:
@@ -186,6 +187,7 @@ MindRoom verifies that the authenticated dashboard user resolves to the same req
 For standalone personal deployments, pairing normally sets `MINDROOM_OWNER_USER_ID`; set it manually if agent-issued links need to resolve to the owner Matrix user.
 The user opens that URL, completes Google OAuth, and retries the original request.
 Tokens are stored in MindRoom credential storage for the resolved requester and agent scope, not in `config.yaml`.
+Dashboard tool settings are stored separately so changing `google_drive` options cannot overwrite or expose OAuth token fields.
 
 ## Troubleshooting
 

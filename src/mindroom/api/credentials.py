@@ -39,6 +39,7 @@ from mindroom.tool_system.worker_routing import (
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.oauth.providers import OAuthProvider
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
@@ -105,6 +106,15 @@ class DashboardAgentExecutionScopeResolution:
     requested_execution_scope: WorkerScope | None
     execution_scope_override_provided: bool
     draft_scope_preview: bool
+
+
+@dataclass(frozen=True)
+class OAuthCredentialServiceMatch:
+    """OAuth provider service role for one credentials API service name."""
+
+    provider: OAuthProvider
+    token_service: bool
+    tool_config_service: bool
 
 
 def _request_auth_user(request: Request) -> dict[str, Any] | None:
@@ -469,39 +479,51 @@ def _request_may_target_scoped_credentials(request: Request, agent_name: str | N
     return agent_name is not None or bool(request.query_params.get("execution_scope"))
 
 
-def _is_oauth_credential_service(request: Request, service: str) -> bool:
+def _oauth_providers_for_request(request: Request) -> dict[str, OAuthProvider]:
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     if snapshot.runtime_config is None and not snapshot.config_data:
         config = Config.model_validate({})
         runtime_paths = snapshot.runtime_paths
     else:
         config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    providers = load_oauth_providers(config, runtime_paths)
-    return any(provider.credential_service == service for provider in providers.values())
+    return load_oauth_providers(config, runtime_paths)
+
+
+def _oauth_token_services_for_request(request: Request) -> frozenset[str]:
+    return frozenset(provider.credential_service for provider in _oauth_providers_for_request(request).values())
+
+
+def _oauth_service_match(request: Request, service: str) -> OAuthCredentialServiceMatch | None:
+    for provider in _oauth_providers_for_request(request).values():
+        token_service = provider.credential_service == service
+        tool_config_service = provider.tool_config_service == service
+        if token_service or tool_config_service:
+            return OAuthCredentialServiceMatch(
+                provider=provider,
+                token_service=token_service,
+                tool_config_service=tool_config_service,
+            )
+    return None
 
 
 def _allow_private_scopes_for_service(
     *,
-    is_oauth_service: bool,
+    oauth_service_match: OAuthCredentialServiceMatch | None,
     request: Request,
     agent_name: str | None,
 ) -> bool:
-    return is_oauth_service and _request_may_target_scoped_credentials(request, agent_name)
+    return oauth_service_match is not None and _request_may_target_scoped_credentials(request, agent_name)
 
 
-def _merged_oauth_tool_config(
-    existing_credentials: dict[str, Any] | None,
+def _oauth_tool_config_for_save(
     config_values: dict[str, Any],
 ) -> dict[str, Any]:
-    credentials = dict(existing_credentials or {})
-    credentials.update(
-        {
-            key: value
-            for key, value in config_values.items()
-            if key not in OAUTH_CREDENTIAL_FIELDS and not key.startswith("_")
-        },
-    )
-    credentials.setdefault("_source", "ui")
+    credentials = {
+        key: value
+        for key, value in config_values.items()
+        if key not in OAUTH_CREDENTIAL_FIELDS and not key.startswith("_")
+    }
+    credentials["_source"] = "ui"
     return credentials
 
 
@@ -533,9 +555,10 @@ async def list_services(
     agent_name: str | None = None,
 ) -> list[str]:
     """List all services with stored credentials."""
+    oauth_token_services = _oauth_token_services_for_request(request)
     target = resolve_request_credentials_target(request, agent_name=agent_name)
     if target.worker_scope is None:
-        return target.target_manager.list_services()
+        return [service for service in target.target_manager.list_services() if service not in oauth_token_services]
     worker_services = set(target.target_manager.list_services())
     shared_manager = target.base_manager.shared_manager()
     shared_services = set(
@@ -552,6 +575,7 @@ async def list_services(
         }
     services = worker_services | shared_services
     services -= set(unsupported_shared_only_integration_names(sorted(services), target.worker_scope))
+    services -= oauth_token_services
     return sorted(services)
 
 
@@ -563,13 +587,13 @@ async def get_credential_status(
 ) -> CredentialStatus:
     """Get the status of credentials for a service."""
     service = _validated_service(service)
-    is_oauth_service = _is_oauth_credential_service(request, service)
+    oauth_service_match = _oauth_service_match(request, service)
     target = resolve_request_credentials_target(
         request,
         agent_name=agent_name,
         service_names=(service,),
         allow_private_scopes=_allow_private_scopes_for_service(
-            is_oauth_service=is_oauth_service,
+            oauth_service_match=oauth_service_match,
             request=request,
             agent_name=agent_name,
         ),
@@ -577,7 +601,7 @@ async def get_credential_status(
     credentials = load_credentials_for_target(service, target)
 
     if credentials:
-        filtered = _filter_credentials_for_response(credentials, is_oauth_service=is_oauth_service)
+        filtered = _filter_credentials_for_response(credentials, is_oauth_service=oauth_service_match is not None)
         return CredentialStatus(
             service=service,
             has_credentials=True,
@@ -596,25 +620,26 @@ async def set_credentials(
 ) -> dict[str, str]:
     """Set multiple credentials for a service."""
     service = _validated_service(service)
-    is_oauth_service = _is_oauth_credential_service(http_request, service)
+    oauth_service_match = _oauth_service_match(http_request, service)
     target = resolve_request_credentials_target(
         http_request,
         agent_name=agent_name,
         service_names=(service,),
         allow_private_scopes=_allow_private_scopes_for_service(
-            is_oauth_service=is_oauth_service,
+            oauth_service_match=oauth_service_match,
             request=http_request,
             agent_name=agent_name,
         ),
     )
 
     # Mark as UI-sourced and save
-    if is_oauth_service:
-        existing_credentials = target.target_manager.load_credentials(service)
-        creds = _merged_oauth_tool_config(
-            existing_credentials if isinstance(existing_credentials, dict) else None,
-            payload.credentials,
-        )
+    if oauth_service_match is not None:
+        if oauth_service_match.token_service:
+            raise HTTPException(
+                status_code=400,
+                detail="OAuth token credentials must be managed through the OAuth connect flow.",
+            )
+        creds = _oauth_tool_config_for_save(payload.credentials)
     else:
         creds = {**payload.credentials, "_source": "ui"}
     target.target_manager.save_credentials(service, creds)
@@ -683,13 +708,13 @@ async def get_credentials(
 ) -> dict[str, Any]:
     """Get credentials for a service (for editing)."""
     service = _validated_service(service)
-    is_oauth_service = _is_oauth_credential_service(request, service)
+    oauth_service_match = _oauth_service_match(request, service)
     target = resolve_request_credentials_target(
         request,
         agent_name=agent_name,
         service_names=(service,),
         allow_private_scopes=_allow_private_scopes_for_service(
-            is_oauth_service=is_oauth_service,
+            oauth_service_match=oauth_service_match,
             request=request,
             agent_name=agent_name,
         ),
@@ -701,7 +726,7 @@ async def get_credentials(
 
     return {
         "service": service,
-        "credentials": _filter_credentials_for_response(credentials, is_oauth_service=is_oauth_service),
+        "credentials": _filter_credentials_for_response(credentials, is_oauth_service=oauth_service_match is not None),
     }
 
 

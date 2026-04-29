@@ -23,6 +23,7 @@ from mindroom.credentials import (
     load_scoped_credentials,
     load_worker_grantable_shared_credentials,
 )
+from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system.catalog import export_tools_metadata, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
@@ -56,6 +57,7 @@ class _ResolvedToolAvailabilityContext:
     credentials_manager: CredentialsManager
     worker_target: ResolvedWorkerTarget | None
     allowed_shared_services: frozenset[str] | None
+    auth_provider_credential_services: dict[str, str]
 
 
 def _effective_allowed_shared_services(
@@ -228,6 +230,10 @@ def _resolve_tool_availability_context(
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,
         allowed_shared_services=(config.get_worker_grantable_credentials() if execution_scope is not None else None),
+        auth_provider_credential_services={
+            provider_id: provider.credential_service
+            for provider_id, provider in load_oauth_providers(config, runtime_paths).items()
+        },
     )
 
 
@@ -268,7 +274,8 @@ def _update_tools_statuses(
 
         auth_provider = tool.get("auth_provider")
         if auth_provider:
-            provider_creds = get_credentials(auth_provider)
+            credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
+            provider_creds = get_credentials(credential_service)
             if _check_auth_provider_configured(tool_name, auth_provider, provider_creds):
                 tool["status"] = "available"
             continue

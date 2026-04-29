@@ -288,23 +288,22 @@ class TestCredentialsAPI:
         assert "execution_scope=unscoped" in response.json()["detail"]
         assert "Persisted scope is worker_scope=shared" in response.json()["detail"]
 
-    def test_oauth_tool_settings_preserve_global_tokens(
+    def test_oauth_tool_settings_do_not_touch_global_token_service(
         self,
         client: TestClient,
     ) -> None:
-        """Saving OAuth-backed tool options should not overwrite stored token fields."""
+        """Saving OAuth-backed tool options should not write or overwrite OAuth tokens."""
         runtime_paths = main._app_runtime_paths(client.app)
         manager = get_runtime_credentials_manager(runtime_paths)
         expected_access_value = "drive-access-value"
         expected_refresh_value = "drive-refresh-value"
         manager.save_credentials(
-            "google_drive",
+            "google_drive_oauth",
             {
                 "token": expected_access_value,
                 "refresh_token": expected_refresh_value,
                 "_oauth_provider": "google_drive",
                 "_source": "oauth",
-                "max_read_size": 1,
             },
         )
 
@@ -320,13 +319,17 @@ class TestCredentialsAPI:
         )
 
         assert response.status_code == 200
-        saved = manager.load_credentials("google_drive")
-        assert saved["token"] == expected_access_value
-        assert saved["refresh_token"] == expected_refresh_value
-        assert saved["_oauth_provider"] == "google_drive"
-        assert saved["_source"] == "oauth"
-        assert saved["list_files"] is False
-        assert saved["max_read_size"] == 42
+        saved_tokens = manager.load_credentials("google_drive_oauth")
+        saved_settings = manager.load_credentials("google_drive")
+        assert saved_tokens["token"] == expected_access_value
+        assert saved_tokens["refresh_token"] == expected_refresh_value
+        assert saved_tokens["_oauth_provider"] == "google_drive"
+        assert saved_tokens["_source"] == "oauth"
+        assert saved_settings == {
+            "list_files": False,
+            "max_read_size": 42,
+            "_source": "ui",
+        }
 
     def test_get_oauth_credentials_filters_token_fields(
         self,
@@ -336,7 +339,7 @@ class TestCredentialsAPI:
         runtime_paths = main._app_runtime_paths(client.app)
         manager = get_runtime_credentials_manager(runtime_paths)
         manager.save_credentials(
-            "google_drive",
+            "google_drive_oauth",
             {
                 "token": "drive-access-value",
                 "refresh_token": "drive-refresh-value",
@@ -346,13 +349,21 @@ class TestCredentialsAPI:
                 "expires_at": 1234.0,
                 "_oauth_provider": "google_drive",
                 "_source": "oauth",
+            },
+        )
+        manager.save_credentials(
+            "google_drive",
+            {
                 "list_files": False,
                 "max_read_size": 42,
+                "_source": "ui",
             },
         )
 
         response = client.get("/api/credentials/google_drive")
         status_response = client.get("/api/credentials/google_drive/status")
+        token_response = client.get("/api/credentials/google_drive_oauth")
+        token_status_response = client.get("/api/credentials/google_drive_oauth/status")
 
         assert response.status_code == 200
         assert response.json() == {
@@ -365,8 +376,26 @@ class TestCredentialsAPI:
         assert status_response.status_code == 200
         assert status_response.json()["has_credentials"] is True
         assert set(status_response.json()["key_names"]) == {"list_files", "max_read_size"}
+        assert token_response.status_code == 200
+        assert token_response.json() == {"service": "google_drive_oauth", "credentials": {}}
+        assert token_status_response.status_code == 200
+        assert token_status_response.json()["has_credentials"] is True
+        assert token_status_response.json()["key_names"] is None
 
-    def test_oauth_tool_settings_preserve_private_tokens(
+    def test_oauth_token_service_rejects_generic_credential_writes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth token services should only be written by the OAuth callback path."""
+        response = client.post(
+            "/api/credentials/google_drive_oauth",
+            json={"credentials": {"token": "posted-token"}},
+        )
+
+        assert response.status_code == 400
+        assert "OAuth token credentials" in response.json()["detail"]
+
+    def test_oauth_tool_settings_do_not_touch_private_token_service(
         self,
         client: TestClient,
     ) -> None:
@@ -390,13 +419,12 @@ class TestCredentialsAPI:
         expected_access_value = "scoped-drive-access-value"
         expected_refresh_value = "scoped-drive-refresh-value"
         scoped_manager.save_credentials(
-            "google_drive",
+            "google_drive_oauth",
             {
                 "token": expected_access_value,
                 "refresh_token": expected_refresh_value,
                 "_oauth_provider": "google_drive",
                 "_source": "oauth",
-                "max_read_size": 1,
             },
         )
 
@@ -406,13 +434,17 @@ class TestCredentialsAPI:
         )
 
         assert response.status_code == 200
-        saved = scoped_manager.load_credentials("google_drive")
-        assert saved["token"] == expected_access_value
-        assert saved["refresh_token"] == expected_refresh_value
-        assert saved["_oauth_provider"] == "google_drive"
-        assert saved["_source"] == "oauth"
-        assert saved["list_files"] is False
-        assert saved["max_read_size"] == 42
+        saved_tokens = scoped_manager.load_credentials("google_drive_oauth")
+        saved_settings = scoped_manager.load_credentials("google_drive")
+        assert saved_tokens["token"] == expected_access_value
+        assert saved_tokens["refresh_token"] == expected_refresh_value
+        assert saved_tokens["_oauth_provider"] == "google_drive"
+        assert saved_tokens["_source"] == "oauth"
+        assert saved_settings == {
+            "list_files": False,
+            "max_read_size": 42,
+            "_source": "ui",
+        }
 
     def test_get_private_oauth_credentials_filters_token_fields(
         self,
@@ -434,8 +466,9 @@ class TestCredentialsAPI:
         )
         worker_key = resolve_worker_key("user_agent", identity, agent_name="general")
         assert worker_key is not None
-        manager.for_worker(worker_key).save_credentials(
-            "google_drive",
+        scoped_manager = manager.for_worker(worker_key)
+        scoped_manager.save_credentials(
+            "google_drive_oauth",
             {
                 "token": "scoped-drive-access-value",
                 "refresh_token": "scoped-drive-refresh-value",
@@ -445,19 +478,28 @@ class TestCredentialsAPI:
                 "expires_at": 1234.0,
                 "_oauth_provider": "google_drive",
                 "_source": "oauth",
+            },
+        )
+        scoped_manager.save_credentials(
+            "google_drive",
+            {
                 "list_files": False,
                 "max_read_size": 42,
+                "_source": "ui",
             },
         )
 
         response = client.get("/api/credentials/google_drive?agent_name=general")
         status_response = client.get("/api/credentials/google_drive/status?agent_name=general")
+        token_response = client.get("/api/credentials/google_drive_oauth?agent_name=general")
 
         assert response.status_code == 200
         assert response.json()["credentials"] == {"list_files": False, "max_read_size": 42}
         assert status_response.status_code == 200
         assert status_response.json()["has_credentials"] is True
         assert set(status_response.json()["key_names"]) == {"list_files", "max_read_size"}
+        assert token_response.status_code == 200
+        assert token_response.json() == {"service": "google_drive_oauth", "credentials": {}}
 
     def test_non_oauth_tool_settings_still_reject_private_scopes(
         self,

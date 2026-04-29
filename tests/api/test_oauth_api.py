@@ -96,6 +96,7 @@ def _fake_provider(
     provider_id: str = "test_drive",
     *,
     credential_service: str = "test_drive",
+    tool_config_service: str | None = None,
     email: str = "alice@example.com",
     hosted_domain: str = "example.com",
     allowed_email_domains: tuple[str, ...] = (),
@@ -128,6 +129,7 @@ def _fake_provider(
         token_url=f"https://auth.example.test/{provider_id}/token",
         scopes=("scope.read",),
         credential_service=credential_service,
+        tool_config_service=tool_config_service,
         client_id_env="TEST_OAUTH_CLIENT_ID",
         client_secret_env="TEST_OAUTH_CLIENT_SECRET",
         allowed_email_domains=allowed_email_domains,
@@ -332,6 +334,8 @@ def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp
     runtime_paths = _runtime_paths(tmp_path)
     provider = google_drive_oauth_provider()
     assert provider.token_parser is not None
+    assert provider.credential_service == "google_drive_oauth"
+    assert provider.tool_config_service == "google_drive"
 
     result = provider.token_parser(
         provider,
@@ -394,10 +398,10 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
         {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider()
+    provider = _fake_provider(credential_service="test_drive_oauth", tool_config_service="test_drive")
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.for_worker(_worker_key_for_standalone_user()).save_credentials(
-        provider.credential_service,
+        "test_drive",
         {
             "list_files": False,
             "max_read_size": 42,
@@ -421,9 +425,13 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
     )
     assert worker_credentials is not None
     assert worker_credentials["token"] == "test_drive-access-token"
-    assert worker_credentials["list_files"] is False
-    assert worker_credentials["max_read_size"] == 42
     assert worker_credentials["_oauth_claims"]["email"] == "alice@example.com"
+    settings = manager.for_worker(_worker_key_for_standalone_user()).load_credentials("test_drive")
+    assert settings == {
+        "list_files": False,
+        "max_read_size": 42,
+        "_source": "ui",
+    }
 
 
 def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_path: Path) -> None:
@@ -597,16 +605,22 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
         {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider()
+    provider = _fake_provider(credential_service="test_drive_oauth", tool_config_service="test_drive")
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.for_worker(_worker_key_for_standalone_user()).save_credentials(
         provider.credential_service,
         {
             "token": "stored-token",
-            "list_files": False,
-            "max_read_size": 42,
             "_source": "oauth",
             "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
+        },
+    )
+    manager.for_worker(_worker_key_for_standalone_user()).save_credentials(
+        "test_drive",
+        {
+            "list_files": False,
+            "max_read_size": 42,
+            "_source": "ui",
         },
     )
 
@@ -623,10 +637,13 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
     assert disconnect_response.status_code == 200
     assert disconnected_status_response.status_code == 200
     assert disconnected_status_response.json()["connected"] is False
-    remaining_credentials = manager.for_worker(_worker_key_for_standalone_user()).load_credentials(
+    remaining_token_credentials = manager.for_worker(_worker_key_for_standalone_user()).load_credentials(
         provider.credential_service,
     )
-    assert remaining_credentials == {
+    remaining_settings = manager.for_worker(_worker_key_for_standalone_user()).load_credentials("test_drive")
+    assert remaining_token_credentials is None
+    assert remaining_settings == {
         "list_files": False,
         "max_read_size": 42,
+        "_source": "ui",
     }

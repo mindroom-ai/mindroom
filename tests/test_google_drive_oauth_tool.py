@@ -107,3 +107,41 @@ def test_google_drive_credentials_restore_stored_expiry(tmp_path: Path) -> None:
     )
 
     assert creds.expiry.replace(tzinfo=UTC) == datetime(2030, 1, 1, tzinfo=UTC)
+
+
+def test_google_drive_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
+    runtime_paths = constants.resolve_runtime_paths(
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
+            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
+        },
+    )
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    expected_value = "access-token"
+    credentials_manager.save_credentials(
+        "google_drive",
+        {
+            "list_files": False,
+            "_source": "ui",
+        },
+    )
+    credentials_manager.save_credentials(
+        "google_drive_oauth",
+        {
+            "token": expected_value,
+            "refresh_token": "refresh-token",
+            "_source": "oauth",
+        },
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    token_data = tool._load_token_data()
+
+    assert token_data is not None
+    assert token_data["token"] == expected_value
+    assert "list_files" not in token_data

@@ -211,6 +211,7 @@ class OAuthProvider:
     token_url: str
     scopes: tuple[str, ...]
     credential_service: str
+    tool_config_service: str | None = None
     client_id_env: str | Sequence[str] | None = None
     client_secret_env: str | Sequence[str] | None = None
     redirect_uri_env: str | Sequence[str] | None = None
@@ -229,6 +230,8 @@ class OAuthProvider:
         """Validate provider identifiers and redirect path shape."""
         validate_service_name(self.id)
         validate_service_name(self.credential_service)
+        if self.tool_config_service is not None:
+            validate_service_name(self.tool_config_service)
         if not self.scopes:
             msg = f"OAuth provider '{self.id}' must declare at least one scope"
             raise ValueError(msg)
