@@ -192,7 +192,7 @@ def _batch_payload_metadata(batch: CoalescedBatch) -> DispatchPayloadMetadata:
 def payload_metadata_from_source(
     source: dict[str, Any],
     *,
-    trust_internal_metadata: bool = True,
+    trust_internal_metadata: bool,
 ) -> DispatchPayloadMetadata:
     """Extract payload metadata from a resolved Matrix event source."""
     content = source.get("content")
