@@ -14,6 +14,7 @@ from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING, Literal
 
 import typer
+from dotenv import dotenv_values
 from rich.console import Console
 from rich.syntax import Syntax
 
@@ -79,6 +80,12 @@ _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
     "openrouter": ("OPENROUTER_API_KEY",),
     "vertexai_claude": (),
 }
+_PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
+    ("MATRIX_HOMESERVER", "https://mindroom.chat"),
+    ("MATRIX_SERVER_NAME", "mindroom.chat"),
+    ("MINDROOM_PROVISIONING_URL", "https://mindroom.chat"),
+    ("MATRIX_REGISTRATION_TOKEN", ""),
+)
 _CANONICAL_INIT_PROFILES: tuple[str, ...] = (
     "full",
     "minimal",
@@ -150,10 +157,42 @@ def _write_env_file(
         return True
 
     if not replace_existing:
+        if selected_profile == "public":
+            return _append_missing_env_defaults(
+                env_path,
+                _PUBLIC_HOSTED_ENV_DEFAULTS,
+                title="Hosted Matrix defaults for public profiles",
+            )
         return False
 
     env_path.write_text(_env_template(selected_profile, selected_preset, storage_root), encoding="utf-8")
     console.print(f"[green]Env file overwritten:[/green] {env_path}")
+    return True
+
+
+def _append_missing_env_defaults(
+    env_path: Path,
+    defaults: tuple[tuple[str, str], ...],
+    *,
+    title: str,
+) -> bool:
+    """Append missing env defaults without changing existing user-owned values."""
+    existing_values = dotenv_values(env_path)
+    missing_defaults = [(key, value) for key, value in defaults if key not in existing_values]
+    if not missing_defaults:
+        return False
+
+    current_content = env_path.read_text(encoding="utf-8")
+    separator = ""
+    if current_content:
+        separator = "" if current_content.endswith("\n") else "\n"
+        if current_content.strip():
+            separator += "\n"
+
+    appended_lines = [f"# {title}", *(f"{key}={value}" for key, value in missing_defaults)]
+    appended_content = "\n".join(appended_lines)
+    env_path.write_text(f"{current_content}{separator}{appended_content}\n", encoding="utf-8")
+    console.print(f"[green]Env file updated:[/green] {env_path}")
     return True
 
 

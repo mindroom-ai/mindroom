@@ -344,6 +344,64 @@ class TestConfigInit:
         assert "Google" in output
         assert "auth" in output
 
+    def test_init_profile_public_vertexai_anthropic_updates_existing_env_with_hosted_defaults(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Hosted profiles should append Matrix defaults when preserving an existing `.env`."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "ANTHROPIC_VERTEX_PROJECT_ID=existing-project\nCLOUD_ML_REGION=europe-west4\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--profile", "public-vertexai-anthropic"],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        env_content = env_path.read_text(encoding="utf-8")
+        assert "ANTHROPIC_VERTEX_PROJECT_ID=existing-project" in env_content
+        assert "CLOUD_ML_REGION=europe-west4" in env_content
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
+        assert "MINDROOM_PROVISIONING_URL=https://mindroom.chat" in env_content
+        assert "MATRIX_REGISTRATION_TOKEN=" in env_content
+        assert "Env file updated" in normalize_console_output(result.output)
+
+    def test_init_profile_public_updates_connect_created_env_with_hosted_defaults(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Running `connect` before `config init` should not strand public Matrix defaults."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n"
+            "MINDROOM_LOCAL_CLIENT_ID=client-123\n"
+            "MINDROOM_LOCAL_CLIENT_SECRET=secret-123\n"
+            "MINDROOM_NAMESPACE=a1b2c3d4\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--profile", "public-vertexai-anthropic"],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        env_content = env_path.read_text(encoding="utf-8")
+        assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in env_content
+        assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
+        assert env_content.count("MINDROOM_PROVISIONING_URL=") == 1
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
+        assert "MATRIX_REGISTRATION_TOKEN=" in env_content
+
     def test_init_profile_public_codex_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
         """Hosted Codex profile should use Codex defaults and hosted Matrix settings."""
         target = tmp_path / "config.yaml"
