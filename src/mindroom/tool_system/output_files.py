@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
 from types import MethodType
-from typing import TYPE_CHECKING, Literal, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
 
 from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
@@ -36,7 +36,6 @@ OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
 MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
-_SCHEMA_POSTPROCESS_ATTR = "__mindroom_output_path_schema_postprocess_installed__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
 _TEXT_FALLBACK_HEADER = (
     "MindRoom tool output serialized with text fallback because the result was not JSON-normalizable.\n\n"
@@ -167,20 +166,36 @@ def normalize_output_path_argument(raw_path: object) -> object | None:
 
 
 def _process_entrypoint_with_output_path_schema(self: Function, strict: bool = False) -> None:
-    Function.process_entrypoint(self, strict=strict)
+    effective_strict = False if self.strict is False else strict
+    Function.process_entrypoint(self, strict=effective_strict)
     ensure_output_path_schema_optional(self)
 
 
-def _model_copy_with_output_path_schema(self: Function, *, deep: bool = False) -> Function:
-    copied = Function.model_copy(self, deep=deep)
+def _copy_function_model(self: Function, *, update: Mapping[str, object] | None, deep: bool) -> Function:
+    model_copy_parameters = inspect.signature(Function.model_copy).parameters
+    if "update" in model_copy_parameters:
+        copied = cast("Any", Function.model_copy)(self, update=update, deep=deep)
+    else:
+        copied = Function.model_copy(self, deep=deep)
+        if update:
+            for field_name, value in update.items():
+                object.__setattr__(copied, field_name, value)
+    return copied
+
+
+def _model_copy_with_output_path_schema(
+    self: Function,
+    *,
+    update: Mapping[str, object] | None = None,
+    deep: bool = False,
+) -> Function:
+    copied = _copy_function_model(self, update=update, deep=deep)
     _install_output_path_schema_postprocessor(copied)
     return copied
 
 
 def _install_output_path_schema_postprocessor(function: Function) -> None:
     """Install a per-function schema sanitizer that survives Agno's Function copies."""
-    if getattr(function, _SCHEMA_POSTPROCESS_ATTR, False):
-        return
     object.__setattr__(
         function,
         "process_entrypoint",
@@ -191,7 +206,6 @@ def _install_output_path_schema_postprocessor(function: Function) -> None:
         "model_copy",
         MethodType(_model_copy_with_output_path_schema, function),
     )
-    object.__setattr__(function, _SCHEMA_POSTPROCESS_ATTR, True)
 
 
 def _path_has_environment_expansion(raw_path: str) -> bool:
@@ -512,6 +526,7 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
 
     uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != _DEFAULT_PARAMETERS
     function.entrypoint = _wrap_entrypoint(function.entrypoint, policy)
+    function.strict = False
     _install_output_path_schema_postprocessor(function)
     if uses_custom_parameters:
         ensure_output_path_schema_optional(function)
