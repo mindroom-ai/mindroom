@@ -4,10 +4,11 @@ Deploy MindRoom on Kubernetes for production multi-tenant deployments.
 
 ## Architecture
 
-MindRoom uses two Helm charts:
+MindRoom uses three Helm charts:
 
 - **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom runtime with bundled dashboard/API plus Matrix/Synapse
 - **Platform Chart** (`cluster/k8s/platform/`) - SaaS control plane (API, frontend, provisioner)
+- **Runtime Chart** (`cluster/k8s/runtime/`) - MindRoom runtime only, for clusters that provide Matrix, storage, secrets, ingress, and platform services externally
 
 ## Prerequisites
 
@@ -47,9 +48,54 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set supabaseServiceKey="your-service-key"
 ```
 
+## Runtime-Only Deployment
+
+Use the runtime chart when you already operate the surrounding platform and only want Kubernetes to run the MindRoom runtime. The chart intentionally does not create Matrix, ingress, a model gateway, or platform services.
+
+```
+helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
+  --namespace mindroom \
+  --create-namespace \
+  -f runtime-values.yaml
+```
+
+Typical production values point at existing resources:
+
+```
+config:
+  create: false
+  existingConfigMap: mindroom-config
+  key: config.yaml
+
+storage:
+  create: false
+  existingClaim: mindroom-data
+
+matrix:
+  homeserverUrl: http://matrix.example.svc.cluster.local:8008
+  serverName: example.com
+  registrationToken:
+    existingSecret: mindroom-secrets
+    key: MATRIX_REGISTRATION_TOKEN
+
+env:
+  envFrom:
+    - secretRef:
+        name: mindroom-secrets
+
+workers:
+  backend: kubernetes
+  sandbox:
+    proxyToken:
+      existingSecret: mindroom-sandbox-proxy
+      key: MINDROOM_SANDBOX_PROXY_TOKEN
+```
+
+See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for the full values surface.
+
 ## Worker Backends
 
-The instance chart supports two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`. The dedicated-worker provisioning flow is implemented today. Both modes store agent data in the same per-agent directory structure.
+The instance and runtime charts support two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`. The dedicated-worker provisioning flow is implemented today. Both modes store agent data in the same per-agent directory structure.
 
 | Helm value                     | Behavior                                                            | Best for                                                                              |
 | ------------------------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -83,6 +129,8 @@ kubernetesWorkerReadyTimeoutSeconds: 60
 kubernetesWorkerIdleTimeoutSeconds: 1800
 sandbox_proxy_token: "replace-me"
 ```
+
+The runtime chart exposes the same concepts under the nested `workers.*` values.
 
 Important behavior and constraints:
 
