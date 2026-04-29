@@ -563,7 +563,7 @@ MessageEnvelope(
     attachment_ids: tuple[str, ...],
     mentioned_agents: tuple[str, ...],
     agent_name: str,
-    source_kind: str,  # "message", "edit", "voice", "image", "scheduled", "hook", "hook_dispatch", "trusted_internal_relay"
+    source_kind: str,  # "message", "edit", "voice", "image", "media", "scheduled", "hook", "hook_dispatch", "trusted_internal_relay"
     hook_source: str | None = None,
     message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
     dispatch_policy_source_kind: str | None = None,

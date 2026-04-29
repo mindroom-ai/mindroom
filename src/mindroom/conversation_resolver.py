@@ -41,16 +41,32 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import MatrixConversationCache, ThreadReadResult
 
 
+_SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
+
+
 def should_skip_mentions(event_source: dict[str, Any]) -> bool:
     """Return whether mentions in this message should be ignored."""
     content = event_source.get("content", {})
     if not isinstance(content, dict):
         return False
-    if bool(content.get("com.mindroom.skip_mentions", False)):
+    if bool(content.get(_SKIP_MENTIONS_KEY, False)):
         return True
 
     new_content = content.get("m.new_content")
-    return isinstance(new_content, dict) and bool(new_content.get("com.mindroom.skip_mentions", False))
+    return isinstance(new_content, dict) and bool(new_content.get(_SKIP_MENTIONS_KEY, False))
+
+
+def _with_skip_mentions_metadata(content: dict[str, Any], skip_mentions: bool) -> dict[str, Any]:
+    content[_SKIP_MENTIONS_KEY] = skip_mentions
+    new_content = content.get("m.new_content")
+    if isinstance(new_content, dict):
+        visible_content = dict(new_content)
+        if skip_mentions:
+            visible_content[_SKIP_MENTIONS_KEY] = True
+        else:
+            visible_content.pop(_SKIP_MENTIONS_KEY, None)
+        content["m.new_content"] = visible_content
+    return content
 
 
 def _source_with_payload_metadata(
@@ -71,7 +87,7 @@ def _source_with_payload_metadata(
         else:
             content.pop("formatted_body", None)
     if payload_metadata.skip_mentions is not None:
-        content["com.mindroom.skip_mentions"] = payload_metadata.skip_mentions
+        content = _with_skip_mentions_metadata(content, payload_metadata.skip_mentions)
     return {**event_source, "content": content}
 
 

@@ -232,7 +232,7 @@ def merge_payload_metadata(
     base: DispatchPayloadMetadata,
     hydrated: DispatchPayloadMetadata,
     *,
-    trust_hydrated_internal_metadata: bool = True,
+    trust_hydrated_internal_metadata: bool,
 ) -> DispatchPayloadMetadata:
     """Fill unknown handoff metadata from hydrated text content."""
     attachment_ids = base.attachment_ids

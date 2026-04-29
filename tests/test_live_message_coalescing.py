@@ -4219,6 +4219,38 @@ async def test_untrusted_raw_payload_metadata_spoofing_does_not_reach_envelope_o
 
 
 @pytest.mark.asyncio
+async def test_untrusted_nested_skip_mentions_does_not_suppress_visible_mentions(
+    tmp_path: Path,
+) -> None:
+    """Nested edit-layer skip metadata should not suppress visible mentions."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    event = _text_event(event_id="$nested-skip", body="* @test_agent edited")
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content["m.new_content"] = {
+        "msgtype": "m.text",
+        "body": "@test_agent edited",
+        "m.mentions": {"user_ids": ["@mindroom_test_agent:localhost"]},
+        "com.mindroom.skip_mentions": True,
+    }
+    captured_extra_content: list[object] = []
+
+    envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [(event, "message", None, {})],
+        captured_plan_extra_content=captured_extra_content,
+    )
+
+    assert envelopes[0].source_kind == "message"
+    assert envelopes[0].mentioned_agents == ("test_agent",)
+    assert envelopes[0].attachment_ids == ()
+    assert payload_requests[0].current_attachment_ids == []
+    assert captured_extra_content == [None]
+
+
+@pytest.mark.asyncio
 async def test_untrusted_coalesced_payload_metadata_spoofing_does_not_reach_envelope_or_payload(
     tmp_path: Path,
 ) -> None:
