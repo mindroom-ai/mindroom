@@ -245,6 +245,7 @@ workers:
     colocateWithControlPlaneNode: false
     extraEnv: {}
     extraLabels: {}
+    extraAnnotations: {}
     resources:
       requests:
         cpu: 100m

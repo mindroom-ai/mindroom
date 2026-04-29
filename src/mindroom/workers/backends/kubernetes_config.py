@@ -51,6 +51,7 @@ _NODE_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_NODE_NAME"
 _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV = "MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE"
 _EXTRA_ENV_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_LABELS_JSON"
+_EXTRA_ANNOTATIONS_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON"
 _OWNER_DEPLOYMENT_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME"
 _MEMORY_REQUEST_ENV = "MINDROOM_KUBERNETES_WORKER_MEMORY_REQUEST"
 _MEMORY_LIMIT_ENV = "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT"
@@ -133,6 +134,7 @@ class _KubernetesWorkerBackendConfig:
     colocate_with_control_plane_node: bool
     extra_env: dict[str, str]
     extra_labels: dict[str, str]
+    extra_annotations: dict[str, str]
     owner_deployment_name: str | None
     resource_requests: dict[str, str]
     resource_limits: dict[str, str]
@@ -187,6 +189,7 @@ class _KubernetesWorkerBackendConfig:
             colocate_with_control_plane_node=_read_bool_env(env, _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
             extra_env=_read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
             extra_labels=_read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
+            extra_annotations=_read_json_mapping_env(env, _EXTRA_ANNOTATIONS_JSON_ENV),
             owner_deployment_name=_read_env(env, _OWNER_DEPLOYMENT_NAME_ENV) or None,
             resource_requests=resource_requests,
             resource_limits=resource_limits,
@@ -203,6 +206,7 @@ def kubernetes_backend_config_signature(
     config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
+    extra_annotations_json = json.dumps(config.extra_annotations, sort_keys=True, separators=(",", ":"))
     resource_requests_json = json.dumps(config.resource_requests, sort_keys=True, separators=(",", ":"))
     resource_limits_json = json.dumps(config.resource_limits, sort_keys=True, separators=(",", ":"))
     return (
@@ -227,6 +231,7 @@ def kubernetes_backend_config_signature(
         str(config.colocate_with_control_plane_node),
         extra_env_json,
         extra_labels_json,
+        extra_annotations_json,
         config.owner_deployment_name or "",
         resource_requests_json,
         resource_limits_json,

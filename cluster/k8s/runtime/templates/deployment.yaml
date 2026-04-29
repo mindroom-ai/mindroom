@@ -154,6 +154,8 @@ spec:
               value: {{ .Values.workers.kubernetes.namePrefix | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
               value: {{ toJson .Values.workers.kubernetes.extraLabels | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON
+              value: {{ toJson .Values.workers.kubernetes.extraAnnotations | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_MEMORY_REQUEST
               value: {{ .Values.workers.kubernetes.resources.requests.memory | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT
