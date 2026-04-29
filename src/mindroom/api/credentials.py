@@ -17,6 +17,7 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
 )
 from mindroom.api import config_lifecycle
+from mindroom.config.main import Config
 from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
@@ -24,6 +25,8 @@ from mindroom.credentials import (
     load_worker_grantable_shared_credentials,
     validate_service_name,
 )
+from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.service import OAUTH_CREDENTIAL_FIELDS
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -35,7 +38,6 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
@@ -455,6 +457,46 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
     return merged_credentials or None
 
 
+def _request_may_target_scoped_credentials(request: Request, agent_name: str | None) -> bool:
+    return agent_name is not None or bool(request.query_params.get("execution_scope"))
+
+
+def _is_oauth_credential_service(request: Request, service: str) -> bool:
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    if snapshot.runtime_config is None and not snapshot.config_data:
+        config = Config.model_validate({})
+        runtime_paths = snapshot.runtime_paths
+    else:
+        config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    providers = load_oauth_providers(config, runtime_paths)
+    return any(provider.credential_service == service for provider in providers.values())
+
+
+def _allow_private_scopes_for_service(
+    *,
+    is_oauth_service: bool,
+    request: Request,
+    agent_name: str | None,
+) -> bool:
+    return is_oauth_service and _request_may_target_scoped_credentials(request, agent_name)
+
+
+def _merged_oauth_tool_config(
+    existing_credentials: dict[str, Any] | None,
+    config_values: dict[str, Any],
+) -> dict[str, Any]:
+    credentials = dict(existing_credentials or {})
+    credentials.update(
+        {
+            key: value
+            for key, value in config_values.items()
+            if key not in OAUTH_CREDENTIAL_FIELDS and not key.startswith("_")
+        },
+    )
+    credentials.setdefault("_source", "ui")
+    return credentials
+
+
 class SetApiKeyRequest(BaseModel):
     """Request to set an API key."""
 
@@ -513,7 +555,17 @@ async def get_credential_status(
 ) -> CredentialStatus:
     """Get the status of credentials for a service."""
     service = _validated_service(service)
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
+    is_oauth_service = _is_oauth_credential_service(request, service)
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=(service,),
+        allow_private_scopes=_allow_private_scopes_for_service(
+            is_oauth_service=is_oauth_service,
+            request=request,
+            agent_name=agent_name,
+        ),
+    )
     credentials = load_credentials_for_target(service, target)
 
     if credentials:
@@ -536,10 +588,27 @@ async def set_credentials(
 ) -> dict[str, str]:
     """Set multiple credentials for a service."""
     service = _validated_service(service)
-    target = resolve_request_credentials_target(http_request, agent_name=agent_name, service_names=(service,))
+    is_oauth_service = _is_oauth_credential_service(http_request, service)
+    target = resolve_request_credentials_target(
+        http_request,
+        agent_name=agent_name,
+        service_names=(service,),
+        allow_private_scopes=_allow_private_scopes_for_service(
+            is_oauth_service=is_oauth_service,
+            request=http_request,
+            agent_name=agent_name,
+        ),
+    )
 
     # Mark as UI-sourced and save
-    creds = {**payload.credentials, "_source": "ui"}
+    if is_oauth_service:
+        existing_credentials = target.target_manager.load_credentials(service)
+        creds = _merged_oauth_tool_config(
+            existing_credentials if isinstance(existing_credentials, dict) else None,
+            payload.credentials,
+        )
+    else:
+        creds = {**payload.credentials, "_source": "ui"}
     target.target_manager.save_credentials(service, creds)
 
     return {"status": "success", "message": f"Credentials saved for {service}"}
@@ -606,7 +675,17 @@ async def get_credentials(
 ) -> dict[str, Any]:
     """Get credentials for a service (for editing)."""
     service = _validated_service(service)
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
+    is_oauth_service = _is_oauth_credential_service(request, service)
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=(service,),
+        allow_private_scopes=_allow_private_scopes_for_service(
+            is_oauth_service=is_oauth_service,
+            request=request,
+            agent_name=agent_name,
+        ),
+    )
     credentials = load_credentials_for_target(service, target)
 
     if not credentials:

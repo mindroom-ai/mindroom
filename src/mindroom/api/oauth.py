@@ -20,6 +20,7 @@ from mindroom.api.credentials import (
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider, OAuthProviderError, load_oauth_providers
 from mindroom.oauth.service import (
+    OAUTH_CREDENTIAL_FIELDS,
     OAuthConnectTarget,
     consume_oauth_connect_token,
     oauth_connect_target_payload,
@@ -33,21 +34,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
-_OAUTH_CREDENTIAL_FIELDS = frozenset(
-    {
-        "_id_token",
-        "_oauth_claims",
-        "_oauth_provider",
-        "_source",
-        "client_id",
-        "expires_at",
-        "refresh_token",
-        "scopes",
-        "token",
-        "token_type",
-        "token_uri",
-    },
-)
 
 
 class OAuthConnectResponse(BaseModel):
@@ -393,7 +379,7 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
     )
     existing_credentials = target.target_manager.load_credentials(provider.credential_service) or {}
     remaining_credentials = {
-        key: value for key, value in existing_credentials.items() if key not in _OAUTH_CREDENTIAL_FIELDS
+        key: value for key, value in existing_credentials.items() if key not in OAUTH_CREDENTIAL_FIELDS
     }
     if remaining_credentials:
         target.target_manager.save_credentials(provider.credential_service, remaining_credentials)

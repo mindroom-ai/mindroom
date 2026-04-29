@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import time
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from mindroom.oauth.providers import (
@@ -10,12 +10,11 @@ from mindroom.oauth.providers import (
     OAuthClientConfig,
     OAuthProvider,
     OAuthTokenResult,
+    oauth_expires_at_from_response,
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from mindroom.constants import RuntimePaths
 
 _GOOGLE_ID_TOKEN_DEPS = ["google-auth"]
@@ -39,22 +38,25 @@ def _google_drive_token_parser(
     if not isinstance(access_token, str) or not access_token:
         msg = "Google did not return an access token"
         raise OAuthClaimValidationError(msg)
-    if not isinstance(id_token, str) or not id_token:
+    existing_claims = token_response.get("_oauth_claims")
+    if (not isinstance(id_token, str) or not id_token) and isinstance(existing_claims, Mapping):
+        claims = dict(existing_claims)
+    elif not isinstance(id_token, str) or not id_token:
         msg = "Google did not return a verifiable identity token"
         raise OAuthClaimValidationError(msg)
+    else:
+        ensure_tool_deps(_GOOGLE_ID_TOKEN_DEPS, "google_drive", runtime_paths)
+        from google.auth.transport.requests import Request as GoogleRequest  # noqa: PLC0415
+        from google.oauth2 import id_token as google_id_token  # noqa: PLC0415
 
-    ensure_tool_deps(_GOOGLE_ID_TOKEN_DEPS, "google_drive", runtime_paths)
-    from google.auth.transport.requests import Request as GoogleRequest  # noqa: PLC0415
-    from google.oauth2 import id_token as google_id_token  # noqa: PLC0415
-
-    claims = google_id_token.verify_oauth2_token(
-        id_token,
-        GoogleRequest(),
-        client_config.client_id,
-    )
-    if not isinstance(claims, dict):
-        msg = "Google identity token verification did not return claims"
-        raise OAuthClaimValidationError(msg)
+        claims = google_id_token.verify_oauth2_token(
+            id_token,
+            GoogleRequest(),
+            client_config.client_id,
+        )
+        if not isinstance(claims, dict):
+            msg = "Google identity token verification did not return claims"
+            raise OAuthClaimValidationError(msg)
 
     scopes = provider.scopes
     response_scope = token_response.get("scope")
@@ -66,18 +68,19 @@ def _google_drive_token_parser(
         "token_uri": provider.token_url,
         "client_id": client_config.client_id,
         "scopes": list(scopes),
-        "_id_token": id_token,
         "_source": "oauth",
         "_oauth_provider": provider.id,
     }
+    if isinstance(id_token, str) and id_token:
+        token_data["_id_token"] = id_token
     if isinstance(refresh_token, str) and refresh_token:
         token_data["refresh_token"] = refresh_token
     token_type = token_response.get("token_type")
     if isinstance(token_type, str) and token_type:
         token_data["token_type"] = token_type
-    expires_in = token_response.get("expires_in")
-    if isinstance(expires_in, int | float) and expires_in > 0:
-        token_data["expires_at"] = time.time() + float(expires_in)
+    expires_at = oauth_expires_at_from_response(token_response)
+    if expires_at is not None:
+        token_data["expires_at"] = expires_at
 
     return OAuthTokenResult(token_data=token_data, claims=claims, claims_verified=True)
 

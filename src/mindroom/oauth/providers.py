@@ -5,19 +5,30 @@ from __future__ import annotations
 import base64
 import json
 import time
+import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import urlencode
 
-import httpx
+from authlib.common.errors import AuthlibBaseError
+from authlib.deprecate import AuthlibDeprecationWarning
+from httpx import HTTPError
 
 from mindroom.credentials import validate_service_name
+
+warnings.filterwarnings(
+    "ignore",
+    category=AuthlibDeprecationWarning,
+    module="authlib._joserfc_helpers",
+)
+from authlib.integrations.httpx_client import AsyncOAuth2Client  # noqa: E402
+from authlib.integrations.requests_client import OAuth2Session  # noqa: E402
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
+_TOKEN_ENDPOINT_AUTH_METHOD = "client_secret_post"  # noqa: S105
 
 
 class OAuthProviderError(RuntimeError):
@@ -148,9 +159,9 @@ def _default_token_parser(
     token_type = token_response.get("token_type")
     if isinstance(token_type, str) and token_type:
         token_data["token_type"] = token_type
-    expires_in = token_response.get("expires_in")
-    if isinstance(expires_in, int | float) and expires_in > 0:
-        token_data["expires_at"] = time.time() + float(expires_in)
+    expires_at = oauth_expires_at_from_response(token_response)
+    if expires_at is not None:
+        token_data["expires_at"] = expires_at
 
     id_token = token_response.get("id_token")
     claims: dict[str, Any] = {}
@@ -177,6 +188,17 @@ def _claim_email_domain(claims: Mapping[str, Any]) -> str | None:
     if not isinstance(email, str) or "@" not in email:
         return None
     return email.rsplit("@", 1)[-1].lower()
+
+
+def oauth_expires_at_from_response(token_response: Mapping[str, Any]) -> float | None:
+    """Return an absolute expiry timestamp from a provider or OAuth client token response."""
+    expires_at = token_response.get("expires_at")
+    if isinstance(expires_at, int | float) and expires_at > 0:
+        return float(expires_at)
+    expires_in = token_response.get("expires_in")
+    if isinstance(expires_in, int | float) and expires_in > 0:
+        return time.time() + float(expires_in)
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,15 +295,22 @@ class OAuthProvider:
     def authorization_uri(self, runtime_paths: RuntimePaths, *, state: str) -> str:
         """Build the provider authorization URL for one state token."""
         client_config = self.require_client_config(runtime_paths)
-        params = {
-            "client_id": client_config.client_id,
-            "redirect_uri": client_config.redirect_uri,
-            "response_type": "code",
-            "scope": " ".join(self.scopes),
-            "state": state,
-            **dict(self.extra_auth_params),
-        }
-        return f"{self.authorization_url}?{urlencode(params)}"
+        client = OAuth2Session(
+            client_id=client_config.client_id,
+            client_secret=client_config.client_secret,
+            scope=self.scopes,
+            redirect_uri=client_config.redirect_uri,
+            token_endpoint_auth_method=_TOKEN_ENDPOINT_AUTH_METHOD,
+        )
+        try:
+            authorization_url, _ = client.create_authorization_url(
+                self.authorization_url,
+                state=state,
+                **dict(self.extra_auth_params),
+            )
+        finally:
+            client.close()
+        return authorization_url
 
     async def exchange_code(self, code: str, runtime_paths: RuntimePaths) -> OAuthTokenResult:
         """Exchange an authorization code for normalized credentials."""
@@ -292,20 +321,28 @@ class OAuthProvider:
                 return result
             return await cast("Awaitable[OAuthTokenResult]", result)
 
-        data = {
-            "code": code,
-            "client_id": client_config.client_id,
-            "client_secret": client_config.client_secret,
-            "redirect_uri": client_config.redirect_uri,
-            "grant_type": "authorization_code",
-        }
-        async with httpx.AsyncClient(timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS) as client:
-            response = await client.post(self.token_url, data=data)
-        if response.status_code >= 400:
+        async with AsyncOAuth2Client(
+            client_id=client_config.client_id,
+            client_secret=client_config.client_secret,
+            scope=self.scopes,
+            redirect_uri=client_config.redirect_uri,
+            token_endpoint_auth_method=_TOKEN_ENDPOINT_AUTH_METHOD,
+            timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
+        ) as client:
+            try:
+                token_response = await client.fetch_token(
+                    self.token_url,
+                    code=code,
+                    grant_type="authorization_code",
+                )
+            except (AuthlibBaseError, HTTPError) as exc:
+                msg = "OAuth token exchange failed"
+                raise OAuthProviderError(msg) from exc
+        if not isinstance(token_response, Mapping):
             msg = "OAuth token exchange failed"
             raise OAuthProviderError(msg)
         parser = self.token_parser or _default_token_parser
-        return parser(self, response.json(), client_config, runtime_paths)
+        return parser(self, token_response, client_config, runtime_paths)
 
     async def refresh_token_data(
         self,
@@ -317,17 +354,21 @@ class OAuthProvider:
         if not isinstance(refresh_token, str) or not refresh_token:
             return None
         client_config = self.require_client_config(runtime_paths)
-        data = {
-            "client_id": client_config.client_id,
-            "client_secret": client_config.client_secret,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        }
-        async with httpx.AsyncClient(timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS) as client:
-            response = await client.post(self.token_url, data=data)
-        if response.status_code >= 400:
+        async with AsyncOAuth2Client(
+            client_id=client_config.client_id,
+            client_secret=client_config.client_secret,
+            scope=self.scopes,
+            redirect_uri=client_config.redirect_uri,
+            token_endpoint_auth_method=_TOKEN_ENDPOINT_AUTH_METHOD,
+            token=dict(token_data),
+            timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
+        ) as client:
+            try:
+                response_data = await client.refresh_token(self.token_url, refresh_token=refresh_token)
+            except (AuthlibBaseError, HTTPError):
+                return None
+        if not isinstance(response_data, Mapping):
             return None
-        response_data = response.json()
         merged_response = {**dict(token_data), **response_data}
         parsed = (self.token_parser or _default_token_parser)(self, merged_response, client_config, runtime_paths)
         refreshed = dict(token_data)

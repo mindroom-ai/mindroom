@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -20,8 +21,9 @@ from mindroom.api import credentials as credentials_api
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth import OAuthProvider, OAuthTokenResult, load_oauth_providers
+from mindroom.oauth import OAuthClientConfig, OAuthProvider, OAuthTokenResult, load_oauth_providers
 from mindroom.oauth import service as oauth_service
+from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 
 
@@ -248,6 +250,109 @@ def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -
     assert params["client_id"] == ["client-id"]
     assert params["scope"] == ["scope.read"]
     assert params["state"][0] != "general"
+
+
+def test_provider_exchange_and_refresh_use_oauth_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = _fake_provider()
+    provider = OAuthProvider(
+        id=provider.id,
+        display_name=provider.display_name,
+        authorization_url=provider.authorization_url,
+        token_url=provider.token_url,
+        scopes=provider.scopes,
+        credential_service=provider.credential_service,
+        client_id_env=provider.client_id_env,
+        client_secret_env=provider.client_secret_env,
+    )
+    seen: dict[str, Any] = {}
+
+    class FakeOAuth2Client:
+        def __init__(self, **kwargs: object) -> None:
+            seen.setdefault("init_kwargs", []).append(kwargs)
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def fetch_token(self, url: str, **kwargs: object) -> dict[str, Any]:
+            seen["fetch"] = {"url": url, **kwargs}
+            return {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "token_type": "Bearer",
+                "scope": "scope.read",
+                "expires_at": 1234.0,
+            }
+
+        async def refresh_token(self, url: str, **kwargs: object) -> dict[str, Any]:
+            seen["refresh"] = {"url": url, **kwargs}
+            return {
+                "access_token": "refreshed-token",
+                "token_type": "Bearer",
+                "expires_at": 2234.0,
+            }
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+
+    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths))
+    refreshed = asyncio.run(
+        provider.refresh_token_data(
+            result.token_data,
+            runtime_paths,
+        ),
+    )
+
+    assert seen["init_kwargs"][0]["token_endpoint_auth_method"] == "client_secret_post"
+    assert seen["fetch"] == {
+        "url": provider.token_url,
+        "code": "auth-code",
+        "grant_type": "authorization_code",
+    }
+    assert result.token_data["token"] == "access-token"
+    assert result.token_data["refresh_token"] == "refresh-token"
+    assert result.token_data["expires_at"] == 1234.0
+    assert seen["refresh"]["url"] == provider.token_url
+    assert seen["refresh"]["refresh_token"] == "refresh-token"
+    assert refreshed is not None
+    assert refreshed["token"] == "refreshed-token"
+    assert refreshed["refresh_token"] == "refresh-token"
+    assert refreshed["expires_at"] == 2234.0
+
+
+def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    provider = google_drive_oauth_provider()
+    assert provider.token_parser is not None
+
+    result = provider.token_parser(
+        provider,
+        {
+            "access_token": "refreshed-access",
+            "expires_at": 2234.0,
+            "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
+        },
+        OAuthClientConfig(
+            client_id="client-id",
+            client_secret="client-secret",
+            redirect_uri="http://localhost/callback",
+        ),
+        runtime_paths,
+    )
+
+    assert result.token_data["token"] == "refreshed-access"
+    assert result.token_data["expires_at"] == 2234.0
+    assert "_id_token" not in result.token_data
+    assert result.claims["email"] == "alice@example.com"
+    assert result.claims_verified is True
 
 
 def test_authorize_redirects_unauthenticated_browser_to_login(tmp_path: Path) -> None:

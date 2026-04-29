@@ -367,7 +367,10 @@ path = "mindroom.api.credentials"
 depends_on = [
     "mindroom.agent_policy",
     "mindroom.api.config_lifecycle",
+    "mindroom.config.main",
     "mindroom.credentials",
+    "mindroom.oauth.registry",
+    "mindroom.oauth.service",
     "mindroom.tool_system.worker_routing",
 ]
 

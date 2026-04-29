@@ -18,6 +18,21 @@ if TYPE_CHECKING:
 
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
 _oauth_connect_token_lock = threading.Lock()
+OAUTH_CREDENTIAL_FIELDS = frozenset(
+    {
+        "_id_token",
+        "_oauth_claims",
+        "_oauth_provider",
+        "_source",
+        "client_id",
+        "expires_at",
+        "refresh_token",
+        "scopes",
+        "token",
+        "token_type",
+        "token_uri",
+    },
+)
 
 
 @dataclass(frozen=True)

@@ -288,6 +288,110 @@ class TestCredentialsAPI:
         assert "execution_scope=unscoped" in response.json()["detail"]
         assert "Persisted scope is worker_scope=shared" in response.json()["detail"]
 
+    def test_oauth_tool_settings_preserve_global_tokens(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Saving OAuth-backed tool options should not overwrite stored token fields."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        expected_access_value = "drive-access-value"
+        expected_refresh_value = "drive-refresh-value"
+        manager.save_credentials(
+            "google_drive",
+            {
+                "token": expected_access_value,
+                "refresh_token": expected_refresh_value,
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+                "max_read_size": 1,
+            },
+        )
+
+        response = client.post(
+            "/api/credentials/google_drive",
+            json={
+                "credentials": {
+                    "token": "posted-token",
+                    "list_files": False,
+                    "max_read_size": 42,
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        saved = manager.load_credentials("google_drive")
+        assert saved["token"] == expected_access_value
+        assert saved["refresh_token"] == expected_refresh_value
+        assert saved["_oauth_provider"] == "google_drive"
+        assert saved["_source"] == "oauth"
+        assert saved["list_files"] is False
+        assert saved["max_read_size"] == 42
+
+    def test_oauth_tool_settings_preserve_private_tokens(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth-backed tool options may save in private scopes without replacing tokens."""
+        config = _config_with_worker_scope("user_agent")
+        _publish_committed_runtime_config(client.app, config)
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="standalone",
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        )
+        worker_key = resolve_worker_key("user_agent", identity, agent_name="general")
+        assert worker_key is not None
+        scoped_manager = manager.for_worker(worker_key)
+        expected_access_value = "scoped-drive-access-value"
+        expected_refresh_value = "scoped-drive-refresh-value"
+        scoped_manager.save_credentials(
+            "google_drive",
+            {
+                "token": expected_access_value,
+                "refresh_token": expected_refresh_value,
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+                "max_read_size": 1,
+            },
+        )
+
+        response = client.post(
+            "/api/credentials/google_drive?agent_name=general",
+            json={"credentials": {"list_files": False, "max_read_size": 42}},
+        )
+
+        assert response.status_code == 200
+        saved = scoped_manager.load_credentials("google_drive")
+        assert saved["token"] == expected_access_value
+        assert saved["refresh_token"] == expected_refresh_value
+        assert saved["_oauth_provider"] == "google_drive"
+        assert saved["_source"] == "oauth"
+        assert saved["list_files"] is False
+        assert saved["max_read_size"] == 42
+
+    def test_non_oauth_tool_settings_still_reject_private_scopes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Private-scope writes stay limited to registered OAuth credential services."""
+        config = _config_with_worker_scope("user_agent")
+        _publish_committed_runtime_config(client.app, config)
+
+        response = client.post(
+            "/api/credentials/weather?agent_name=general",
+            json={"credentials": {"api_key": "weather-key"}},
+        )
+
+        assert response.status_code == 400
+        assert "worker_scope=user_agent" in response.json()["detail"]
+
     def test_resolve_request_credentials_target_keeps_one_runtime_for_identity(
         self,
         tmp_path: Path,

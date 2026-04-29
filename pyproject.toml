@@ -21,6 +21,7 @@ dependencies = [
   "aiosqlite>=0.20",
   "anthropic>=0.70",
   "anyio>=4.10",
+  "authlib>=1.6",
   "cerebras-cloud-sdk>=1.46",
   "chromadb>=1.0.15",
   "cron-descriptor>=1.4.5",
