@@ -64,7 +64,7 @@ from mindroom.streaming import (
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
-from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.timing import DispatchPipelineTiming, elapsed_timing, timed
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     runtime_context_from_dispatch_context,
@@ -447,23 +447,43 @@ class ResponseRunner:
         response_event_id: str | None = None,
     ) -> None:
         """Persist one interrupted recorder snapshot exactly once."""
+        timing_data = {
+            "agent_name": self.deps.agent_name,
+            "session_id": session_id,
+            "session_scope_kind": session_scope.kind,
+            "session_scope_id": session_scope.scope_id,
+            "run_id": recorder.run_id or run_id,
+            "response_event_id": response_event_id,
+            "is_team": is_team,
+        }
         if not recorder.claim_interrupted_persistence():
+            with elapsed_timing("response_runner.interrupted_replay.total", outcome="skipped", **timing_data):
+                pass
             return
-        if response_event_id:
-            recorder.set_response_event_id(response_event_id)
-        storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
-        try:
-            persist_interrupted_replay_snapshot(
-                storage=storage,
-                session=None,
-                session_id=session_id,
-                scope_id=session_scope.scope_id,
-                run_id=recorder.run_id or run_id or str(uuid4()),
-                snapshot=recorder.interrupted_snapshot(),
-                is_team=is_team,
-            )
-        finally:
-            storage.close()
+        with elapsed_timing("response_runner.interrupted_replay.total", outcome="failed", **timing_data) as total_timing:
+            if response_event_id:
+                recorder.set_response_event_id(response_event_id)
+            with elapsed_timing("response_runner.interrupted_replay.create_storage", **timing_data):
+                storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
+            try:
+                with elapsed_timing("response_runner.interrupted_replay.persist_snapshot", **timing_data):
+                    persist_interrupted_replay_snapshot(
+                        storage=storage,
+                        session=None,
+                        session_id=session_id,
+                        scope_id=session_scope.scope_id,
+                        run_id=recorder.run_id or run_id or str(uuid4()),
+                        snapshot=recorder.interrupted_snapshot(),
+                        is_team=is_team,
+                    )
+                total_timing["outcome"] = "persisted"
+            finally:
+                try:
+                    with elapsed_timing("response_runner.interrupted_replay.close_storage", **timing_data):
+                        storage.close()
+                except Exception:
+                    total_timing["outcome"] = "failed"
+                    raise
 
     def _ensure_recorder_interrupted(self, recorder: TurnRecorder) -> None:
         """Mark one recorder interrupted unless lower layers already captured richer state."""
@@ -1885,59 +1905,81 @@ class ResponseRunner:
                 await lifecycle.emit_session_started(session_started_watch)
         except StreamingDeliveryError as error:
             stream_transport_outcome = error.transport_outcome
-            if stream_transport_outcome.terminal_status == "cancelled":
-                if stream_transport_outcome.failure_reason == "sync_restart_cancelled":
-                    self.deps.logger.info(
-                        "Bot streaming response interrupted by sync restart",
-                        message_id=error.event_id,
-                    )
+            error_timing_data = {
+                "agent_name": self.deps.agent_name,
+                "run_id": run_id,
+                "session_id": runtime.session_id,
+                "response_event_id": error.event_id,
+                "terminal_status": stream_transport_outcome.terminal_status,
+                "failure_reason": stream_transport_outcome.failure_reason,
+                "is_team": False,
+            }
+            with elapsed_timing("response_runner.streaming_error.total", outcome="failed", **error_timing_data) as total_timing:
+                if stream_transport_outcome.terminal_status == "cancelled":
+                    if stream_transport_outcome.failure_reason == "sync_restart_cancelled":
+                        self.deps.logger.info(
+                            "Bot streaming response interrupted by sync restart",
+                            message_id=error.event_id,
+                        )
+                    else:
+                        self.deps.logger.warning(
+                            "Bot streaming response cancelled — traceback for diagnosis",
+                            message_id=error.event_id,
+                            exc_info=True,
+                        )
                 else:
-                    self.deps.logger.warning(
-                        "Bot streaming response cancelled — traceback for diagnosis",
-                        message_id=error.event_id,
-                        exc_info=True,
+                    self.deps.logger.exception("Error in streaming response", error=str(error.error))
+                tool_trace[:] = error.tool_trace
+                recorded_error = False
+                with elapsed_timing(
+                    "response_runner.streaming_error.record",
+                    recorded=False,
+                    **error_timing_data,
+                ) as record_timing:
+                    recorded_error = self._record_stream_delivery_error(
+                        recorder=turn_recorder,
+                        accumulated_text=error.accumulated_text,
+                        tool_trace=error.tool_trace,
                     )
-            else:
-                self.deps.logger.exception("Error in streaming response", error=str(error.error))
-            tool_trace[:] = error.tool_trace
-            if self._record_stream_delivery_error(
-                recorder=turn_recorder,
-                accumulated_text=error.accumulated_text,
-                tool_trace=error.tool_trace,
-            ):
-                self._persist_interrupted_recorder(
-                    recorder=turn_recorder,
-                    session_scope=session_scope,
-                    session_id=runtime.session_id,
-                    execution_identity=runtime.tool_dispatch.execution_identity,
-                    run_id=run_id,
-                    is_team=False,
-                    response_event_id=error.event_id,
+                    record_timing["recorded"] = recorded_error
+                if recorded_error:
+                    with elapsed_timing("response_runner.streaming_error.persist_interrupted", **error_timing_data):
+                        self._persist_interrupted_recorder(
+                            recorder=turn_recorder,
+                            session_scope=session_scope,
+                            session_id=runtime.session_id,
+                            execution_identity=runtime.tool_dispatch.execution_identity,
+                            run_id=run_id,
+                            is_team=False,
+                            response_event_id=error.event_id,
+                        )
+                if run_success_collector is not None:
+                    run_success_collector.append(turn_recorder.outcome == "completed")
+                if compaction_outcomes_collector is not None:
+                    compaction_outcomes_collector.extend(compaction_outcomes)
+                if post_response_compaction_checks_collector is not None:
+                    post_response_compaction_checks_collector.extend(post_response_compaction_checks)
+                response_extra_content = _merge_response_extra_content(
+                    run_metadata_content,
+                    request.attachment_ids,
                 )
-            if run_success_collector is not None:
-                run_success_collector.append(turn_recorder.outcome == "completed")
-            if compaction_outcomes_collector is not None:
-                compaction_outcomes_collector.extend(compaction_outcomes)
-            if post_response_compaction_checks_collector is not None:
-                post_response_compaction_checks_collector.extend(post_response_compaction_checks)
-            response_extra_content = _merge_response_extra_content(
-                run_metadata_content,
-                request.attachment_ids,
-            )
-            return await self.deps.delivery_gateway.finalize_streamed_response(
-                FinalizeStreamedResponseRequest(
-                    target=runtime.resolved_target,
-                    stream_transport_outcome=stream_transport_outcome,
-                    initial_delivery_kind="edited" if request.existing_event_id else "sent",
-                    response_kind=response_kind,
-                    response_envelope=response_envelope,
-                    correlation_id=correlation_id,
-                    tool_trace=error.tool_trace if self._show_tool_calls() else None,
-                    extra_content=response_extra_content,
-                    existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
-                ),
-            )
+                with elapsed_timing("response_runner.streaming_error.finalize", **error_timing_data):
+                    final_delivery_outcome = await self.deps.delivery_gateway.finalize_streamed_response(
+                        FinalizeStreamedResponseRequest(
+                            target=runtime.resolved_target,
+                            stream_transport_outcome=stream_transport_outcome,
+                            initial_delivery_kind="edited" if request.existing_event_id else "sent",
+                            response_kind=response_kind,
+                            response_envelope=response_envelope,
+                            correlation_id=correlation_id,
+                            tool_trace=error.tool_trace if self._show_tool_calls() else None,
+                            extra_content=response_extra_content,
+                            existing_event_id=request.existing_event_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        ),
+                    )
+                total_timing["outcome"] = "finalized"
+                return final_delivery_outcome
         except asyncio.CancelledError as exc:
             log_cancelled_response(
                 self.deps.logger,
