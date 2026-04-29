@@ -1,0 +1,17 @@
+{{- if and .Values.storage.create (not .Values.storage.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "mindroom-runtime.storageClaimName" . }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.storage.accessModes | nindent 4 }}
+  {{- if .Values.storage.storageClassName }}
+  storageClassName: {{ .Values.storage.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.size | quote }}
+{{- end }}

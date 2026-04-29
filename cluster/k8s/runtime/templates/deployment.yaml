@@ -1,0 +1,322 @@
+{{- $fullname := include "mindroom-runtime.fullname" . -}}
+{{- $proxyTokenSecretName := include "mindroom-runtime.proxyTokenSecretName" . -}}
+{{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "mindroom-runtime.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mindroom-runtime.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "mindroom-runtime.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName | quote }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mindroom
+          image: {{ include "mindroom-runtime.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /app/.venv/bin/mindroom
+            - run
+            - --api-host
+            - {{ .Values.runtime.apiHost | quote }}
+            - --api-port
+            - {{ .Values.runtime.apiPort | quote }}
+          ports:
+            - name: api
+              containerPort: {{ .Values.runtime.apiPort }}
+              protocol: TCP
+          env:
+            - name: MINDROOM_STORAGE_PATH
+              value: {{ .Values.storage.mountPath | quote }}
+            - name: MINDROOM_CONFIG_PATH
+              value: {{ .Values.config.mountPath | quote }}
+            - name: HOME
+              value: {{ .Values.storage.mountPath | quote }}
+            {{- if .Values.runtime.logLevel }}
+            - name: LOG_LEVEL
+              value: {{ .Values.runtime.logLevel | quote }}
+            {{- end }}
+            {{- if .Values.runtime.timezone }}
+            - name: TZ
+              value: {{ .Values.runtime.timezone | quote }}
+            {{- end }}
+            {{- if .Values.runtime.timing }}
+            - name: MINDROOM_TIMING
+              value: "1"
+            {{- end }}
+            - name: MINDROOM_WORKER_BACKEND
+              value: {{ .Values.workers.backend | quote }}
+            - name: MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS
+              value: {{ .Values.workers.cleanupIntervalSeconds | quote }}
+            - name: MINDROOM_SANDBOX_EXECUTION_MODE
+              value: {{ .Values.workers.sandbox.executionMode | quote }}
+            - name: MINDROOM_SANDBOX_PROXY_TOOLS
+              value: {{ .Values.workers.sandbox.proxyTools | quote }}
+            {{- if $proxyTokenSecretName }}
+            - name: MINDROOM_SANDBOX_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $proxyTokenSecretName }}
+                  key: {{ .Values.workers.sandbox.proxyToken.key }}
+            {{- end }}
+            {{- if eq .Values.workers.backend "static_runner" }}
+            - name: MINDROOM_SANDBOX_PROXY_URL
+              value: {{ printf "http://localhost:%v" .Values.workers.staticRunner.port | quote }}
+            {{- else if eq .Values.workers.backend "kubernetes" }}
+            - name: MINDROOM_KUBERNETES_WORKER_NAMESPACE
+              value: {{ include "mindroom-runtime.workerNamespace" . | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_IMAGE
+              value: {{ include "mindroom-runtime.workerImage" . | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY
+              value: {{ default .Values.image.pullPolicy .Values.workers.kubernetes.image.pullPolicy | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_PORT
+              value: {{ .Values.workers.kubernetes.port | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_SERVICE_ACCOUNT_NAME
+              value: {{ include "mindroom-runtime.workerServiceAccountName" . | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME
+              value: {{ include "mindroom-runtime.storageClaimName" . | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH
+              value: {{ .Values.storage.mountPath | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX
+              value: {{ .Values.workers.kubernetes.storageSubpathPrefix | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME
+              value: {{ include "mindroom-runtime.workerConfigMapName" . | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_CONFIG_KEY
+              value: {{ include "mindroom-runtime.workerConfigKey" . | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_CONFIG_PATH
+              value: {{ include "mindroom-runtime.workerConfigPath" . | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS
+              value: {{ .Values.workers.kubernetes.idleTimeoutSeconds | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS
+              value: {{ .Values.workers.kubernetes.readyTimeoutSeconds | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_NAME_PREFIX
+              value: {{ .Values.workers.kubernetes.namePrefix | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
+              value: {{ toJson .Values.workers.kubernetes.extraLabels | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_MEMORY_REQUEST
+              value: {{ .Values.workers.kubernetes.resources.requests.memory | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT
+              value: {{ .Values.workers.kubernetes.resources.limits.memory | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_CPU_REQUEST
+              value: {{ .Values.workers.kubernetes.resources.requests.cpu | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_CPU_LIMIT
+              value: {{ .Values.workers.kubernetes.resources.limits.cpu | quote }}
+            {{- if $proxyTokenSecretName }}
+            - name: MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_NAME
+              value: {{ $proxyTokenSecretName | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_KEY
+              value: {{ .Values.workers.sandbox.proxyToken.key | quote }}
+            {{- end }}
+            {{- if .Values.workers.kubernetes.nodeName }}
+            - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
+              value: {{ .Values.workers.kubernetes.nodeName | quote }}
+            {{- end }}
+            {{- if .Values.workers.kubernetes.colocateWithControlPlaneNode }}
+            - name: MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE
+              value: "true"
+            {{- end }}
+            {{- if .Values.workers.kubernetes.extraEnv }}
+            - name: MINDROOM_KUBERNETES_WORKER_ENV_JSON
+              value: {{ toJson .Values.workers.kubernetes.extraEnv | quote }}
+            {{- end }}
+            {{- if or .Values.workers.kubernetes.ownerDeploymentName (eq $workerNamespace .Release.Namespace) }}
+            - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME
+              value: {{ default $fullname .Values.workers.kubernetes.ownerDeploymentName | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.matrix.homeserverUrl }}
+            - name: MATRIX_HOMESERVER
+              value: {{ .Values.matrix.homeserverUrl | quote }}
+            {{- end }}
+            {{- if .Values.matrix.serverName }}
+            - name: MATRIX_SERVER_NAME
+              value: {{ .Values.matrix.serverName | quote }}
+            {{- end }}
+            {{- if .Values.matrix.startupTimeoutSeconds }}
+            - name: MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS
+              value: {{ .Values.matrix.startupTimeoutSeconds | quote }}
+            {{- end }}
+            {{- if .Values.matrix.registrationToken.existingSecret }}
+            - name: MATRIX_REGISTRATION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.matrix.registrationToken.existingSecret }}
+                  key: {{ .Values.matrix.registrationToken.key }}
+            {{- end }}
+            {{- with .Values.env.extra }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.env.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            {{- if .Values.probes.startup.custom }}
+            {{- toYaml .Values.probes.startup.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: {{ .Values.probes.startup.port }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            {{- end }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            {{- if .Values.probes.readiness.custom }}
+            {{- toYaml .Values.probes.readiness.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: {{ .Values.probes.readiness.port }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            {{- end }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            {{- if .Values.probes.liveness.custom }}
+            {{- toYaml .Values.probes.liveness.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: {{ .Values.probes.liveness.port }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: {{ .Values.config.mountPath }}
+              subPath: {{ .Values.config.key }}
+              readOnly: true
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ .Values.storage.mountPath }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- if eq .Values.workers.backend "static_runner" }}
+        - name: sandbox-runner
+          image: {{ include "mindroom-runtime.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /app/run-sandbox-runner.sh
+          ports:
+            - name: sandbox
+              containerPort: {{ .Values.workers.staticRunner.port }}
+              protocol: TCP
+          env:
+            - name: MINDROOM_SANDBOX_RUNNER_MODE
+              value: "true"
+            - name: MINDROOM_SANDBOX_RUNNER_PORT
+              value: {{ .Values.workers.staticRunner.port | quote }}
+            - name: MINDROOM_CONFIG_PATH
+              value: {{ .Values.config.mountPath | quote }}
+            - name: MINDROOM_STORAGE_PATH
+              value: {{ .Values.storage.mountPath | quote }}
+            - name: MINDROOM_SANDBOX_WORKER_ROOT
+              value: {{ default (printf "%s/workers" .Values.storage.mountPath) .Values.workers.staticRunner.workerRoot | quote }}
+            - name: HOME
+              value: {{ .Values.storage.mountPath | quote }}
+            {{- if $proxyTokenSecretName }}
+            - name: MINDROOM_SANDBOX_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $proxyTokenSecretName }}
+                  key: {{ .Values.workers.sandbox.proxyToken.key }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.workers.staticRunner.resources | nindent 12 }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: {{ .Values.config.mountPath }}
+              subPath: {{ .Values.config.key }}
+              readOnly: true
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ .Values.storage.mountPath }}
+            - name: sandbox-workspace
+              mountPath: /app/workspace
+        {{- end }}
+        {{- with .Values.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "mindroom-runtime.configMapName" . }}
+        - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+          persistentVolumeClaim:
+            claimName: {{ include "mindroom-runtime.storageClaimName" . }}
+        {{- if eq .Values.workers.backend "static_runner" }}
+        - name: sandbox-workspace
+          emptyDir: {}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

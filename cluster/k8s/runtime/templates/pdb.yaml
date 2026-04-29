@@ -1,0 +1,17 @@
+{{- if .Values.podDisruptionBudget.create }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "mindroom-runtime.fullname" . }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "mindroom-runtime.selectorLabels" . | nindent 6 }}
+  {{- if .Values.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+{{- end }}

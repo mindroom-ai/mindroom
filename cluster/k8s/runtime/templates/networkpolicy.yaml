@@ -1,0 +1,31 @@
+{{- if and (eq .Values.workers.backend "kubernetes") .Values.workers.kubernetes.networkPolicy.create }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mindroom-runtime.workerNetworkPolicyName" . }}
+  namespace: {{ include "mindroom-runtime.workerNamespace" . }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+      app.kubernetes.io/managed-by: mindroom
+      app.kubernetes.io/name: mindroom-worker
+      {{- with .Values.workers.kubernetes.extraLabels }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.workers.kubernetes.port }}
+{{- end }}

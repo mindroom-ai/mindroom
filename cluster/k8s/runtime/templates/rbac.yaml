@@ -1,0 +1,60 @@
+{{- if and (eq .Values.workers.backend "kubernetes") .Values.workers.kubernetes.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mindroom-runtime.fullname" . }}-worker-manager
+  namespace: {{ include "mindroom-runtime.workerNamespace" . }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mindroom-runtime.fullname" . }}-worker-manager
+  namespace: {{ include "mindroom-runtime.workerNamespace" . }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mindroom-runtime.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mindroom-runtime.fullname" . }}-worker-manager
+{{- end }}
