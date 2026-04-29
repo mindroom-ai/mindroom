@@ -27,4 +27,5 @@ jobs:
         run: |
           gh workflow run build-mindroom.yml --ref "$PUBLISH_WORKFLOW_REF" --field release_ref="$RELEASE_REF"
           gh workflow run build-platform.yml --ref "$PUBLISH_WORKFLOW_REF" --field release_ref="$RELEASE_REF"
+          gh workflow run publish-helm-charts.yml --ref "$PUBLISH_WORKFLOW_REF" --field release_ref="$RELEASE_REF"
           gh workflow run release.yml --ref "$PUBLISH_WORKFLOW_REF" --field release_ref="$RELEASE_REF"
