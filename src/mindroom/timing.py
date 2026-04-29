@@ -122,7 +122,7 @@ class DispatchPipelineTiming:
             elapsed = self.elapsed_ms(start_label, end_label)
             if elapsed is not None:
                 summary[key] = elapsed
-        logger.info("Dispatch pipeline timing", **summary)
+        logger.debug("Dispatch pipeline timing", **summary)
 
 
 def create_dispatch_pipeline_timing(*, event_id: str, room_id: str) -> DispatchPipelineTiming | None:
@@ -163,7 +163,14 @@ def event_timing_scope(event_id: str | None) -> str:
 
 
 def emit_timing_event(event_name: str, **event_data: object) -> None:
-    """Emit one structured timing event when timing instrumentation is enabled."""
+    """Emit one structured timing event when timing instrumentation is enabled.
+
+    Emitted at ``debug`` level so callers can keep ``MINDROOM_TIMING=1`` enabled
+    in long-running processes and still flip emission off cheaply via the global
+    log level. With ``MINDROOM_TIMING=1`` and log level at INFO or above, the
+    stdlib ``isEnabledFor(DEBUG)`` check short-circuits before formatting and
+    handler dispatch.
+    """
     if not _is_enabled():
         return
     scope = event_data.pop("timing_scope", None)
@@ -172,7 +179,7 @@ def emit_timing_event(event_name: str, **event_data: object) -> None:
     filtered_event_data = {key: value for key, value in event_data.items() if value is not None}
     if scope:
         filtered_event_data["timing_scope"] = scope
-    logger.info(event_name, **filtered_event_data)
+    logger.debug(event_name, **filtered_event_data)
 
 
 def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
