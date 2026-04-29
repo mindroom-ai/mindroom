@@ -421,10 +421,15 @@ class CoalescingGate:
         self._upload_grace_seconds = upload_grace_seconds
         self._is_shutting_down = is_shutting_down
         self._gates: dict[CoalescingKey, _GateEntry] = {}
+        self._retired_in_flight_drain_tasks: set[asyncio.Task[None]] = set()
 
     def is_idle(self) -> bool:
         """Return whether all coalescing gates are currently idle."""
-        return not self._gates
+        return not self._gates and not any(not task.done() for task in self._retired_in_flight_drain_tasks)
+
+    def _track_retired_in_flight_drain(self, task: asyncio.Task[None]) -> None:
+        self._retired_in_flight_drain_tasks.add(task)
+        task.add_done_callback(self._retired_in_flight_drain_tasks.discard)
 
     def retarget(self, old_key: CoalescingKey, new_key: CoalescingKey) -> None:
         """Re-key one live gate after thread resolution changes the canonical scope."""
@@ -462,13 +467,11 @@ class CoalescingGate:
         self._gates.pop(old_key, None)
         self._gates[new_key] = owner_gate
         retired_drain_task = retired_gate.drain_task
-        if (
-            retired_drain_task is not None
-            and not retired_drain_task.done()
-            and retired_drain_task is not asyncio.current_task()
-            and retired_gate.phase is not GatePhase.IN_FLIGHT
-        ):
-            retired_drain_task.cancel()
+        if retired_drain_task is not None and not retired_drain_task.done():
+            if retired_gate.phase is GatePhase.IN_FLIGHT:
+                self._track_retired_in_flight_drain(retired_drain_task)
+            elif retired_drain_task is not asyncio.current_task():
+                retired_drain_task.cancel()
         self._ensure_drain_task(new_key, owner_gate)
         self._wake(owner_gate)
 
@@ -734,6 +737,7 @@ class CoalescingGate:
             for gate in self._gates.values()
             if gate.drain_task is not None and not gate.drain_task.done()
         ]
+        tasks_to_await.extend(task for task in self._retired_in_flight_drain_tasks if not task.done())
         if tasks_to_await:
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
         self._gates.clear()

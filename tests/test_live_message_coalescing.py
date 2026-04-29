@@ -1839,6 +1839,65 @@ async def test_retarget_preserves_both_in_flight_dispatches() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retarget_tracks_retired_in_flight_source_until_dispatch_finishes() -> None:
+    """Retired in-flight source drains must remain visible to shutdown and idle checks."""
+    room = _make_room()
+    dispatch_started = {"$m1": asyncio.Event(), "$m2": asyncio.Event()}
+    release_dispatch = {"$m1": asyncio.Event(), "$m2": asyncio.Event()}
+    dispatched_source_event_ids: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        source_event_ids = list(batch.source_event_ids)
+        event_id = source_event_ids[0]
+        dispatch_started[event_id].set()
+        await release_dispatch[event_id].wait()
+        dispatched_source_event_ids.append(source_event_ids)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    old_key = ("!room:localhost", None, "@user:localhost")
+    new_key = ("!room:localhost", "$m1", "@user:localhost")
+
+    await gate.enqueue(
+        old_key,
+        PendingEvent(
+            event=_text_event(event_id="$m1", body="first"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await dispatch_started["$m1"].wait()
+    await gate.enqueue(
+        new_key,
+        PendingEvent(
+            event=_text_event(event_id="$m2", body="follow-up", thread_id="$m1"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await dispatch_started["$m2"].wait()
+
+    gate.retarget(old_key, new_key)
+    release_dispatch["$m2"].set()
+    await _wait_for(lambda: dispatched_source_event_ids == [["$m2"]])
+
+    assert gate.is_idle() is False
+    drain_task = asyncio.create_task(gate.drain_all())
+    await asyncio.sleep(0.01)
+    assert drain_task.done() is False
+
+    release_dispatch["$m1"].set()
+    await drain_task
+
+    assert sorted(dispatched_source_event_ids) == [["$m1"], ["$m2"]]
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
 async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing() -> None:
     """Immediate-flush telemetry should report the batch size before _flush clears pending."""
     room = _make_room()

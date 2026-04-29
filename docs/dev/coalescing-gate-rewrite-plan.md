@@ -178,6 +178,8 @@ After a merge, exactly one gate remains mapped to the canonical key and that gat
 
 Retarget may cancel only a retired drain that has not claimed work.
 
+Retired in-flight drains remain tracked until they finish so `is_idle()` and `drain_all()` include their claimed work.
+
 ## Tests
 
 Add or update focused tests for these cases.
@@ -197,6 +199,7 @@ Add or update focused tests for these cases.
 - Retargeting preserves queued work and drain ownership.
 - Retargeting into an in-flight destination gate does not cancel the claimed destination batch.
 - Retargeting two in-flight gates does not cancel either already-claimed batch.
+- Retargeting two in-flight gates keeps retired in-flight drains visible to shutdown and idle checks.
 
 ## Commit Strategy
 
