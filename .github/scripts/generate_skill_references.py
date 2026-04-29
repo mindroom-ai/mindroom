@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 import tempfile
@@ -17,6 +18,7 @@ DOCS_DIR = REPO_ROOT / "docs"
 ZENSICAL_CONFIG = REPO_ROOT / "zensical.toml"
 SKILL_DIR = REPO_ROOT / "skills" / "mindroom-docs"
 REFERENCES_DIR = SKILL_DIR / "references"
+CACHE_PATH = REPO_ROOT / ".cache" / "mindroom-docs-skill-references.sha256"
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,23 @@ def _load_project_and_nav() -> tuple[dict[str, Any], list[NavPage]]:
     pages: list[NavPage] = []
     _collect_nav_pages(nav, pages)
     return project, pages
+
+
+def _digest_paths(paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        relative_path = path.relative_to(REPO_ROOT).as_posix()
+        digest.update(relative_path.encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _cache_key() -> str:
+    inputs = sorted([Path(__file__).resolve(), ZENSICAL_CONFIG, *DOCS_DIR.rglob("*.md")])
+    references = sorted(path for path in REFERENCES_DIR.rglob("*") if path.is_file()) if REFERENCES_DIR.exists() else []
+    return f"{_digest_paths(inputs)}\n{_digest_paths(references)}"
 
 
 def _mkdocs_config(project: dict[str, Any], nav_pages: list[NavPage], site_dir: Path) -> dict[str, Any]:
@@ -173,6 +192,10 @@ def _write_reference_index(nav_pages: list[NavPage], built_to_reference: dict[st
 
 def main() -> None:
     """Build and sync generated docs references into the mindroom-docs skill."""
+    if CACHE_PATH.exists() and CACHE_PATH.read_text(encoding="utf-8") == _cache_key():
+        print(f"Generated references already up to date in {REFERENCES_DIR}")
+        return
+
     project, nav_pages = _load_project_and_nav()
     assert nav_pages, "No docs pages found in zensical.toml navigation"
     with tempfile.TemporaryDirectory(prefix="mindroom-docs-skill-") as tmp:
@@ -186,6 +209,8 @@ def main() -> None:
         built_to_reference = _flatten_page_references(generated_site_dir)
         _write_reference_index(nav_pages, built_to_reference)
 
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_PATH.write_text(_cache_key(), encoding="utf-8")
     print(f"Generated {len(list(REFERENCES_DIR.glob('*')))} files in {REFERENCES_DIR}")
 
 

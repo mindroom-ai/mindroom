@@ -8,8 +8,6 @@ repos:
       - id: check-docstring-first
       - id: check-yaml
         exclude: (cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$|cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$)
-      - id: debug-statements
-      - id: check-ast
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: "v0.15.11"
@@ -50,7 +48,7 @@ repos:
         entry: .venv/bin/python .github/scripts/generate_skill_references.py
         language: system
         pass_filenames: false
-        files: ^(docs/.*\.md|zensical\.toml)$
+        files: ^(docs/.*\.md|zensical\.toml|\.github/scripts/generate_skill_references\.py)$
 
       - id: check-tool-extras-sync
         name: Check tool extras stay in sync with pyproject.toml
@@ -78,6 +76,8 @@ repos:
       - id: prettier
         files: ^frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
         exclude: ^(frontend/package-lock\.json|frontend/tsconfig.*\.json|.*\.min\.(js|css))$
+        args: ["--cache", "--cache-location", ".cache/prettier-precommit.json"]
+        require_serial: true
 
   - repo: https://github.com/pre-commit/mirrors-eslint
     rev: v10.2.1
