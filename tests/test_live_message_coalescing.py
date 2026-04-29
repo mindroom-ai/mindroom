@@ -15,15 +15,11 @@ from pydantic import ValidationError
 from mindroom.bot import AgentBot
 from mindroom.coalescing import (
     COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
-    CoalescedBatch,
     CoalescingGate,
     GatePhase,
-    PendingEvent,
-    PreparedTextEvent,
-    build_batch_dispatch_event,
-    build_coalesced_batch,
     is_coalescing_exempt_source_kind,
 )
+from mindroom.coalescing_batch import CoalescedBatch, PendingEvent, build_coalesced_batch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -35,7 +31,13 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import DispatchIngressMetadata, DispatchPayloadMetadata, build_dispatch_handoff
+from mindroom.dispatch_handoff import (
+    DispatchIngressMetadata,
+    DispatchPayloadMetadata,
+    PreparedTextEvent,
+    build_batch_dispatch_event,
+    build_dispatch_handoff,
+)
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (

@@ -19,11 +19,9 @@ from mindroom.authorization import (
 from mindroom.coalescing import (
     COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
     COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
-    CoalescedBatch,
     CoalescingGate,
-    CoalescingKey,
-    PendingEvent,
 )
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.commands.handler import (
     CommandHandlerContext,
     handle_command,

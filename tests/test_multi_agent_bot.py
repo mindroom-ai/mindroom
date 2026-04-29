@@ -38,9 +38,8 @@ from mindroom.bot import (
 from mindroom.coalescing import (
     COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
     COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
-    PendingEvent,
-    PreparedTextEvent,
 )
+from mindroom.coalescing_batch import PendingEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -64,6 +63,7 @@ from mindroom.delivery_gateway import (
     FinalizeStreamedResponseRequest,
     SendTextRequest,
 )
+from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionLifecycleStart, CompactionOutcome

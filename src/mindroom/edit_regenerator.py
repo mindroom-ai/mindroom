@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.coalescing import coalesced_prompt
+from mindroom.coalescing_batch import coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks import hook_ingress_policy

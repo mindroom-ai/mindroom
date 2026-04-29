@@ -15,7 +15,7 @@ from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.coalescing import CoalescedBatch
+    from mindroom.coalescing_batch import CoalescedBatch
 
 
 class _PendingEventLike(Protocol):

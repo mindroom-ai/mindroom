@@ -79,10 +79,7 @@ from .authorization import (
     is_authorized_sender,
 )
 from .background_tasks import create_background_task, wait_for_background_tasks
-from .coalescing import (
-    CoalescedBatch,
-    CoalescingGate,
-)
+from .coalescing import CoalescingGate
 from .commands import config_confirmation
 from .constants import (
     ROUTER_AGENT_NAME,
@@ -146,6 +143,7 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
 
+    from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.config.main import Config
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
