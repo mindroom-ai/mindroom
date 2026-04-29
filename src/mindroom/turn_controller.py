@@ -592,6 +592,10 @@ class TurnController:
         )
         if suppressed:
             self._mark_source_events_responded(handled_turn)
+            self.deps.response_runner.clear_waiting_human_message(
+                target=target,
+                response_envelope=envelope,
+            )
             return None
 
         sender_agent_name = extract_agent_name(requester_user_id, self.deps.runtime.config, self.deps.runtime_paths)
@@ -1354,6 +1358,7 @@ class TurnController:
         event = await self.deps.normalizer.resolve_text_event(
             TextNormalizationRequest(event=raw_event),
         )
+        dispatch: PreparedDispatch | None = None
         dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
         attach_dispatch_pipeline_timing(event.source, dispatch_timing)
         timing_scope_token = timing_scope_context.set(event_timing_scope(event.event_id))
@@ -1539,6 +1544,11 @@ class TurnController:
                 matrix_run_metadata=matrix_run_metadata,
             )
         finally:
+            if dispatch is not None:
+                self.deps.response_runner.clear_waiting_human_message(
+                    target=dispatch.target,
+                    response_envelope=dispatch.envelope,
+                )
             timing_scope_context.reset(timing_scope_token)
 
     async def handle_media_event(

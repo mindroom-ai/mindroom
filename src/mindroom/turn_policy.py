@@ -11,6 +11,7 @@ from mindroom.authorization import (
     get_available_agents_for_sender_authoritative,
     is_sender_allowed_for_agent_reply,
 )
+from mindroom.coalescing import COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
@@ -588,10 +589,12 @@ class TurnPolicy:
             return False
         if context.mentioned_agents or context.has_non_agent_mentions:
             return False
-        if is_automation_source_kind(source_envelope.source_kind):
+        if is_automation_source_kind(source_envelope.source_kind) or is_agent_id(
+            source_envelope.sender_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        ):
             return False
-        if is_agent_id(source_envelope.sender_id, self.deps.runtime.config, self.deps.runtime_paths):
-            return False
-        if has_active_response_for_target is None:
-            return False
-        return has_active_response_for_target(target)
+        if source_envelope.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP:
+            return True
+        return has_active_response_for_target(target) if has_active_response_for_target is not None else False

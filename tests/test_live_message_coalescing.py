@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from mindroom.bot import AgentBot
 from mindroom.coalescing import (
+    COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
     CoalescedBatch,
     CoalescingGate,
     GatePhase,
@@ -2947,6 +2948,54 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
     assert isinstance(dispatch_event, PreparedTextEvent)
     content = dispatch_event.source.get("content", {})
     assert content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True
+
+
+def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
+    """Single prepared events must still carry gate source-kind classification into dispatch."""
+    room = _make_room()
+    event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$followup",
+        body="stop if you see this",
+        source={"content": {"body": "stop if you see this"}},
+        server_timestamp=1000,
+    )
+
+    batch = build_coalesced_batch(
+        ("!room:localhost", "$thread", "@user:localhost"),
+        [
+            PendingEvent(
+                event=event,
+                room=room,
+                source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            ),
+        ],
+    )
+    dispatch_event = build_batch_dispatch_event(batch)
+
+    assert isinstance(dispatch_event, PreparedTextEvent)
+    assert dispatch_event.source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+
+
+def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None:
+    """Single text events with bypass classification should expose that source kind to dispatch."""
+    room = _make_room()
+    event = _text_event(event_id="$relay", body="@agent relay", server_timestamp=1000)
+
+    batch = build_coalesced_batch(
+        ("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(
+                event=event,
+                room=room,
+                source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+            ),
+        ],
+    )
+    dispatch_event = build_batch_dispatch_event(batch)
+
+    assert isinstance(dispatch_event, PreparedTextEvent)
+    assert dispatch_event.source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
 
 
 def test_batch_dispatch_event_preserves_original_sender() -> None:

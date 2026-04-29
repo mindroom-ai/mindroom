@@ -529,6 +529,18 @@ class ResponseRunner:
             response_envelope=response_envelope,
         )
 
+    def clear_waiting_human_message(
+        self,
+        *,
+        target: MessageTarget,
+        response_envelope: MessageEnvelope | None,
+    ) -> bool:
+        """Clear a queued-human notice for ingress that will not enter the response lifecycle."""
+        return self._lifecycle_coordinator.clear_waiting_human_message(
+            target=target,
+            response_envelope=response_envelope,
+        )
+
     async def _run_in_tool_context(
         self,
         *,

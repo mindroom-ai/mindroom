@@ -6,7 +6,7 @@ import asyncio
 import enum
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import nio
@@ -388,6 +388,20 @@ def build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     Multi-event batches produce a ``PreparedTextEvent`` with the combined prompt.
     """
     if len(batch.pending_events) == 1 and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent):
+        if (
+            isinstance(batch.primary_event, PreparedTextEvent)
+            and batch.primary_event.source_kind_override != batch.source_kind
+        ):
+            return replace(batch.primary_event, source_kind_override=batch.source_kind)
+        if isinstance(batch.primary_event, nio.RoomMessageText) and batch.source_kind != "message":
+            return PreparedTextEvent(
+                sender=batch.primary_event.sender,
+                event_id=batch.primary_event.event_id,
+                body=batch.primary_event.body,
+                source=batch.primary_event.source,
+                server_timestamp=batch.primary_event.server_timestamp,
+                source_kind_override=batch.source_kind,
+            )
         return batch.primary_event
     return PreparedTextEvent(
         sender=batch.primary_event.sender,

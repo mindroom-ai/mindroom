@@ -193,16 +193,34 @@ class ResponseLifecycleCoordinator:
         thread_key: tuple[str, str | None],
         response_envelope: MessageEnvelope | None,
         queued_signal: _QueuedMessageState,
-    ) -> None:
+    ) -> bool:
         if response_envelope is None:
-            return
+            return False
         pre_signaled_ids = self._pre_signaled_human_message_ids.get(thread_key)
         if pre_signaled_ids is None or response_envelope.source_event_id not in pre_signaled_ids:
-            return
+            return False
         pre_signaled_ids.remove(response_envelope.source_event_id)
         if not pre_signaled_ids:
             self._pre_signaled_human_message_ids.pop(thread_key, None)
         queued_signal.consume_waiting_human_message()
+        return True
+
+    def clear_waiting_human_message(
+        self,
+        *,
+        target: MessageTarget,
+        response_envelope: MessageEnvelope | None,
+    ) -> bool:
+        """Clear an enqueue-time queued-human notice if dispatch exits before lifecycle ownership."""
+        thread_key = self._thread_key(target)
+        queued_signal = self._thread_queued_signals.get(thread_key)
+        if queued_signal is None:
+            return False
+        return self._consume_pre_signaled_human_message(
+            thread_key=thread_key,
+            response_envelope=response_envelope,
+            queued_signal=queued_signal,
+        )
 
     def _begin_response_turn_notice(
         self,

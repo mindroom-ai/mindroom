@@ -28,7 +28,7 @@ from mindroom.ai_runtime import (
 )
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing import PreparedTextEvent
+from mindroom.coalescing import COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP, PreparedTextEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -94,8 +94,13 @@ def _bot(tmp_path: Path) -> AgentBot:
     return bot
 
 
-def _envelope(*, source_kind: str = "message", source_event_id: str = "$event") -> MessageEnvelope:
-    target = MessageTarget.resolve(
+def _envelope(
+    *,
+    source_kind: str = "message",
+    source_event_id: str = "$event",
+    target: MessageTarget | None = None,
+) -> MessageEnvelope:
+    target = target or MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id=None,
         reply_to_event_id="$event",
@@ -941,6 +946,119 @@ async def test_pre_signaled_human_follow_up_reaches_active_turn_before_dispatch(
     )
 
     assert follow_up_observed_pending == [False]
+    assert not queued_signal.is_set()
+    assert lifecycle._pre_signaled_human_message_ids == {}
+
+
+@pytest.mark.asyncio
+async def test_pre_signaled_command_follow_up_cleanup_when_dispatch_returns(tmp_path: Path) -> None:
+    """Command-shaped active follow-ups should not leave stale queued-message state."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, "$thread", "$command")
+    envelope = _envelope(
+        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id="$command",
+        target=target,
+    )
+    event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$command",
+        body="!help",
+        source={"content": {"body": "!help"}},
+        server_timestamp=1234,
+        source_kind_override=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+    )
+    dispatch = PreparedDispatch(
+        requester_user_id="@user:localhost",
+        context=MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=target,
+        correlation_id="$command",
+        envelope=envelope,
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        assert lifecycle.signal_waiting_human_message(target=target, response_envelope=envelope)
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            )
+    finally:
+        queued_signal.finish_response_turn()
+
+    mock_plan_turn.assert_not_awaited()
+    assert not queued_signal.is_set()
+    assert lifecycle._pre_signaled_human_message_ids == {}
+
+
+@pytest.mark.asyncio
+async def test_pre_signaled_superseded_follow_up_cleanup_when_dispatch_returns(tmp_path: Path) -> None:
+    """Superseded active follow-ups should clear their enqueue-time notice when skipped."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, "$thread", "$older")
+    envelope = _envelope(
+        source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id="$older",
+        target=target,
+    )
+    event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$older",
+        body="older follow-up",
+        source={"content": {"body": "older follow-up"}},
+        server_timestamp=1234,
+        source_kind_override=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+    )
+    dispatch = PreparedDispatch(
+        requester_user_id="@user:localhost",
+        context=MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=target,
+        correlation_id="$older",
+        envelope=envelope,
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        assert lifecycle.signal_waiting_human_message(target=target, response_envelope=envelope)
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
+            patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            )
+    finally:
+        queued_signal.finish_response_turn()
+
+    mock_plan_turn.assert_not_awaited()
     assert not queued_signal.is_set()
     assert lifecycle._pre_signaled_human_message_ids == {}
 
