@@ -68,7 +68,7 @@ agents:
     # Learning mode: always (automatic) or agentic (tool-driven)
     learning_mode: always
 
-    # Memory backend override for this agent (optional: mem0 or file)
+    # Memory backend override for this agent (optional: mem0, file, or none)
     memory_backend: file
 
     # Assign agent to one or more configured knowledge bases (optional)
@@ -145,7 +145,7 @@ agents:
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
-| `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted |
+| `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
@@ -168,6 +168,7 @@ Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `con
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime.
 Per-agent values override them.
 `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
+Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
@@ -465,6 +466,7 @@ For a `mind` agent with `private.per: user`, different users get different priva
 - Private agents require an active requester-scoped runtime context.
 - MindRoom raises an error instead of silently falling back to a shared config-relative path when that requester scope is missing.
 - Set `memory_backend: file` if you want `MEMORY.md` and `memory/` inside the private root to be the agent's actual file memory.
+- Set `memory_backend: none` if the private agent should stay stateless while still using its private files and knowledge configuration.
 - Set `private.context_files` explicitly for any copied files you want loaded into role context.
 - Set `private.knowledge.path` explicitly for any copied files or folders you want indexed as PrivateAgentKnowledge.
 - Omit `private.knowledge` entirely, or set `private.knowledge.enabled: false`, when you do not want PrivateAgentKnowledge indexing.

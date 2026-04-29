@@ -480,6 +480,23 @@ class TestMemoryFacade:
         assert prompt_parts == MemoryPromptParts()
 
     @pytest.mark.asyncio
+    async def test_disabled_backend_build_memory_prompt_parts_skips_mem0(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        config.memory.backend = "none"
+
+        with patch(
+            "mindroom.memory.functions.create_memory_instance",
+            side_effect=AssertionError("disabled memory must not create Mem0"),
+        ) as mock_create:
+            prompt_parts = await build_memory_prompt_parts("Original prompt", "agent", storage_path, config)
+
+        assert prompt_parts == MemoryPromptParts()
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_store_conversation_memory(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory(
@@ -507,6 +524,30 @@ class TestMemoryFacade:
             await store_conversation_memory("", "agent", storage_path, "session123", config)
 
         mock_memory.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_disabled_backend_store_conversation_memory_is_noop(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        config.memory.backend = "none"
+
+        with patch(
+            "mindroom.memory.functions.create_memory_instance",
+            side_effect=AssertionError("disabled memory must not create Mem0"),
+        ) as mock_create:
+            await store_conversation_memory("Remember this", "calculator", storage_path, "session123", config)
+            await store_conversation_memory(
+                "Team should also stay stateless",
+                ["calculator", "finance"],
+                storage_path,
+                "session-team",
+                config,
+            )
+
+        mock_create.assert_not_called()
+        assert not any(storage_path.rglob("MEMORY.md"))
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory_with_empty_response(
@@ -635,6 +676,31 @@ class TestMemoryFacade:
         assert mock_memory.add.call_count == 2
         team_memory_file = storage_path / "memory-files" / "team_calculator+finance" / "MEMORY.md"
         assert not team_memory_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_disabled_backend_crud_facade_does_not_fall_through_to_mem0(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        config.memory.backend = "none"
+
+        with patch(
+            "mindroom.memory.functions.create_memory_instance",
+            side_effect=AssertionError("disabled memory must not create Mem0"),
+        ) as mock_create:
+            await add_agent_memory("Remember this", "general", storage_path, config)
+            search_results = await search_agent_memories("Remember", "general", storage_path, config)
+            list_results = await list_all_agent_memories("general", storage_path, config)
+            get_result = await get_agent_memory("memory-1", "general", storage_path, config)
+            await update_agent_memory("memory-1", "Updated", "general", storage_path, config)
+            await delete_agent_memory("memory-1", "general", storage_path, config)
+
+        assert search_results == []
+        assert list_results == []
+        assert get_result is None
+        mock_create.assert_not_called()
+        assert not any(storage_path.rglob("MEMORY.md"))
 
     @pytest.mark.asyncio
     async def test_search_agent_memories_with_teams(

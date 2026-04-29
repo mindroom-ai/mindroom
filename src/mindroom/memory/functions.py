@@ -32,9 +32,12 @@ from ._mem0_backend import (
 )
 from ._policy import (
     agent_scope_user_id,
+    caller_uses_disabled_memory_backend,
     caller_uses_file_memory_backend,
     resolve_file_memory_resolution,
+    team_uses_disabled_memory_backend,
     team_uses_file_memory_backend,
+    use_disabled_memory_backend,
     use_file_memory_backend,
 )
 from ._prompting import (
@@ -152,6 +155,8 @@ async def add_agent_memory(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Add a memory for an agent."""
+    if use_disabled_memory_backend(config, agent_name=agent_name):
+        return
     if use_file_memory_backend(config, agent_name=agent_name):
         add_file_agent_memory(
             content,
@@ -208,6 +213,8 @@ async def search_agent_memories(
     timing_scope: str | None = None,
 ) -> list[MemoryResult]:
     """Search agent memories including team memories."""
+    if use_disabled_memory_backend(config, agent_name=agent_name):
+        return []
     if use_file_memory_backend(config, agent_name=agent_name):
         return _search_file_backend_memories(
             query,
@@ -242,6 +249,8 @@ async def list_all_agent_memories(
     preserve_resolved_storage_path: bool = False,
 ) -> list[MemoryResult]:
     """List all memories for an agent."""
+    if use_disabled_memory_backend(config, agent_name=agent_name):
+        return []
     if use_file_memory_backend(config, agent_name=agent_name):
         return list_file_agent_memories(
             agent_name,
@@ -272,6 +281,8 @@ async def get_agent_memory(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryResult | None:
     """Get a single memory by ID."""
+    if caller_uses_disabled_memory_backend(config, caller_context):
+        return None
     if caller_uses_file_memory_backend(config, caller_context):
         return get_file_agent_memory(
             memory_id,
@@ -302,6 +313,8 @@ async def update_agent_memory(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Update a single memory by ID."""
+    if caller_uses_disabled_memory_backend(config, caller_context):
+        return
     if caller_uses_file_memory_backend(config, caller_context):
         update_file_agent_memory(
             memory_id,
@@ -334,6 +347,8 @@ async def delete_agent_memory(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Delete a single memory by ID."""
+    if caller_uses_disabled_memory_backend(config, caller_context):
+        return
     if caller_uses_file_memory_backend(config, caller_context):
         delete_file_agent_memory(
             memory_id,
@@ -367,6 +382,9 @@ async def build_memory_prompt_parts(
 ) -> MemoryPromptParts:
     """Split stable entrypoint context from turn-local searched memories."""
     logger.debug("Building enhanced prompt", agent=agent_name)
+    if use_disabled_memory_backend(config, agent_name=agent_name):
+        return MemoryPromptParts()
+
     use_file_backend = use_file_memory_backend(config, agent_name=agent_name)
     agent_memories = await search_agent_memories(
         prompt,
@@ -438,6 +456,12 @@ async def store_conversation_memory(
 ) -> None:
     """Store conversation in memory for future recall."""
     if not prompt:
+        return
+
+    if isinstance(agent_name, str):
+        if use_disabled_memory_backend(config, agent_name=agent_name):
+            return
+    elif team_uses_disabled_memory_backend(config, agent_name):
         return
 
     use_file_backend = (

@@ -1,11 +1,12 @@
 # Memory System
 
-MindRoom supports two memory backends:
+MindRoom supports three memory backends:
 
 - `mem0`: vector memory (semantic retrieval + extraction via Mem0)
 - `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
+- `none`: disabled memory for stateless agents
 
-Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. When an agent uses `memory_backend: file`, its file memory lives in its canonical workspace root. Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root. `private` changes where private files live. It does not switch the memory backend by itself.
+Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. When an agent uses `memory_backend: file`, its file memory lives in its canonical workspace root. When an agent uses `memory_backend: none`, MindRoom skips prompt memory lookup, automatic memory persistence, and the explicit `memory` tool for that agent. Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root. `private` changes where private files live. It does not switch the memory backend by itself.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -84,6 +85,38 @@ memory:
 ```
 
 Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
+
+## Backend: `none`
+
+`none` disables MindRoom's built-in durable memory for the effective agent.
+
+Global example:
+
+```
+memory:
+  backend: none
+```
+
+Shorthand example:
+
+```
+memory: none
+```
+
+Per-agent stateless override:
+
+```
+memory:
+  backend: mem0
+
+agents:
+  scratch:
+    display_name: Scratch
+    role: Stateless scratchpad agent
+    memory_backend: none
+```
+
+Disabled memory does not disable Agno Learning. Set `learning: false` separately if you also want to disable learning.
 
 ## Backend: `file`
 
@@ -184,7 +217,7 @@ High-level behavior:
 
 The Dashboard **Memory** page supports:
 
-- backend selection (`mem0` vs `file`)
+- backend selection (`mem0`, `file`, or `none`)
 - team/member read toggle (`team_reads_member_memory`)
 - embedder provider/model/host
 - file backend settings (`path`, `max_entrypoint_lines`)

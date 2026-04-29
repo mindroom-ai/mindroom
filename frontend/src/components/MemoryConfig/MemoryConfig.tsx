@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Brain } from "lucide-react";
 
-import type { Config as MindRoomConfig } from "@/types/config";
+import type { Config as MindRoomConfig, MemoryBackend } from "@/types/config";
 import { EditorPanel } from "@/components/shared/EditorPanel";
 import { FieldGroup } from "@/components/shared/FieldGroup";
 import { Input } from "@/components/ui/input";
@@ -23,6 +23,7 @@ const EMBEDDER_PROVIDERS = [
 const MEMORY_BACKENDS = [
   { value: "mem0", label: "Mem0 (vector)" },
   { value: "file", label: "File (markdown)" },
+  { value: "none", label: "Disabled (stateless)" },
 ];
 
 const DEFAULT_MODELS: Record<string, string> = {
@@ -179,7 +180,7 @@ export function MemoryConfig() {
     updateMemoryConfig(nextConfig);
   };
 
-  const handleBackendChange = (backend: "mem0" | "file") => {
+  const handleBackendChange = (backend: MemoryBackend) => {
     applyMemoryConfig({ ...localConfig, backend });
   };
 
@@ -322,14 +323,14 @@ export function MemoryConfig() {
         <div className="space-y-4">
           <FieldGroup
             label="Memory Backend"
-            helperText="Choose vector memory (mem0) or file-based markdown memory."
+            helperText="Choose vector memory, file-based markdown memory, or disabled memory."
             required
             htmlFor="memory-backend"
           >
             <Select
               value={localConfig.backend || "mem0"}
               onValueChange={(value) =>
-                handleBackendChange(value as "mem0" | "file")
+                handleBackendChange(value as MemoryBackend)
               }
             >
               <SelectTrigger

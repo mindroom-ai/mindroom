@@ -205,7 +205,9 @@ class AgentConfig(BaseModel):
     model: str = Field(default="default", description="Model name")
     memory_backend: MemoryBackend | None = Field(
         default=None,
-        description="Memory backend override for this agent ('mem0' or 'file'); inherits memory.backend when omitted",
+        description=(
+            "Memory backend override for this agent ('mem0', 'file', or 'none'); inherits memory.backend when omitted"
+        ),
     )
     compaction: CompactionOverrideConfig | None = Field(
         default=None,

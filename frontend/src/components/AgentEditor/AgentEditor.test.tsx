@@ -1424,6 +1424,25 @@ describe("AgentEditor", () => {
     );
   });
 
+  it("updates memory backend to disabled when none is selected", () => {
+    render(<AgentEditor />);
+
+    const memoryBackendSelect = screen.getByLabelText("Memory Backend");
+    fireEvent.click(memoryBackendSelect);
+
+    const disabledOption = screen.getByRole("option", {
+      name: "Disabled (stateless)",
+    });
+    fireEvent.click(disabledOption);
+
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      "test_agent",
+      expect.objectContaining({
+        memory_backend: "none",
+      }),
+    );
+  });
+
   it("clears memory backend override when inherit is selected", () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,

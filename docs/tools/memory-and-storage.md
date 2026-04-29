@@ -20,7 +20,8 @@ Use these tools when you need explicit memory CRUD operations, direct provider-s
 ## Common Setup Notes
 
 `memory` is MindRoom-native and has no tool-specific configuration fields.
-It operates on the same MindRoom memory backend configured through `memory.backend` or `agents.<name>.memory_backend`, so it follows the built-in `mem0` or `file` backend for that agent.
+It operates on the same MindRoom memory backend configured through `memory.backend` or `agents.<name>.memory_backend`, so it follows the effective `mem0`, `file`, or `none` backend for that agent.
+If the effective backend is `none`, MindRoom does not attach the `memory` tool to that agent.
 Use [Memory System](../memory.md) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout.
 `mem0` and `zep` are separate upstream Agno toolkits that talk to external memory providers directly.
 Enabling `mem0` or `zep` does not change MindRoom's own memory backend, automatic memory extraction, or the behavior of the `memory` tool.
@@ -39,6 +40,7 @@ Use [Matrix & Attachments](matrix-and-attachments.md) and [Attachments](../attac
 `memory` exposes `add_memory()`, `search_memories()`, `list_memories()`, `get_memory()`, `update_memory()`, and `delete_memory()`.
 It complements MindRoom's automatic post-response memory extraction by letting the agent deliberately remember or inspect something on demand.
 The tool always uses the current agent's configured MindRoom memory backend, so the same calls work whether that agent uses built-in `mem0` storage or file-backed memory.
+Agents with `memory_backend: none` do not receive this tool.
 Search and list results include memory IDs, and those IDs are then used with `get_memory()`, `update_memory()`, and `delete_memory()`.
 The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
 

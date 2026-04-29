@@ -429,3 +429,40 @@ class TestMemoryConfig:
         """Auto-flush should default to a half-hour worker interval."""
         memory = MemoryConfig()
         assert memory.auto_flush.flush_interval_seconds == 1800
+
+    def test_memory_config_accepts_disabled_backend(self) -> None:
+        """The memory config should accept disabled memory in object and shorthand form."""
+        explicit = MemoryConfig.model_validate({"backend": "none"})
+        shorthand = MemoryConfig.model_validate("none")
+
+        assert explicit.backend == "none"
+        assert shorthand.backend == "none"
+
+    def test_config_accepts_global_disabled_memory_shorthand(self) -> None:
+        """The root config should normalize memory: none to a disabled memory config."""
+        config = Config(
+            agents={"scratch": {"display_name": "Scratch"}},
+            memory="none",
+            router=RouterConfig(model="default"),
+        )
+
+        assert config.memory.backend == "none"
+        assert config.get_agent_memory_backend("scratch") == "none"
+        assert config.uses_file_memory() is False
+        assert config.uses_mem0_memory() is False
+
+    def test_config_accepts_per_agent_disabled_memory_backend(self) -> None:
+        """Per-agent memory_backend should support disabling memory for one agent."""
+        config = Config(
+            agents={
+                "general": {"display_name": "General"},
+                "scratch": {"display_name": "Scratch", "memory_backend": "none"},
+            },
+            memory={"backend": "mem0"},
+            router=RouterConfig(model="default"),
+        )
+
+        assert config.get_agent_memory_backend("general") == "mem0"
+        assert config.get_agent_memory_backend("scratch") == "none"
+        assert config.uses_file_memory() is False
+        assert config.uses_mem0_memory() is True

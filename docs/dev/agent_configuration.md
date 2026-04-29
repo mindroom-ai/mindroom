@@ -18,7 +18,7 @@ The configuration file has these top-level sections:
 3. **cultures** - Shared principles and practices applied to groups of agents
 4. **models** - Define available AI models and their providers
 5. **defaults** - Default settings inherited by all agents
-6. **memory** - Memory system configuration (mem0 or file-backed)
+6. **memory** - Memory system configuration (mem0, file-backed, or disabled)
 7. **knowledge_bases** - File-backed RAG knowledge bases
 8. **router** - Agent routing system configuration
 9. **voice** - Voice message processing (STT + command intelligence)
@@ -83,7 +83,7 @@ The memory system helps agents remember and retrieve relevant information:
 
 ```yaml
 memory:
-  backend: "mem0"  # Global default backend: "mem0" or "file"
+  backend: "mem0"  # Global default backend: "mem0", "file", or "none"
   team_reads_member_memory: false  # Allow team reads to access member agent memories
   embedder:
     provider: "ollama"  # Options: openai, ollama, sentence_transformers
@@ -102,6 +102,7 @@ memory:
 
 You can override the memory backend per agent with `memory_backend`.
 When an agent uses `memory_backend: file`, its file memory lives in the canonical workspace root.
+When an agent uses `memory_backend: none`, built-in durable memory is disabled for that agent.
 Use `provider: "sentence_transformers"` to run embeddings locally inside MindRoom with the optional `sentence-transformers` package.
 
 ## Router Configuration
@@ -143,7 +144,7 @@ agents:
     accept_invites: true  # Optional: accept direct room invites and auto-join invited rooms
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
-    memory_backend: "file"  # Optional: per-agent override ("mem0" or "file")
+    memory_backend: "file"  # Optional: per-agent override ("mem0", "file", or "none")
     knowledge_bases:
       - docs
     context_files:
@@ -169,7 +170,7 @@ agents:
 - **markdown**: Per-agent override for markdown formatting (default: inherits from `defaults.markdown`; `null` means inherit)
 - **learning**: Enable Agno Learning for this agent (default: inherits from `defaults.learning`, which defaults to `true`)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
-- **memory_backend**: Optional per-agent memory backend override (`mem0` or `file`), inherits from `memory.backend` when omitted
+- **memory_backend**: Optional per-agent memory backend override (`mem0`, `file`, or `none`), inherits from `memory.backend` when omitted
 - **knowledge_bases**: List of configured knowledge base IDs assigned to this agent
 - **context_files**: File paths relative to the agent's canonical workspace root (`<storage_root>/agents/<name>/workspace/`) loaded into each agent instance; edits take effect on the next reply without restarting
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
@@ -583,7 +584,7 @@ Some tools need additional setup:
 ```yaml
 # Memory configuration
 memory:
-  backend: "mem0"  # "mem0" or "file"
+  backend: "mem0"  # "mem0", "file", or "none"
   embedder:
     provider: "ollama"
     config:

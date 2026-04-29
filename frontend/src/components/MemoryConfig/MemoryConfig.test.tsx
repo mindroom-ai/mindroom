@@ -108,6 +108,25 @@ describe("MemoryConfig", () => {
     });
   });
 
+  it("updates backend to disabled memory when none is selected", async () => {
+    render(<MemoryConfig />);
+
+    const backendSelect = document.getElementById("memory-backend");
+    expect(backendSelect).toBeInTheDocument();
+    fireEvent.click(backendSelect!);
+
+    const disabledOption = await screen.findByText("Disabled (stateless)");
+    fireEvent.click(disabledOption);
+
+    await waitFor(() => {
+      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          backend: "none",
+        }),
+      );
+    });
+  });
+
   it("shows host input for ollama provider", () => {
     const ollamaConfig: Partial<Config> = {
       memory: {

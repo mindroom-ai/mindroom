@@ -656,6 +656,33 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
     assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
 
 
+def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path) -> None:
+    """Agents with an effective disabled memory backend should not receive MemoryTools."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.memory.backend = "mem0"
+    config.agents["general"].memory_backend = "none"
+    agent_runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        create=True,
+    )
+
+    toolkit = build_agent_toolkit(
+        "memory",
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        worker_tools=[],
+        agent_runtime=agent_runtime,
+        execution_identity=None,
+    )
+
+    assert toolkit is None
+
+
 def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(tmp_path: Path) -> None:
     """Shared file-backed agents should resolve to the canonical agent workspace root."""
     config = _test_config()
