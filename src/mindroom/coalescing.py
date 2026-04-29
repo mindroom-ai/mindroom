@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 __all__ = [
+    "COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP",
+    "COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY",
     "CoalescedBatch",
     "CoalescingGate",
     "CoalescingKey",
@@ -41,7 +43,16 @@ __all__ = [
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
-_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"hook", "hook_dispatch"})
+COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP = "active_thread_follow_up"
+COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY = "trusted_internal_relay"
+_COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset(
+    {
+        "hook",
+        "hook_dispatch",
+        COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
+    },
+)
 logger = get_logger(__name__)
 
 

@@ -1669,6 +1669,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
                     requester_user_id="@mindroom_router:localhost",
                 ),
             )
+            await bot._coalescing_gate.drain_all()
 
         assert handled is True
         assert "$question123" in interactive._active_questions

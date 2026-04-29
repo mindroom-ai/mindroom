@@ -16,8 +16,9 @@ from mindroom.authorization import (
     get_effective_sender_id_for_reply_permissions,
     is_authorized_sender,
 )
-from mindroom.background_tasks import create_background_task
 from mindroom.coalescing import (
+    COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+    COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
     CoalescedBatch,
     CoalescingGate,
     CoalescingKey,
@@ -462,20 +463,7 @@ class TurnController:
         if self._is_trusted_internal_relay_event(event):
             if dispatch_timing is not None:
                 dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
-                dispatch_timing.mark("gate_exit")
-            trusted_relay_event = cast("_TextDispatchEvent", event)
-            await self._dispatch_text_message(
-                room,
-                trusted_relay_event,
-                effective_requester_user_id,
-            )
-            emit_elapsed_timing(
-                "ingress_handoff.enqueue_for_dispatch",
-                enqueue_start,
-                path="trusted_internal_relay",
-                timing_scope=timing_scope,
-            )
-            return
+            source_kind = COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
         coalescing_key_start = time.monotonic()
         resolved_key = coalescing_key or await self._coalescing_key_for_event(room, event, effective_requester_user_id)
         emit_elapsed_timing(
@@ -1319,20 +1307,16 @@ class TurnController:
             sender_id=prepared_event.sender,
         ):
             if dispatch_timing is not None:
-                dispatch_timing.mark("gate_enter")
                 dispatch_timing.note(
                     coalescing_bypassed=True,
                     coalescing_bypass_reason="active_thread_follow_up",
                 )
-                dispatch_timing.mark("gate_exit")
-            create_background_task(
-                self._dispatch_text_message(
-                    room,
-                    prepared_event,
-                    prechecked_event.requester_user_id,
-                ),
-                name=f"active_thread_follow_up:{room.room_id}:{coalescing_thread_id}:{prepared_event.event_id}",
-                owner=self.deps.runtime,
+            await self._enqueue_for_dispatch(
+                prepared_event,
+                room,
+                source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                requester_user_id=prechecked_event.requester_user_id,
+                coalescing_key=(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
             )
         else:
             await self._enqueue_for_dispatch(
@@ -1717,11 +1701,11 @@ class TurnController:
                     source_event_id=prepared_text_event.event_id,
                 )
                 return True
-        await self._dispatch_text_message(
+        await self._enqueue_for_dispatch(
+            prepared_text_event,
             room,
-            _PrecheckedEvent(
-                event=prepared_text_event,
-                requester_user_id=prechecked_event.requester_user_id,
-            ),
+            source_kind=envelope.source_kind,
+            requester_user_id=prechecked_event.requester_user_id,
+            coalescing_key=(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
         )
         return True
