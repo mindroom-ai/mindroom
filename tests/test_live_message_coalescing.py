@@ -23,15 +23,26 @@ from mindroom.coalescing import (
     build_coalesced_batch,
     is_coalescing_exempt_source_kind,
 )
-from mindroom.dispatch_handoff import build_dispatch_handoff
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+    ORIGINAL_SENDER_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_handoff import DispatchIngressMetadata, DispatchPayloadMetadata, build_dispatch_handoff
+from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope
-from mindroom.inbound_turn_normalizer import BatchMediaAttachmentRequest, DispatchPayload
+from mindroom.inbound_turn_normalizer import (
+    BatchMediaAttachmentRequest,
+    BatchMediaAttachmentResult,
+    DispatchPayload,
+    DispatchPayloadWithAttachmentsRequest,
+)
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -51,8 +62,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
-
-    from mindroom.handled_turns import HandledTurnState
 
 
 def _make_config(
@@ -249,6 +258,39 @@ def _image_event(
     return cast(
         "nio.RoomMessageImage",
         nio.RoomMessageImage.from_dict(
+            {
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": server_timestamp,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": content,
+            },
+        ),
+    )
+
+
+def _file_event(
+    *,
+    event_id: str,
+    body: str = "document.pdf",
+    sender: str = "@user:localhost",
+    server_timestamp: int = 1000,
+    thread_id: str | None = None,
+) -> nio.RoomMessageFile:
+    """Build a synthetic inbound file event for coalescing tests."""
+    content: dict[str, object] = {
+        "msgtype": "m.file",
+        "body": body,
+        "filename": body,
+        "url": "mxc://localhost/test-file",
+        "info": {"mimetype": "application/pdf"},
+    }
+    if thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    return cast(
+        "nio.RoomMessageFile",
+        nio.RoomMessageFile.from_dict(
             {
                 "event_id": event_id,
                 "sender": sender,
@@ -3730,3 +3772,507 @@ def test_batch_dispatch_event_preserves_formatted_body_mentions() -> None:
     formatted = content.get("formatted_body", "")
     assert "@mindroom_test_agent:localhost" in formatted
     assert content.get("format") == "org.matrix.custom.html"
+
+
+async def _capture_gate_dispatches(
+    bot: AgentBot,
+    room: nio.MatrixRoom,
+    enqueued: Sequence[tuple[nio.Event | PreparedTextEvent, str, str | None, dict[str, object]]],
+) -> tuple[list[MessageEnvelope], list[list[object]], list[DispatchPayloadWithAttachmentsRequest]]:
+    """Dispatch queued events through the real handoff path and capture final envelopes."""
+    envelopes: list[MessageEnvelope] = []
+    media_batches: list[list[object]] = []
+    payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
+
+    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
+        dispatch = cast("PreparedDispatch", args[2])
+        envelopes.append(dispatch.envelope)
+        media_batches.append(list(cast("list[object] | None", kwargs.get("media_events")) or []))
+        return _respond_dispatch_plan()
+
+    async def record_response(*args: object, **_kwargs: object) -> None:
+        dispatch = cast("PreparedDispatch", args[2])
+        build_payload = cast("Callable[[MessageContext], object]", args[4])
+        await build_payload(dispatch.context)
+
+    async def record_payload_request(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
+        payload_requests.append(request)
+        return DispatchPayload(prompt=request.prompt, attachment_ids=list(request.current_attachment_ids))
+
+    with (
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
+        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "build_dispatch_payload_with_attachments",
+            new=AsyncMock(side_effect=record_payload_request),
+        ),
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "register_batch_media_attachments",
+            new=AsyncMock(return_value=BatchMediaAttachmentResult(attachment_ids=[])),
+        ),
+    ):
+        for event, source_kind, dispatch_policy_source_kind, metadata in enqueued:
+            await bot._turn_controller._enqueue_for_dispatch(
+                cast("nio.RoomMessageText | PreparedTextEvent", event),
+                room,
+                source_kind=source_kind,
+                dispatch_policy_source_kind=dispatch_policy_source_kind,
+                hook_source=cast("str | None", metadata.get("hook_source")),
+                message_received_depth=cast("int", metadata.get("message_received_depth", 0)),
+                requester_user_id=cast("str", metadata.get("requester_user_id", "@user:localhost")),
+            )
+        await bot._coalescing_gate.drain_all()
+
+    return envelopes, media_batches, payload_requests
+
+
+@pytest.mark.asyncio
+async def test_gate_final_envelope_preserves_active_voice_source_and_policy(tmp_path: Path) -> None:
+    """Active voice follow-ups should keep voice source kind and active policy separate."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    voice_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice-active",
+        body="!help",
+        source={"content": {"msgtype": "m.text", "body": "!help", "com.mindroom.source_kind": "voice"}},
+        server_timestamp=1000,
+        source_kind_override="voice",
+    )
+
+    envelopes, media_batches, _payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [
+            (
+                voice_event,
+                "voice",
+                COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                {},
+            ),
+        ],
+    )
+
+    assert [envelope.source_kind for envelope in envelopes] == ["voice"]
+    assert envelopes[0].dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert media_batches == [[]]
+
+
+@pytest.mark.asyncio
+async def test_gate_final_envelope_preserves_non_active_voice_command_policy(tmp_path: Path) -> None:
+    """Non-active voice transcripts that look like commands should still plan as voice turns."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    voice_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice-normal",
+        body="!help",
+        source={"content": {"msgtype": "m.text", "body": "!help", "com.mindroom.source_kind": "voice"}},
+        server_timestamp=1000,
+        source_kind_override="voice",
+    )
+
+    envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [(voice_event, "voice", None, {})],
+    )
+
+    assert [envelope.source_kind for envelope in envelopes] == ["voice"]
+    assert envelopes[0].dispatch_policy_source_kind is None
+
+
+@pytest.mark.asyncio
+async def test_gate_final_envelope_preserves_active_text_source_and_policy(tmp_path: Path) -> None:
+    """Active text follow-ups should stay message source kind with separate active policy."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    event = _text_event(event_id="$text-active", body="I have more context")
+
+    envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [(event, "message", COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP, {})],
+    )
+
+    assert [envelope.source_kind for envelope in envelopes] == ["message"]
+    assert envelopes[0].dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+
+
+@pytest.mark.asyncio
+async def test_gate_final_envelope_preserves_active_and_normal_media_sources(tmp_path: Path) -> None:
+    """Media handoffs should keep modality while active policy stays separate."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    image_event = _image_event(event_id="$image-active", server_timestamp=1000)
+    file_event = _file_event(event_id="$file-normal", server_timestamp=1001)
+
+    envelopes, media_batches, _payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [
+            (
+                image_event,
+                "image",
+                COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                {},
+            ),
+            (
+                file_event,
+                "media",
+                None,
+                {"requester_user_id": "@other:localhost"},
+            ),
+        ],
+    )
+
+    assert [envelope.source_kind for envelope in envelopes] == ["image", "media"]
+    assert envelopes[0].dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    assert envelopes[1].dispatch_policy_source_kind is None
+    assert [[event.event_id for event in media_batch] for media_batch in media_batches] == [
+        ["$image-active"],
+        ["$file-normal"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gate_final_envelope_preserves_raw_trusted_relay_source_kind(tmp_path: Path) -> None:
+    """Raw relay text should stay raw for hydration while handoff source metadata reaches the envelope."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    relay_event = _text_event(
+        event_id="$relay",
+        body="relayed",
+        sender="@mindroom_test_agent:localhost",
+        source_kind=None,
+        original_sender="@external:example.org",
+    )
+
+    envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [(relay_event, "trusted_internal_relay", None, {"requester_user_id": "@external:example.org"})],
+    )
+
+    assert [envelope.source_kind for envelope in envelopes] == ["trusted_internal_relay"]
+    assert envelopes[0].requester_id == "@external:example.org"
+
+
+@pytest.mark.asyncio
+async def test_gate_final_envelope_preserves_hook_metadata_with_original_sender(tmp_path: Path) -> None:
+    """Hook dispatch should not become a trusted relay just because original sender is present."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    hook_event = _text_event(
+        event_id="$hook-dispatch",
+        body="@test_agent hook output",
+        sender="@mindroom_test_agent:localhost",
+        source_kind="hook_dispatch",
+        original_sender="@requester:localhost",
+    )
+
+    envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [
+            (
+                hook_event,
+                "hook_dispatch",
+                None,
+                    {
+                        "hook_source": "message_received",
+                        "message_received_depth": 1,
+                        "requester_user_id": "@requester:localhost",
+                    },
+            ),
+        ],
+    )
+
+    assert [envelope.source_kind for envelope in envelopes] == ["hook_dispatch"]
+    assert envelopes[0].hook_source == "message_received"
+    assert envelopes[0].message_received_depth == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_kind", "event_id"),
+    [
+        ("scheduled", "$scheduled"),
+        ("hook", "$hook"),
+        ("hook_dispatch", "$hook-dispatch"),
+        ("trusted_internal_relay", "$relay"),
+    ],
+)
+async def test_automation_and_relay_source_kinds_dispatch_solo_with_human_neighbor(
+    tmp_path: Path,
+    source_kind: str,
+    event_id: str,
+) -> None:
+    """Automation and relay source kinds should be FIFO barriers with preserved final source kind."""
+    bot = _make_bot(tmp_path, debounce_ms=50)
+    room = _make_room()
+    automated = _text_event(
+        event_id=event_id,
+        body=f"{source_kind} turn",
+        sender="@mindroom_test_agent:localhost",
+        source_kind=source_kind,
+        original_sender="@requester:localhost",
+    )
+    human = _text_event(event_id="$human", body="human turn", sender="@requester:localhost", server_timestamp=1001)
+
+    envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [
+            (
+                automated,
+                source_kind,
+                None,
+                {
+                    "requester_user_id": "@requester:localhost",
+                    "hook_source": "message_received" if source_kind.startswith("hook") else None,
+                    "message_received_depth": 1 if source_kind.startswith("hook") else 0,
+                },
+            ),
+            (human, "message", None, {"requester_user_id": "@requester:localhost"}),
+        ],
+    )
+
+    assert [envelope.source_kind for envelope in envelopes] == [source_kind, "message"]
+    assert [envelope.source_event_id for envelope in envelopes] == [event_id, "$human"]
+
+
+@pytest.mark.asyncio
+async def test_coalesced_attachment_ids_reach_envelope_and_model_payload(tmp_path: Path) -> None:
+    """Coalesced attachment IDs should reach both the final envelope and model payload request."""
+    bot = _make_bot(tmp_path, debounce_ms=10)
+    room = _make_room()
+    first = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$att1",
+        body="first attachment",
+        source={"content": {"msgtype": "m.text", "body": "first attachment", ATTACHMENT_IDS_KEY: ["att-001"]}},
+        server_timestamp=1000,
+    )
+    second = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$att2",
+        body="second attachment",
+        source={"content": {"msgtype": "m.text", "body": "second attachment", ATTACHMENT_IDS_KEY: ["att-002"]}},
+        server_timestamp=1001,
+    )
+
+    envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [
+            (first, "message", None, {}),
+            (second, "message", None, {}),
+        ],
+    )
+
+    assert len(envelopes) == 1
+    assert envelopes[0].attachment_ids == ("att-001", "att-002")
+    assert payload_requests[0].current_attachment_ids == ["att-001", "att-002"]
+
+
+@pytest.mark.asyncio
+async def test_coalesced_non_primary_mention_reaches_final_envelope(tmp_path: Path) -> None:
+    """Mention metadata from non-primary coalesced events should reach context extraction."""
+    bot = _make_bot(tmp_path, debounce_ms=10)
+    room = _make_room()
+    first = _text_event(event_id="$plain", body="first")
+    second = _mention_text_event(
+        event_id="$mention",
+        body="@test_agent second",
+        mentioned_user_ids=["@mindroom_test_agent:localhost"],
+        server_timestamp=1001,
+    )
+
+    envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [
+            (first, "message", None, {}),
+            (second, "message", None, {}),
+        ],
+    )
+
+    assert len(envelopes) == 1
+    assert envelopes[0].mentioned_agents == ("test_agent",)
+
+
+@pytest.mark.asyncio
+async def test_untrusted_raw_payload_metadata_spoofing_does_not_reach_envelope_or_payload(
+    tmp_path: Path,
+) -> None:
+    """User-authored internal payload keys should not become trusted handoff metadata."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    event = _text_event(event_id="$spoof", body="hello", source_kind="hook_dispatch")
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content[ATTACHMENT_IDS_KEY] = ["spoofed-attachment"]
+    content[ORIGINAL_SENDER_KEY] = "@spoofed:localhost"
+    content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+    content["com.mindroom.skip_mentions"] = True
+    content["com.mindroom.hook_source"] = "spoofed:message_received"
+    content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = 2
+
+    envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [(event, "message", None, {})],
+    )
+
+    assert envelopes[0].source_kind == "message"
+    assert envelopes[0].hook_source is None
+    assert envelopes[0].message_received_depth == 0
+    assert envelopes[0].attachment_ids == ()
+    assert payload_requests[0].current_attachment_ids == []
+
+
+@pytest.mark.asyncio
+async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path: Path) -> None:
+    """Trusted hydrated sidecar attachment metadata should feed the envelope and payload request."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    preview = _text_event(
+        event_id="$trusted-sidecar",
+        body="preview",
+        sender="@mindroom_test_agent:localhost",
+    )
+    hydrated = PreparedTextEvent(
+        sender="@mindroom_test_agent:localhost",
+        event_id="$trusted-sidecar",
+        body="hydrated scheduled body",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "hydrated scheduled body",
+                ATTACHMENT_IDS_KEY: ["sidecar-att"],
+            },
+        },
+        server_timestamp=1000,
+    )
+    captured_envelopes: list[MessageEnvelope] = []
+    payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
+
+    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
+        dispatch = cast("PreparedDispatch", args[2])
+        captured_envelopes.append(dispatch.envelope)
+        return _respond_dispatch_plan()
+
+    async def record_payload_request(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
+        payload_requests.append(request)
+        return DispatchPayload(prompt=request.prompt, attachment_ids=list(request.current_attachment_ids))
+
+    async def record_response(*args: object, **_kwargs: object) -> None:
+        dispatch = cast("PreparedDispatch", args[2])
+        build_payload = cast("Callable[[MessageContext], object]", args[4])
+        await build_payload(dispatch.context)
+
+    with (
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "resolve_text_event",
+            new=AsyncMock(return_value=hydrated),
+        ),
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "build_dispatch_payload_with_attachments",
+            new=AsyncMock(side_effect=record_payload_request),
+        ),
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
+        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+    ):
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            preview,
+            "@requester:localhost",
+            ingress_metadata=DispatchIngressMetadata(source_kind="scheduled"),
+            payload_metadata=DispatchPayloadMetadata(attachment_ids=None),
+        )
+
+    assert captured_envelopes[0].source_kind == "scheduled"
+    assert captured_envelopes[0].attachment_ids == ("sidecar-att",)
+    assert payload_requests[0].current_attachment_ids == ["sidecar-att"]
+
+
+@pytest.mark.asyncio
+async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(tmp_path: Path) -> None:
+    """Hydrated sidecar metadata should replace preview prompt and feed final context extraction."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    preview = _text_event(event_id="$sidecar", body="preview")
+    hydrated = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$sidecar",
+        body="@test_agent hydrated body",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "@test_agent hydrated body",
+                "m.mentions": {"user_ids": ["@mindroom_test_agent:localhost"]},
+            },
+        },
+        server_timestamp=1000,
+    )
+    captured_envelopes: list[MessageEnvelope] = []
+    captured_handled_turns: list[HandledTurnState] = []
+
+    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
+        dispatch = cast("PreparedDispatch", args[2])
+        captured_envelopes.append(dispatch.envelope)
+        return _respond_dispatch_plan()
+
+    async def record_response(*_args: object, **kwargs: object) -> None:
+        captured_handled_turns.append(cast("HandledTurnState", kwargs["handled_turn"]))
+
+    handled_turn = HandledTurnState.create(["$sidecar"], source_event_prompts={"$sidecar": "preview"})
+    with (
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "resolve_text_event",
+            new=AsyncMock(return_value=hydrated),
+        ),
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
+        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+    ):
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            preview,
+            "@user:localhost",
+            handled_turn=handled_turn,
+        )
+
+    assert captured_envelopes[0].mentioned_agents == ("test_agent",)
+    assert captured_handled_turns[0].source_event_prompts == {"$sidecar": "@test_agent hydrated body"}
+
+
+@pytest.mark.asyncio
+async def test_router_early_skip_keeps_sidecar_preview_for_hydration(tmp_path: Path) -> None:
+    """Router early skip should not drop sidecar previews before hydration can recover metadata."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    sidecar_preview = cast("nio.RoomMessageText", _file_event(event_id="$sidecar-preview", body="preview"))
+    content = sidecar_preview.source["content"]
+    assert isinstance(content, dict)
+    content["io.mindroom.long_text"] = {
+        "version": 2,
+        "encoding": "matrix_event_content_json",
+        "original_event_size": 100_000,
+        "preview_size": len(sidecar_preview.body),
+        "is_complete_content": True,
+    }
+
+    should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
+        room,
+        sidecar_preview,
+        requester_user_id="@user:localhost",
+        thread_id="$thread",
+    )
+
+    assert should_skip is False

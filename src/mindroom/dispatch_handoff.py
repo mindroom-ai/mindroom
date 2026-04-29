@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
 import nio
 
@@ -14,7 +13,15 @@ from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
     from mindroom.coalescing import CoalescedBatch
+
+
+class _PendingEventLike(Protocol):
+    event: DispatchEvent
+    source_kind: str
+
 
 @dataclass(frozen=True)
 class PreparedTextEvent:
@@ -101,6 +108,7 @@ def _event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
 
 
 def is_media_dispatch_event(event: DispatchEvent) -> TypeGuard[MediaDispatchEvent]:
+    """Return whether one dispatch event is image, file, or video media."""
     return isinstance(
         event,
         nio.RoomMessageImage
@@ -113,6 +121,7 @@ def is_media_dispatch_event(event: DispatchEvent) -> TypeGuard[MediaDispatchEven
 
 
 def dispatch_prompt_for_event(event: DispatchEvent) -> str:
+    """Return the prompt text contributed by one dispatch event."""
     if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
         msg = "Raw audio must be normalized into PreparedTextEvent before coalescing"
         raise TypeError(msg)
@@ -126,7 +135,7 @@ def dispatch_prompt_for_event(event: DispatchEvent) -> str:
 
 
 def _collect_batch_mentions_and_formatted_bodies(
-    pending_events: tuple[Any, ...],
+    pending_events: tuple[_PendingEventLike, ...],
 ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None, bool | None]:
     all_user_ids: list[str] = []
     seen_user_ids: set[str] = set()
@@ -148,7 +157,11 @@ def _collect_batch_mentions_and_formatted_bodies(
         formatted_body = content.get("formatted_body")
         if isinstance(formatted_body, str) and formatted_body:
             formatted_parts.append(formatted_body)
-        if content.get("com.mindroom.skip_mentions") is True:
+        internal_payload_is_trusted = pending_event.source_kind != "message" or isinstance(
+            pending_event.event,
+            PreparedTextEvent,
+        )
+        if internal_payload_is_trusted and content.get("com.mindroom.skip_mentions") is True:
             skip_mentions = True
     if not inspected_content:
         return None, None, None
@@ -174,7 +187,11 @@ def _batch_payload_metadata(batch: CoalescedBatch) -> DispatchPayloadMetadata:
     )
 
 
-def payload_metadata_from_source(source: dict[str, Any]) -> DispatchPayloadMetadata:
+def payload_metadata_from_source(
+    source: dict[str, Any],
+    *,
+    trust_internal_metadata: bool = True,
+) -> DispatchPayloadMetadata:
     """Extract payload metadata from a resolved Matrix event source."""
     content = source.get("content")
     if not isinstance(content, dict):
@@ -187,15 +204,23 @@ def payload_metadata_from_source(source: dict[str, Any]) -> DispatchPayloadMetad
 
     formatted_body = content.get("formatted_body")
     formatted_bodies = (formatted_body,) if isinstance(formatted_body, str) and formatted_body else ()
+    if not trust_internal_metadata:
+        return DispatchPayloadMetadata(
+            attachment_ids=(),
+            mentioned_user_ids=mentioned_user_ids,
+            formatted_bodies=formatted_bodies,
+            skip_mentions=False,
+        )
+
     original_sender = content.get(ORIGINAL_SENDER_KEY)
     raw_audio_fallback = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY)
     return DispatchPayloadMetadata(
         attachment_ids=tuple(parse_attachment_ids_from_event_source(source)),
         original_sender=original_sender if isinstance(original_sender, str) else None,
-        raw_audio_fallback=True if raw_audio_fallback is True else False,
+        raw_audio_fallback=raw_audio_fallback is True,
         mentioned_user_ids=mentioned_user_ids,
         formatted_bodies=formatted_bodies,
-        skip_mentions=True if content.get("com.mindroom.skip_mentions") is True else False,
+        skip_mentions=content.get("com.mindroom.skip_mentions") is True,
     )
 
 
@@ -239,7 +264,7 @@ def _merge_batch_source(batch: CoalescedBatch) -> dict[str, Any]:
 
 
 def _single_prepared_dispatch_event(event: PreparedTextEvent, source_kind: str) -> PreparedTextEvent:
-    if source_kind == "message" or event.source_kind_override == source_kind:
+    if source_kind in {"message", event.source_kind_override}:
         return event
     return replace(event, source_kind_override=source_kind)
 

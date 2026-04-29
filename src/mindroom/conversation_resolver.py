@@ -15,9 +15,7 @@ from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
 from mindroom.dispatch_handoff import (
     DispatchEvent,
     DispatchPayloadMetadata,
-    MediaDispatchEvent,
     PreparedTextEvent,
-    TextDispatchEvent,
 )
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
@@ -62,10 +60,7 @@ def _source_with_payload_metadata(
     if payload_metadata is None:
         return event_source
     content = event_source.get("content")
-    if not isinstance(content, dict):
-        content = {}
-    else:
-        content = dict(content)
+    content = {} if not isinstance(content, dict) else dict(content)
     if payload_metadata.mentioned_user_ids is not None:
         content["m.mentions"] = {"user_ids": list(payload_metadata.mentioned_user_ids)}
     if payload_metadata.formatted_bodies is not None:
@@ -121,7 +116,7 @@ class ConversationResolver:
     def _matrix_id(self) -> MatrixID:
         return self.deps.matrix_id
 
-    def _envelope_ingress_metadata(
+    def _envelope_ingress_metadata(  # noqa: C901
         self,
         *,
         event: DispatchEvent,
@@ -251,7 +246,9 @@ class ConversationResolver:
             requester_id=requester_user_id,
             sender_id=event.sender,
             body=body or event.body,
-            attachment_ids=tuple(attachment_ids or parse_attachment_ids_from_event_source(event.source)),
+            attachment_ids=tuple(
+                attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
+            ),
             mentioned_agents=tuple(
                 agent_id.agent_name(config, self.deps.runtime_paths) or agent_id.username
                 for agent_id in context.mentioned_agents
@@ -299,7 +296,9 @@ class ConversationResolver:
             requester_id=requester_user_id,
             sender_id=event.sender,
             body=body or event.body,
-            attachment_ids=tuple(attachment_ids or parse_attachment_ids_from_event_source(event.source)),
+            attachment_ids=tuple(
+                attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
+            ),
             mentioned_agents=(),
             agent_name=agent_name or self.deps.agent_name,
             source_kind=resolved_source_kind,

@@ -22,7 +22,7 @@ The central invariant is that `source_kind` describes what arrived, while `dispa
 - [x] Step 8 routes text, sidecar text, voice text, and standalone media through the shared active-follow-up enqueue decision.
 - [x] Step 9 makes scheduled, hook, hook-dispatch, and trusted internal relay source kinds FIFO bypass barriers.
 - [x] Step 10 keeps resolver and lifecycle modules independent of the full coalescing handoff object.
-- [ ] Add the remaining final-envelope and model-payload regressions listed in the test plan.
+- [x] Add the remaining final-envelope and model-payload regressions listed in the test plan.
 - [ ] Complete the accountability searches and full validation commands.
 
 ## Current Problem

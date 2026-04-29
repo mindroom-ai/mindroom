@@ -24,19 +24,6 @@ from mindroom.coalescing import (
     CoalescingKey,
     PendingEvent,
 )
-from mindroom.dispatch_handoff import (
-    DispatchEvent,
-    DispatchHandoff,
-    DispatchIngressMetadata,
-    DispatchPayloadMetadata,
-    MediaDispatchEvent,
-    PendingDispatchMetadata,
-    PreparedTextEvent,
-    TextDispatchEvent,
-    build_dispatch_handoff,
-    merge_payload_metadata,
-    payload_metadata_from_source,
-)
 from mindroom.commands.handler import (
     CommandHandlerContext,
     handle_command,
@@ -54,6 +41,19 @@ from mindroom.constants import (
     RuntimePaths,
 )
 from mindroom.delivery_gateway import SendTextRequest
+from mindroom.dispatch_handoff import (
+    DispatchEvent,
+    DispatchHandoff,
+    DispatchIngressMetadata,
+    DispatchPayloadMetadata,
+    MediaDispatchEvent,
+    PendingDispatchMetadata,
+    PreparedTextEvent,
+    TextDispatchEvent,
+    build_dispatch_handoff,
+    merge_payload_metadata,
+    payload_metadata_from_source,
+)
 from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
@@ -1576,7 +1576,17 @@ class TurnController:
             event = await self.deps.normalizer.resolve_text_event(
                 TextNormalizationRequest(event=raw_event),
             )
-            hydrated_payload_metadata = payload_metadata_from_source(event.source)
+            trust_internal_payload_metadata = self._sender_is_trusted_for_ingress_metadata(event.sender) or (
+                isinstance(event, PreparedTextEvent)
+                and (
+                    event.is_synthetic
+                    or event.source_kind_override not in {None, "message"}
+                )
+            )
+            hydrated_payload_metadata = payload_metadata_from_source(
+                event.source,
+                trust_internal_metadata=trust_internal_payload_metadata,
+            )
             payload_metadata = (
                 hydrated_payload_metadata
                 if payload_metadata is None

@@ -166,6 +166,10 @@ def _event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
     return cast("dict[str, object]", content)
 
 
+def _pending_event_trusts_internal_payload(pending_event: PendingEvent) -> bool:
+    return pending_event.source_kind != "message" or isinstance(pending_event.event, PreparedTextEvent)
+
+
 def _effective_source_kind(
     event: DispatchEvent,
     fallback_source_kind: str | None = None,
@@ -222,6 +226,8 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
     original_sender: str | None = None
     raw_audio_fallback = False
     for pending_event in pending_events:
+        if not _pending_event_trusts_internal_payload(pending_event):
+            continue
         content = _event_content_dict(pending_event.event)
         if content is None:
             continue
@@ -322,6 +328,7 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
             *(
                 parse_attachment_ids_from_event_source(pending_event.event.source)
                 for pending_event in ordered_pending_events
+                if _pending_event_trusts_internal_payload(pending_event)
             ),
         ),
         source_event_ids=[pending_event.event.event_id for pending_event in ordered_pending_events],
