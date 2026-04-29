@@ -244,7 +244,11 @@ class TurnController:
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if not isinstance(content, dict):
             return False
-        if content.get("com.mindroom.source_kind") == "scheduled":
+        source_kind = event.source_kind_override if isinstance(event, PreparedTextEvent) else None
+        if source_kind is None:
+            raw_source_kind = content.get("com.mindroom.source_kind")
+            source_kind = raw_source_kind if isinstance(raw_source_kind, str) else None
+        if source_kind not in {None, "", "message", COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY}:
             return False
         original_sender = content.get(ORIGINAL_SENDER_KEY)
         return isinstance(original_sender, str) and bool(original_sender)
@@ -1765,11 +1769,21 @@ class TurnController:
             thread_id=normalized_voice.effective_thread_id,
         )
 
-        await self._enqueue_for_dispatch(
-            normalized_voice.event,
-            room,
-            source_kind="voice",
+        envelope = self.deps.resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=normalized_voice.event,
             requester_user_id=prechecked_event.requester_user_id,
+            thread_id=normalized_voice.effective_thread_id,
+            source_kind="voice",
+        )
+        await self._enqueue_prepared_text_for_dispatch(
+            room=room,
+            prepared_event=normalized_voice.event,
+            dispatch_event=normalized_voice.event,
+            envelope=envelope,
+            coalescing_thread_id=normalized_voice.effective_thread_id,
+            requester_user_id=prechecked_event.requester_user_id,
+            dispatch_timing=dispatch_timing,
         )
 
     async def _dispatch_file_sidecar_text_preview(

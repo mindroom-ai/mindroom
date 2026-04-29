@@ -9058,6 +9058,7 @@ class TestAgentBot:
                     "msgtype": "m.text",
                     "body": f"@mindroom_calculator:localhost {source_kind} says hello",
                     "com.mindroom.source_kind": source_kind,
+                    ORIGINAL_SENDER_KEY: "@user:localhost",
                 },
             },
         )
@@ -9073,7 +9074,7 @@ class TestAgentBot:
             patch.object(
                 bot._turn_controller,
                 "_precheck_dispatch_event",
-                return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_general:localhost"),
+                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             ),
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
@@ -9097,6 +9098,74 @@ class TestAgentBot:
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is event
         assert pending_event.source_kind == source_kind
+
+    @pytest.mark.asyncio
+    async def test_voice_preview_reserves_active_thread_follow_up(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Transcribed voice follow-ups should share the active-response notice path."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
+        prepared_event = PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$voice-followup",
+            body="please stop",
+            source={"content": {"msgtype": "m.text", "body": "please stop", "com.mindroom.source_kind": "voice"}},
+            server_timestamp=1234567890,
+            is_synthetic=True,
+            source_kind_override="voice",
+        )
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_voice_event",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        event=prepared_event,
+                        effective_thread_id="$thread_root",
+                    ),
+                ),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()) as mock_echo,
+            patch.object(
+                bot._response_runner,
+                "has_active_response_for_target",
+                return_value=True,
+            ),
+            patch.object(
+                bot._response_runner,
+                "reserve_waiting_human_message",
+                return_value=MagicMock(),
+            ) as mock_reserve_waiting_human_message,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+        ):
+            await bot._turn_controller._on_audio_media_message(
+                room,
+                _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
+            )
+
+        mock_echo.assert_awaited_once()
+        mock_reserve_waiting_human_message.assert_called_once()
+        reserved_envelope = mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"]
+        assert reserved_envelope.source_kind == "voice"
+        mock_enqueue.assert_awaited_once()
+        key, pending_event = mock_enqueue.await_args.args
+        assert key == (room.room_id, "$thread_root", "@user:localhost")
+        assert isinstance(pending_event, PendingEvent)
+        assert pending_event.event is prepared_event
+        assert pending_event.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert len(pending_event.dispatch_metadata) == 1
+        metadata = pending_event.dispatch_metadata[0]
+        assert metadata.kind == "queued_notice_reservation"
+        assert metadata.payload is mock_reserve_waiting_human_message.return_value
+        assert metadata.requires_solo_batch is True
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_enqueues_prepared_text(
