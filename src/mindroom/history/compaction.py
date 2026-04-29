@@ -55,6 +55,12 @@ logger = get_logger(__name__)
 
 _WRAPPER_OVERHEAD_TOKENS = 200
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
+_EXCERPT_METADATA_OMIT_KEYS = frozenset(
+    {
+        "model_params",
+        "tools_schema",
+    },
+)
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 type _ToolDefinition = dict[str, object]
@@ -968,13 +974,20 @@ def _serialize_run_excerpt(
 def _excerpt_blocks(run: RunOutput | TeamRunOutput) -> list[_ExcerptBlock]:
     blocks: list[_ExcerptBlock] = []
     if run.metadata:
-        blocks.append(_ExcerptBlock("<run_metadata>", stable_serialize(run.metadata), "</run_metadata>"))
+        blocks.append(
+            _ExcerptBlock("<run_metadata>", stable_serialize(_metadata_for_excerpt(run.metadata)), "</run_metadata>"),
+        )
     for message in run.messages or []:
         content = _render_message_content(message)
         if not content:
             continue
         blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
     return blocks
+
+
+def _metadata_for_excerpt(metadata: dict[str, object]) -> dict[str, object]:
+    """Keep compact identity metadata for oversized excerpts without tool schema bulk."""
+    return {key: value for key, value in metadata.items() if key not in _EXCERPT_METADATA_OMIT_KEYS}
 
 
 def _truncate_excerpt(text: str, max_chars: int) -> str:
