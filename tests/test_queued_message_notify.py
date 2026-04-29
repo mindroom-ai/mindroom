@@ -1458,11 +1458,11 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
             ),
             pytest.raises(asyncio.CancelledError),
         ):
-                await bot._turn_controller._enqueue_active_thread_follow_up(
-                    room=room,
-                    event=event,
-                    target=target,
-                    envelope=envelope,
+            await bot._turn_controller._enqueue_active_thread_follow_up(
+                room=room,
+                event=event,
+                target=target,
+                envelope=envelope,
                 coalescing_thread_id="$thread",
                 requester_user_id="@user:localhost",
                 dispatch_timing=None,

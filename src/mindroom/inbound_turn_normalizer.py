@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
+
 @dataclass(frozen=True)
 class TextNormalizationRequest:
     """One inbound text-like event to normalize."""

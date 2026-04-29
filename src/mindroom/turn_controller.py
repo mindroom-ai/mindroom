@@ -494,12 +494,12 @@ class TurnController:
         *,
         room: nio.MatrixRoom,
         event: _MediaDispatchEvent,
+        coalescing_thread_id: str | None,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> None:
         """Queue one media event with the same active-follow-up policy as text."""
         source_kind = "image" if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage) else "media"
-        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -732,13 +732,13 @@ class TurnController:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
         if (
-            ingress_metadata is not None
-            and ingress_metadata.source_kind == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+            ingress_metadata is not None and ingress_metadata.source_kind == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
         ) or (ingress_metadata is None and self._is_trusted_router_relay_event(event)):
+            context_kwargs = {"payload_metadata": payload_metadata} if payload_metadata is not None else {}
             context = await self.deps.resolver.extract_trusted_router_relay_context(
                 room,
                 event,
-                payload_metadata=payload_metadata,
+                **context_kwargs,
             )
             emit_elapsed_timing(
                 "dispatch_handoff.prepare_dispatch.extract_context",
@@ -746,10 +746,11 @@ class TurnController:
                 path="trusted_router_relay",
             )
         else:
+            context_kwargs = {"payload_metadata": payload_metadata} if payload_metadata is not None else {}
             context = await self.deps.resolver.extract_dispatch_context(
                 room,
                 event,
-                payload_metadata=payload_metadata,
+                **context_kwargs,
             )
             emit_elapsed_timing(
                 "dispatch_handoff.prepare_dispatch.extract_context",
@@ -781,14 +782,10 @@ class TurnController:
             else None,
             source_kind=ingress_metadata.source_kind if ingress_metadata is not None else None,
             dispatch_policy_source_kind=(
-                ingress_metadata.dispatch_policy_source_kind
-                if ingress_metadata is not None
-                else None
+                ingress_metadata.dispatch_policy_source_kind if ingress_metadata is not None else None
             ),
             hook_source=ingress_metadata.hook_source if ingress_metadata is not None else None,
-            message_received_depth=(
-                ingress_metadata.message_received_depth if ingress_metadata is not None else None
-            ),
+            message_received_depth=(ingress_metadata.message_received_depth if ingress_metadata is not None else None),
         )
         emit_elapsed_timing(
             "dispatch_handoff.prepare_dispatch.build_message_envelope",
@@ -1578,10 +1575,7 @@ class TurnController:
             )
             trust_internal_payload_metadata = self._sender_is_trusted_for_ingress_metadata(event.sender) or (
                 isinstance(event, PreparedTextEvent)
-                and (
-                    event.is_synthetic
-                    or event.source_kind_override not in {None, "message"}
-                )
+                and (event.is_synthetic or event.source_kind_override not in {None, "message"})
             )
             hydrated_payload_metadata = payload_metadata_from_source(
                 event.source,
@@ -1670,11 +1664,12 @@ class TurnController:
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
+            hydrate_kwargs = {"payload_metadata": payload_metadata} if payload_metadata is not None else {}
             await self.deps.resolver.hydrate_dispatch_context(
                 room,
                 event,
                 dispatch.context,
-                payload_metadata=payload_metadata,
+                **hydrate_kwargs,
             )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_plan_start")
@@ -1828,7 +1823,7 @@ class TurnController:
         )
         attach_dispatch_pipeline_timing(prechecked_event.event.source, dispatch_timing)
         # Prime transitive ancestor lookups before writing advisory cache membership.
-        await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
         event_info = EventInfo.from_event(prechecked_event.event.source)
         await self._append_live_event_with_timing(
             room.room_id,
@@ -1842,6 +1837,7 @@ class TurnController:
         await self._enqueue_media_for_dispatch(
             room=room,
             event=prechecked_event.event,
+            coalescing_thread_id=coalescing_thread_id,
             requester_user_id=prechecked_event.requester_user_id,
             dispatch_timing=dispatch_timing,
         )

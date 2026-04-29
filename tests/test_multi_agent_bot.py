@@ -6505,7 +6505,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.get_available_agents_for_sender_authoritative") as mock_get_available,
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-            patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
+            patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [
                 config.get_ids(runtime_paths_for(config))["general"],
@@ -7037,7 +7037,7 @@ class TestAgentBot:
             ),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
+            patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
             patch(
                 "mindroom.turn_controller.interactive.handle_text_response",
                 new_callable=AsyncMock,
@@ -7114,7 +7114,7 @@ class TestAgentBot:
             ),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
+            patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
             patch(
                 "mindroom.turn_controller.interactive.handle_text_response",
                 new_callable=AsyncMock,
@@ -8502,6 +8502,7 @@ class TestAgentBot:
             _room: object,
             _event: object,
             context: MessageContext,
+            **_kwargs: object,
         ) -> None:
             call_order.append("hydrate")
             context.thread_history = ThreadHistoryResult(full_history, is_full_history=True)
@@ -8659,6 +8660,7 @@ class TestAgentBot:
             _room: object,
             _event: object,
             context: MessageContext,
+            **_kwargs: object,
         ) -> None:
             context.thread_history = ThreadHistoryResult(full_history, is_full_history=True)
             context.requires_full_thread_history = False
@@ -9101,8 +9103,9 @@ class TestAgentBot:
         key, pending_event = mock_enqueue.await_args.args
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event is prepared_event
-        assert pending_event.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert pending_event.event is event
+        assert pending_event.source_kind == "message"
+        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
@@ -9237,7 +9240,8 @@ class TestAgentBot:
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
-        assert pending_event.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert pending_event.source_kind == "voice"
+        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"
@@ -9425,7 +9429,8 @@ class TestAgentBot:
         assert key == (room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
-        assert pending_event.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert pending_event.source_kind == "message"
+        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
         assert len(pending_event.dispatch_metadata) == 1
         metadata = pending_event.dispatch_metadata[0]
         assert metadata.kind == "queued_notice_reservation"

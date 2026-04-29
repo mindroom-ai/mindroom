@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache, ThreadReadResult
 
+
 def should_skip_mentions(event_source: dict[str, Any]) -> bool:
     """Return whether mentions in this message should be ignored."""
     content = event_source.get("content", {})

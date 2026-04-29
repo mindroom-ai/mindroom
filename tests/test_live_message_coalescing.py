@@ -3981,11 +3981,11 @@ async def test_gate_final_envelope_preserves_hook_metadata_with_original_sender(
                 hook_event,
                 "hook_dispatch",
                 None,
-                    {
-                        "hook_source": "message_received",
-                        "message_received_depth": 1,
-                        "requester_user_id": "@requester:localhost",
-                    },
+                {
+                    "hook_source": "message_received",
+                    "message_received_depth": 1,
+                    "requester_user_id": "@requester:localhost",
+                },
             ),
         ],
     )
