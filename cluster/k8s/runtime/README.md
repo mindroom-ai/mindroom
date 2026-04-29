@@ -147,6 +147,7 @@ workers:
 - Use `nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`, and `podDisruptionBudget` for cluster-specific scheduling and availability policy.
 - Set `selectorLabels` when adopting an existing Deployment with an immutable selector.
 - Set `storage.volumeName`, `eventCache.postgres.selectorLabels`, `eventCache.postgres.persistence.volumeName`, or `workers.kubernetes.networkPolicy.name` when adopting existing resources with established names.
+- Set `eventCache.postgres.persistence.includeChartLabels: false` when adopting an existing PostgreSQL StatefulSet whose volume claim template has no chart labels.
 - Override `probes.*.custom` when a deployment needs custom Kubernetes startup, readiness, or liveness probes.
 
 ## Adopting Existing Resources
@@ -180,6 +181,7 @@ eventCache:
       passwordKey: POSTGRES_PASSWORD
     persistence:
       volumeName: existing-event-cache-postgres-data
+      includeChartLabels: false
   databaseUrl:
     existingSecret: existing-event-cache-secrets
     key: DATABASE_URL
