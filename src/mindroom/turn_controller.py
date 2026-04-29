@@ -237,6 +237,12 @@ class TurnController:
         """Return whether one sender may supply trusted ingress metadata overrides."""
         return extract_agent_name(sender_id, self.deps.runtime.config, self.deps.runtime_paths) is not None
 
+    def _should_trust_internal_payload_metadata(self, event: _DispatchEvent) -> bool:
+        """Return whether internal payload keys on one event should be treated as authoritative."""
+        if self._sender_is_trusted_for_ingress_metadata(event.sender):
+            return True
+        return isinstance(event, PreparedTextEvent) and event.is_synthetic
+
     def _is_trusted_internal_relay_event(self, event: _DispatchEvent) -> bool:
         """Return whether one agent-authored relay should bypass user-turn coalescing."""
         if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
@@ -631,6 +637,7 @@ class TurnController:
         requester_user_id: str | None = None,
         coalescing_key: CoalescingKey | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
+        trust_internal_payload_metadata: bool | None = None,
     ) -> None:
         """Route one inbound event through the live coalescing gate."""
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
@@ -651,6 +658,11 @@ class TurnController:
             if dispatch_timing is not None:
                 dispatch_timing.note(coalescing_bypassed=True, coalescing_bypass_reason="trusted_internal_relay")
             source_kind = COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
+        resolved_trust_internal_payload_metadata = (
+            self._should_trust_internal_payload_metadata(event)
+            if trust_internal_payload_metadata is None
+            else trust_internal_payload_metadata
+        )
         coalescing_key_start = time.monotonic()
         resolved_key = coalescing_key or await self._coalescing_key_for_event(room, event, effective_requester_user_id)
         emit_elapsed_timing(
@@ -669,6 +681,7 @@ class TurnController:
                 dispatch_policy_source_kind=dispatch_policy_source_kind,
                 hook_source=hook_source,
                 message_received_depth=message_received_depth,
+                trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
                 dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation),
             ),
         )
@@ -731,9 +744,7 @@ class TurnController:
     ) -> PreparedDispatch | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
-        if (
-            ingress_metadata is not None and ingress_metadata.source_kind == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
-        ) or (ingress_metadata is None and self._is_trusted_router_relay_event(event)):
+        if self._is_trusted_router_relay_event(event):
             context_kwargs = {"payload_metadata": payload_metadata} if payload_metadata is not None else {}
             context = await self.deps.resolver.extract_trusted_router_relay_context(
                 room,
@@ -1640,7 +1651,6 @@ class TurnController:
                 envelope=dispatch.envelope,
             ):
                 return
-            content = event.source.get("content") if isinstance(event.source, dict) else None
             message_attachment_ids = (
                 list(payload_metadata.attachment_ids)
                 if payload_metadata is not None and payload_metadata.attachment_ids is not None
@@ -1651,16 +1661,8 @@ class TurnController:
                 message_extra_content[ATTACHMENT_IDS_KEY] = message_attachment_ids
             if payload_metadata is not None and payload_metadata.original_sender is not None:
                 message_extra_content[ORIGINAL_SENDER_KEY] = payload_metadata.original_sender
-            elif isinstance(content, dict):
-                original_sender = content.get(ORIGINAL_SENDER_KEY)
-                if isinstance(original_sender, str):
-                    message_extra_content[ORIGINAL_SENDER_KEY] = original_sender
             if payload_metadata is not None and payload_metadata.raw_audio_fallback:
                 message_extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
-            elif isinstance(content, dict):
-                raw_audio_fallback = content.get(VOICE_RAW_AUDIO_FALLBACK_KEY)
-                if isinstance(raw_audio_fallback, bool) and raw_audio_fallback:
-                    message_extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id

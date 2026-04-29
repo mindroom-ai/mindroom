@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 class _PendingEventLike(Protocol):
     event: DispatchEvent
     source_kind: str
+    trust_internal_payload_metadata: bool
 
 
 @dataclass(frozen=True)
@@ -156,11 +157,7 @@ def _collect_batch_mentions_and_formatted_bodies(
         formatted_body = content.get("formatted_body")
         if isinstance(formatted_body, str) and formatted_body:
             formatted_parts.append(formatted_body)
-        internal_payload_is_trusted = pending_event.source_kind != "message" or isinstance(
-            pending_event.event,
-            PreparedTextEvent,
-        )
-        if internal_payload_is_trusted and content.get("com.mindroom.skip_mentions") is True:
+        if pending_event.trust_internal_payload_metadata and content.get("com.mindroom.skip_mentions") is True:
             skip_mentions = True
     if not inspected_content:
         return None, None, None

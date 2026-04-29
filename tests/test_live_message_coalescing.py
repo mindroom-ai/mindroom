@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -46,6 +47,7 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from tests.conftest import (
     TEST_PASSWORD,
@@ -3194,7 +3196,12 @@ def test_batch_dispatch_event_preserves_original_sender() -> None:
     batch = build_coalesced_batch(
         ("!room:localhost", None, "@real_user:remote"),
         [
-            PendingEvent(event=relay_event, room=room, source_kind="message"),
+            PendingEvent(
+                event=relay_event,
+                room=room,
+                source_kind="message",
+                trust_internal_payload_metadata=True,
+            ),
             PendingEvent(event=followup, room=room, source_kind="message"),
         ],
     )
@@ -3236,8 +3243,18 @@ def test_batch_dispatch_event_preserves_attachment_ids() -> None:
     batch = build_coalesced_batch(
         ("!room:localhost", None, "@user:localhost"),
         [
-            PendingEvent(event=event_with_attachment, room=room, source_kind="message"),
-            PendingEvent(event=event_with_another, room=room, source_kind="message"),
+            PendingEvent(
+                event=event_with_attachment,
+                room=room,
+                source_kind="message",
+                trust_internal_payload_metadata=True,
+            ),
+            PendingEvent(
+                event=event_with_another,
+                room=room,
+                source_kind="message",
+                trust_internal_payload_metadata=True,
+            ),
         ],
     )
     dispatch_event = build_batch_dispatch_event(batch)
@@ -3775,6 +3792,8 @@ async def _capture_gate_dispatches(
     bot: AgentBot,
     room: nio.MatrixRoom,
     enqueued: Sequence[tuple[nio.Event | PreparedTextEvent, str, str | None, dict[str, object]]],
+    *,
+    captured_plan_extra_content: list[object] | None = None,
 ) -> tuple[list[MessageEnvelope], list[list[object]], list[DispatchPayloadWithAttachmentsRequest]]:
     """Dispatch queued events through the real handoff path and capture final envelopes."""
     envelopes: list[MessageEnvelope] = []
@@ -3785,6 +3804,8 @@ async def _capture_gate_dispatches(
         dispatch = cast("PreparedDispatch", args[2])
         envelopes.append(dispatch.envelope)
         media_batches.append(list(cast("list[object] | None", kwargs.get("media_events")) or []))
+        if captured_plan_extra_content is not None:
+            captured_plan_extra_content.append(kwargs.get("extra_content"))
         return _respond_dispatch_plan()
 
     async def record_response(*args: object, **_kwargs: object) -> None:
@@ -3819,6 +3840,10 @@ async def _capture_gate_dispatches(
                 hook_source=cast("str | None", metadata.get("hook_source")),
                 message_received_depth=cast("int", metadata.get("message_received_depth", 0)),
                 requester_user_id=cast("str", metadata.get("requester_user_id", "@user:localhost")),
+                trust_internal_payload_metadata=cast(
+                    "bool | None",
+                    metadata.get("trust_internal_payload_metadata"),
+                ),
             )
         await bot._coalescing_gate.drain_all()
 
@@ -4065,8 +4090,8 @@ async def test_coalesced_attachment_ids_reach_envelope_and_model_payload(tmp_pat
         bot,
         room,
         [
-            (first, "message", None, {}),
-            (second, "message", None, {}),
+            (first, "message", None, {"trust_internal_payload_metadata": True}),
+            (second, "message", None, {"trust_internal_payload_metadata": True}),
         ],
     )
 
@@ -4117,11 +4142,13 @@ async def test_untrusted_raw_payload_metadata_spoofing_does_not_reach_envelope_o
     content["com.mindroom.skip_mentions"] = True
     content["com.mindroom.hook_source"] = "spoofed:message_received"
     content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = 2
+    captured_extra_content: list[object] = []
 
     envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
         bot,
         room,
         [(event, "message", None, {})],
+        captured_plan_extra_content=captured_extra_content,
     )
 
     assert envelopes[0].source_kind == "message"
@@ -4129,6 +4156,85 @@ async def test_untrusted_raw_payload_metadata_spoofing_does_not_reach_envelope_o
     assert envelopes[0].message_received_depth == 0
     assert envelopes[0].attachment_ids == ()
     assert payload_requests[0].current_attachment_ids == []
+    assert captured_extra_content == [None]
+
+
+@pytest.mark.asyncio
+async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelope_or_payload(
+    tmp_path: Path,
+) -> None:
+    """User-authored sidecar JSON should hydrate text without trusting internal payload keys."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    sidecar_event = _file_event(event_id="$sidecar-spoof", body="preview.txt")
+    sidecar_content = sidecar_event.source["content"]
+    assert isinstance(sidecar_content, dict)
+    sidecar_content.update(
+        {
+            "msgtype": "m.file",
+            "body": "preview",
+            "info": {"mimetype": "application/json"},
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://localhost/spoof-sidecar",
+        },
+    )
+    hydrated_content = {
+        "msgtype": "m.text",
+        "body": "@test_agent hydrated sidecar",
+        "m.mentions": {"user_ids": ["@mindroom_test_agent:localhost"]},
+        ATTACHMENT_IDS_KEY: ["spoofed-attachment"],
+        ORIGINAL_SENDER_KEY: "@spoofed:localhost",
+        VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+        "com.mindroom.skip_mentions": True,
+    }
+    response = MagicMock(spec=nio.DownloadResponse)
+    response.body = json.dumps(hydrated_content).encode("utf-8")
+    bot.client.download = AsyncMock(return_value=response)
+    captured_envelopes: list[MessageEnvelope] = []
+    captured_extra_content: list[object] = []
+    payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
+
+    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
+        dispatch = cast("PreparedDispatch", args[2])
+        captured_envelopes.append(dispatch.envelope)
+        captured_extra_content.append(kwargs.get("extra_content"))
+        return _respond_dispatch_plan()
+
+    async def record_payload_request(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
+        payload_requests.append(request)
+        return DispatchPayload(prompt=request.prompt, attachment_ids=list(request.current_attachment_ids))
+
+    async def record_response(*args: object, **_kwargs: object) -> None:
+        dispatch = cast("PreparedDispatch", args[2])
+        build_payload = cast("Callable[[MessageContext], Awaitable[DispatchPayload]]", args[4])
+        await build_payload(dispatch.context)
+
+    with (
+        patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
+        patch.object(bot._turn_controller, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "build_dispatch_payload_with_attachments",
+            new=AsyncMock(side_effect=record_payload_request),
+        ),
+    ):
+        handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+            room,
+            _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
+        )
+        await bot._coalescing_gate.drain_all()
+
+    assert handled is True
+    assert captured_envelopes[0].source_kind == "message"
+    assert captured_envelopes[0].mentioned_agents == ("test_agent",)
+    assert captured_envelopes[0].requester_id == "@user:localhost"
+    assert captured_envelopes[0].attachment_ids == ()
+    assert payload_requests[0].current_attachment_ids == []
+    assert captured_extra_content == [None]
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_handoff import DispatchIngressMetadata
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -721,6 +722,7 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
         "@user:localhost",
         event_label="message",
         handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+        ingress_metadata=DispatchIngressMetadata(source_kind="trusted_internal_relay"),
     )
 
     assert dispatch is not None
@@ -782,6 +784,7 @@ async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_r
         "@user:localhost",
         event_label="message",
         handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+        ingress_metadata=DispatchIngressMetadata(source_kind="trusted_internal_relay"),
     )
 
     assert dispatch is not None

@@ -103,6 +103,7 @@ class PendingEvent:
     dispatch_policy_source_kind: str | None = None
     hook_source: str | None = None
     message_received_depth: int = 0
+    trust_internal_payload_metadata: bool = False
     enqueue_time: float = field(default_factory=time.time)
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
@@ -167,7 +168,7 @@ def _event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
 
 
 def _pending_event_trusts_internal_payload(pending_event: PendingEvent) -> bool:
-    return pending_event.source_kind != "message" or isinstance(pending_event.event, PreparedTextEvent)
+    return pending_event.trust_internal_payload_metadata
 
 
 def _effective_source_kind(
