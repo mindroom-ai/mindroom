@@ -40,6 +40,7 @@ __all__ = [
 
 _UPLOAD_GRACE_HARD_CAP_MULTIPLIER = 4.0
 _UPLOAD_GRACE_MAX_HARD_CAP_SECONDS = 2.0
+_COALESCING_FLUSH_WARNING_SECONDS = 5.0
 _COALESCING_EXEMPT_SOURCE_KINDS: frozenset[str] = frozenset({"hook", "hook_dispatch"})
 logger = get_logger(__name__)
 
@@ -137,6 +138,16 @@ class CoalescedBatch:
     media_events: list[MediaDispatchEvent]
     original_sender: str | None = None
     raw_audio_fallback: bool = False
+
+
+@dataclass(frozen=True)
+class _FlushDiagnostics:
+    """Stable metadata for one flush attempt."""
+
+    batch: CoalescedBatch
+    pending_count: int
+    timing_scope: str
+    log_context: dict[str, object]
 
 
 def _event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
@@ -474,6 +485,15 @@ class CoalescingGate:
         return round((time.time() - oldest_enqueue_time) * 1000, 1)
 
     @staticmethod
+    def _oldest_pending_events_age_ms(pending_events: list[PendingEvent]) -> float:
+        oldest_enqueue_time = min(pending_event.enqueue_time for pending_event in pending_events)
+        return round((time.time() - oldest_enqueue_time) * 1000, 1)
+
+    @staticmethod
+    def _source_event_ids(pending_events: list[PendingEvent]) -> list[str]:
+        return [pending_event.event.event_id for pending_event in pending_events]
+
+    @staticmethod
     def _queue_pending_events(gate: _GateEntry, count: int) -> list[PendingEvent]:
         return [gate.queue[index].pending_event for index in range(count)]
 
@@ -547,6 +567,68 @@ class CoalescingGate:
             duration_ms=round((time.monotonic() - enqueue_start) * 1000, 1),
         )
 
+    def _log_enqueued_event(
+        self,
+        key: CoalescingKey,
+        pending_event: PendingEvent,
+        *,
+        pending_count: int,
+    ) -> None:
+        logger.info(
+            "coalescing_gate_message_enqueued",
+            room_id=key[0],
+            thread_id=key[1],
+            requester_user_id=key[2],
+            event_id=pending_event.event.event_id,
+            pending_count=pending_count,
+            source_kind=pending_event.source_kind,
+            timing_scope=event_timing_scope(pending_event.event.event_id),
+        )
+
+    def _flush_diagnostics(
+        self,
+        key: CoalescingKey,
+        pending_events: list[PendingEvent],
+        *,
+        bypass_grace: bool,
+    ) -> _FlushDiagnostics:
+        batch = build_coalesced_batch(key, pending_events)
+        pending_count = len(pending_events)
+        timing_scope = event_timing_scope(batch.primary_event.event_id)
+        return _FlushDiagnostics(
+            batch=batch,
+            pending_count=pending_count,
+            timing_scope=timing_scope,
+            log_context={
+                "room_id": key[0],
+                "thread_id": key[1],
+                "requester_user_id": key[2],
+                "pending_count": pending_count,
+                "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
+                "bypass_grace": bypass_grace,
+                "source_event_ids": self._source_event_ids(pending_events),
+                "timing_scope": timing_scope,
+            },
+        )
+
+    @staticmethod
+    def _log_flush_finished(
+        flush_context: dict[str, object],
+        *,
+        flush_start: float,
+        outcome: str,
+    ) -> None:
+        duration_ms = round((time.monotonic() - flush_start) * 1000, 1)
+        log_context = {
+            **flush_context,
+            "duration_ms": duration_ms,
+            "outcome": outcome,
+        }
+        if duration_ms >= _COALESCING_FLUSH_WARNING_SECONDS * 1000:
+            logger.warning("coalescing_gate_flush_slow", **log_context)
+            return
+        logger.info("coalescing_gate_flush_finished", **log_context)
+
     def _ensure_drain_task(self, key: CoalescingKey, gate: _GateEntry) -> None:
         if gate.drain_task is not None and not gate.drain_task.done():
             return
@@ -574,6 +656,11 @@ class CoalescingGate:
         path: str,
         flush_outcome: str | None = None,
     ) -> None:
+        self._log_enqueued_event(
+            key,
+            pending_event,
+            pending_count=self._gate_work_count(gate),
+        )
         self._log_enqueue(
             key,
             gate,
@@ -745,32 +832,37 @@ class CoalescingGate:
         """Dispatch a claimed batch while buffering new ingress on the same gate."""
         flush_start = time.monotonic()
         gate.phase = GatePhase.IN_FLIGHT
-        pending_count = len(pending_events)
         gate.deadline = None
         gate.grace_deadline = None
-        batch = build_coalesced_batch(key, pending_events)
-        timing_scope = event_timing_scope(batch.primary_event.event_id)
+        diagnostics = self._flush_diagnostics(key, pending_events, bypass_grace=bypass_grace)
+        logger.info("coalescing_gate_flush_started", **diagnostics.log_context)
         dispatched = False
         try:
             dispatch_batch_start = time.monotonic()
-            await self._dispatch_batch(batch)
+            await self._dispatch_batch(diagnostics.batch)
             dispatched = True
             emit_elapsed_timing(
                 "coalescing_gate.flush.dispatch_batch",
                 dispatch_batch_start,
-                pending_count=pending_count,
+                pending_count=diagnostics.pending_count,
                 bypass_grace=bypass_grace,
-                timing_scope=timing_scope,
+                timing_scope=diagnostics.timing_scope,
             )
             return "dispatched"
         finally:
+            outcome = "dispatched" if dispatched else "failed"
             emit_elapsed_timing(
                 "coalescing_gate.flush",
                 flush_start,
-                outcome="dispatched" if dispatched else "failed",
-                pending_count=pending_count,
+                outcome=outcome,
+                pending_count=diagnostics.pending_count,
                 bypass_grace=bypass_grace,
-                timing_scope=timing_scope,
+                timing_scope=diagnostics.timing_scope,
+            )
+            self._log_flush_finished(
+                diagnostics.log_context,
+                flush_start=flush_start,
+                outcome=outcome,
             )
             current_key, current_gate = self._resolve_gate_entry(key, gate)
             if current_key is not None and current_gate is not None:

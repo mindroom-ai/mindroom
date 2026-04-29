@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 import time
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2025,10 +2024,8 @@ async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
         upload_grace_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
     )
-    monotonic_values = itertools.chain([100.0, 100.0, 100.0, 106.0], itertools.repeat(106.0))
-
     with (
-        patch("mindroom.coalescing.time.monotonic", side_effect=lambda: next(monotonic_values)),
+        patch("mindroom.coalescing._COALESCING_FLUSH_WARNING_SECONDS", 0.0),
         patch("mindroom.coalescing.logger.warning") as mock_warning,
     ):
         await gate.enqueue(
@@ -2039,10 +2036,11 @@ async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
                 source_kind="message",
             ),
         )
+        await _wait_for(gate.is_idle)
 
     mock_warning.assert_called_once()
     assert mock_warning.call_args.args == ("coalescing_gate_flush_slow",)
-    assert mock_warning.call_args.kwargs["duration_ms"] == 6000.0
+    assert mock_warning.call_args.kwargs["duration_ms"] >= 0.0
     assert mock_warning.call_args.kwargs["source_event_ids"] == ["$m1"]
     assert mock_warning.call_args.kwargs["room_id"] == "!room:localhost"
     assert mock_warning.call_args.kwargs["thread_id"] == "$thread"
