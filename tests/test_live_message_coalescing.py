@@ -1065,6 +1065,45 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
 
 
 @pytest.mark.asyncio
+async def test_command_during_active_dispatch_only_flushes_preceding_pending() -> None:
+    """A command should not pull later in-flight-buffered messages ahead of itself."""
+    room = _make_room()
+    first = _text_event(event_id="$m1", body="first", server_timestamp=1000)
+    before_command = _text_event(event_id="$m2", body="before command", server_timestamp=1001)
+    command = _text_event(event_id="$cmd", body="!help", server_timestamp=1002)
+    after_command = _text_event(event_id="$m3", body="after command", server_timestamp=1003)
+    entered_first_dispatch = asyncio.Event()
+    release_first_dispatch = asyncio.Event()
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        source_event_ids = list(batch.source_event_ids)
+        calls.append(source_event_ids)
+        if source_event_ids == ["$m1"]:
+            entered_first_dispatch.set()
+            await release_first_dispatch.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue(key, PendingEvent(event=first, room=room, source_kind="message"))
+    await entered_first_dispatch.wait()
+    await gate.enqueue(key, PendingEvent(event=before_command, room=room, source_kind="message"))
+    await gate.enqueue(key, PendingEvent(event=command, room=room, source_kind="message"))
+    await gate.enqueue(key, PendingEvent(event=after_command, room=room, source_kind="message"))
+
+    release_first_dispatch.set()
+    await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$cmd"], ["$m3"]])
+
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
 async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path: Path) -> None:
     """A blocked coalescing drain must not hold later Matrix ingress callbacks."""
     bot = _make_bot(tmp_path, debounce_ms=0)

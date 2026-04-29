@@ -111,7 +111,7 @@ class _GateEntry:
 @dataclass
 class _ImmediateDispatch:
     pending_event: PendingEvent
-    flush_pending_first: bool = False
+    preceding_pending: list[PendingEvent] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -429,13 +429,15 @@ class CoalescingGate:
 
     @staticmethod
     def _gate_work_count(gate: _GateEntry) -> int:
-        return len(gate.pending) + len(gate.deferred_pending) + len(gate.immediate)
+        preceding_pending_count = sum(len(immediate.preceding_pending) for immediate in gate.immediate)
+        return len(gate.pending) + len(gate.deferred_pending) + len(gate.immediate) + preceding_pending_count
 
     @staticmethod
     def _oldest_pending_age_ms(gate: _GateEntry) -> float | None:
         pending_events = [
             *gate.pending,
             *gate.deferred_pending,
+            *(pending_event for immediate in gate.immediate for pending_event in immediate.preceding_pending),
             *(immediate.pending_event for immediate in gate.immediate),
         ]
         if not pending_events:
@@ -533,11 +535,10 @@ class CoalescingGate:
         # Path 2: command interrupt — flush pending, dispatch command solo
         if is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
             gate = self._get_or_create_gate(key)
-            gate.immediate.append(_ImmediateDispatch(pending_event, flush_pending_first=True))
-            if gate.phase is not GatePhase.IN_FLIGHT and gate.pending:
-                gate.force_flush_pending = True
-                gate.debounce_deadline = time.monotonic()
-                gate.grace_deadline = None
+            preceding_pending = list(gate.pending)
+            gate.pending.clear()
+            gate.immediate.append(_ImmediateDispatch(pending_event, preceding_pending=preceding_pending))
+            gate.grace_deadline = None
             self._schedule_drain(key, gate)
             self._record_enqueue(key, gate, pending_event, enqueue_start, path="command_interrupt")
             return
@@ -715,8 +716,10 @@ class CoalescingGate:
 
                 if gate.immediate:
                     immediate = gate.immediate[0]
-                    if immediate.flush_pending_first and gate.pending:
-                        await self._flush_pending(current_key, gate, bypass_grace=True)
+                    if immediate.preceding_pending:
+                        preceding_pending = immediate.preceding_pending
+                        immediate.preceding_pending = []
+                        await self._dispatch_events(current_key, gate, preceding_pending, bypass_grace=True)
                         continue
                     gate.immediate.pop(0)
                     await self._dispatch_events(
