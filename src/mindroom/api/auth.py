@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import importlib
+import json
 import secrets
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -292,7 +293,14 @@ def _render_standalone_login_page(
     runtime_paths: RuntimePaths,
 ) -> str:
     """Return the standalone dashboard login page."""
-    escaped_next_path = html.escape(next_path, quote=True)
+    next_path_js = (
+        json.dumps(next_path)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
     env_path = html.escape(str(runtime_paths.env_path))
     return f"""<!doctype html>
 <html lang="en">
@@ -368,7 +376,7 @@ def _render_standalone_login_page(
     <div id="error" role="alert"></div>
   </form>
   <script>
-    const nextPath = {escaped_next_path!r};
+    const nextPath = {next_path_js};
     const form = document.getElementById("login-form");
     const input = document.getElementById("api-key");
     const error = document.getElementById("error");

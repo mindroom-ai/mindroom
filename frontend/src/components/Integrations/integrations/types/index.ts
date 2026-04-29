@@ -1,4 +1,5 @@
 import type { WorkerScope } from "@/types/config";
+import type { ToolFieldSchema } from "@/hooks/useTools";
 
 /**
  * Core type definitions for all integrations
@@ -17,6 +18,12 @@ export interface Integration {
   details?: any;
   docs_url?: string | null;
   helper_text?: string | null;
+  config_fields?: ToolFieldSchema[] | null;
+  dependencies?: string[] | null;
+  icon_color?: string | null;
+  auth_provider?: string;
+  dashboard_configuration_supported?: boolean;
+  execution_scope_supported?: boolean;
 }
 
 export interface IntegrationScope {

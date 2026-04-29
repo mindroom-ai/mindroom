@@ -35,7 +35,11 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useTools, mapToolToIntegration } from "@/hooks/useTools";
+import {
+  useTools,
+  mapToolToIntegration,
+  type ToolInfo,
+} from "@/hooks/useTools";
 import { useConfigStore } from "@/store/configStore";
 import { getIconForTool } from "./iconMapping";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
@@ -181,10 +185,15 @@ export function Integrations() {
         agentName: effectiveScopeAgentName,
         executionScope: selectedExecutionScope,
       };
+      const providerIds = Object.keys(integrationProviders);
+      const backendToolsByName = new Map<string, ToolInfo>(
+        backendTools.map((tool) => [tool.name, tool]),
+      );
 
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
         const config = provider.getConfig(scope);
+        const providerTool = backendToolsByName.get(config.integration.id);
         if (
           hidesSharedOnlyIntegrations &&
           SHARED_ONLY_PROVIDER_IDS.has(config.integration.id)
@@ -196,14 +205,26 @@ export function Integrations() {
           : {};
         loadedIntegrations.push({
           ...config.integration,
+          config_fields:
+            providerTool?.config_fields ?? config.integration.config_fields,
+          docs_url: providerTool?.docs_url ?? config.integration.docs_url,
+          helper_text:
+            providerTool?.helper_text ?? config.integration.helper_text,
+          dependencies:
+            providerTool?.dependencies ?? config.integration.dependencies,
+          icon_color: providerTool?.icon_color ?? config.integration.icon_color,
+          dashboard_configuration_supported:
+            providerTool?.dashboard_configuration_supported ??
+            config.integration.dashboard_configuration_supported,
+          execution_scope_supported:
+            providerTool?.execution_scope_supported ??
+            config.integration.execution_scope_supported,
           ...status,
         });
       }
 
       // Load backend tools and map them to integrations
       // (excluding those already handled by providers)
-      const providerIds = Object.keys(integrationProviders);
-
       const backendIntegrations = backendTools
         .filter((tool) => !providerIds.includes(tool.name))
         .filter(
@@ -222,7 +243,7 @@ export function Integrations() {
               tool.auth_provider && tool.status === "available"
                 ? "connected"
                 : mapped.status,
-            auth_provider: tool.auth_provider, // Pass through auth_provider
+            auth_provider: tool.auth_provider ?? undefined,
           } as Integration & { auth_provider?: string };
         });
 
@@ -251,14 +272,11 @@ export function Integrations() {
     }
   };
 
-  const integrationNeedsDashboardCredentials = (
-    integration: Integration & { auth_provider?: string },
-  ) => {
-    const tool = integration as any;
+  const integrationNeedsDashboardCredentials = (integration: Integration) => {
     return (
       integration.setup_type !== "none" ||
-      Boolean(tool.auth_provider) ||
-      Boolean(tool.config_fields && tool.config_fields.length > 0)
+      Boolean(integration.auth_provider) ||
+      Boolean(integration.config_fields && integration.config_fields.length > 0)
     );
   };
 
@@ -271,6 +289,24 @@ export function Integrations() {
     disablesDashboardCredentialManagement &&
     integrationNeedsDashboardCredentials(integration) &&
     !integrationHasScopedOAuthProvider(integration);
+
+  const openToolConfigDialog = (integration: Integration) => {
+    if (!integration.config_fields || integration.config_fields.length === 0) {
+      return false;
+    }
+    setConfigDialog({
+      service: integration.id,
+      displayName: integration.name,
+      description: integration.description,
+      configFields: integration.config_fields,
+      isEditing: integration.status === "connected",
+      docsUrl: integration.docs_url || null,
+      helperText: integration.helper_text || null,
+      icon: null,
+      iconColor: integration.icon_color || integration.iconColor || undefined,
+    });
+    return true;
+  };
 
   const handleIntegrationAction = async (integration: Integration) => {
     if (blocksScopedDashboardCredentials(integration)) {
@@ -296,6 +332,13 @@ export function Integrations() {
       // If there's a custom config component, show it in a dialog
       if (config.ConfigComponent) {
         setActiveDialog({ integrationId: integration.id, config });
+        return;
+      }
+
+      if (
+        integration.status === "connected" &&
+        openToolConfigDialog(integration)
+      ) {
         return;
       }
 
@@ -325,20 +368,7 @@ export function Integrations() {
       integration.setup_type === "none"
     ) {
       // Show generic config dialog for tools with config_fields
-      const tool = integration as any; // Cast to access config_fields
-      if (tool.config_fields && tool.config_fields.length > 0) {
-        setConfigDialog({
-          service: integration.id,
-          displayName: integration.name,
-          description: integration.description,
-          configFields: tool.config_fields,
-          isEditing: integration.status === "connected",
-          docsUrl: tool.docs_url || null,
-          helperText: tool.helper_text || null,
-          icon: null, // Icon loaded from integration object or backend
-          iconColor: tool.icon_color || integration.iconColor,
-        });
-      } else {
+      if (!openToolConfigDialog(integration)) {
         toast({
           title: "Configuration Error",
           description: `${integration.name} requires configuration but no fields are specified.`,
@@ -442,7 +472,7 @@ export function Integrations() {
     }
 
     // Handle tools with delegated authentication
-    const tool = integration as any;
+    const tool = integration;
     if (tool.auth_provider) {
       // Check if the auth provider is connected
       const authProvider = integrations.find(
@@ -513,9 +543,8 @@ export function Integrations() {
 
     // Tools with no setup required
     if (integration.setup_type === "none") {
-      const tool = integration as any;
       // Check if there are optional config fields
-      if (tool.config_fields && tool.config_fields.length > 0) {
+      if (integration.config_fields && integration.config_fields.length > 0) {
         // Check if any configuration has been saved
         const hasConfig = integration.status === "connected";
 
@@ -626,11 +655,7 @@ export function Integrations() {
     );
   };
 
-  const IntegrationCard = ({
-    integration,
-  }: {
-    integration: Integration & { auth_provider?: string };
-  }) => (
+  const IntegrationCard = ({ integration }: { integration: Integration }) => (
     <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
       <CardHeader>
         <div className="flex items-center justify-between">

@@ -3437,6 +3437,21 @@ def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient
     assert ".env" in response.text
 
 
+def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
+    api_key_client: TestClient,
+) -> None:
+    """Standalone login must preserve OAuth query parameters in the JS redirect target."""
+    next_path = "/api/oauth/test_drive/authorize?agent_name=general&execution_scope=user"
+
+    response = api_key_client.get("/login", params={"next": next_path})
+
+    assert response.status_code == 200
+    next_path_line = next(line for line in response.text.splitlines() if "const nextPath =" in line)
+    next_path_literal = next_path_line.split("=", 1)[1].strip().removesuffix(";")
+    assert json.loads(next_path_literal) == next_path
+    assert "&amp;execution_scope" not in response.text
+
+
 def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClient) -> None:
     """A valid standalone auth session cookie should work without bearer headers."""
     response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})

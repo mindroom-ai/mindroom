@@ -982,6 +982,68 @@ describe("Integrations", () => {
     );
   });
 
+  it("opens Google Drive tool configuration from the OAuth provider card", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValue({
+      status: "connected",
+      connected: true,
+    });
+    const googleDriveTools = [
+      ...mockTools,
+      {
+        name: "google_drive",
+        display_name: "Google Drive",
+        description: "Search and read files from Google Drive",
+        icon: "SiGoogledrive",
+        icon_color: "text-green-600",
+        category: "productivity",
+        status: "available",
+        setup_type: "oauth",
+        auth_provider: "google_drive",
+        config_fields: [
+          {
+            name: "max_read_size",
+            label: "Max Read Size",
+            type: "number",
+            required: false,
+            default: 10485760,
+            description: "Maximum file size to read in bytes.",
+          },
+        ],
+        helper_text: null,
+        docs_url: null,
+        dependencies: null,
+      },
+    ];
+    mockUseTools.mockImplementation(() => ({
+      tools: googleDriveTools,
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    }));
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Google Drive")).toBeInTheDocument();
+    });
+
+    const driveCard = screen.getByText("Google Drive").closest(".h-full");
+    expect(driveCard).toBeInstanceOf(HTMLElement);
+    const editButton = await waitFor(() => {
+      const button = within(driveCard as HTMLElement).getByRole("button", {
+        name: /edit/i,
+      });
+      expect(button).not.toBeDisabled();
+      return button;
+    });
+    fireEvent.click(editButton);
+
+    await waitFor(() => {
+      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+    });
+    expect(mockGoogleDriveOnAction).not.toHaveBeenCalled();
+  });
+
   it("ignores stale shared-scope reloads after switching scope mid-action", async () => {
     const spotifyAction = createDeferred();
     mockSpotifyOnAction.mockImplementation(() => spotifyAction.promise);
