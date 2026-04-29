@@ -134,6 +134,7 @@ _CONFIG_RELOAD_IDLE_POLL_SECONDS = 0.5
 _CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS = 30.0
 _CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
 _CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS = 120.0
+_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -230,8 +231,9 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         super().__init__(config)
         self._shutdown_requested = shutdown_requested
 
-    def handle_exit(self, sig: int, _frame: FrameType | None) -> None:
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
         """Mirror Uvicorn signal handling and surface shutdown to the orchestrator."""
+        del frame
         signal_number = int(sig)
         logger.info(
             "embedded_api_server_signal_received",
@@ -1788,6 +1790,12 @@ async def _wait_for_runtime_completion(
 
     if shutdown_wait_task in done:
         logger.info("application_shutdown_requested")
+        if api_task is not None and api_task not in done:
+            await _await_api_task_graceful_shutdown(
+                api_task,
+                shutdown_requested=shutdown_requested,
+                api_server=api_server,
+            )
 
 
 async def _consume_completed_runtime_tasks(
@@ -1835,6 +1843,33 @@ async def _await_api_task_completion(
     _raise_embedded_api_server_exit(
         api_server,
         reason="API task finished while application shutdown was not requested",
+    )
+
+
+async def _await_api_task_graceful_shutdown(
+    api_task: asyncio.Task[None],
+    *,
+    shutdown_requested: asyncio.Event,
+    api_server: _EmbeddedApiServerContext,
+) -> None:
+    """Give Uvicorn a bounded window to run FastAPI lifespan shutdown."""
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(api_task),
+            timeout=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning(
+            "embedded_api_server_shutdown_timeout",
+            **api_server.log_context(),
+            timeout_seconds=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS,
+        )
+        return
+
+    await _await_api_task_completion(
+        api_task,
+        shutdown_requested=shutdown_requested,
+        api_server=api_server,
     )
 
 

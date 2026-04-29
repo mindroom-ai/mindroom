@@ -1301,9 +1301,13 @@ class TestAgentBot:
             await asyncio.gather(orchestrator_task, shutdown_wait_task, api_task, return_exceptions=True)
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_cancels_runtime_tasks_after_shutdown_request(self, tmp_path: Path) -> None:
-        """Shutdown should hand off to teardown without waiting for pending runtime tasks."""
+    async def test_orchestrator_main_logs_api_shutdown_timeout_before_cancelling_stuck_api_task(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shutdown should wait for API grace timeout before cancelling a stuck API task."""
         reset_runtime_state()
+        events: list[str] = []
         orchestrator_cancelled = asyncio.Event()
         api_cancelled = asyncio.Event()
         mock_orchestrator = MagicMock()
@@ -1330,8 +1334,84 @@ class TestAgentBot:
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
+                events.append("api_cancelled")
                 api_cancelled.set()
                 raise
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        def _record_warning(*_args: object, **_kwargs: object) -> None:
+            events.append("timeout_logged")
+
+        mock_orchestrator.start = AsyncMock(side_effect=_start)
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_and_blocks),
+            patch("mindroom.orchestrator.logger.warning", side_effect=_record_warning) as mock_warning,
+            patch("mindroom.orchestrator._EMBEDDED_API_SHUTDOWN_GRACE_SECONDS", 0.01),
+        ):
+            await asyncio.wait_for(
+                main(
+                    log_level="INFO",
+                    runtime_paths=self._runtime_paths(tmp_path),
+                    api=True,
+                    api_host="127.0.0.1",
+                ),
+                timeout=1,
+            )
+
+        assert events[:2] == ["timeout_logged", "api_cancelled"]
+        assert orchestrator_cancelled.is_set()
+        assert api_cancelled.is_set()
+        mock_warning.assert_called_once_with(
+            "embedded_api_server_shutdown_timeout",
+            host="127.0.0.1",
+            port=8765,
+            timeout_seconds=0.01,
+        )
+        mock_orchestrator.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_waits_for_api_server_graceful_shutdown_after_request(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shutdown should let the embedded API server run its own cleanup before teardown."""
+        reset_runtime_state()
+        api_shutdown_started = asyncio.Event()
+        api_allow_finish = asyncio.Event()
+        api_completed = asyncio.Event()
+        api_cancelled = asyncio.Event()
+        start_blocker = asyncio.Event()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.knowledge_refresh_scheduler = None
+        mock_orchestrator.stop = AsyncMock()
+
+        async def _start() -> None:
+            await start_blocker.wait()
+
+        async def _api_requests_shutdown_then_finishes(
+            _host: str,
+            _port: int,
+            _log_level: str,
+            _runtime_paths: RuntimePaths,
+            _knowledge_refresh_scheduler: object,
+            shutdown_requested: asyncio.Event | None,
+        ) -> None:
+            assert shutdown_requested is not None
+            shutdown_requested.set()
+            api_shutdown_started.set()
+            try:
+                await api_allow_finish.wait()
+            except asyncio.CancelledError:
+                api_cancelled.set()
+                raise
+            api_completed.set()
 
         async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
             await asyncio.Event().wait()
@@ -1343,15 +1423,27 @@ class TestAgentBot:
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
-            patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_and_blocks),
+            patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_then_finishes),
         ):
-            await asyncio.wait_for(
+            main_task = asyncio.create_task(
                 main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=True),
-                timeout=1,
             )
+            try:
+                await asyncio.wait_for(api_shutdown_started.wait(), timeout=1)
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert not main_task.done()
+                assert not api_cancelled.is_set()
+                api_allow_finish.set()
+                await asyncio.wait_for(main_task, timeout=1)
+            finally:
+                api_allow_finish.set()
+                if not main_task.done():
+                    main_task.cancel()
+                await asyncio.gather(main_task, return_exceptions=True)
 
-        assert orchestrator_cancelled.is_set()
-        assert api_cancelled.is_set()
+        assert api_completed.is_set()
+        assert not api_cancelled.is_set()
         mock_orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
