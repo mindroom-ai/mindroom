@@ -16,6 +16,7 @@ from mindroom.authorization import (
     get_effective_sender_id_for_reply_permissions,
     is_authorized_sender,
 )
+from mindroom.background_tasks import create_background_task
 from mindroom.coalescing import (
     CoalescedBatch,
     CoalescingGate,
@@ -1324,10 +1325,14 @@ class TurnController:
                     coalescing_bypass_reason="active_thread_follow_up",
                 )
                 dispatch_timing.mark("gate_exit")
-            await self._dispatch_text_message(
-                room,
-                prepared_event,
-                prechecked_event.requester_user_id,
+            create_background_task(
+                self._dispatch_text_message(
+                    room,
+                    prepared_event,
+                    prechecked_event.requester_user_id,
+                ),
+                name=f"active_thread_follow_up:{room.room_id}:{coalescing_thread_id}:{prepared_event.event_id}",
+                owner=self.deps.runtime,
             )
         else:
             await self._enqueue_for_dispatch(

@@ -1672,6 +1672,52 @@ async def test_retargeted_sleeping_timer_flushes_under_current_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retarget_merges_existing_destination_gate_queue() -> None:
+    """A pre-existing canonical gate should merge into the retargeted drain owner."""
+    room = _make_room()
+    dispatched_source_event_ids: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        dispatched_source_event_ids.append(list(batch.source_event_ids))
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 5.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    old_key = ("!room:localhost", None, "@user:localhost")
+    new_key = ("!room:localhost", "$m1", "@user:localhost")
+
+    await gate.enqueue(
+        old_key,
+        PendingEvent(
+            event=_text_event(event_id="$m1", body="first"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await gate.enqueue(
+        new_key,
+        PendingEvent(
+            event=_text_event(event_id="$m2", body="follow-up", thread_id="$m1"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+
+    gate.retarget(old_key, new_key)
+
+    assert set(gate._gates) == {new_key}
+    assert [queued.pending_event.event.event_id for queued in gate._gates[new_key].queue] == ["$m1", "$m2"]
+
+    await gate.drain_all()
+
+    assert dispatched_source_event_ids == [["$m1", "$m2"]]
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
 async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing() -> None:
     """Immediate-flush telemetry should report the batch size before _flush clears pending."""
     room = _make_room()

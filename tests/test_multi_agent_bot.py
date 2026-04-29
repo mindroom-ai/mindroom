@@ -8887,6 +8887,19 @@ class TestAgentBot:
             source_kind="message",
         )
 
+        entered_dispatch = asyncio.Event()
+        release_dispatch = asyncio.Event()
+        finished_dispatch = asyncio.Event()
+
+        async def record_dispatch(
+            _room: nio.MatrixRoom,
+            _event: PreparedTextEvent,
+            _requester_user_id: str,
+        ) -> None:
+            entered_dispatch.set()
+            await release_dispatch.wait()
+            finished_dispatch.set()
+
         with (
             patch.object(
                 bot._turn_controller,
@@ -8913,11 +8926,19 @@ class TestAgentBot:
                 "has_active_response_for_target",
                 return_value=True,
             ) as mock_has_active_response,
-            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(
+                bot._turn_controller,
+                "_dispatch_text_message",
+                new=AsyncMock(side_effect=record_dispatch),
+            ) as mock_dispatch,
             patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
         ):
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+            await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
+            await asyncio.wait_for(entered_dispatch.wait(), timeout=0.05)
+            assert not finished_dispatch.is_set()
+
+            release_dispatch.set()
+            await asyncio.wait_for(finished_dispatch.wait(), timeout=0.2)
 
         mock_has_active_response.assert_called_once()
         active_target = mock_has_active_response.call_args.args[0]

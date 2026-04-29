@@ -2,9 +2,9 @@
 
 ## Goal
 
-Replace the current side-queue coalescing logic with a simpler ordered per-key queue.
+Replace the old side-queue coalescing logic with a simpler ordered per-key queue.
 
-The current design spreads ordering across `pending`, `immediate`, `deferred_pending`, `force_flush_pending`, `phase`, and deadline state.
+The replaced design spread ordering across `pending`, `immediate`, `deferred_pending`, `force_flush_pending`, `phase`, and deadline state.
 
 That makes command, grace, failure, cancellation, and in-flight behavior hard to reason about.
 
@@ -39,7 +39,6 @@ class QueueKind(enum.Enum):
 
 @dataclass
 class QueuedEvent:
-    sequence: int
     kind: QueueKind
     pending_event: PendingEvent
 
@@ -52,7 +51,6 @@ class _GateEntry:
     wake_generation: int = 0
     phase: GatePhase = GatePhase.DEBOUNCE
     deadline: float | None = None
-    next_sequence: int = 0
 ```
 
 Delete these fields from `_GateEntry`.
@@ -69,8 +67,6 @@ force_flush_pending
 `enqueue()` should get or create the gate.
 
 It should classify the event as `NORMAL`, `COMMAND`, or `BYPASS`.
-
-It should assign a monotonic sequence number.
 
 It should append to `gate.queue`.
 

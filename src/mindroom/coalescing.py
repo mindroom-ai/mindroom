@@ -409,9 +409,37 @@ class CoalescingGate:
         if old_key == new_key:
             return
         gate = self._gates.get(old_key)
-        if gate is None or new_key in self._gates:
+        if gate is None:
             return
-        self._gates[new_key] = self._gates.pop(old_key)
+        existing_gate = self._gates.get(new_key)
+        if existing_gate is None:
+            self._gates[new_key] = self._gates.pop(old_key)
+            self._ensure_drain_task(new_key, gate)
+            self._wake(gate)
+            return
+        if existing_gate is gate:
+            self._gates.pop(old_key, None)
+            self._gates[new_key] = gate
+            self._ensure_drain_task(new_key, gate)
+            self._wake(gate)
+            return
+
+        existing_drain_task = existing_gate.drain_task
+        gate.queue = deque(
+            sorted(
+                [*gate.queue, *existing_gate.queue],
+                key=lambda queued: queued.pending_event.enqueue_time,
+            ),
+        )
+        gate.drain_all_requested = gate.drain_all_requested or existing_gate.drain_all_requested
+        existing_gate.queue.clear()
+        self._gates.pop(old_key, None)
+        self._gates.pop(new_key, None)
+        self._gates[new_key] = gate
+        if existing_drain_task is not None and not existing_drain_task.done():
+            existing_drain_task.cancel()
+        self._ensure_drain_task(new_key, gate)
+        self._wake(gate)
 
     def _resolve_gate_entry(
         self,
