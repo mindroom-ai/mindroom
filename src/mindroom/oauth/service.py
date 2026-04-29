@@ -89,13 +89,7 @@ def issue_oauth_connect_token(provider: OAuthProvider, worker_target: ResolvedWo
     return token
 
 
-def consume_oauth_connect_token(provider: OAuthProvider, token: str) -> OAuthConnectTarget:
-    """Consume one conversation-issued OAuth target token for a provider authorize request."""
-    now = time.time()
-    with _oauth_connect_token_lock:
-        _prune_expired_connect_targets(now)
-        connect_target = _oauth_connect_targets.pop(token, None)
-
+def _validated_connect_target(provider: OAuthProvider, connect_target: OAuthConnectTarget | None) -> OAuthConnectTarget:
     if connect_target is None:
         msg = "OAuth connect link is invalid or expired"
         raise OAuthProviderError(msg)
@@ -103,6 +97,33 @@ def consume_oauth_connect_token(provider: OAuthProvider, token: str) -> OAuthCon
         msg = "OAuth connect link does not match this provider"
         raise OAuthProviderError(msg)
     return connect_target
+
+
+def lookup_oauth_connect_token(provider: OAuthProvider, token: str) -> OAuthConnectTarget:
+    """Return one conversation-issued OAuth target token without consuming it."""
+    now = time.time()
+    with _oauth_connect_token_lock:
+        _prune_expired_connect_targets(now)
+        connect_target = _oauth_connect_targets.get(token)
+    return _validated_connect_target(provider, connect_target)
+
+
+def consume_oauth_connect_token(
+    provider: OAuthProvider,
+    token: str,
+    *,
+    expected_target: OAuthConnectTarget | None = None,
+) -> OAuthConnectTarget:
+    """Consume one conversation-issued OAuth target token for a provider authorize request."""
+    now = time.time()
+    with _oauth_connect_token_lock:
+        _prune_expired_connect_targets(now)
+        connect_target = _validated_connect_target(provider, _oauth_connect_targets.get(token))
+        if expected_target is not None and connect_target != expected_target:
+            msg = "OAuth connect link target changed"
+            raise OAuthProviderError(msg)
+        _oauth_connect_targets.pop(token, None)
+        return connect_target
 
 
 def oauth_connect_target_payload(connect_target: OAuthConnectTarget) -> dict[str, str]:

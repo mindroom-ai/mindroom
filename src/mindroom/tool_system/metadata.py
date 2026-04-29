@@ -339,7 +339,37 @@ def sanitize_tool_init_overrides(
     }
 
 
+def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: object) -> int | float | object:
+    """Normalize a persisted dashboard number field before passing it to a tool constructor."""
+    if value is None:
+        return value
+    if isinstance(value, bool):
+        msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
+        raise ToolConfigOverrideError(msg)
+    if isinstance(value, int | float):
+        return value
+    if isinstance(value, str):
+        raw_value = value.strip()
+        if not raw_value:
+            return None
+        try:
+            parsed = float(raw_value)
+        except ValueError as exc:
+            msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
+            raise ToolConfigOverrideError(msg) from exc
+        return int(parsed) if parsed.is_integer() else parsed
+    msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
+    raise ToolConfigOverrideError(msg)
+
+
+def _coerce_runtime_tool_config_value(tool_name: str, field: ConfigField, value: object) -> object:
+    if field.type == "number":
+        return _coerce_number_tool_config_value(tool_name, field.name, value)
+    return value
+
+
 def _build_tool_config_init_kwargs(
+    tool_name: str,
     metadata: ToolMetadata,
     *,
     credentials: dict[str, object],
@@ -352,7 +382,11 @@ def _build_tool_config_init_kwargs(
         return {}
 
     config_field_names = {field.name for field in metadata.config_fields}
-    init_kwargs = {field.name: credentials[field.name] for field in metadata.config_fields if field.name in credentials}
+    init_kwargs = {
+        field.name: _coerce_runtime_tool_config_value(tool_name, field, credentials[field.name])
+        for field in metadata.config_fields
+        if field.name in credentials
+    }
     if tool_config_overrides:
         for field in metadata.config_fields:
             if field.name not in tool_config_overrides:
@@ -360,11 +394,11 @@ def _build_tool_config_init_kwargs(
             override_value = tool_config_overrides[field.name]
             if is_authored_override_inherit(override_value):
                 continue
-            init_kwargs[field.name] = override_value
+            init_kwargs[field.name] = _coerce_runtime_tool_config_value(tool_name, field, override_value)
     if tool_init_overrides:
         init_kwargs.update(
             {
-                field.name: tool_init_overrides[field.name]
+                field.name: _coerce_runtime_tool_config_value(tool_name, field, tool_init_overrides[field.name])
                 for field in metadata.config_fields
                 if field.name in tool_init_overrides
             },
@@ -467,6 +501,7 @@ def _build_tool_instance(
     validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
+        tool_name,
         metadata,
         credentials=credentials,
         tool_config_overrides=validated_tool_config_overrides,

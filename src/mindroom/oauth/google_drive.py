@@ -5,6 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2 import id_token as google_id_token
+
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
     OAuthClientConfig,
@@ -46,8 +49,6 @@ def _google_drive_token_parser(
         raise OAuthClaimValidationError(msg)
     else:
         ensure_tool_deps(_GOOGLE_ID_TOKEN_DEPS, "google_drive", runtime_paths)
-        from google.auth.transport.requests import Request as GoogleRequest  # noqa: PLC0415
-        from google.oauth2 import id_token as google_id_token  # noqa: PLC0415
 
         claims = google_id_token.verify_oauth2_token(
             id_token,

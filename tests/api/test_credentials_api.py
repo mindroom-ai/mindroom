@@ -382,6 +382,36 @@ class TestCredentialsAPI:
         assert token_status_response.json()["has_credentials"] is True
         assert token_status_response.json()["key_names"] is None
 
+    def test_get_orphaned_oauth_credentials_filters_token_fields(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth-shaped credentials should stay hidden even if their provider is no longer registered."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "removed_oauth_provider",
+            {
+                "token": "orphaned-access-value",
+                "refresh_token": "orphaned-refresh-value",
+                "client_id": "client-id",
+                "token_uri": "https://oauth.example.test/token",
+                "scopes": ["drive.read"],
+                "expires_at": 1234.0,
+                "_oauth_provider": "removed_provider",
+                "_source": "oauth",
+            },
+        )
+
+        response = client.get("/api/credentials/removed_oauth_provider")
+        status_response = client.get("/api/credentials/removed_oauth_provider/status")
+
+        assert response.status_code == 200
+        assert response.json() == {"service": "removed_oauth_provider", "credentials": {}}
+        assert status_response.status_code == 200
+        assert status_response.json()["has_credentials"] is True
+        assert status_response.json()["key_names"] is None
+
     def test_oauth_token_service_rejects_generic_credential_writes(
         self,
         client: TestClient,

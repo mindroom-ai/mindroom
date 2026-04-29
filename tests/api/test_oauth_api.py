@@ -487,10 +487,19 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
 
 def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
-        tmp_path,
+        tmp_path / "wrong-user",
         {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    rightful_runtime_paths = _runtime_paths(
+        tmp_path / "right-user",
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    rightful_api_app = _make_test_app(rightful_runtime_paths, _config_payload(worker_scope="user_agent"))
     provider = _fake_provider()
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -513,12 +522,36 @@ def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Pat
                 follow_redirects=False,
             )
 
+        with TestClient(rightful_api_app) as client:
+            _login(client)
+            rightful_authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?connect_token={connect_token}",
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(rightful_authorize_response.headers["location"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
     assert authorize_response.status_code == 403
-    manager = get_runtime_credentials_manager(runtime_paths)
-    matrix_credentials = manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).load_credentials(
+    assert rightful_authorize_response.status_code == 307
+    assert callback_response.status_code == 307
+    wrong_manager = get_runtime_credentials_manager(runtime_paths)
+    wrong_matrix_credentials = wrong_manager.for_worker(
+        _worker_key_for_matrix_user("@alice:example.org"),
+    ).load_credentials(
         provider.credential_service,
     )
-    assert matrix_credentials is None
+    rightful_manager = get_runtime_credentials_manager(rightful_runtime_paths)
+    matrix_credentials = rightful_manager.for_worker(
+        _worker_key_for_matrix_user("@alice:example.org"),
+    ).load_credentials(
+        provider.credential_service,
+    )
+    assert wrong_matrix_credentials is None
+    assert matrix_credentials is not None
+    assert matrix_credentials["token"] == "test_drive-access-token"
 
 
 def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:
@@ -647,3 +680,27 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
         "max_read_size": 42,
         "_source": "ui",
     }
+
+
+def test_status_requires_client_config_for_connected_true(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.for_worker(_worker_key_for_standalone_user()).save_credentials(
+        provider.credential_service,
+        {
+            "token": "stored-token",
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["has_client_config"] is False
+    assert status_response.json()["connected"] is False

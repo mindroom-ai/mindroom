@@ -22,6 +22,7 @@ from mindroom.oauth import OAuthClaimValidationError, OAuthProvider, OAuthProvid
 from mindroom.oauth.service import (
     OAuthConnectTarget,
     consume_oauth_connect_token,
+    lookup_oauth_connect_token,
     oauth_connect_target_payload,
     oauth_success_redirect_url,
     sanitized_oauth_token_result,
@@ -91,7 +92,7 @@ def _issue_authorization_url(
 ) -> OAuthConnectResponse:
     if connect_token:
         try:
-            connect_target = consume_oauth_connect_token(provider, connect_token)
+            connect_target = lookup_oauth_connect_token(provider, connect_token)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _verify_connect_target_authorized(request, connect_target, runtime_paths)
@@ -105,6 +106,10 @@ def _issue_authorization_url(
             auth_url = provider.authorization_uri(runtime_paths, state=state)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+        try:
+            consume_oauth_connect_token(provider, connect_token, expected_target=connect_target)
+        except OAuthProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return OAuthConnectResponse(provider=provider.id, auth_url=auth_url)
 
     target = resolve_request_credentials_target(
@@ -353,14 +358,15 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         allow_private_scopes=True,
     )
     credentials = load_credentials_for_target(provider.credential_service, target) or {}
-    connected = bool(credentials.get("token") or credentials.get("refresh_token"))
+    has_client_config = provider.client_config(runtime_paths) is not None
+    connected = has_client_config and bool(credentials.get("token") or credentials.get("refresh_token"))
     return OAuthStatusResponse(
         provider=provider.id,
         display_name=provider.display_name,
         credential_service=provider.credential_service,
         tool_config_service=provider.tool_config_service,
         connected=connected,
-        has_client_config=provider.client_config(runtime_paths) is not None,
+        has_client_config=has_client_config,
         email=_claim_str(credentials, "email"),
         hosted_domain=_claim_str(credentials, "hd"),
         capabilities=list(provider.status_capabilities),

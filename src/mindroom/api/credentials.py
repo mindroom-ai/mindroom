@@ -71,9 +71,19 @@ def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
 def _filter_credentials_for_response(credentials: dict[str, Any], *, is_oauth_service: bool) -> dict[str, Any]:
     """Return credentials safe for dashboard config responses."""
     filtered = _filter_internal_keys(credentials)
-    if not is_oauth_service:
+    if not is_oauth_service and not _looks_like_oauth_credentials(credentials):
         return filtered
     return {key: value for key, value in filtered.items() if key not in OAUTH_CREDENTIAL_FIELDS}
+
+
+def _looks_like_oauth_credentials(credentials: dict[str, Any]) -> bool:
+    """Return whether stored credentials carry MindRoom OAuth token metadata."""
+    return (
+        credentials.get("_source") == "oauth"
+        or isinstance(credentials.get("_oauth_provider"), str)
+        or isinstance(credentials.get("_id_token"), str)
+        or isinstance(credentials.get("_oauth_claims"), dict)
+    )
 
 
 def _validated_service(service: str) -> str:
@@ -515,14 +525,18 @@ def _allow_private_scopes_for_service(
     return oauth_service_match is not None and _request_may_target_scoped_credentials(request, agent_name)
 
 
-def _oauth_tool_config_for_save(
+def _dashboard_credentials_for_save(
     config_values: dict[str, Any],
+    *,
+    strip_oauth_fields: bool,
 ) -> dict[str, Any]:
-    credentials = {
-        key: value
-        for key, value in config_values.items()
-        if key not in OAUTH_CREDENTIAL_FIELDS and not key.startswith("_")
-    }
+    credentials = dict(config_values)
+    if strip_oauth_fields:
+        credentials = {
+            key: value
+            for key, value in credentials.items()
+            if key not in OAUTH_CREDENTIAL_FIELDS and not key.startswith("_")
+        }
     credentials["_source"] = "ui"
     return credentials
 
@@ -639,9 +653,9 @@ async def set_credentials(
                 status_code=400,
                 detail="OAuth token credentials must be managed through the OAuth connect flow.",
             )
-        creds = _oauth_tool_config_for_save(payload.credentials)
+        creds = _dashboard_credentials_for_save(payload.credentials, strip_oauth_fields=True)
     else:
-        creds = {**payload.credentials, "_source": "ui"}
+        creds = _dashboard_credentials_for_save(payload.credentials, strip_oauth_fields=False)
     target.target_manager.save_credentials(service, creds)
 
     return {"status": "success", "message": f"Credentials saved for {service}"}

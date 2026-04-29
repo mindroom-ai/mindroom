@@ -39,10 +39,33 @@ class GoogleDriveTools(AgnoGoogleDriveTools):
         if credentials_manager is None:
             msg = "GoogleDriveTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
+        if "max_read_size" in kwargs:
+            kwargs["max_read_size"] = self._coerce_max_read_size(kwargs["max_read_size"])
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         self._worker_target = worker_target
         super().__init__(creds=provided_creds, **kwargs)
+
+    def _coerce_max_read_size(self, value: object) -> int | float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            msg = "Google Drive max_read_size must be a number"
+            raise TypeError(msg)
+        if isinstance(value, int | float):
+            return value
+        if isinstance(value, str):
+            raw_value = value.strip()
+            if not raw_value:
+                return None
+            try:
+                parsed = float(raw_value)
+            except ValueError as exc:
+                msg = "Google Drive max_read_size must be a number"
+                raise ValueError(msg) from exc
+            return int(parsed) if parsed.is_integer() else parsed
+        msg = "Google Drive max_read_size must be a number"
+        raise TypeError(msg)
 
     def _load_token_data(self) -> dict[str, Any] | None:
         return load_scoped_credentials(

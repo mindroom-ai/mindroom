@@ -9,8 +9,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mindroom import constants
+from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 
@@ -145,3 +147,32 @@ def test_google_drive_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
     assert token_data is not None
     assert token_data["token"] == expected_value
     assert "list_files" not in token_data
+
+
+def test_google_drive_saved_numeric_config_is_coerced_before_tool_init(tmp_path: Path) -> None:
+    runtime_paths = constants.resolve_runtime_paths(
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
+            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
+        },
+    )
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google_drive",
+        {
+            "max_read_size": "42",
+            "_source": "ui",
+        },
+    )
+
+    tool = get_tool_by_name(
+        "google_drive",
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        disable_sandbox_proxy=True,
+    )
+
+    assert isinstance(tool, GoogleDriveTools)
+    assert tool.max_read_size == 42
