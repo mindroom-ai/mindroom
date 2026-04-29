@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.hooks.context import MessageEnvelope
 from mindroom.hooks.ingress import (
     hook_ingress_policy,
-    is_automation_source_kind,
     should_handle_interactive_text_response,
     split_hook_source,
 )

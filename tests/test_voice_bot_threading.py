@@ -18,6 +18,7 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
     install_generate_response_mock,
     install_runtime_cache_support,
     replace_turn_controller_deps,
@@ -122,6 +123,7 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
+        await drain_coalescing(bot)
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
@@ -173,6 +175,7 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
+        await drain_coalescing(bot)
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
@@ -225,6 +228,7 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         await bot._on_media_message(room, voice_event)
+        await drain_coalescing(bot)
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs

@@ -81,6 +81,7 @@ from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
     patch_response_runner_module,
@@ -331,6 +332,7 @@ class TestStreamingBehavior:
 
             # Process message with helper bot - it should stream a response
             await helper_bot._on_message(mock_room, user_event)
+            await drain_coalescing(helper_bot)
 
         # Verify helper bot sent initial message and edit
         assert helper_bot.client.room_send.call_count >= 1  # At least initial message
@@ -362,6 +364,7 @@ class TestStreamingBehavior:
                 mock_extract.return_value = "helper"
 
                 await calc_bot._on_message(mock_room, initial_event)
+                await drain_coalescing(calc_bot)
 
         assert calc_bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0  # Calculator didn't process anything
@@ -386,6 +389,7 @@ class TestStreamingBehavior:
                 # Make extract_agent_name return 'helper' for the sender
                 mock_extract.return_value = "helper"
                 await calc_bot._on_message(mock_room, final_event)
+                await drain_coalescing(calc_bot)
 
         assert calc_bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
@@ -445,6 +449,7 @@ class TestStreamingBehavior:
 
         # Process initial message - calculator SHOULD respond
         await calc_bot._on_message(mock_room, initial_event)
+        await drain_coalescing(calc_bot)
         assert calc_bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
 
@@ -470,6 +475,7 @@ class TestStreamingBehavior:
 
         # Process edit - calculator should NOT respond again
         await calc_bot._on_message(mock_room, edit_event)
+        await drain_coalescing(calc_bot)
         assert calc_bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0
 

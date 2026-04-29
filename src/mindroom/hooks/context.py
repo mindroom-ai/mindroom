@@ -233,6 +233,7 @@ class MessageEnvelope:
     source_kind: str
     hook_source: str | None = None
     message_received_depth: int = 0
+    dispatch_policy_source_kind: str | None = None
 
 
 @dataclass(slots=True)

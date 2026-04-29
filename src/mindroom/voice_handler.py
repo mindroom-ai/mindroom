@@ -234,8 +234,11 @@ async def prepare_voice_message(
         extra_content["m.mentions"] = inherited_mentions
 
     source = dict(event.source) if isinstance(event.source, dict) else {}
-    copied_content = source.get("content")
-    content = dict(copied_content) if isinstance(copied_content, dict) else {}
+    content: dict[str, Any] = {}
+    if isinstance(original_content, dict):
+        relates_to = original_content.get("m.relates_to")
+        if isinstance(relates_to, dict):
+            content["m.relates_to"] = relates_to
     content.update(
         format_message_with_mentions(
             config,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Protocol, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -28,12 +28,16 @@ from mindroom.ai_runtime import (
 )
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing import PreparedTextEvent
+from mindroom.coalescing import (
+    COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+)
+from mindroom.coalescing_batch import PendingEvent, build_coalesced_batch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
@@ -49,7 +53,7 @@ from mindroom.post_response_effects import (
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -65,6 +69,11 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine
     from pathlib import Path
+
+
+class _ReservationLike(Protocol):
+    def cancel(self) -> None:
+        """Release the reserved queued-human notice."""
 
 
 def _config(tmp_path: Path) -> Config:
@@ -94,14 +103,20 @@ def _bot(tmp_path: Path) -> AgentBot:
     return bot
 
 
-def _envelope(*, source_kind: str = "message") -> MessageEnvelope:
-    target = MessageTarget.resolve(
+def _envelope(
+    *,
+    source_kind: str = "message",
+    dispatch_policy_source_kind: str | None = None,
+    source_event_id: str = "$event",
+    target: MessageTarget | None = None,
+) -> MessageEnvelope:
+    target = target or MessageTarget.resolve(
         room_id="!room:localhost",
         thread_id=None,
         reply_to_event_id="$event",
     )
     return MessageEnvelope(
-        source_event_id="$event",
+        source_event_id=source_event_id,
         room_id="!room:localhost",
         target=target,
         requester_id="@user:localhost",
@@ -111,6 +126,7 @@ def _envelope(*, source_kind: str = "message") -> MessageEnvelope:
         mentioned_agents=(),
         agent_name="general",
         source_kind=source_kind,
+        dispatch_policy_source_kind=dispatch_policy_source_kind,
     )
 
 
@@ -141,6 +157,65 @@ def _message_context() -> MessageContext:
         thread_history=[],
         mentioned_agents=[],
         has_non_agent_mentions=False,
+    )
+
+
+def _reserved_follow_up_case(
+    bot: AgentBot,
+    room: nio.MatrixRoom,
+    *,
+    event_id: str,
+    body: str = "hello",
+) -> SimpleNamespace:
+    target = MessageTarget.resolve(room.room_id, "$thread", event_id)
+    envelope = _envelope(
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id=event_id,
+        target=target,
+    )
+    event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id=event_id,
+        body=body,
+        source={"content": {"body": body}},
+        server_timestamp=1234,
+    )
+    dispatch = PreparedDispatch(
+        requester_user_id="@user:localhost",
+        context=MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=target,
+        correlation_id=event_id,
+        envelope=envelope,
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+    assert reservation is not None
+    return SimpleNamespace(
+        dispatch=dispatch,
+        event=event,
+        queued_signal=queued_signal,
+        reservation=reservation,
+    )
+
+
+def _queued_notice_metadata(reservation: _ReservationLike) -> tuple[PendingDispatchMetadata, ...]:
+    return (
+        PendingDispatchMetadata(
+            kind="queued_notice_reservation",
+            payload=reservation,
+            close=reservation.cancel,
+            requires_solo_batch=True,
+        ),
     )
 
 
@@ -486,7 +561,7 @@ async def test_generate_response_skips_signal_for_automation_ingress(tmp_path: P
     bot = _bot(tmp_path)
     response_envelope = _envelope(source_kind="scheduled")
     response_target = response_envelope.target
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    coordinator = unwrap_extracted_collaborator(bot._turn_controller.deps.response_runner)
     lifecycle = coordinator._lifecycle_coordinator
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
@@ -881,6 +956,588 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
             lifecycle_lock.release()
 
     assert observed_pending == [True, False]
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_path: Path) -> None:
+    """Gate-owned follow-ups should still notify the active response before their dispatch starts."""
+    bot = _bot(tmp_path)
+    active_envelope = _envelope(source_event_id="$active")
+    follow_up_envelope = _envelope(source_event_id="$followup")
+    response_target = active_envelope.target
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    active_started = asyncio.Event()
+    active_saw_follow_up = asyncio.Event()
+    allow_active_to_finish = asyncio.Event()
+    follow_up_observed_pending: list[bool] = []
+
+    async def active_operation(_target: MessageTarget) -> str:
+        active_started.set()
+        await queued_signal.wait()
+        if queued_signal.has_pending_human_messages():
+            active_saw_follow_up.set()
+        await allow_active_to_finish.wait()
+        return "$active-response"
+
+    async def follow_up_operation(_target: MessageTarget) -> str:
+        follow_up_observed_pending.append(queued_signal.has_pending_human_messages())
+        return "$followup-response"
+
+    active_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=response_target,
+            response_envelope=active_envelope,
+            queued_notice_reservation=None,
+            pipeline_timing=None,
+            locked_operation=active_operation,
+        ),
+    )
+    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+
+    reservation = lifecycle.reserve_waiting_human_message(
+        target=response_target,
+        response_envelope=follow_up_envelope,
+    )
+    assert reservation is not None
+    await asyncio.wait_for(active_saw_follow_up.wait(), timeout=0.2)
+    assert queued_signal.pending_human_messages == 1
+
+    follow_up_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=response_target,
+            response_envelope=follow_up_envelope,
+            queued_notice_reservation=reservation,
+            pipeline_timing=None,
+            locked_operation=follow_up_operation,
+        ),
+    )
+    await asyncio.sleep(0)
+    assert queued_signal.pending_human_messages == 1
+
+    allow_active_to_finish.set()
+    assert await active_task == "$active-response"
+    assert await follow_up_task == "$followup-response"
+
+    assert follow_up_observed_pending == [False]
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path: Path) -> None:
+    """Command-shaped active follow-ups should not leave stale queued-message state."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, "$thread", "$command")
+    envelope = _envelope(
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id="$command",
+        target=target,
+    )
+    event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$command",
+        body="!help",
+        source={"content": {"body": "!help"}},
+        server_timestamp=1234,
+    )
+    dispatch = PreparedDispatch(
+        requester_user_id="@user:localhost",
+        context=MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=target,
+        correlation_id="$command",
+        envelope=envelope,
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is not None
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                queued_notice_reservation=reservation,
+            )
+    finally:
+        queued_signal.finish_response_turn()
+
+    mock_plan_turn.assert_not_awaited()
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_path: Path) -> None:
+    """Superseded active follow-ups should clear their enqueue-time notice when skipped."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, "$thread", "$older")
+    envelope = _envelope(
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id="$older",
+        target=target,
+    )
+    event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$older",
+        body="older follow-up",
+        source={"content": {"body": "older follow-up"}},
+        server_timestamp=1234,
+    )
+    dispatch = PreparedDispatch(
+        requester_user_id="@user:localhost",
+        context=MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=target,
+        correlation_id="$older",
+        envelope=envelope,
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is not None
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
+            patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+                queued_notice_reservation=reservation,
+            )
+    finally:
+        queued_signal.finish_response_turn()
+
+    mock_plan_turn.assert_not_awaited()
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_follow_up_cleanup_when_hook_suppression_returns_before_dispatch(tmp_path: Path) -> None:
+    """Hook-suppressed active follow-ups should clear the reservation before planning."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    case = _reserved_follow_up_case(bot, room, event_id="$suppressed")
+    try:
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=None)),
+            patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
+                queued_notice_reservation=case.reservation,
+            )
+    finally:
+        case.queued_signal.finish_response_turn()
+
+    mock_plan_turn.assert_not_awaited()
+    assert not case.queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_path: Path) -> None:
+    """Ignored active follow-ups should clear the reservation before response lifecycle ownership."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    case = _reserved_follow_up_case(bot, room, event_id="$ignored")
+    try:
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
+            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+            patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
+            patch(
+                "mindroom.turn_policy.TurnPolicy.plan_turn",
+                new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
+            ),
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
+                queued_notice_reservation=case.reservation,
+            )
+    finally:
+        case.queued_signal.finish_response_turn()
+
+    assert not case.queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp_path: Path) -> None:
+    """Routed active follow-ups should clear the reservation after router handoff."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    case = _reserved_follow_up_case(bot, room, event_id="$routed")
+    try:
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
+            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+            patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
+            patch(
+                "mindroom.turn_policy.TurnPolicy.plan_turn",
+                new=AsyncMock(return_value=DispatchPlan(kind="route", router_message="route this")),
+            ),
+            patch.object(bot._turn_controller, "_execute_router_relay", new=AsyncMock()) as mock_route,
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
+                queued_notice_reservation=case.reservation,
+            )
+    finally:
+        case.queued_signal.finish_response_turn()
+
+    mock_route.assert_awaited_once()
+    assert not case.queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(tmp_path: Path) -> None:
+    """Exceptions before response lifecycle ownership should cancel the reservation."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    case = _reserved_follow_up_case(bot, room, event_id="$raises")
+    try:
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
+            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+            patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
+            patch(
+                "mindroom.turn_policy.TurnPolicy.plan_turn",
+                new=AsyncMock(
+                    return_value=DispatchPlan(
+                        kind="respond",
+                        response_action=ResponseAction(kind="individual"),
+                    ),
+                ),
+            ),
+            patch.object(
+                bot._turn_controller,
+                "_execute_response_action",
+                new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
+            ),
+            pytest.raises(RuntimeError, match="dispatch failed"),
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
+                queued_notice_reservation=case.reservation,
+            )
+    finally:
+        case.queued_signal.finish_response_turn()
+
+    assert not case.queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecycle(tmp_path: Path) -> None:
+    """Cancellation before response lifecycle ownership should cancel the reservation."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    case = _reserved_follow_up_case(bot, room, event_id="$cancelled")
+    try:
+        with (
+            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
+            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+            patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
+            patch(
+                "mindroom.turn_policy.TurnPolicy.plan_turn",
+                new=AsyncMock(
+                    return_value=DispatchPlan(
+                        kind="respond",
+                        response_action=ResponseAction(kind="individual"),
+                    ),
+                ),
+            ),
+            patch.object(
+                bot._turn_controller,
+                "_execute_response_action",
+                new=AsyncMock(side_effect=asyncio.CancelledError),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                _PrecheckedEvent(event=case.event, requester_user_id="@user:localhost"),
+                queued_notice_reservation=case.reservation,
+            )
+    finally:
+        case.queued_signal.finish_response_turn()
+
+    assert not case.queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_follow_up_cleanup_when_text_normalization_raises(tmp_path: Path) -> None:
+    """Reserved follow-ups should clean up even before PreparedDispatch can exist."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, "$thread", "$normalize")
+    envelope = _envelope(
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id="$normalize",
+        target=target,
+    )
+    event = _prepared_text_event(event_id="$normalize")
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is not None
+        with (
+            patch.object(
+                type(bot._turn_controller.deps.normalizer),
+                "resolve_text_event",
+                new=AsyncMock(side_effect=RuntimeError("normalization failed")),
+            ),
+            pytest.raises(RuntimeError, match="normalization failed"),
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                event,
+                "@user:localhost",
+                queued_notice_reservation=reservation,
+            )
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path: Path) -> None:
+    """Reserved follow-ups should clean up when dispatch preparation fails."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, "$thread", "$prepare")
+    envelope = _envelope(
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id="$prepare",
+        target=target,
+    )
+    event = _prepared_text_event(event_id="$prepare")
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is not None
+        with (
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(side_effect=RuntimeError("prepare failed")),
+            ),
+            pytest.raises(RuntimeError, match="prepare failed"),
+        ):
+            await bot._turn_controller._dispatch_text_message(
+                room,
+                event,
+                "@user:localhost",
+                queued_notice_reservation=reservation,
+            )
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    """Reserved follow-ups claimed by the gate should clean up if handoff fails early."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, "$thread", "$handoff")
+    envelope = _envelope(
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id="$handoff",
+        target=target,
+    )
+    event = _prepared_text_event(event_id="$handoff")
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is not None
+        batch = build_coalesced_batch(
+            (room.room_id, "$thread", "@user:localhost"),
+            [
+                PendingEvent(
+                    event=event,
+                    room=room,
+                    source_kind="message",
+                    dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                    dispatch_metadata=_queued_notice_metadata(reservation),
+                ),
+            ],
+        )
+        with (
+            patch(
+                "mindroom.turn_controller.build_dispatch_handoff",
+                side_effect=RuntimeError("handoff failed"),
+            ),
+            pytest.raises(RuntimeError, match="handoff failed"),
+        ):
+            await bot._turn_controller.handle_coalesced_batch(batch)
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(tmp_path: Path) -> None:
+    """Cancellation during enqueue handoff should not leak the reserved notice."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, "$thread", "$cancelled")
+    envelope = _envelope(source_kind="message", source_event_id="$cancelled", target=target)
+    event = _prepared_text_event(event_id="$cancelled")
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is not None
+        assert queued_signal.pending_human_messages == 1
+        with (
+            patch.object(
+                bot._turn_controller.deps.response_runner,
+                "reserve_waiting_human_message",
+                return_value=reservation,
+            ),
+            patch.object(
+                bot._turn_controller,
+                "_enqueue_for_dispatch",
+                new=AsyncMock(side_effect=asyncio.CancelledError),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await bot._turn_controller._enqueue_active_thread_follow_up(
+                room=room,
+                event=event,
+                target=target,
+                envelope=envelope,
+                coalescing_thread_id="$thread",
+                requester_user_id="@user:localhost",
+                dispatch_timing=None,
+            )
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert queued_signal.pending_human_messages == 0
+    assert not queued_signal.is_set()
+
+
+def test_queued_human_reservation_is_idempotent(tmp_path: Path) -> None:
+    """Reservation consume/cancel operations should clear the notice at most once."""
+    bot = _bot(tmp_path)
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
+    envelope = _envelope(
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id="$event",
+        target=target,
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is not None
+        assert queued_signal.pending_human_messages == 1
+        reservation.consume()
+        reservation.consume()
+        reservation.cancel()
+        assert queued_signal.pending_human_messages == 0
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert not queued_signal.is_set()
+
+
+def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> None:
+    """A reserved active follow-up mixed into a multi-event batch should fail and clear."""
+    bot = _bot(tmp_path)
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!room:localhost"
+    target = MessageTarget.resolve(room.room_id, "$thread", "$reserved")
+    envelope = _envelope(
+        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        source_event_id="$reserved",
+        target=target,
+    )
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = coordinator._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal.begin_response_turn()
+    try:
+        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
+        assert reservation is not None
+        with pytest.raises(ValueError, match="solo batches"):
+            build_coalesced_batch(
+                (room.room_id, "$thread", "@user:localhost"),
+                [
+                    PendingEvent(
+                        event=_prepared_text_event(event_id="$reserved"),
+                        room=room,
+                        source_kind="message",
+                        dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+                        dispatch_metadata=_queued_notice_metadata(reservation),
+                    ),
+                    PendingEvent(
+                        event=_prepared_text_event(event_id="$normal"),
+                        room=room,
+                        source_kind="message",
+                    ),
+                ],
+            )
+    finally:
+        queued_signal.finish_response_turn()
+
     assert not queued_signal.is_set()
 
 

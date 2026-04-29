@@ -29,6 +29,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.voice_handler import prepare_voice_message
 from tests.conftest import (
     bind_runtime_paths,
+    drain_coalescing,
     install_generate_response_mock,
     install_runtime_cache_support,
     install_send_response_mock,
@@ -210,6 +211,7 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     ):
         bot.client = MagicMock()
         await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
     mock_handle.assert_called_once()
     command = mock_handle.await_args.kwargs["command"]
@@ -333,6 +335,7 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
     ):
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
+        await bot._coalescing_gate.drain_all()
 
     mock_interactive.assert_awaited_once()
     assert mock_schedule.await_args.kwargs["scheduled_by"] == "@alice:example.com"
@@ -416,6 +419,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     ):
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
+        await bot._coalescing_gate.drain_all()
 
     mock_interactive.assert_awaited_once()
     assert (
@@ -504,6 +508,7 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
     ) as mock_interactive:
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
+        await bot._coalescing_gate.drain_all()
 
     mock_interactive.assert_awaited_once()
     bot._send_response.assert_awaited_once()
@@ -613,6 +618,58 @@ async def test_prepare_voice_message_includes_original_sender_and_attachment_met
     attachment = load_attachment(tmp_path, expected_attachment_id)
     assert attachment is not None
     assert attachment.local_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_prepare_voice_message_sanitizes_user_authored_internal_metadata(tmp_path) -> None:  # noqa: ANN001
+    """Voice normalization should trust only system-owned internal metadata."""
+    config = _attach_runtime_paths(
+        Config(
+            authorization={"default_room_access": True},
+            voice={"enabled": True},
+        ),
+        tmp_path,
+    )
+    room = _make_room("@mindroom_router:example.com", "@alice:example.com")
+    event = _make_voice_event(
+        sender="@alice:example.com",
+        source={
+            "content": {
+                "body": "voice.ogg",
+                ATTACHMENT_IDS_KEY: ["spoofed-attachment"],
+                ORIGINAL_SENDER_KEY: "@spoofed:example.com",
+                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+                "com.mindroom.skip_mentions": True,
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        },
+    )
+    client = MagicMock()
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = "🎤 sanitized transcript"
+        prepared = await _prepare_voice_message_with_runtime(
+            client,
+            tmp_path,
+            room,
+            event,
+            config,
+            sender_domain="example.com",
+            thread_id=None,
+        )
+
+    assert prepared is not None
+    content = prepared.source["content"]
+    expected_attachment_id = _attachment_id_for_event("$voice_event")
+    assert content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert content[ATTACHMENT_IDS_KEY] == [expected_attachment_id]
+    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in content
+    assert "com.mindroom.skip_mentions" not in content
+    assert content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$thread_root"}
 
 
 @pytest.mark.asyncio
@@ -761,6 +818,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
         await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
 
     bot._generate_response.assert_called_once()
     call_kwargs = bot._generate_response.call_args.kwargs
@@ -832,6 +890,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
         await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
 
     mock_download_audio.assert_called_once()
     bot._generate_response.assert_called_once()
@@ -891,6 +950,7 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         mock_voice.return_value = f"{VOICE_PREFIX}turn on the lights"
         for bot in bots:
             await bot._on_media_message(room, event)
+        await drain_coalescing(*bots)
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
@@ -934,6 +994,7 @@ async def test_router_visible_voice_echo_is_deduplicated_on_redelivery(tmp_path)
         mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
         await bot._on_media_message(room, event)
         await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_called_once()
     assert mock_download_audio.await_count == 1
@@ -992,6 +1053,7 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
 
     assert bot._delivery_gateway.send_text.await_count == 2
     echo_request = bot._delivery_gateway.send_text.call_args_list[0].args[0]
@@ -1029,11 +1091,13 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
 
         assert not bot._turn_store.is_handled(event.event_id)
         assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
 
         await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
 
     response_texts = [call.args[0].response_text for call in bot._delivery_gateway.send_text.call_args_list]
     assert response_texts == [
@@ -1069,6 +1133,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
 
     assert not bot._turn_store.is_handled(event.event_id)
     assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
@@ -1088,6 +1153,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await restarted_bot._on_media_message(restarted_room, restarted_event)
+        await drain_coalescing(restarted_bot)
 
     response_texts = [call.args[0].response_text for call in restarted_bot._delivery_gateway.send_text.call_args_list]
     assert response_texts == ["@home could you help with this?"]
@@ -1151,6 +1217,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_called_once()
     request = bot._delivery_gateway.send_text.call_args.args[0]
@@ -1233,6 +1300,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         mock_voice.return_value = f"{VOICE_PREFIX}@research summarize this audio"
         for bot in bots:
             await bot._on_media_message(room, event)
+        await drain_coalescing(*bots)
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
@@ -1309,6 +1377,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         for bot in bots:
             await bot._on_media_message(room, event)
+        await drain_coalescing(*bots)
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1

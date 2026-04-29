@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    is_automation_source_kind,
+    is_voice_event,
+)
+
 from .context import (
     AfterResponseContext,
     AgentLifecycleContext,
@@ -38,8 +45,6 @@ from .execution import emit, emit_collect, emit_final_response_transform, emit_g
 from .ingress import (
     HookIngressPolicy,
     hook_ingress_policy,
-    is_automation_source_kind,
-    is_voice_event,
     should_handle_interactive_text_response,
 )
 from .registry import HookRegistry, HookRegistryPlugin, HookRegistryState
@@ -82,6 +87,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 __all__ = [
+    "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND",
     "BUILTIN_EVENT_NAMES",
     "EVENT_AGENT_STARTED",
     "EVENT_AGENT_STOPPED",
@@ -101,6 +107,7 @@ __all__ = [
     "EVENT_SYSTEM_ENRICH",
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
+    "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "AfterResponseContext",
     "AgentLifecycleContext",
     "BeforeResponseContext",

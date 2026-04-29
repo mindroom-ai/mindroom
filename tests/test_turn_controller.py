@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,10 +26,30 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.message_target import MessageTarget
+
+
+async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 0.5) -> None:
+    """Poll until a test condition becomes true."""
+    ready = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _mark_ready() -> None:
+        if condition():
+            ready.set()
+            return
+        loop.call_later(0.001, _mark_ready)
+
+    _mark_ready()
+    try:
+        async with asyncio.timeout(deadline_seconds):
+            await ready.wait()
+    except TimeoutError as exc:
+        msg = "Timed out waiting for async test condition"
+        raise AssertionError(msg) from exc
 
 
 @pytest.mark.asyncio
@@ -286,6 +307,7 @@ async def test_on_message_passes_resolved_thread_id_to_interactive_text_response
         patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch_text,
     ):
         await bot._on_message(room, message_event)
+        await _wait_for(lambda: mock_dispatch_text.await_count == 1)
 
     mock_handle_text_response.assert_awaited_once()
     assert mock_handle_text_response.await_args.kwargs["resolved_thread_id"] == "$thread-root:localhost"

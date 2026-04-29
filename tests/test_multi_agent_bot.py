@@ -35,7 +35,11 @@ from mindroom.bot import (
     AgentBot,
     TeamBot,
 )
-from mindroom.coalescing import PreparedTextEvent
+from mindroom.coalescing import (
+    COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+    COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
+)
+from mindroom.coalescing_batch import PendingEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -59,6 +63,7 @@ from mindroom.delivery_gateway import (
     FinalizeStreamedResponseRequest,
     SendTextRequest,
 )
+from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionLifecycleStart, CompactionOutcome
@@ -128,6 +133,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    drain_coalescing,
     install_edit_message_mock,
     install_generate_response_mock,
     install_runtime_cache_support,
@@ -758,8 +764,10 @@ class TestAgentBot:
         """Invoke the target handler by name."""
         if handler_name == "message":
             await bot._on_message(room, event)
+            await drain_coalescing(bot)
         elif handler_name in {"image", "voice", "file"}:
             await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
         elif handler_name == "reaction":
             await bot._on_reaction(room, event)
         else:  # pragma: no cover - defensive guard for test helper misuse
@@ -1697,6 +1705,7 @@ class TestAgentBot:
         mock_event.sender = "@mindroom_calculator:localhost"  # Bot's own ID
 
         await bot._on_message(mock_room, mock_event)
+        await drain_coalescing(bot)
 
         # Should not send any response
         bot.client.room_send.assert_not_called()
@@ -1719,6 +1728,7 @@ class TestAgentBot:
         mock_event.sender = "@mindroom_general:localhost"  # Another agent
 
         await bot._on_message(mock_room, mock_event)
+        await drain_coalescing(bot)
 
         # Should not send any response
         bot.client.room_send.assert_not_called()
@@ -1827,6 +1837,7 @@ class TestAgentBot:
             patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock(return_value=history)),
         ):
             await bot._on_message(mock_room, mock_event)
+            await drain_coalescing(bot)
 
         # Should call AI and send response based on streaming mode
         if enable_streaming:
@@ -5420,6 +5431,7 @@ class TestAgentBot:
         mock_event.source = {"content": {"body": "Hello everyone!"}}
 
         await bot._on_message(mock_room, mock_event)
+        await drain_coalescing(bot)
 
         # Should not send any response
         bot.client.room_send.assert_not_called()
@@ -5875,6 +5887,7 @@ class TestAgentBot:
             ),
         ):
             await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
@@ -6059,6 +6072,7 @@ class TestAgentBot:
             ) as mock_resolve_media,
         ):
             await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
 
         mock_resolve_media.assert_called_once()
         assert mock_resolve_media.call_args.args[1] == [current_attachment_id, history_attachment_id]
@@ -6263,6 +6277,7 @@ class TestAgentBot:
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=None),
         ):
             await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
 
         bot._generate_response.assert_not_called()
         tracker.record_handled_turn.assert_not_called()
@@ -6336,6 +6351,7 @@ class TestAgentBot:
             ),
         ):
             await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
 
         bot._generate_response.assert_awaited_once()
         generate_kwargs = bot._generate_response.await_args.kwargs
@@ -6424,6 +6440,7 @@ class TestAgentBot:
             ),
         ):
             await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
 
         bot._generate_response.assert_not_called()
         tracker.record_handled_turn.assert_not_called()
@@ -6488,13 +6505,14 @@ class TestAgentBot:
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch("mindroom.turn_policy.get_available_agents_for_sender_authoritative") as mock_get_available,
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
-            patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
+            patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
             mock_get_available.return_value = [
                 config.get_ids(runtime_paths_for(config))["general"],
                 config.get_ids(runtime_paths_for(config))["calculator"],
             ]
             await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
 
         bot._turn_controller._execute_router_relay.assert_called_once_with(
             room,
@@ -6640,6 +6658,7 @@ class TestAgentBot:
                 config.get_ids(runtime_paths_for(config))["calculator"],
             ]
             await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
 
         bot._turn_controller._execute_router_relay.assert_called_once()
         mock_register_file.assert_not_awaited()
@@ -6942,6 +6961,7 @@ class TestAgentBot:
         ):
             await router_bot._on_media_message(router_room, file_event)
             await general_bot._on_media_message(general_room, file_event)
+            await drain_coalescing(router_bot, general_bot)
 
         mock_register.assert_awaited_once()
         assert mock_register.await_args.kwargs["room_id"] == "!test:localhost"
@@ -7017,7 +7037,7 @@ class TestAgentBot:
             ),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
+            patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
             patch(
                 "mindroom.turn_controller.interactive.handle_text_response",
                 new_callable=AsyncMock,
@@ -7025,7 +7045,9 @@ class TestAgentBot:
             ),
         ):
             await bot._on_message(room, text_event)
+            await drain_coalescing(bot)
             await bot._on_media_message(room, image_event)
+            await drain_coalescing(bot)
 
         assert bot._turn_controller._execute_router_relay.await_count == 2
         first_call = bot._turn_controller._execute_router_relay.await_args_list[0].kwargs
@@ -7092,7 +7114,7 @@ class TestAgentBot:
             ),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.coalescing.extract_media_caption", return_value="[Attached image]"),
+            patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
             patch(
                 "mindroom.turn_controller.interactive.handle_text_response",
                 new_callable=AsyncMock,
@@ -7100,7 +7122,9 @@ class TestAgentBot:
             ),
         ):
             await bot._on_message(room, text_event)
+            await drain_coalescing(bot)
             await bot._on_media_message(room, image_event)
+            await drain_coalescing(bot)
 
         bot._turn_controller._execute_router_relay.assert_not_awaited()
 
@@ -7180,6 +7204,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True),
         ):
             await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
         mock_resolve_attachment_ids.assert_awaited_once()
         bot._generate_response.assert_awaited_once()
@@ -7894,6 +7919,159 @@ class TestAgentBot:
         mock_has_active_response.assert_called_once_with(target)
 
     @pytest.mark.asyncio
+    async def test_resolve_response_action_keeps_gate_owned_active_thread_follow_up(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Gate-owned active follow-ups should keep active-response treatment after the active turn ends."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        ids = config.get_ids(runtime_paths)
+        room.users = {
+            bot.matrix_id.full_id: MagicMock(),
+            ids[ROUTER_AGENT_NAME].full_id: MagicMock(),
+            ids["general"].full_id: MagicMock(),
+        }
+        target = MessageTarget.resolve(room.room_id, "$thread", "$event")
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        envelope = MessageEnvelope(
+            source_event_id="$followup",
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="stop if you see this",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="message",
+            dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        )
+
+        with (
+            patch(
+                "mindroom.turn_policy.decide_team_formation",
+                new=AsyncMock(return_value=TeamResolution.none()),
+            ),
+            patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
+            patch.object(
+                bot._response_runner,
+                "has_active_response_for_target",
+                return_value=False,
+            ) as mock_has_active_response,
+        ):
+            action = await bot._turn_policy.resolve_response_action(
+                context,
+                room,
+                "@user:localhost",
+                "stop if you see this",
+                False,
+                target=target,
+                source_envelope=envelope,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+            )
+
+        assert action.kind == "individual"
+        mock_should_respond.assert_called_once()
+        mock_has_active_response.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_response_action_uses_active_follow_up_policy_without_erasing_voice(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Gate-owned voice follow-ups should keep voice source kind and active-response policy."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        ids = config.get_ids(runtime_paths)
+        room.users = {
+            bot.matrix_id.full_id: MagicMock(),
+            ids[ROUTER_AGENT_NAME].full_id: MagicMock(),
+            ids["general"].full_id: MagicMock(),
+        }
+        target = MessageTarget.resolve(room.room_id, "$thread", "$event")
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        envelope = MessageEnvelope(
+            source_event_id="$followup",
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="stop if you see this",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="voice",
+            dispatch_policy_source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        )
+
+        with (
+            patch(
+                "mindroom.turn_policy.decide_team_formation",
+                new=AsyncMock(return_value=TeamResolution.none()),
+            ),
+            patch("mindroom.turn_policy.should_agent_respond", return_value=False) as mock_should_respond,
+            patch.object(
+                bot._response_runner,
+                "has_active_response_for_target",
+                return_value=False,
+            ) as mock_has_active_response,
+        ):
+            action = await bot._turn_policy.resolve_response_action(
+                context,
+                room,
+                "@user:localhost",
+                "stop if you see this",
+                False,
+                target=target,
+                source_envelope=envelope,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+            )
+
+        assert action.kind == "individual"
+        assert envelope.source_kind == "voice"
+        mock_should_respond.assert_called_once()
+        mock_has_active_response.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_resolve_response_action_requires_explicit_mention_in_multi_human_thread_even_after_prior_team_mentions(
         self,
         tmp_path: Path,
@@ -8325,6 +8503,7 @@ class TestAgentBot:
             _room: object,
             _event: object,
             context: MessageContext,
+            **_kwargs: object,
         ) -> None:
             call_order.append("hydrate")
             context.thread_history = ThreadHistoryResult(full_history, is_full_history=True)
@@ -8482,6 +8661,7 @@ class TestAgentBot:
             _room: object,
             _event: object,
             context: MessageContext,
+            **_kwargs: object,
         ) -> None:
             context.thread_history = ThreadHistoryResult(full_history, is_full_history=True)
             context.requires_full_thread_history = False
@@ -8780,12 +8960,12 @@ class TestAgentBot:
         ]
 
     @pytest.mark.asyncio
-    async def test_trusted_internal_router_relays_bypass_user_turn_coalescing(
+    async def test_trusted_internal_router_relays_use_gate_bypass(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Agent-authored relays with preserved original sender should dispatch immediately."""
+        """Agent-authored relays should enter the gate as FIFO bypass events."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -8811,16 +8991,21 @@ class TestAgentBot:
         ):
             await bot._turn_controller._enqueue_for_dispatch(event, room, source_kind="message")
 
-        mock_dispatch.assert_awaited_once_with(room, event, "@user:localhost")
-        mock_enqueue.assert_not_awaited()
+        mock_dispatch.assert_not_awaited()
+        mock_enqueue.assert_awaited_once()
+        key, pending_event = mock_enqueue.await_args.args
+        assert key == (room.room_id, None, "@user:localhost")
+        assert isinstance(pending_event, PendingEvent)
+        assert pending_event.event is event
+        assert pending_event.source_kind == COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
 
     @pytest.mark.asyncio
-    async def test_handle_message_inner_bypasses_coalescing_for_active_thread_follow_up(
+    async def test_handle_message_inner_enqueues_active_thread_follow_up_as_gate_bypass(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Human follow-ups in an actively responding thread must bypass IN_FLIGHT coalescing."""
+        """Human follow-ups in an actively responding thread must stay owned by the gate."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _install_runtime_cache_support(bot)
@@ -8893,16 +9078,365 @@ class TestAgentBot:
                 "has_active_response_for_target",
                 return_value=True,
             ) as mock_has_active_response,
-            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(
+                bot._response_runner,
+                "reserve_waiting_human_message",
+                return_value=MagicMock(),
+            ) as mock_reserve_waiting_human_message,
+            patch.object(
+                bot._turn_controller,
+                "_dispatch_text_message",
+                new=AsyncMock(),
+            ) as mock_dispatch,
             patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
         ):
-            await bot._on_message(room, event)
+            await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
 
         mock_has_active_response.assert_called_once()
         active_target = mock_has_active_response.call_args.args[0]
         assert active_target.resolved_thread_id == target.resolved_thread_id
-        mock_dispatch.assert_awaited_once_with(room, prepared_event, "@user:localhost")
-        mock_enqueue.assert_not_awaited()
+        mock_reserve_waiting_human_message.assert_called_once()
+        signal_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
+        assert signal_target.resolved_thread_id == target.resolved_thread_id
+        assert mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"] is envelope
+        mock_dispatch.assert_not_awaited()
+        mock_enqueue.assert_awaited_once()
+        key, pending_event = mock_enqueue.await_args.args
+        assert key == (room.room_id, "$thread_root", "@user:localhost")
+        assert isinstance(pending_event, PendingEvent)
+        assert pending_event.event is event
+        assert pending_event.source_kind == "message"
+        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert len(pending_event.dispatch_metadata) == 1
+        metadata = pending_event.dispatch_metadata[0]
+        assert metadata.kind == "queued_notice_reservation"
+        assert metadata.payload is mock_reserve_waiting_human_message.return_value
+        assert metadata.requires_solo_batch is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source_kind", ["hook", "hook_dispatch"])
+    async def test_handle_message_inner_enqueues_trusted_hook_source_kind_as_gate_bypass(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        source_kind: str,
+    ) -> None:
+        """Trusted hook messages should keep their bypass source kind on the real text path."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": f"${source_kind}",
+                "sender": "@mindroom_general:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": f"@mindroom_calculator:localhost {source_kind} says hello",
+                    "com.mindroom.source_kind": source_kind,
+                    ORIGINAL_SENDER_KEY: "@user:localhost",
+                },
+            },
+        )
+        prepared_event = PreparedTextEvent(
+            sender="@mindroom_general:localhost",
+            event_id=f"${source_kind}",
+            body=f"@mindroom_calculator:localhost {source_kind} says hello",
+            source=event.source,
+            server_timestamp=1234567890,
+        )
+
+        with (
+            patch.object(
+                bot._turn_controller,
+                "_precheck_dispatch_event",
+                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
+                new=AsyncMock(return_value=prepared_event),
+            ),
+            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+        ):
+            await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
+
+        mock_dispatch.assert_not_awaited()
+        mock_enqueue.assert_awaited_once()
+        _key, pending_event = mock_enqueue.await_args.args
+        assert isinstance(pending_event, PendingEvent)
+        assert pending_event.event is event
+        assert pending_event.source_kind == source_kind
+
+    @pytest.mark.asyncio
+    async def test_voice_preview_reserves_active_thread_follow_up(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Transcribed voice follow-ups should share the active-response notice path."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
+        prepared_event = PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$voice-followup",
+            body="please stop",
+            source={"content": {"msgtype": "m.text", "body": "please stop", "com.mindroom.source_kind": "voice"}},
+            server_timestamp=1234567890,
+            is_synthetic=True,
+            source_kind_override="voice",
+        )
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_voice_event",
+                new=AsyncMock(
+                    return_value=SimpleNamespace(
+                        event=prepared_event,
+                        effective_thread_id="$thread_root",
+                    ),
+                ),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()) as mock_echo,
+            patch.object(
+                bot._response_runner,
+                "has_active_response_for_target",
+                return_value=True,
+            ),
+            patch.object(
+                bot._response_runner,
+                "reserve_waiting_human_message",
+                return_value=MagicMock(),
+            ) as mock_reserve_waiting_human_message,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+        ):
+            await bot._turn_controller._on_audio_media_message(
+                room,
+                _PrecheckedEvent(event=voice_event, requester_user_id="@user:localhost"),
+            )
+
+        mock_echo.assert_awaited_once()
+        mock_reserve_waiting_human_message.assert_called_once()
+        reserved_envelope = mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"]
+        assert reserved_envelope.source_kind == "voice"
+        mock_enqueue.assert_awaited_once()
+        key, pending_event = mock_enqueue.await_args.args
+        assert key == (room.room_id, "$thread_root", "@user:localhost")
+        assert isinstance(pending_event, PendingEvent)
+        assert pending_event.event is prepared_event
+        assert pending_event.source_kind == "voice"
+        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert len(pending_event.dispatch_metadata) == 1
+        metadata = pending_event.dispatch_metadata[0]
+        assert metadata.kind == "queued_notice_reservation"
+        assert metadata.payload is mock_reserve_waiting_human_message.return_value
+        assert metadata.requires_solo_batch is True
+
+    @pytest.mark.asyncio
+    async def test_file_sidecar_text_preview_enqueues_prepared_text(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """File sidecar previews should hand prepared text to the gate, not dispatch inline."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        sidecar_event = cast(
+            "nio.RoomMessageFile",
+            nio.Event.parse_event(
+                {
+                    "event_id": "$sidecar",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.file",
+                        "body": "long-text.txt",
+                        "info": {"mimetype": "application/json"},
+                        "io.mindroom.long_text": {
+                            "version": 2,
+                            "encoding": "matrix_event_content_json",
+                        },
+                        "url": "mxc://localhost/sidecar",
+                    },
+                },
+            ),
+        )
+        prepared_event = PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$sidecar",
+            body="full long text",
+            source={"content": {"msgtype": "m.text", "body": "full long text"}},
+            server_timestamp=1234567890,
+        )
+        target = MessageTarget.resolve(room.room_id, "$thread_root", sidecar_event.event_id)
+        envelope = MessageEnvelope(
+            source_event_id=sidecar_event.event_id,
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="full long text",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="message",
+        )
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
+                new=AsyncMock(return_value=prepared_event),
+            ),
+            patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
+            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$thread_root"),
+            ),
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+        ):
+            handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+                room,
+                _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
+            )
+
+        assert handled is True
+        mock_dispatch.assert_not_awaited()
+        mock_enqueue.assert_awaited_once()
+        key, pending_event = mock_enqueue.await_args.args
+        assert key == (room.room_id, "$thread_root", "@user:localhost")
+        assert isinstance(pending_event, PendingEvent)
+        assert pending_event.event is prepared_event
+        assert pending_event.source_kind == "message"
+
+    @pytest.mark.asyncio
+    async def test_file_sidecar_text_preview_reserves_active_thread_follow_up(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Sidecar text follow-ups should share the active-response notice path."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        sidecar_event = cast(
+            "nio.RoomMessageFile",
+            nio.Event.parse_event(
+                {
+                    "event_id": "$sidecar-followup",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.file",
+                        "body": "long-text.txt",
+                        "info": {"mimetype": "application/json"},
+                        "io.mindroom.long_text": {
+                            "version": 2,
+                            "encoding": "matrix_event_content_json",
+                        },
+                        "url": "mxc://localhost/sidecar-followup",
+                    },
+                },
+            ),
+        )
+        prepared_event = PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$sidecar-followup",
+            body="please stop",
+            source={"content": {"msgtype": "m.text", "body": "please stop"}},
+            server_timestamp=1234567890,
+        )
+        target = MessageTarget.resolve(room.room_id, "$thread_root", sidecar_event.event_id)
+        envelope = MessageEnvelope(
+            source_event_id=sidecar_event.event_id,
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="please stop",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="message",
+        )
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
+                new=AsyncMock(return_value=prepared_event),
+            ),
+            patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
+            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$thread_root"),
+            ),
+            patch.object(
+                bot._response_runner,
+                "has_active_response_for_target",
+                return_value=True,
+            ),
+            patch.object(
+                bot._response_runner,
+                "reserve_waiting_human_message",
+                return_value=MagicMock(),
+            ) as mock_reserve_waiting_human_message,
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+        ):
+            handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+                room,
+                _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
+            )
+
+        assert handled is True
+        mock_dispatch.assert_not_awaited()
+        mock_reserve_waiting_human_message.assert_called_once()
+        mock_enqueue.assert_awaited_once()
+        key, pending_event = mock_enqueue.await_args.args
+        assert key == (room.room_id, "$thread_root", "@user:localhost")
+        assert isinstance(pending_event, PendingEvent)
+        assert pending_event.event is prepared_event
+        assert pending_event.source_kind == "message"
+        assert pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert len(pending_event.dispatch_metadata) == 1
+        metadata = pending_event.dispatch_metadata[0]
+        assert metadata.kind == "queued_notice_reservation"
+        assert metadata.payload is mock_reserve_waiting_human_message.return_value
+        assert metadata.requires_solo_batch is True
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_team_defers_placeholder_creation_to_coordinator(
@@ -9135,6 +9669,7 @@ class TestAgentBot:
             patch.object(bot._turn_controller, "_log_dispatch_latency"),
         ):
             await bot._on_media_message(room, event)
+            await drain_coalescing(bot)
 
         bot._generate_response.assert_not_called()
         bot._edit_message.assert_not_awaited()
@@ -10256,6 +10791,7 @@ class TestAgentBot:
         }
 
         await bot._on_message(mock_room, mock_event)
+        await drain_coalescing(bot)
 
         # Should respond as only agent in thread
         if enable_streaming:
@@ -10308,6 +10844,7 @@ class TestAgentBot:
         }
 
         await bot._on_message(mock_room, mock_event_2)
+        await drain_coalescing(bot)
 
         # Should form team and send a structured streaming team response
         mock_stream_agent_response.assert_not_called()
@@ -10348,6 +10885,7 @@ class TestAgentBot:
         mock_ai_response.return_value = "Mentioned response"
 
         await bot._on_message(mock_room, mock_event_with_mention)
+        await drain_coalescing(bot)
 
         # Should respond when explicitly mentioned
         if enable_streaming:
@@ -10394,6 +10932,7 @@ class TestAgentBot:
         }
 
         await bot._on_message(mock_room, mock_event)
+        await drain_coalescing(bot)
 
         # Should not send any message since it already responded
         bot.client.room_send.assert_not_called()

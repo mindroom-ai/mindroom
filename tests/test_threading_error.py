@@ -85,6 +85,7 @@ from mindroom.runtime_support import (
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
     install_generate_response_mock,
     make_event_cache_mock,
     make_matrix_client_mock,
@@ -7634,6 +7635,7 @@ class TestThreadingBehavior:
         ):
             # Process the message
             await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
             # Check that _generate_response was called
             bot._generate_response.assert_called_once()
@@ -7716,6 +7718,7 @@ class TestThreadingBehavior:
         ):
             # Process the message
             await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
         # Verify the bot sent messages (thinking + final)
         assert bot.client.room_send.call_count == 2
@@ -9032,6 +9035,7 @@ class TestThreadingBehavior:
             ):
                 # Process the command
                 await bot._on_message(room, event)
+                await drain_coalescing(bot)
 
             # The bot should send an error message about needing threads
             bot.client.room_send.assert_called_once()
@@ -9150,6 +9154,7 @@ class TestThreadingBehavior:
             ):
                 # Process the command
                 await bot._on_message(room, event)
+                await drain_coalescing(bot)
 
             # The bot should respond
             bot.client.room_send.assert_called_once()
@@ -9253,6 +9258,7 @@ class TestThreadingBehavior:
             ),
         ):
             await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
         bot.client.room_send.assert_called_once()
         content = bot.client.room_send.call_args.kwargs["content"]
@@ -9438,6 +9444,7 @@ class TestThreadingBehavior:
         ):
             # Process the message
             await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
             # Check that _generate_response was called
             bot._generate_response.assert_called_once()

@@ -563,14 +563,18 @@ MessageEnvelope(
     attachment_ids: tuple[str, ...],
     mentioned_agents: tuple[str, ...],
     agent_name: str,
-    source_kind: str,  # "message", "edit", "voice", "image", "scheduled", "hook", "hook_dispatch"
+    source_kind: str,  # "message", "edit", "voice", "image", "media", "scheduled", "hook", "hook_dispatch", "trusted_internal_relay"
     hook_source: str | None = None,
     message_received_depth: int = 0,  # internal synthetic-chain depth for hook-originated relays
+    dispatch_policy_source_kind: str | None = None,
 )
 
 # target.thread_id preserves the raw inbound thread ID.
 # target.resolved_thread_id is the delivery thread after safe-root and room-mode resolution.
 # target.session_id is the canonical persistence key for the conversation.
+# dispatch_policy_source_kind is usually None.
+# When it is "active_thread_follow_up", source_kind still preserves the original modality such as "message" or "voice".
+# ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND and TRUSTED_INTERNAL_RELAY_SOURCE_KIND are exported from mindroom.hooks for comparisons.
 
 ResponseDraft(
     response_text: str,

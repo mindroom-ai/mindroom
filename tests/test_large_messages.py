@@ -1,16 +1,20 @@
 """Tests for large message handling."""
 
 import json
+from unittest.mock import MagicMock
 
 import nio
 import pytest
 
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    ATTACHMENT_IDS_KEY,
+    HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
     STREAM_WARMUP_SUFFIX_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
@@ -22,6 +26,7 @@ from mindroom.matrix.large_messages import (
     prepare_large_message,
     should_send_oversized_nonterminal_streaming_edit,
 )
+from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 
 
@@ -462,6 +467,76 @@ async def test_prepare_large_message_preserves_original_sender_metadata() -> Non
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
     assert uploaded_payload[ORIGINAL_SENDER_KEY] == "@user:localhost"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_kind",
+    ["scheduled", "hook", "hook_dispatch", "trusted_internal_relay"],
+)
+async def test_prepare_large_message_trusted_metadata_round_trips_through_sidecar_hydration(
+    source_kind: str,
+) -> None:
+    """Large-message writer and reader should preserve trusted dispatch metadata."""
+
+    class MockClient:
+        rooms: dict = {}  # noqa: RUF012
+        uploaded_data: bytes | None = None
+
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
+            data_provider = kwargs.get("data_provider")
+            if data_provider:
+                data = data_provider(None, None)
+                self.uploaded_data = data.read()
+            response = nio.UploadResponse.from_dict({"content_uri": f"mxc://server/{source_kind}-metadata-sidecar"})
+            return response, None
+
+        async def download(self, *, mxc: str) -> nio.DownloadResponse:
+            assert mxc == f"mxc://server/{source_kind}-metadata-sidecar"
+            assert self.uploaded_data is not None
+            response = MagicMock(spec=nio.DownloadResponse)
+            response.body = self.uploaded_data
+            return response
+
+    client = MockClient()
+    content = {
+        "body": "trusted metadata " * 10000,
+        "msgtype": "m.text",
+        "com.mindroom.source_kind": source_kind,
+        "com.mindroom.hook_source": "message_received",
+        "com.mindroom.skip_mentions": True,
+        "formatted_body": '<a href="https://matrix.to/#/@mindroom_agent:localhost">agent</a>',
+        "m.mentions": {"user_ids": ["@mindroom_agent:localhost"]},
+        ATTACHMENT_IDS_KEY: ["att-sidecar"],
+        HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
+        ORIGINAL_SENDER_KEY: "@user:localhost",
+        VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+    }
+
+    preview = await prepare_large_message(client, "!room:server", content)
+    assert client.uploaded_data is not None
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": preview,
+            "event_id": "$metadata-sidecar",
+            "sender": "@mindroom_agent:localhost",
+            "origin_server_ts": 123,
+            "type": "m.room.message",
+            "room_id": "!room:server",
+        },
+    )
+    resolved = await extract_and_resolve_message(event, client)
+
+    assert resolved["body"] == content["body"]
+    assert resolved["content"]["com.mindroom.source_kind"] == source_kind
+    assert resolved["content"]["com.mindroom.hook_source"] == "message_received"
+    assert resolved["content"]["com.mindroom.skip_mentions"] is True
+    assert resolved["content"]["formatted_body"] == content["formatted_body"]
+    assert resolved["content"]["m.mentions"] == content["m.mentions"]
+    assert resolved["content"][ATTACHMENT_IDS_KEY] == ["att-sidecar"]
+    assert resolved["content"][HOOK_MESSAGE_RECEIVED_DEPTH_KEY] == 2
+    assert resolved["content"][ORIGINAL_SENDER_KEY] == "@user:localhost"
+    assert resolved["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
 
 
 @pytest.mark.asyncio

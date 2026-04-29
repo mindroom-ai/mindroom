@@ -13,6 +13,7 @@ from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wai
 
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -26,7 +27,6 @@ from mindroom.hooks import (
     MessageEnvelope,
     ReactionReceivedContext,
     emit,
-    is_automation_source_kind,
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -79,10 +79,7 @@ from .authorization import (
     is_authorized_sender,
 )
 from .background_tasks import create_background_task, wait_for_background_tasks
-from .coalescing import (
-    CoalescedBatch,
-    CoalescingGate,
-)
+from .coalescing import CoalescingGate
 from .commands import config_confirmation
 from .constants import (
     ROUTER_AGENT_NAME,
@@ -146,6 +143,7 @@ if TYPE_CHECKING:
     import structlog
     from agno.agent import Agent
 
+    from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.config.main import Config
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage

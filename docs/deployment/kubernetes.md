@@ -54,9 +54,9 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 ## Runtime-Only Deployment
 
-Use the runtime chart when you already operate the surrounding platform and only
-want Kubernetes to run the MindRoom runtime. The chart intentionally does not
-create Matrix, ingress, a model gateway, or platform services.
+Use the runtime chart when you already operate the surrounding platform and only want Kubernetes to run the MindRoom runtime.
+
+The chart intentionally does not create Matrix, ingress, a model gateway, or platform services.
 
 ```bash
 helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
@@ -97,13 +97,14 @@ workers:
       key: MINDROOM_SANDBOX_PROXY_TOKEN
 ```
 
-See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for
-the full values surface.
+See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for the full values surface.
 
 ## Worker Backends
 
 The instance and runtime charts support two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`.
+
 The dedicated-worker provisioning flow is implemented today.
+
 Both modes store agent data in the same per-agent directory structure.
 
 | Helm value | Behavior | Best for |

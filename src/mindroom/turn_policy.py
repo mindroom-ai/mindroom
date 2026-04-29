@@ -12,6 +12,10 @@ from mindroom.authorization import (
     is_sender_allowed_for_agent_reply,
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    is_automation_source_kind,
+)
 from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_RECEIVED,
@@ -25,7 +29,6 @@ from mindroom.hooks import (
     SystemEnrichContext,
     emit,
     emit_collect,
-    is_automation_source_kind,
     render_enrichment_block,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
@@ -55,12 +58,8 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.conversation_resolver import (
-        DispatchEvent,
-        MediaDispatchEvent,
-        MessageContext,
-        TextDispatchEvent,
-    )
+    from mindroom.conversation_resolver import MessageContext
+    from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, TextDispatchEvent
     from mindroom.message_target import MessageTarget
 
 
@@ -163,6 +162,7 @@ class IngressHookRunner:
             source_kind=dispatch.envelope.source_kind,
             hook_source=dispatch.envelope.hook_source,
             message_received_depth=dispatch.envelope.message_received_depth,
+            dispatch_policy_source_kind=dispatch.envelope.dispatch_policy_source_kind,
         )
         model_prompt = payload.model_prompt
         if hook_registered:
@@ -588,10 +588,13 @@ class TurnPolicy:
             return False
         if context.mentioned_agents or context.has_non_agent_mentions:
             return False
-        if is_automation_source_kind(source_envelope.source_kind):
+        if is_automation_source_kind(source_envelope.source_kind) or is_agent_id(
+            source_envelope.sender_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        ):
             return False
-        if is_agent_id(source_envelope.sender_id, self.deps.runtime.config, self.deps.runtime_paths):
-            return False
-        if has_active_response_for_target is None:
-            return False
-        return has_active_response_for_target(target)
+        policy_source_kind = source_envelope.dispatch_policy_source_kind or source_envelope.source_kind
+        if policy_source_kind == ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND:
+            return True
+        return has_active_response_for_target(target) if has_active_response_for_target is not None else False

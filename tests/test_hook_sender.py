@@ -12,13 +12,13 @@ import pytest
 from mindroom import interactive
 from mindroom.authorization import is_authorized_sender as real_is_authorized_sender
 from mindroom.bot import AgentBot
-from mindroom.coalescing import PreparedTextEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedTextEvent
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -721,6 +721,7 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
         "@user:localhost",
         event_label="message",
         handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+        ingress_metadata=DispatchIngressMetadata(source_kind="trusted_internal_relay"),
     )
 
     assert dispatch is not None
@@ -782,6 +783,7 @@ async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_r
         "@user:localhost",
         event_label="message",
         handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+        ingress_metadata=DispatchIngressMetadata(source_kind="trusted_internal_relay"),
     )
 
     assert dispatch is not None
@@ -1131,6 +1133,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
 
     assert isinstance(event, nio.RoomMessageFile)
     await bot._on_media_message(room, event)
+    await bot._coalescing_gate.drain_all()
 
     assert captured_bodies == ["@mindroom_code:localhost what is 99+1?"]
     assert bot._turn_policy.plan_turn.await_args.args[1].body == "@mindroom_code:localhost what is 99+1?"
@@ -1557,6 +1560,7 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
 
     try:
         await bot._on_message(room, event)
+        await bot._coalescing_gate.drain_all()
     finally:
         assert "$question123" in interactive._active_questions
         interactive._active_questions.clear()
@@ -1668,6 +1672,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
                     requester_user_id="@mindroom_router:localhost",
                 ),
             )
+            await bot._coalescing_gate.drain_all()
 
         assert handled is True
         assert "$question123" in interactive._active_questions

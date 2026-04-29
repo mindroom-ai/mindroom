@@ -18,6 +18,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
     runtime_paths_for,
@@ -154,6 +155,7 @@ class TestStreamingEdits:
 
         # Process initial message - bot should respond
         await bot._on_message(mock_room, initial_event)
+        await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
         bot._turn_store.record_turn(
@@ -191,6 +193,7 @@ class TestStreamingEdits:
             new=AsyncMock(return_value=_delivery_resolution("$response123")),
         ) as mock_generate_response:
             await bot._on_message(mock_room, edit_event1)
+            await drain_coalescing(bot)
         assert mock_generate_response.await_count == 1
 
         # Edit event 2 - another streaming update
@@ -224,6 +227,7 @@ class TestStreamingEdits:
             new=AsyncMock(return_value=_delivery_resolution("$response123")),
         ) as mock_generate_response:
             await bot._on_message(mock_room, edit_event2)
+            await drain_coalescing(bot)
         assert mock_generate_response.await_count == 1
 
     @pytest.mark.asyncio
@@ -267,6 +271,7 @@ class TestStreamingEdits:
 
         # Process new message - bot SHOULD respond
         await bot._on_message(mock_room, new_event)
+        await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
 
@@ -307,6 +312,7 @@ class TestStreamingEdits:
 
         # Process initial message - calculator should NOT respond (not mentioned)
         await bot._on_message(mock_room, initial_event)
+        await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0
 
@@ -335,6 +341,7 @@ class TestStreamingEdits:
             # Make extract_agent_name return 'helper' for the sender
             mock_extract.return_value = "helper"
             await bot._on_message(mock_room, edit_event)
+            await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0
 
@@ -379,6 +386,7 @@ class TestStreamingEdits:
 
         # Process initial message - calculator should NOT respond (not mentioned)
         await bot._on_message(mock_room, initial_event)
+        await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0
 
@@ -404,5 +412,6 @@ class TestStreamingEdits:
 
         # Process edit - calculator should NOT respond (bot ignores all edits)
         await bot._on_message(mock_room, edit_event)
+        await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0

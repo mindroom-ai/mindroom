@@ -83,7 +83,12 @@ from .delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
-from .response_lifecycle import ResponseLifecycle, ResponseLifecycleCoordinator, ResponseLifecycleDeps
+from .response_lifecycle import (
+    QueuedHumanNoticeReservation,
+    ResponseLifecycle,
+    ResponseLifecycleCoordinator,
+    ResponseLifecycleDeps,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -313,6 +318,7 @@ class ResponseRequest:
     prepare_after_lock: Callable[[ResponseRequest], Awaitable[ResponseRequest]] | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
+    queued_notice_reservation: QueuedHumanNoticeReservation | None = None
 
 
 class PostLockRequestPreparationError(RuntimeError):
@@ -517,6 +523,18 @@ class ResponseRunner:
         """Return whether one canonical conversation target already has an active turn."""
         return self._lifecycle_coordinator.has_active_response_for_target(target)
 
+    def reserve_waiting_human_message(
+        self,
+        *,
+        target: MessageTarget,
+        response_envelope: MessageEnvelope | None,
+    ) -> QueuedHumanNoticeReservation | None:
+        """Reserve a queued-human notice for an active response before dispatch owns ingress."""
+        return self._lifecycle_coordinator.reserve_waiting_human_message(
+            target=target,
+            response_envelope=response_envelope,
+        )
+
     async def _run_in_tool_context(
         self,
         *,
@@ -578,6 +596,7 @@ class ResponseRunner:
         return await self._lifecycle_coordinator.run_locked_response(
             target=resolved_target,
             response_envelope=request.response_envelope,
+            queued_notice_reservation=request.queued_notice_reservation,
             pipeline_timing=request.pipeline_timing,
             locked_operation=locked_operation,
         )
