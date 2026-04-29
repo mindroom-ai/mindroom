@@ -67,6 +67,14 @@ def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in credentials.items() if not k.startswith("_")}
 
 
+def _filter_credentials_for_response(credentials: dict[str, Any], *, is_oauth_service: bool) -> dict[str, Any]:
+    """Return credentials safe for dashboard config responses."""
+    filtered = _filter_internal_keys(credentials)
+    if not is_oauth_service:
+        return filtered
+    return {key: value for key, value in filtered.items() if key not in OAUTH_CREDENTIAL_FIELDS}
+
+
 def _validated_service(service: str) -> str:
     try:
         return validate_service_name(service)
@@ -569,7 +577,7 @@ async def get_credential_status(
     credentials = load_credentials_for_target(service, target)
 
     if credentials:
-        filtered = _filter_internal_keys(credentials) if isinstance(credentials, dict) else {}
+        filtered = _filter_credentials_for_response(credentials, is_oauth_service=is_oauth_service)
         return CredentialStatus(
             service=service,
             has_credentials=True,
@@ -691,7 +699,10 @@ async def get_credentials(
     if not credentials:
         return {"service": service, "credentials": {}}
 
-    return {"service": service, "credentials": _filter_internal_keys(credentials)}
+    return {
+        "service": service,
+        "credentials": _filter_credentials_for_response(credentials, is_oauth_service=is_oauth_service),
+    }
 
 
 @router.delete("/{service}")

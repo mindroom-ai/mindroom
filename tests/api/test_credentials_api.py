@@ -328,6 +328,44 @@ class TestCredentialsAPI:
         assert saved["list_files"] is False
         assert saved["max_read_size"] == 42
 
+    def test_get_oauth_credentials_filters_token_fields(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth-backed config reads should expose editable tool settings only."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "google_drive",
+            {
+                "token": "drive-access-value",
+                "refresh_token": "drive-refresh-value",
+                "client_id": "client-id",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": ["https://www.googleapis.com/auth/drive.metadata.readonly"],
+                "expires_at": 1234.0,
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+                "list_files": False,
+                "max_read_size": 42,
+            },
+        )
+
+        response = client.get("/api/credentials/google_drive")
+        status_response = client.get("/api/credentials/google_drive/status")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "service": "google_drive",
+            "credentials": {
+                "list_files": False,
+                "max_read_size": 42,
+            },
+        }
+        assert status_response.status_code == 200
+        assert status_response.json()["has_credentials"] is True
+        assert set(status_response.json()["key_names"]) == {"list_files", "max_read_size"}
+
     def test_oauth_tool_settings_preserve_private_tokens(
         self,
         client: TestClient,
@@ -375,6 +413,51 @@ class TestCredentialsAPI:
         assert saved["_source"] == "oauth"
         assert saved["list_files"] is False
         assert saved["max_read_size"] == 42
+
+    def test_get_private_oauth_credentials_filters_token_fields(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Private-scope OAuth config reads should not return stored OAuth tokens."""
+        config = _config_with_worker_scope("user_agent")
+        _publish_committed_runtime_config(client.app, config)
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="standalone",
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        )
+        worker_key = resolve_worker_key("user_agent", identity, agent_name="general")
+        assert worker_key is not None
+        manager.for_worker(worker_key).save_credentials(
+            "google_drive",
+            {
+                "token": "scoped-drive-access-value",
+                "refresh_token": "scoped-drive-refresh-value",
+                "client_id": "client-id",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": ["https://www.googleapis.com/auth/drive.metadata.readonly"],
+                "expires_at": 1234.0,
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+                "list_files": False,
+                "max_read_size": 42,
+            },
+        )
+
+        response = client.get("/api/credentials/google_drive?agent_name=general")
+        status_response = client.get("/api/credentials/google_drive/status?agent_name=general")
+
+        assert response.status_code == 200
+        assert response.json()["credentials"] == {"list_files": False, "max_read_size": 42}
+        assert status_response.status_code == 200
+        assert status_response.json()["has_credentials"] is True
+        assert set(status_response.json()["key_names"]) == {"list_files", "max_read_size"}
 
     def test_non_oauth_tool_settings_still_reject_private_scopes(
         self,
