@@ -4893,7 +4893,7 @@ class TestThreadingBehavior:
             and call.kwargs["coalesced_update_count"] == 2
             and call.kwargs["predecessor_wait_ms"] >= 0.0
             and call.kwargs["update_run_ms"] >= 0.0
-            for call in timing_logger.info.call_args_list
+            for call in timing_logger.debug.call_args_list
         )
 
     @pytest.mark.asyncio
@@ -5062,7 +5062,7 @@ class TestThreadingBehavior:
             await coordinator.close()
 
         timing_calls = [
-            call for call in timing_logger.info.call_args_list if call.args == ("Event cache update timing",)
+            call for call in timing_logger.debug.call_args_list if call.args == ("Event cache update timing",)
         ]
         assert any(
             call.kwargs["barrier_kind"] == "room"
@@ -5109,7 +5109,7 @@ class TestThreadingBehavior:
 
         timing_call = next(
             call
-            for call in timing_logger.info.call_args_list
+            for call in timing_logger.debug.call_args_list
             if call.args == ("Event cache update timing",) and call.kwargs["operation"] == "matrix_cache_single_update"
         )
         assert timing_call.kwargs["predecessor_wait_ms"] == 0.0
@@ -5176,7 +5176,7 @@ class TestThreadingBehavior:
 
         timing_call = next(
             call
-            for call in timing_logger.info.call_args_list
+            for call in timing_logger.debug.call_args_list
             if call.args == ("Event cache update timing",) and call.kwargs["operation"] == "matrix_cache_third_update"
         )
         assert timing_call.kwargs["predecessor_count"] == 2
@@ -5218,7 +5218,7 @@ class TestThreadingBehavior:
             await coordinator.close()
 
         idle_wait_calls = [
-            call for call in timing_logger.info.call_args_list if call.args == ("Event cache idle wait timing",)
+            call for call in timing_logger.debug.call_args_list if call.args == ("Event cache idle wait timing",)
         ]
         assert any(
             call.kwargs["barrier_kind"] == "room"
@@ -5277,7 +5277,7 @@ class TestThreadingBehavior:
             await coordinator.close()
 
         timing_call = next(
-            call for call in timing_logger.info.call_args_list if call.args == ("Event cache idle wait timing",)
+            call for call in timing_logger.debug.call_args_list if call.args == ("Event cache idle wait timing",)
         )
         assert timing_call.kwargs["pending_task_count"] == 2
 
@@ -5332,7 +5332,7 @@ class TestThreadingBehavior:
             await coordinator.close()
 
         timing_call = next(
-            call for call in timing_logger.info.call_args_list if call.args == ("Event cache idle wait timing",)
+            call for call in timing_logger.debug.call_args_list if call.args == ("Event cache idle wait timing",)
         )
         assert timing_call.kwargs["pending_task_count"] == 2
 
@@ -5415,7 +5415,7 @@ class TestThreadingBehavior:
             await coordinator.close()
 
         timing_call = next(
-            call for call in timing_logger.info.call_args_list if call.args == ("Event cache idle wait timing",)
+            call for call in timing_logger.debug.call_args_list if call.args == ("Event cache idle wait timing",)
         )
         assert timing_call.kwargs["pending_task_count"] == 4
 
@@ -5488,7 +5488,7 @@ class TestThreadingBehavior:
         )
 
         append_calls = [
-            call for call in timing_logger.info.call_args_list if call.args == ("Live event cache append timing",)
+            call for call in timing_logger.debug.call_args_list if call.args == ("Live event cache append timing",)
         ]
         assert any(
             call.kwargs["thread_id"] == "$thread:localhost"
@@ -5542,7 +5542,7 @@ class TestThreadingBehavior:
         )
 
         timing_call = next(
-            call for call in timing_logger.info.call_args_list if call.args == ("Live event cache append timing",)
+            call for call in timing_logger.debug.call_args_list if call.args == ("Live event cache append timing",)
         )
         assert timing_call.kwargs["thread_id"] == "$thread:localhost"
         assert timing_call.kwargs["appended"] is False
