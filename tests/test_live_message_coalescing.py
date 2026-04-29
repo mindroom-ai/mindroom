@@ -1313,6 +1313,46 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
 
 
 @pytest.mark.asyncio
+async def test_pending_source_kind_controls_prepared_override_queue_policy() -> None:
+    """The queue-owned source kind should classify prepared events inside the gate."""
+    room = _make_room()
+    event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice_followup",
+        body="voice follow-up",
+        source={"content": {"body": "voice follow-up", "com.mindroom.source_kind": "voice"}},
+        server_timestamp=1000,
+        source_kind_override="voice",
+    )
+    calls: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 60.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    await gate.enqueue(
+        ("!room:localhost", "$thread", "@user:localhost"),
+        PendingEvent(
+            event=event,
+            room=room,
+            source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+        ),
+    )
+    await _wait_for(lambda: len(calls) == 1)
+
+    assert calls[0].source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+    dispatch_event = build_batch_dispatch_event(calls[0])
+    assert isinstance(dispatch_event, PreparedTextEvent)
+    assert dispatch_event.source_kind_override == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "spoofed_source_kind",
     [COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP, "hook", "hook_dispatch", "voice"],

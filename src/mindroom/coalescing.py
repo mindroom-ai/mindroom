@@ -191,9 +191,11 @@ def _effective_source_kind(
     event: DispatchEvent,
     fallback_source_kind: str | None = None,
 ) -> str | None:
+    if fallback_source_kind is not None:
+        return fallback_source_kind
     if isinstance(event, PreparedTextEvent) and event.source_kind_override is not None:
         return event.source_kind_override
-    return fallback_source_kind
+    return None
 
 
 def is_coalescing_exempt_source_kind(
