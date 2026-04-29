@@ -66,21 +66,29 @@ let mockStatusAuthoritative = true;
 const {
   mockUseTools,
   mockGoogleOnAction,
+  mockGoogleDriveOnAction,
+  mockGoogleDriveOnDisconnect,
   mockSpotifyOnAction,
   mockSpotifyOnDisconnect,
   mockPlexOnAction,
   mockPlexOnDisconnect,
   mockGoogleLoadStatus,
+  mockGoogleDriveLoadStatus,
   mockSpotifyLoadStatus,
   mockPlexLoadStatus,
 } = vi.hoisted(() => ({
   mockUseTools: vi.fn(),
   mockGoogleOnAction: vi.fn(),
+  mockGoogleDriveOnAction: vi.fn(),
+  mockGoogleDriveOnDisconnect: vi.fn(),
   mockSpotifyOnAction: vi.fn(),
   mockSpotifyOnDisconnect: vi.fn(),
   mockPlexOnAction: vi.fn(),
   mockPlexOnDisconnect: vi.fn(),
   mockGoogleLoadStatus: vi
+    .fn()
+    .mockResolvedValue({ status: "available", connected: false }),
+  mockGoogleDriveLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
   mockSpotifyLoadStatus: vi
@@ -181,6 +189,23 @@ vi.mock("./integrations/index", () => ({
       }),
       loadStatus: mockGoogleLoadStatus,
     },
+    google_drive: {
+      getConfig: () => ({
+        integration: {
+          id: "google_drive",
+          name: "Google Drive",
+          description: "Search and read files from your connected Google Drive",
+          category: "productivity",
+          icon: <span>Google Drive Icon</span>,
+          status: "available",
+          setup_type: "oauth",
+          connected: false,
+        },
+        onAction: mockGoogleDriveOnAction,
+        onDisconnect: mockGoogleDriveOnDisconnect,
+      }),
+      loadStatus: mockGoogleDriveLoadStatus,
+    },
     spotify: {
       getConfig: () => ({
         integration: {
@@ -238,6 +263,23 @@ vi.mock("./integrations/index", () => ({
     {
       getConfig: () => ({
         integration: {
+          id: "google_drive",
+          name: "Google Drive",
+          description: "Search and read files from your connected Google Drive",
+          category: "productivity",
+          icon: <span>Google Drive Icon</span>,
+          status: "available",
+          setup_type: "oauth",
+          connected: false,
+        },
+        onAction: mockGoogleDriveOnAction,
+        onDisconnect: mockGoogleDriveOnDisconnect,
+      }),
+      loadStatus: mockGoogleDriveLoadStatus,
+    },
+    {
+      getConfig: () => ({
+        integration: {
           id: "spotify",
           name: "Spotify",
           description: "Music streaming service",
@@ -279,11 +321,17 @@ describe("Integrations", () => {
     mockToast.mockReset();
     mockStatusAuthoritative = true;
     mockGoogleOnAction.mockResolvedValue(undefined);
+    mockGoogleDriveOnAction.mockResolvedValue(undefined);
+    mockGoogleDriveOnDisconnect.mockResolvedValue(undefined);
     mockSpotifyOnAction.mockResolvedValue(undefined);
     mockSpotifyOnDisconnect.mockResolvedValue(undefined);
     mockPlexOnAction.mockResolvedValue(undefined);
     mockPlexOnDisconnect.mockResolvedValue(undefined);
     mockGoogleLoadStatus.mockResolvedValue({
+      status: "available",
+      connected: false,
+    });
+    mockGoogleDriveLoadStatus.mockResolvedValue({
       status: "available",
       connected: false,
     });
@@ -871,6 +919,67 @@ describe("Integrations", () => {
     expect(screen.queryByText("Spotify")).not.toBeInTheDocument();
     expect(screen.queryByText("Weather")).not.toBeInTheDocument();
     expect(screen.getByText("Private Mail")).toBeInTheDocument();
+  });
+
+  it("allows scoped OAuth providers to connect for private agents", async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: "mind",
+          display_name: "Private Agent",
+          role: "test",
+          tools: ["google_drive"],
+          skills: [],
+          instructions: [],
+          rooms: ["personal"],
+          private: {
+            per: "user",
+          },
+        },
+      ],
+      agentPoliciesByAgent: {
+        mind: makeAgentPolicy("mind", {
+          is_private: true,
+          effective_execution_scope: "user",
+          scope_label: "private.per=user",
+          scope_source: "private.per",
+          dashboard_credentials_supported: false,
+          private_workspace_enabled: true,
+        }),
+      },
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole("combobox");
+    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
+
+    await waitFor(() => {
+      expect(screen.getByText("Private Agent")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Private Agent"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Google Drive")).toBeInTheDocument();
+    });
+
+    const driveCard = screen.getByText("Google Drive").closest(".h-full");
+    expect(driveCard).toBeInstanceOf(HTMLElement);
+    fireEvent.click(
+      within(driveCard as HTMLElement).getByRole("button", {
+        name: /connect/i,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(mockGoogleDriveOnAction).toHaveBeenCalledTimes(1);
+    });
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Shared-only dashboard configuration",
+      }),
+    );
   });
 
   it("ignores stale shared-scope reloads after switching scope mid-action", async () => {

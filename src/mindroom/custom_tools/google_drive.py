@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, NoReturn
 
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
@@ -70,7 +71,21 @@ class GoogleDriveTools(AgnoGoogleDriveTools):
     def _raise_connection_required(self) -> NoReturn:
         raise self._connection_required()
 
-    def _credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
+    def _expiry_from_token_data(self, token_data: dict[str, Any]) -> datetime | None:
+        expires_at = token_data.get("expires_at")
+        if not isinstance(expires_at, int | float) or expires_at <= 0:
+            return None
+        return datetime.fromtimestamp(float(expires_at), tz=UTC).replace(tzinfo=None)
+
+    def _expires_at_from_expiry(self, credentials: Credentials) -> float | None:
+        expiry = credentials.expiry
+        if expiry is None:
+            return None
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=UTC)
+        return expiry.timestamp()
+
+    def _credentials_from_token_data(self, token_data: dict[str, Any]) -> Credentials:
         ensure_tool_deps(_GOOGLE_OAUTH_DEPS, "google_drive", self._runtime_paths)
 
         client_config = self._oauth_provider.client_config(self._runtime_paths)
@@ -83,6 +98,7 @@ class GoogleDriveTools(AgnoGoogleDriveTools):
             client_id=token_data.get("client_id") or client_config.client_id,
             client_secret=client_config.client_secret,
             scopes=token_data.get("scopes") or list(self._oauth_provider.scopes),
+            expiry=self._expiry_from_token_data(token_data),
         )
 
     def _auth(self) -> None:
@@ -101,11 +117,15 @@ class GoogleDriveTools(AgnoGoogleDriveTools):
         try:
             ensure_tool_deps(_GOOGLE_OAUTH_DEPS, "google_drive", self._runtime_paths)
 
-            self.creds = self._credentials_from_token_data(token_data)
-            if self.creds.expired and self.creds.refresh_token:
-                self.creds.refresh(GoogleRequest())
+            credentials = self._credentials_from_token_data(token_data)
+            self.creds = credentials
+            if credentials.expired and credentials.refresh_token:
+                credentials.refresh(GoogleRequest())
                 refreshed_token_data = dict(token_data)
-                refreshed_token_data["token"] = self.creds.token
+                refreshed_token_data["token"] = credentials.token
+                refreshed_expires_at = self._expires_at_from_expiry(credentials)
+                if refreshed_expires_at is not None:
+                    refreshed_token_data["expires_at"] = refreshed_expires_at
                 self._save_token_data(refreshed_token_data)
             if not self.creds.valid:
                 self._raise_connection_required()

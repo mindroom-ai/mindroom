@@ -6,6 +6,7 @@ import importlib
 import secrets
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -266,6 +267,24 @@ def sanitize_next_path(next_path: str | None) -> str:
     if not next_path or not next_path.startswith("/") or next_path.startswith("//"):
         return "/"
     return next_path
+
+
+def _request_path_with_query(request: Request) -> str:
+    path = request.url.path
+    query = request.url.query
+    return f"{path}?{query}" if query else path
+
+
+def login_redirect_for_request(request: Request, *, next_path: str | None = None) -> RedirectResponse | None:
+    """Return the dashboard login redirect for one browser request when configured."""
+    auth_settings = request_auth_state(request).settings
+    if auth_settings.supabase_url and auth_settings.supabase_anon_key and auth_settings.platform_login_url:
+        redirect_to = quote(str(request.url), safe="")
+        return RedirectResponse(f"{auth_settings.platform_login_url}?redirect_to={redirect_to}")
+    if auth_settings.mindroom_api_key:
+        login_target = sanitize_next_path(next_path or _request_path_with_query(request))
+        return RedirectResponse(f"/login?{urlencode({'next': login_target})}")
+    return None
 
 
 def _render_standalone_login_page(

@@ -262,11 +262,18 @@ export function Integrations() {
     );
   };
 
+  const integrationHasScopedOAuthProvider = (integration: Integration) =>
+    integration.setup_type === "oauth" &&
+    integrationProviders[integration.id] != null &&
+    !SHARED_ONLY_PROVIDER_IDS.has(integration.id);
+
+  const blocksScopedDashboardCredentials = (integration: Integration) =>
+    disablesDashboardCredentialManagement &&
+    integrationNeedsDashboardCredentials(integration) &&
+    !integrationHasScopedOAuthProvider(integration);
+
   const handleIntegrationAction = async (integration: Integration) => {
-    if (
-      disablesDashboardCredentialManagement &&
-      integrationNeedsDashboardCredentials(integration)
-    ) {
+    if (blocksScopedDashboardCredentials(integration)) {
       toast({
         title: "Shared-only dashboard configuration",
         description:
@@ -349,10 +356,7 @@ export function Integrations() {
   };
 
   const handleDisconnect = async (integration: Integration) => {
-    if (
-      disablesDashboardCredentialManagement &&
-      integrationNeedsDashboardCredentials(integration)
-    ) {
+    if (blocksScopedDashboardCredentials(integration)) {
       toast({
         title: "Shared-only dashboard configuration",
         description:
@@ -411,10 +415,7 @@ export function Integrations() {
   };
 
   const getActionButton = (integration: Integration) => {
-    if (
-      disablesDashboardCredentialManagement &&
-      integrationNeedsDashboardCredentials(integration)
-    ) {
+    if (blocksScopedDashboardCredentials(integration)) {
       return (
         <Button disabled variant="outline" size="sm">
           Shared-only config
@@ -862,14 +863,15 @@ export function Integrations() {
           {hidesSharedOnlyIntegrations && (
             <Alert className="mt-3">
               <AlertDescription>
-                Dashboard credential setup, editing, and disconnect are only
-                supported for shared deployment credentials.
+                Legacy dashboard credential setup, editing, and disconnect are
+                only supported for shared deployment credentials.
               </AlertDescription>
               <AlertDescription className="mt-2">
                 Google Services, Home Assistant, Spotify, Gmail, Google
-                Calendar, and Google Sheets are only supported for shared
-                deployment credentials or agents with an effective shared
-                runtime scope (<code>worker_scope=shared</code>).
+                Calendar, and Google Sheets remain shared-only unless the agent
+                has an effective shared runtime scope (
+                <code>worker_scope=shared</code>). Scoped OAuth integrations
+                such as Google Drive can be connected for this selected agent.
               </AlertDescription>
             </Alert>
           )}

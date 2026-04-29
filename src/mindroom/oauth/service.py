@@ -29,6 +29,9 @@ class OAuthConnectTarget:
     agent_name: str | None
     worker_scope: str
     worker_key: str
+    requester_id: str | None
+    tenant_id: str | None
+    account_id: str | None
     created_at: float
 
 
@@ -58,6 +61,11 @@ def issue_oauth_connect_token(provider: OAuthProvider, worker_target: ResolvedWo
         agent_name=worker_target.routing_agent_name,
         worker_scope=worker_target.worker_scope or "unscoped",
         worker_key=worker_target.worker_key,
+        requester_id=(
+            worker_target.execution_identity.requester_id if worker_target.execution_identity is not None else None
+        ),
+        tenant_id=worker_target.tenant_id,
+        account_id=worker_target.account_id,
         created_at=now,
     )
     with _oauth_connect_token_lock:
@@ -91,6 +99,9 @@ def oauth_connect_target_payload(connect_target: OAuthConnectTarget) -> dict[str
         "agent_name": connect_target.agent_name or "",
         "worker_scope": connect_target.worker_scope,
         "worker_key": connect_target.worker_key,
+        "requester_id": connect_target.requester_id or "",
+        "tenant_id": connect_target.tenant_id or "",
+        "account_id": connect_target.account_id or "",
     }
 
 

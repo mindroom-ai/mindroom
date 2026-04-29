@@ -11,6 +11,8 @@ The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provide
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the exact worker credential target that produced the missing-credentials tool result.
+That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials.
+Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal.
 
 Plugins may declare an `oauth_module` in `mindroom.plugin.json`.
 That module exposes `register_oauth_providers(settings, runtime_paths)` and returns `OAuthProvider` objects.
@@ -18,6 +20,7 @@ This keeps FastAPI routing and state handling in core while still letting plugin
 
 Credential writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`.
 For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime.
+If MindRoom cannot resolve the authenticated dashboard user to the requester carried by a conversation-issued link, the link fails closed and no credential is saved.
 Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent.
 
 Identity restrictions are provider settings, not MindRoom policy.

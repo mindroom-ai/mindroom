@@ -11,7 +11,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mindroom import constants
@@ -53,7 +53,7 @@ def _make_test_app(runtime_paths: constants.RuntimePaths, payload: dict[str, Any
     api_app = FastAPI()
     main.initialize_api_app(api_app, runtime_paths)
     api_app.include_router(auth.router)
-    api_app.include_router(oauth_router, dependencies=[Depends(auth.verify_user)])
+    api_app.include_router(oauth_router)
     _publish_config(api_app, runtime_paths, payload)
     return api_app
 
@@ -250,6 +250,39 @@ def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -
     assert params["state"][0] != "general"
 
 
+def test_authorize_redirects_unauthenticated_browser_to_login(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    api_app = _make_test_app(runtime_paths, _config_payload())
+
+    with TestClient(api_app) as client:
+        response = client.get("/api/oauth/test_drive/authorize?agent_name=general", follow_redirects=False)
+
+    assert response.status_code == 307
+    location = urlparse(response.headers["location"])
+    assert location.path == "/login"
+    assert parse_qs(location.query) == {
+        "next": ["/api/oauth/test_drive/authorize?agent_name=general"],
+    }
+
+
+def test_authorize_login_redirect_preserves_scoped_oauth_query(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user"))
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/api/oauth/test_drive/authorize?agent_name=general&execution_scope=user",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 307
+    location = urlparse(response.headers["location"])
+    assert location.path == "/login"
+    assert parse_qs(location.query) == {
+        "next": ["/api/oauth/test_drive/authorize?agent_name=general&execution_scope=user"],
+    }
+
+
 def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -257,6 +290,15 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     provider = _fake_provider()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.for_worker(_worker_key_for_standalone_user()).save_credentials(
+        provider.credential_service,
+        {
+            "list_files": False,
+            "max_read_size": 42,
+            "_source": "ui",
+        },
+    )
 
     with patch("mindroom.api.oauth.load_oauth_providers", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
@@ -269,19 +311,24 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
             )
 
     assert callback_response.status_code == 307
-    manager = get_runtime_credentials_manager(runtime_paths)
     worker_credentials = manager.for_worker(_worker_key_for_standalone_user()).load_credentials(
         provider.credential_service,
     )
     assert worker_credentials is not None
     assert worker_credentials["token"] == "test_drive-access-token"
+    assert worker_credentials["list_files"] is False
+    assert worker_credentials["max_read_size"] == 42
     assert worker_credentials["_oauth_claims"]["email"] == "alice@example.com"
 
 
 def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
-        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     provider = _fake_provider()
@@ -323,6 +370,42 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
     assert matrix_credentials is not None
     assert matrix_credentials["token"] == "test_drive-access-token"
     assert standalone_credentials is None
+
+
+def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service.issue_oauth_connect_token(provider, worker_target)
+    assert connect_token is not None
+
+    with patch("mindroom.api.oauth.load_oauth_providers", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?connect_token={connect_token}",
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 403
+    manager = get_runtime_credentials_manager(runtime_paths)
+    matrix_credentials = manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).load_credentials(
+        provider.credential_service,
+    )
+    assert matrix_credentials is None
 
 
 def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:
@@ -415,6 +498,8 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
         provider.credential_service,
         {
             "token": "stored-token",
+            "list_files": False,
+            "max_read_size": 42,
             "_source": "oauth",
             "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
         },
@@ -433,3 +518,10 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
     assert disconnect_response.status_code == 200
     assert disconnected_status_response.status_code == 200
     assert disconnected_status_response.json()["connected"] is False
+    remaining_credentials = manager.for_worker(_worker_key_for_standalone_user()).load_credentials(
+        provider.credential_service,
+    )
+    assert remaining_credentials == {
+        "list_files": False,
+        "max_read_size": 42,
+    }

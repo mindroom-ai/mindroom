@@ -30,6 +30,7 @@ from mindroom.matrix.health import (
     reset_matrix_sync_health,
 )
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.models import WorkerHandle
 
 TEST_WORKER_AUTH = "token"
@@ -1595,6 +1596,80 @@ def test_get_tools_shared_scope_local_only_integrations_ignore_worker_allowlist(
     tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
     assert tools_by_name["gmail"]["status"] == "available"
     assert tools_by_name["homeassistant"]["status"] == "available"
+
+
+def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: TestClient) -> None:
+    """Generic OAuth-backed tools should not look connected from config-only credentials."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(main.app)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="standalone",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_key = resolve_worker_key("shared", identity, agent_name="general")
+    assert worker_key is not None
+    scoped_manager = manager.for_worker(worker_key)
+    scoped_manager.save_credentials(
+        "google_drive",
+        {
+            "list_files": True,
+            "max_read_size": 1048576,
+            "_source": "ui",
+        },
+    )
+    tools = [
+        {
+            "name": "google_drive",
+            "display_name": "Google Drive",
+            "description": "Drive access",
+            "category": "productivity",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "google_drive",
+            "config_fields": [
+                {
+                    "name": "max_read_size",
+                    "required": False,
+                },
+            ],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    tool = response.json()["tools"][0]
+    assert tool["name"] == "google_drive"
+    assert tool["status"] == "requires_config"
+
+    scoped_manager.save_credentials(
+        "google_drive",
+        {
+            "token": "drive-token",
+            "list_files": True,
+            "max_read_size": 1048576,
+            "_source": "oauth",
+        },
+    )
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        connected_response = test_client.get("/api/tools/?agent_name=general")
+
+    assert connected_response.status_code == 200
+    connected_tool = connected_response.json()["tools"][0]
+    assert connected_tool["status"] == "available"
 
 
 def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboard_truth(
@@ -3348,7 +3423,9 @@ def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
 
     response = api_key_client.get("/", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"] == "/login?next=/"
+    location = urlparse(response.headers["location"])
+    assert location.path == "/login"
+    assert parse_qs(location.query) == {"next": ["/"]}
 
 
 def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient) -> None:

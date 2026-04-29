@@ -492,11 +492,14 @@ def save_scoped_credentials(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
+    merge_existing: bool = False,
 ) -> None:
     """Save credentials for a service to the current worker scope when available."""
     manager = credentials_manager
     if worker_target is None or worker_target.worker_scope is None:
         target_manager = manager if manager.shared_base_path != manager.base_path else manager.shared_manager()
+        if merge_existing:
+            credentials = {**(target_manager.load_credentials(service) or {}), **credentials}
         target_manager.save_credentials(service, credentials)
         return
 
@@ -505,4 +508,6 @@ def save_scoped_credentials(
         worker_target=worker_target,
     )
     target_manager = worker_manager or manager.shared_manager()
+    if merge_existing:
+        credentials = {**(target_manager.load_credentials(service) or {}), **credentials}
     target_manager.save_credentials(service, credentials)

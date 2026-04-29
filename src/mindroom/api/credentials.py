@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
+_OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
 _pending_oauth_state_lock = threading.Lock()
 
@@ -107,6 +108,16 @@ def _require_auth_user_id(request: Request) -> str:
     if isinstance(user_id, str) and user_id:
         return user_id
     raise HTTPException(status_code=401, detail="Missing or invalid credentials")
+
+
+def dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
+    """Return the requester identity dashboard-scoped worker credentials should use."""
+    owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
+    if owner_user_id:
+        return owner_user_id
+    auth_user = _request_auth_user(request) or {}
+    user_id = auth_user.get("user_id")
+    return user_id if isinstance(user_id, str) and user_id else None
 
 
 def _prune_expired_pending_oauth_states(now: float) -> None:
@@ -185,15 +196,12 @@ def build_dashboard_execution_identity(
     and it exists solely so dashboard previews hit the same scoped-runtime seams as
     live requests once an execution scope is chosen.
     """
-    auth_user = _request_auth_user(request) or {}
-    user_id = auth_user.get("user_id")
-    requester_id = user_id if isinstance(user_id, str) and user_id else None
     tenant_id = runtime_paths.env_value("CUSTOMER_ID")
     account_id = runtime_paths.env_value("ACCOUNT_ID")
     return ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,
-        requester_id=requester_id,
+        requester_id=dashboard_requester_id_for_request(request, runtime_paths),
         room_id=None,
         thread_id=None,
         resolved_thread_id=None,

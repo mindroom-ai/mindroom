@@ -9,8 +9,9 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import verify_user
+from mindroom.api.auth import login_redirect_for_request, verify_user
 from mindroom.api.credentials import (
+    build_dashboard_execution_identity,
     consume_pending_oauth_request,
     issue_pending_oauth_state,
     load_credentials_for_target,
@@ -19,6 +20,7 @@ from mindroom.api.credentials import (
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth import OAuthClaimValidationError, OAuthProvider, OAuthProviderError, load_oauth_providers
 from mindroom.oauth.service import (
+    OAuthConnectTarget,
     consume_oauth_connect_token,
     oauth_connect_target_payload,
     oauth_success_redirect_url,
@@ -31,6 +33,21 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
+_OAUTH_CREDENTIAL_FIELDS = frozenset(
+    {
+        "_id_token",
+        "_oauth_claims",
+        "_oauth_provider",
+        "_source",
+        "client_id",
+        "expires_at",
+        "refresh_token",
+        "scopes",
+        "token",
+        "token_type",
+        "token_uri",
+    },
+)
 
 
 class OAuthConnectResponse(BaseModel):
@@ -62,6 +79,22 @@ def _load_provider(request: Request, provider_id: str) -> tuple[OAuthProvider, R
     return provider, runtime_paths
 
 
+async def _require_oauth_api_user(request: Request) -> None:
+    await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+
+
+async def _require_oauth_browser_user(request: Request) -> RedirectResponse | None:
+    try:
+        await _require_oauth_api_user(request)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            login_redirect = login_redirect_for_request(request)
+            if login_redirect is not None:
+                return login_redirect
+        raise
+    return None
+
+
 def _issue_authorization_url(
     request: Request,
     provider: OAuthProvider,
@@ -75,6 +108,7 @@ def _issue_authorization_url(
             connect_target = consume_oauth_connect_token(provider, connect_token)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _verify_connect_target_authorized(request, connect_target, runtime_paths)
         state = issue_pending_oauth_state(
             request,
             provider.id,
@@ -136,6 +170,62 @@ def _worker_scope_from_payload(payload: dict[str, str]) -> WorkerScope | None:
     raise HTTPException(status_code=400, detail="OAuth state has an invalid worker scope")
 
 
+def _verify_worker_binding_authorized(
+    request: Request,
+    *,
+    worker_scope: str,
+    agent_name: str | None,
+    requester_id: str | None,
+    tenant_id: str | None,
+    account_id: str | None,
+    runtime_paths: RuntimePaths,
+) -> None:
+    dashboard_identity = build_dashboard_execution_identity(
+        request,
+        agent_name or "oauth",
+        runtime_paths=runtime_paths,
+    )
+    if worker_scope in ("user", "user_agent") and (not requester_id or requester_id != dashboard_identity.requester_id):
+        raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
+
+    if tenant_id and dashboard_identity.tenant_id and tenant_id != dashboard_identity.tenant_id:
+        raise HTTPException(status_code=403, detail="OAuth connect link does not belong to this tenant")
+    if account_id and dashboard_identity.account_id and account_id != dashboard_identity.account_id:
+        raise HTTPException(status_code=403, detail="OAuth connect link does not belong to this account")
+
+
+def _verify_connect_target_authorized(
+    request: Request,
+    connect_target: OAuthConnectTarget,
+    runtime_paths: RuntimePaths,
+) -> None:
+    _verify_worker_binding_authorized(
+        request,
+        worker_scope=connect_target.worker_scope,
+        agent_name=connect_target.agent_name,
+        requester_id=connect_target.requester_id,
+        tenant_id=connect_target.tenant_id,
+        account_id=connect_target.account_id,
+        runtime_paths=runtime_paths,
+    )
+
+
+def _verify_worker_payload_authorized(
+    request: Request,
+    payload: dict[str, str],
+    runtime_paths: RuntimePaths,
+) -> None:
+    _verify_worker_binding_authorized(
+        request,
+        worker_scope=payload.get("worker_scope", ""),
+        agent_name=payload.get("agent_name") or None,
+        requester_id=payload.get("requester_id") or None,
+        tenant_id=payload.get("tenant_id") or None,
+        account_id=payload.get("account_id") or None,
+        runtime_paths=runtime_paths,
+    )
+
+
 def _worker_target_from_payload(provider: OAuthProvider, payload: dict[str, str]) -> ResolvedWorkerTarget:
     if payload.get("provider") != provider.id or payload.get("credential_service") != provider.credential_service:
         raise HTTPException(status_code=400, detail="OAuth state does not match this provider")
@@ -147,8 +237,8 @@ def _worker_target_from_payload(provider: OAuthProvider, payload: dict[str, str]
         worker_scope=_worker_scope_from_payload(payload),
         routing_agent_name=agent_name,
         execution_identity=None,
-        tenant_id=None,
-        account_id=None,
+        tenant_id=payload.get("tenant_id") or None,
+        account_id=payload.get("account_id") or None,
         worker_key=worker_key,
     )
 
@@ -173,6 +263,7 @@ def _claim_str(credentials: dict[str, Any], key: str) -> str | None:
 @router.post("/{provider_id}/connect")
 async def connect(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthConnectResponse:
     """Start a provider OAuth flow and return the external authorization URL."""
+    await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
     return _issue_authorization_url(request, provider, runtime_paths, agent_name=agent_name)
 
@@ -185,6 +276,9 @@ async def authorize(
     connect_token: str | None = None,
 ) -> RedirectResponse:
     """Start a provider OAuth flow from a browser-openable MindRoom URL."""
+    login_redirect = await _require_oauth_browser_user(request)
+    if login_redirect is not None:
+        return login_redirect
     provider, runtime_paths = _load_provider(request, provider_id)
     response = _issue_authorization_url(
         request,
@@ -211,7 +305,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
     if not state:
         raise HTTPException(status_code=400, detail="No OAuth state received")
 
-    await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+    await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
     pending = consume_pending_oauth_request(request, provider.id, state)
     worker_target: ResolvedWorkerTarget | None = None
@@ -219,6 +313,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
     if _state_payload_target_mode(pending.payload) == "worker_key":
         if pending.payload is None:
             raise HTTPException(status_code=400, detail="OAuth state is missing a credential target")
+        _verify_worker_payload_authorized(request, pending.payload, runtime_paths)
         worker_target = _worker_target_from_payload(provider, pending.payload)
     else:
         target = resolve_request_credentials_target(
@@ -248,6 +343,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
                 target.base_manager if target is not None else get_runtime_credentials_manager(runtime_paths)
             ),
             worker_target=worker_target,
+            merge_existing=True,
         )
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -262,6 +358,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
 @router.get("/{provider_id}/status")
 async def status(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthStatusResponse:
     """Return scoped connection status for one provider."""
+    await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
     target = resolve_request_credentials_target(
         request,
@@ -286,6 +383,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
 @router.post("/{provider_id}/disconnect")
 async def disconnect(provider_id: str, request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Remove scoped credentials for one provider."""
+    await _require_oauth_api_user(request)
     provider, _runtime_paths = _load_provider(request, provider_id)
     target = resolve_request_credentials_target(
         request,
@@ -293,5 +391,12 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
         service_names=(provider.credential_service,),
         allow_private_scopes=True,
     )
-    target.target_manager.delete_credentials(provider.credential_service)
+    existing_credentials = target.target_manager.load_credentials(provider.credential_service) or {}
+    remaining_credentials = {
+        key: value for key, value in existing_credentials.items() if key not in _OAUTH_CREDENTIAL_FIELDS
+    }
+    if remaining_credentials:
+        target.target_manager.save_credentials(provider.credential_service, remaining_credentials)
+    else:
+        target.target_manager.delete_credentials(provider.credential_service)
     return {"status": "disconnected", "provider": provider.id}

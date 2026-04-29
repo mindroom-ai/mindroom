@@ -204,6 +204,7 @@ OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oa
 Dashboard flows normally call `connect` and use the returned provider authorization URL.
 Conversation flows should show the browser-openable `authorize` URL, because that URL first authenticates the MindRoom user and then redirects to the external provider.
 Conversation-issued links include an opaque connect token so the callback stores credentials in the same worker target the tool was using.
+The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester.
 The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes.
 Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
 

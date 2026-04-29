@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, Response
 
-from mindroom.api.auth import request_auth_state, request_has_frontend_access, sanitize_next_path
+from mindroom.api.auth import login_redirect_for_request, request_has_frontend_access, sanitize_next_path
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 
@@ -51,15 +51,10 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
         raise HTTPException(status_code=404, detail="Not found")
 
     if not request_has_frontend_access(request):
-        auth_settings = request_auth_state(request).settings
         target_path = sanitize_next_path(f"/{path}" if path else "/")
-        if auth_settings.supabase_url and auth_settings.supabase_anon_key and auth_settings.platform_login_url:
-            redirect_to = quote(str(request.url), safe="")
-            return RedirectResponse(f"{auth_settings.platform_login_url}?redirect_to={redirect_to}")
-        if auth_settings.mindroom_api_key:
-            login_target = quote(target_path, safe="/?=&")
-            return RedirectResponse(f"/login?next={login_target}")
-
+        login_redirect = login_redirect_for_request(request, next_path=target_path)
+        if login_redirect is not None:
+            return login_redirect
         raise HTTPException(status_code=401, detail="Authentication required")
 
     frontend_dir = ensure_frontend_dist_dir(api_runtime_paths(request))

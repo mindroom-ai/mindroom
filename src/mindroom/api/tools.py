@@ -94,6 +94,19 @@ def _check_standard_tool_configured(tool: dict[str, Any], credentials: dict[str,
     return all(field in credentials for field in required_fields)
 
 
+def _check_auth_provider_configured(
+    tool_name: str,
+    auth_provider: str,
+    credentials: dict[str, Any] | None,
+) -> bool:
+    """Return whether a delegated auth provider has usable credentials for one tool."""
+    if not credentials:
+        return False
+    if auth_provider == "google":
+        return check_google_tool_configured(tool_name, credentials)
+    return bool(credentials.get("token") or credentials.get("access_token") or credentials.get("refresh_token"))
+
+
 def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
     """Append config-only tool presets so the dashboard can display them."""
     existing_tool_names = {tool.get("name") for tool in tools}
@@ -256,10 +269,7 @@ def _update_tools_statuses(
         auth_provider = tool.get("auth_provider")
         if auth_provider:
             provider_creds = get_credentials(auth_provider)
-            if provider_creds and (
-                (auth_provider == "google" and check_google_tool_configured(tool_name, provider_creds))
-                or auth_provider != "google"
-            ):
+            if _check_auth_provider_configured(tool_name, auth_provider, provider_creds):
                 tool["status"] = "available"
             continue
 

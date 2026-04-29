@@ -180,6 +180,8 @@ agents:
 
 If credentials are missing, the tool returns a MindRoom connect URL for the selected agent.
 That URL contains an opaque connect token for the current worker credential target instead of exposing the Matrix requester in the URL.
+MindRoom verifies that the authenticated dashboard user resolves to the same requester before it stores credentials.
+For standalone personal deployments, pairing normally sets `MINDROOM_OWNER_USER_ID`; set it manually if agent-issued links need to resolve to the owner Matrix user.
 The user opens that URL, completes Google OAuth, and retries the original request.
 Tokens are stored in MindRoom credential storage for the resolved requester and agent scope, not in `config.yaml`.
 
