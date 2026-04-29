@@ -121,8 +121,15 @@ spec:
   volumeClaimTemplates:
     - metadata:
         name: {{ include "mindroom-runtime.eventCachePostgresVolumeName" . }}
+        {{- if or .Values.eventCache.postgres.persistence.includeChartLabels .Values.eventCache.postgres.persistence.labels }}
         labels:
+          {{- if .Values.eventCache.postgres.persistence.includeChartLabels }}
           {{- include "mindroom-runtime.labels" . | nindent 10 }}
+          {{- end }}
+          {{- with .Values.eventCache.postgres.persistence.labels }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+        {{- end }}
       spec:
         accessModes:
           {{- toYaml .Values.eventCache.postgres.persistence.accessModes | nindent 10 }}

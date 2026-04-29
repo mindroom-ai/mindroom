@@ -109,6 +109,11 @@ eventCache:
     persistence:
       enabled: true
       volumeName: data
+      # Leave true for chart-created StatefulSets and upgrades.
+      # Set false when adopting an existing StatefulSet whose volumeClaimTemplate has no chart labels.
+      includeChartLabels: true
+      # Extra labels for the StatefulSet volumeClaimTemplates metadata.
+      labels: {}
       accessModes:
         - ReadWriteOnce
       storageClassName: ""

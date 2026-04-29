@@ -85,6 +85,7 @@ jobs:
             --set eventCache.postgres.nameOverride=existing-event-cache-postgres \
             --set eventCache.postgres.selectorLabels.app=existing-event-cache-postgres \
             --set eventCache.postgres.persistence.volumeName=existing-event-cache-postgres-data \
+            --set eventCache.postgres.persistence.includeChartLabels=false \
             --set eventCache.postgres.auth.existingSecret=existing-event-cache-secrets \
             --set eventCache.postgres.auth.passwordKey=POSTGRES_PASSWORD \
             --set eventCache.databaseUrl.existingSecret=existing-event-cache-secrets \
