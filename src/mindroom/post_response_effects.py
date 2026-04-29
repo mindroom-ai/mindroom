@@ -278,6 +278,25 @@ async def apply_post_response_effects(
             dict(final_delivery_outcome.option_map),
             [dict(item) for item in final_delivery_outcome.options_list],
         )
+    else:  # noqa: PLR5501, RUF100
+        if response_event_id is not None and (
+            (final_delivery_outcome.final_visible_body or "")
+            .rstrip()
+            .endswith("React with an emoji or type the number to respond.")
+            or final_delivery_outcome.option_map
+            or final_delivery_outcome.options_list
+        ):
+            deps.logger.warning(
+                "Interactive question registration skipped",
+                response_event_id=response_event_id,
+                register_interactive_is_none=deps.register_interactive is None,
+                terminal_status=final_delivery_outcome.terminal_status,
+                final_visible_body_is_none=final_delivery_outcome.final_visible_body is None,
+                suppressed=final_delivery_outcome.suppressed,
+                option_map_empty=not bool(final_delivery_outcome.option_map),
+                options_list_empty=not bool(final_delivery_outcome.options_list),
+                interactive_target_is_none=outcome.interactive_target is None,
+            )
 
     if deps.queue_memory_persistence is not None:
         try:
