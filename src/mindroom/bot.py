@@ -1365,8 +1365,42 @@ class AgentBot:
         """Delegate one flushed coalesced batch to the turn engine."""
         await self._turn_controller.handle_coalesced_batch(batch)
 
+    @staticmethod
+    def _origin_server_ts_from_source(source: object) -> int | float | None:
+        """Return a Matrix origin timestamp from a raw event source if present."""
+        if not isinstance(source, dict):
+            return None
+        source_dict = cast("dict[str, object]", source)
+        raw_timestamp = source_dict.get("origin_server_ts")
+        if isinstance(raw_timestamp, int | float) and not isinstance(raw_timestamp, bool):
+            return raw_timestamp
+        return None
+
+    def _log_matrix_event_callback_started(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText | _MediaDispatchEvent,
+        *,
+        callback_name: str,
+    ) -> None:
+        """Log Matrix ingress timing without message content."""
+        receive_timestamp_ms = int(time.time() * 1000)
+        origin_server_ts = self._origin_server_ts_from_source(event.source)
+        log_context: dict[str, object] = {
+            "callback": callback_name,
+            "event_id": event.event_id,
+            "room_id": room.room_id,
+            "agent_name": self.agent_name,
+            "receive_timestamp_ms": receive_timestamp_ms,
+        }
+        if origin_server_ts is not None:
+            log_context["origin_server_ts_ms"] = origin_server_ts
+            log_context["matrix_event_receive_lag_ms"] = round(receive_timestamp_ms - float(origin_server_ts), 1)
+        self.logger.info("matrix_event_callback_started", **log_context)
+
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Delegate one inbound text event to the turn engine."""
+        self._log_matrix_event_callback_started(room, event, callback_name="message")
         await self._turn_controller.handle_text_event(room, event)
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
@@ -1450,6 +1484,7 @@ class AgentBot:
         event: _MediaDispatchEvent,
     ) -> None:
         """Delegate one inbound media event to the turn engine."""
+        self._log_matrix_event_callback_started(room, event, callback_name="media")
         await self._turn_controller.handle_media_event(room, event)
 
     def _should_queue_follow_up_in_active_response_thread(
