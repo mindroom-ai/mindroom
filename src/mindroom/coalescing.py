@@ -26,8 +26,6 @@ from .timing import emit_elapsed_timing, event_timing_scope
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
-
 __all__ = [
     "COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP",
     "COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY",
@@ -37,6 +35,7 @@ __all__ = [
     "DispatchEvent",
     "GatePhase",
     "MediaDispatchEvent",
+    "PendingDispatchMetadata",
     "PendingEvent",
     "PreparedTextEvent",
     "TextDispatchEvent",
@@ -112,6 +111,16 @@ class PreparedTextEvent:
 
 
 @dataclass
+class PendingDispatchMetadata:
+    """Opaque metadata that must be closed if claimed work cannot dispatch."""
+
+    kind: str
+    payload: object
+    close: Callable[[], None]
+    requires_solo_batch: bool = False
+
+
+@dataclass
 class PendingEvent:
     """One queued inbound event waiting to be coalesced."""
 
@@ -119,7 +128,7 @@ class PendingEvent:
     room: nio.MatrixRoom
     source_kind: str
     enqueue_time: float = field(default_factory=time.time)
-    queued_notice_reservation: QueuedHumanNoticeReservation | None = None
+    dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
 
 @dataclass
@@ -156,7 +165,7 @@ class CoalescedBatch:
     media_events: list[MediaDispatchEvent]
     original_sender: str | None = None
     raw_audio_fallback: bool = False
-    queued_notice_reservation: QueuedHumanNoticeReservation | None = None
+    dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -290,28 +299,24 @@ def _batch_source_kind(ordered_pending_events: list[PendingEvent]) -> str:
     return min(resolved_source_kinds, key=lambda sk: _SOURCE_KIND_PRIORITY.get(sk, 999))
 
 
-def _batch_queued_notice_reservation(
+def _batch_dispatch_metadata(
     ordered_pending_events: list[PendingEvent],
-) -> QueuedHumanNoticeReservation | None:
-    reservations = [
-        pending_event.queued_notice_reservation
-        for pending_event in ordered_pending_events
-        if pending_event.queued_notice_reservation is not None
-    ]
-    if not reservations:
-        return None
-    if len(ordered_pending_events) == 1:
-        return reservations[0]
-    for reservation in reservations:
-        reservation.cancel()
-    msg = "Queued-human notice reservations must dispatch as solo batches"
+) -> tuple[PendingDispatchMetadata, ...]:
+    metadata = tuple(item for pending_event in ordered_pending_events for item in pending_event.dispatch_metadata)
+    if not metadata:
+        return ()
+    if len(ordered_pending_events) == 1 or not any(item.requires_solo_batch for item in metadata):
+        return metadata
+    for item in metadata:
+        item.close()
+    msg = "Pending dispatch metadata requires solo batches"
     raise ValueError(msg)
 
 
-def _cancel_pending_event_reservations(pending_events: list[PendingEvent]) -> None:
+def _close_pending_event_metadata(pending_events: list[PendingEvent]) -> None:
     for pending_event in pending_events:
-        if pending_event.queued_notice_reservation is not None:
-            pending_event.queued_notice_reservation.cancel()
+        for item in pending_event.dispatch_metadata:
+            item.close()
 
 
 def _batch_source_event_prompts(ordered_pending_events: list[PendingEvent]) -> dict[str, str]:
@@ -354,7 +359,7 @@ def build_coalesced_batch(key: CoalescingKey, pending_events: list[PendingEvent]
         ],
         original_sender=original_sender,
         raw_audio_fallback=raw_audio_fallback,
-        queued_notice_reservation=_batch_queued_notice_reservation(ordered_pending_events),
+        dispatch_metadata=_batch_dispatch_metadata(ordered_pending_events),
     )
 
 
@@ -968,10 +973,10 @@ class CoalescingGate:
         try:
             await self._dispatch_events(key, gate, pending_events, bypass_grace=bypass_grace)
         except asyncio.CancelledError:
-            _cancel_pending_event_reservations(pending_events)
+            _close_pending_event_metadata(pending_events)
             raise
         except Exception as error:
-            _cancel_pending_event_reservations(pending_events)
+            _close_pending_event_metadata(pending_events)
             current_key, current_gate = self._resolve_gate_entry(key, gate)
             self._log_dispatch_failure(current_key or key, current_gate or gate, error)
 

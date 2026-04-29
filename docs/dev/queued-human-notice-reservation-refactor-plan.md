@@ -27,9 +27,9 @@ Every queued-human notice reservation must be consumed exactly once when a real 
 - Calling `cancel()` after `consume()` is safe.
 - `consume()` means the follow-up has reached response lifecycle ownership.
 - `cancel()` means the follow-up will not reach response lifecycle ownership.
-- `coalescing.py` may carry the reservation as opaque metadata.
-- `coalescing.py` must not inspect, consume, or know the meaning of the reservation.
-- `coalescing.py` may cancel opaque reservation metadata only when it drops claimed work before dispatch callback ownership.
+- `coalescing.py` may carry generic opaque dispatch metadata.
+- `coalescing.py` must not import, name, inspect, consume, or know the meaning of queued-human reservations.
+- `coalescing.py` may close generic dispatch metadata only when claimed work cannot be handed to dispatch ownership.
 - Dispatch owns cancellation for every terminal path before response lifecycle ownership.
 - `run_locked_response()` owns consumption once the response lifecycle lock is acquired and the response turn is about to run.
 - The final implementation should not need `_pre_signaled_human_message_ids`, `signal_waiting_human_message()`, or `clear_waiting_human_message()`.
@@ -96,29 +96,37 @@ The reservation path is only for ingress that must notify an already-running res
 
 ## Coalescing Boundary
 
-Extend `PendingEvent` with opaque dispatch metadata.
+Extend `PendingEvent` with generic opaque dispatch metadata.
 
 ```python
+@dataclass
+class PendingDispatchMetadata:
+    kind: str
+    payload: object
+    close: Callable[[], None]
+    requires_solo_batch: bool = False
+
+
 @dataclass
 class PendingEvent:
     event: DispatchEvent
     room: nio.MatrixRoom
     source_kind: str
     enqueue_time: float = field(default_factory=time.time)
-    queued_notice_reservation: QueuedHumanNoticeReservation | None = None
+    dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 ```
 
-Use a type-only import or a small protocol if importing the concrete reservation would create an unwanted dependency.
+Do not import the concrete lifecycle reservation into `coalescing.py`.
 
-Add an explicit `queued_notice_reservation` field to `CoalescedBatch`.
+Add an explicit `dispatch_metadata` field to `CoalescedBatch`.
 
-`build_coalesced_batch()` should preserve the reservation only for single-event batches.
+`build_coalesced_batch()` should preserve generic metadata only for valid batches.
 
-The reservation should only be present on bypass active-follow-up events.
+The queued-human reservation should be wrapped by turn-controller-owned metadata and only be present on bypass active-follow-up events.
 
-Any reservation in a multi-event batch is invalid.
+Any metadata marked `requires_solo_batch` in a multi-event batch is invalid.
 
-The implementation should fail loudly and cancel the reservation rather than silently dispatching mixed ownership.
+The implementation should fail loudly and close the metadata rather than silently dispatching mixed ownership.
 
 The expected path is that active-follow-up bypass events dispatch solo.
 
@@ -146,7 +154,7 @@ except Exception:
     raise
 ```
 
-Pass the reservation from `PendingEvent` through `CoalescedBatch` into `_dispatch_text_message()`.
+Pass the reservation as generic dispatch metadata from `PendingEvent` through `CoalescedBatch`, then unwrap it in `handle_coalesced_batch()` before `_dispatch_text_message()`.
 
 Make `_dispatch_text_message()` the final cancellation boundary.
 
@@ -185,7 +193,7 @@ If enqueue raises, that caller must cancel the reservation.
 
 After enqueue succeeds, ownership transfers to queued dispatch metadata.
 
-The queued dispatch item owns the reservation until the coalescing drain claims it.
+The queued dispatch item owns generic metadata that carries the reservation until the coalescing drain claims it.
 
 After the drain claims the event, the dispatch callback owns the reservation until it either hands the reservation to response lifecycle ownership or cancels it.
 
@@ -193,7 +201,9 @@ This means `handle_coalesced_batch()` must also be a cleanup boundary.
 
 If retargeting, `build_batch_dispatch_event()`, key resolution, source-event bookkeeping, or any other pre-`_dispatch_text_message()` step raises after the gate has claimed a reserved event, the reservation must be canceled.
 
-The coalescing gate should not understand the reservation, but the dispatch callback that receives a claimed `CoalescedBatch` must close any opaque dispatch metadata when it drops or fails claimed work before handing it onward.
+The coalescing gate should not understand the reservation, but it may close generic metadata if claimed work cannot reach the dispatch callback.
+
+The dispatch callback that receives a claimed `CoalescedBatch` must close any opaque dispatch metadata when it drops or fails claimed work before handing it onward.
 
 ## Response Lifecycle Consumption
 
@@ -281,7 +291,7 @@ Add focused tests for the reservation contract.
 - Constructing or dispatching a multi-event batch with a reservation fails loudly and clears the reservation.
 - Duplicate `consume()` and duplicate `cancel()` are idempotent.
 - `cancel()` after `consume()` is idempotent.
-- `coalescing.py` transports opaque reservations and only cancels them when it drops claimed work before dispatch callback ownership.
+- `coalescing.py` transports generic opaque dispatch metadata and never calls reservation methods directly.
 - A full coalescing-path spoofing regression where untrusted Matrix content sets `com.mindroom.source_kind` to `active_thread_follow_up`, `hook_dispatch`, `hook`, or `voice`, and the event still dispatches as normal user ingress.
 - A trusted internal-source regression proving internally assigned non-message source kinds still dispatch with the intended policy.
 
@@ -307,7 +317,7 @@ The refactor is complete when every reservation has exactly one owner at each st
 
 The refactor is complete when dispatch can fail before `PreparedDispatch` exists without leaking a queued-human notice.
 
-The refactor is complete when `coalescing.py` carries only opaque reservation metadata and never interprets lifecycle state.
+The refactor is complete when `coalescing.py` carries only generic opaque dispatch metadata and never imports, names, or interprets lifecycle state.
 
 The refactor is complete when active-follow-up behavior is covered for response, command, skip, ignore, route, exception, and cancellation paths.
 
@@ -325,6 +335,7 @@ Run these searches before review.
 rg "_pre_signaled_human_message_ids|signal_waiting_human_message|clear_waiting_human_message" src tests
 rg "COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP" src/mindroom/turn_policy.py
 rg "queued_notice_reservation" src/mindroom tests
+rg "QueuedHumanNoticeReservation|queued_notice_reservation" src/mindroom/coalescing.py
 ```
 
 The first command should return nothing.
@@ -334,6 +345,8 @@ The second command should return nothing after the source-kind cleanup commit.
 The third command should show a small, explainable path from ingress reservation creation, through queue metadata, through dispatch ownership, into lifecycle consumption.
 
 If `queued_notice_reservation` appears in unrelated modules, stop and reassess the design before patching around it.
+
+The fourth command should return nothing.
 
 ### Ownership Walkthrough
 
@@ -384,7 +397,7 @@ Ask reviewers to check these specific claims.
 
 - The side table is gone, not renamed.
 - Cleanup is tied to reservation ownership, not event-id lookup.
-- `coalescing.py` does not inspect lifecycle semantics and only cancels opaque metadata when claimed work cannot be handed to dispatch.
+- `coalescing.py` does not inspect lifecycle semantics and only closes generic opaque metadata when claimed work cannot be handed to dispatch.
 - `turn_policy.py` does not import coalescing-specific constants after the cleanup commit.
 - Reserved requests bypass normal queued-notice creation and therefore cannot double-count.
 - The implementation has one cancellation boundary for each ownership stage.

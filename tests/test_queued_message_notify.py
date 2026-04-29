@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Protocol, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -30,6 +30,7 @@ from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import (
     COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
+    PendingDispatchMetadata,
     PendingEvent,
     PreparedTextEvent,
     build_coalesced_batch,
@@ -70,6 +71,11 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine
     from pathlib import Path
+
+
+class _ReservationLike(Protocol):
+    def cancel(self) -> None:
+        """Release the reserved queued-human notice."""
 
 
 def _config(tmp_path: Path) -> Config:
@@ -200,6 +206,17 @@ def _reserved_follow_up_case(
         event=event,
         queued_signal=queued_signal,
         reservation=reservation,
+    )
+
+
+def _queued_notice_metadata(reservation: _ReservationLike) -> tuple[PendingDispatchMetadata, ...]:
+    return (
+        PendingDispatchMetadata(
+            kind="queued_notice_reservation",
+            payload=reservation,
+            close=reservation.cancel,
+            requires_solo_batch=True,
+        ),
     )
 
 
@@ -1393,7 +1410,7 @@ async def test_reserved_follow_up_cleanup_when_handle_coalesced_batch_fails_befo
                     event=event,
                     room=room,
                     source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
-                    queued_notice_reservation=reservation,
+                    dispatch_metadata=_queued_notice_metadata(reservation),
                 ),
             ],
         )
@@ -1464,7 +1481,7 @@ def test_reserved_follow_up_cannot_join_multi_event_batch(tmp_path: Path) -> Non
                         event=_prepared_text_event(event_id="$reserved"),
                         room=room,
                         source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
-                        queued_notice_reservation=reservation,
+                        dispatch_metadata=_queued_notice_metadata(reservation),
                     ),
                     PendingEvent(
                         event=_prepared_text_event(event_id="$normal"),

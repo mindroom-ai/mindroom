@@ -22,6 +22,7 @@ from mindroom.coalescing import (
     CoalescedBatch,
     CoalescingGate,
     CoalescingKey,
+    PendingDispatchMetadata,
     PendingEvent,
     PreparedTextEvent,
     build_batch_dispatch_event,
@@ -117,6 +118,35 @@ type _MediaDispatchEvent = (
 type _InboundMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
 type _TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type _DispatchEvent = _TextDispatchEvent | _MediaDispatchEvent
+
+_QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
+
+
+def _queued_notice_dispatch_metadata(
+    reservation: QueuedHumanNoticeReservation | None,
+) -> tuple[PendingDispatchMetadata, ...]:
+    if reservation is None:
+        return ()
+    return (
+        PendingDispatchMetadata(
+            kind=_QUEUED_NOTICE_METADATA_KIND,
+            payload=reservation,
+            close=reservation.cancel,
+            requires_solo_batch=True,
+        ),
+    )
+
+
+def _queued_notice_reservation_from_batch(
+    batch: CoalescedBatch,
+) -> QueuedHumanNoticeReservation | None:
+    reservations = [item.payload for item in batch.dispatch_metadata if item.kind == _QUEUED_NOTICE_METADATA_KIND]
+    if not reservations:
+        return None
+    if len(reservations) > 1:
+        msg = "Coalesced batch carried multiple queued-human notice reservations"
+        raise ValueError(msg)
+    return cast("QueuedHumanNoticeReservation", reservations[0])
 
 
 class _EditRegenerator(Protocol):
@@ -396,6 +426,47 @@ class TurnController:
                 queued_notice_reservation.cancel()
             raise
 
+    async def _enqueue_prepared_text_for_dispatch(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        prepared_event: PreparedTextEvent,
+        dispatch_event: _TextDispatchEvent,
+        envelope: MessageEnvelope,
+        coalescing_thread_id: str | None,
+        requester_user_id: str,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> None:
+        """Queue one normalized text event with shared active-follow-up handling."""
+        target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=coalescing_thread_id,
+            reply_to_event_id=prepared_event.event_id,
+            event_source=prepared_event.source,
+        )
+        if self._should_bypass_coalescing_for_active_thread_follow_up(
+            target=target,
+            source_kind=envelope.source_kind,
+            sender_id=prepared_event.sender,
+        ):
+            await self._enqueue_active_thread_follow_up(
+                room=room,
+                prepared_event=prepared_event,
+                target=target,
+                envelope=envelope,
+                coalescing_thread_id=coalescing_thread_id,
+                requester_user_id=requester_user_id,
+                dispatch_timing=dispatch_timing,
+            )
+            return
+        await self._enqueue_for_dispatch(
+            dispatch_event,
+            room,
+            source_kind=envelope.source_kind,
+            requester_user_id=requester_user_id,
+            coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
+        )
+
     async def _should_skip_router_before_shared_ingress_work(
         self,
         room: nio.MatrixRoom,
@@ -516,7 +587,7 @@ class TurnController:
                 event=event,
                 room=room,
                 source_kind=source_kind,
-                queued_notice_reservation=queued_notice_reservation,
+                dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation),
             ),
         )
         emit_elapsed_timing(
@@ -1191,7 +1262,7 @@ class TurnController:
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
-        reservation = batch.queued_notice_reservation
+        reservation = _queued_notice_reservation_from_batch(batch)
         try:
             dispatch_event = build_batch_dispatch_event(batch)
             timing_scope = event_timing_scope(dispatch_event.event_id)
@@ -1354,34 +1425,15 @@ class TurnController:
                     source_event_id=prepared_event.event_id,
                 )
                 return
-        target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=coalescing_thread_id,
-            reply_to_event_id=prepared_event.event_id,
-            event_source=prepared_event.source,
+        await self._enqueue_prepared_text_for_dispatch(
+            room=room,
+            prepared_event=prepared_event,
+            dispatch_event=prechecked_event.event,
+            envelope=envelope,
+            coalescing_thread_id=coalescing_thread_id,
+            requester_user_id=prechecked_event.requester_user_id,
+            dispatch_timing=dispatch_timing,
         )
-        if self._should_bypass_coalescing_for_active_thread_follow_up(
-            target=target,
-            source_kind=envelope.source_kind,
-            sender_id=prepared_event.sender,
-        ):
-            await self._enqueue_active_thread_follow_up(
-                room=room,
-                prepared_event=prepared_event,
-                target=target,
-                envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
-                requester_user_id=prechecked_event.requester_user_id,
-                dispatch_timing=dispatch_timing,
-            )
-        else:
-            await self._enqueue_for_dispatch(
-                prechecked_event.event,
-                room,
-                source_kind="message",
-                requester_user_id=prechecked_event.requester_user_id,
-                coalescing_key=(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
-            )
 
     async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -1765,11 +1817,13 @@ class TurnController:
                     source_event_id=prepared_text_event.event_id,
                 )
                 return True
-        await self._enqueue_for_dispatch(
-            prepared_text_event,
-            room,
-            source_kind=envelope.source_kind,
+        await self._enqueue_prepared_text_for_dispatch(
+            room=room,
+            prepared_event=prepared_text_event,
+            dispatch_event=prepared_text_event,
+            envelope=envelope,
+            coalescing_thread_id=coalescing_thread_id,
             requester_user_id=prechecked_event.requester_user_id,
-            coalescing_key=(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id),
+            dispatch_timing=dispatch_timing,
         )
         return True

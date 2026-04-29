@@ -9026,7 +9026,77 @@ class TestAgentBot:
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
-        assert pending_event.queued_notice_reservation is mock_reserve_waiting_human_message.return_value
+        assert len(pending_event.dispatch_metadata) == 1
+        metadata = pending_event.dispatch_metadata[0]
+        assert metadata.kind == "queued_notice_reservation"
+        assert metadata.payload is mock_reserve_waiting_human_message.return_value
+        assert metadata.requires_solo_batch is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source_kind", ["hook", "hook_dispatch"])
+    async def test_handle_message_inner_enqueues_trusted_hook_source_kind_as_gate_bypass(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        source_kind: str,
+    ) -> None:
+        """Trusted hook messages should keep their bypass source kind on the real text path."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": f"${source_kind}",
+                "sender": "@mindroom_general:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": f"@mindroom_calculator:localhost {source_kind} says hello",
+                    "com.mindroom.source_kind": source_kind,
+                },
+            },
+        )
+        prepared_event = PreparedTextEvent(
+            sender="@mindroom_general:localhost",
+            event_id=f"${source_kind}",
+            body=f"@mindroom_calculator:localhost {source_kind} says hello",
+            source=event.source,
+            server_timestamp=1234567890,
+        )
+
+        with (
+            patch.object(
+                bot._turn_controller,
+                "_precheck_dispatch_event",
+                return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_general:localhost"),
+            ),
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
+                new=AsyncMock(return_value=prepared_event),
+            ),
+            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+        ):
+            await asyncio.wait_for(bot._on_message(room, event), timeout=0.05)
+
+        mock_dispatch.assert_not_awaited()
+        mock_enqueue.assert_awaited_once()
+        _key, pending_event = mock_enqueue.await_args.args
+        assert isinstance(pending_event, PendingEvent)
+        assert pending_event.event is event
+        assert pending_event.source_kind == source_kind
 
     @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_enqueues_prepared_text(
@@ -9113,6 +9183,108 @@ class TestAgentBot:
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.event is prepared_event
         assert pending_event.source_kind == "message"
+
+    @pytest.mark.asyncio
+    async def test_file_sidecar_text_preview_reserves_active_thread_follow_up(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Sidecar text follow-ups should share the active-response notice path."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        sidecar_event = cast(
+            "nio.RoomMessageFile",
+            nio.Event.parse_event(
+                {
+                    "event_id": "$sidecar-followup",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.file",
+                        "body": "long-text.txt",
+                        "info": {"mimetype": "application/json"},
+                        "io.mindroom.long_text": {
+                            "version": 2,
+                            "encoding": "matrix_event_content_json",
+                        },
+                        "url": "mxc://localhost/sidecar-followup",
+                    },
+                },
+            ),
+        )
+        prepared_event = PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$sidecar-followup",
+            body="please stop",
+            source={"content": {"msgtype": "m.text", "body": "please stop"}},
+            server_timestamp=1234567890,
+        )
+        target = MessageTarget.resolve(room.room_id, "$thread_root", sidecar_event.event_id)
+        envelope = MessageEnvelope(
+            source_event_id=sidecar_event.event_id,
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="please stop",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="message",
+        )
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_file_sidecar_text_event",
+                new=AsyncMock(return_value=prepared_event),
+            ),
+            patch.object(bot._conversation_resolver, "build_ingress_envelope", return_value=envelope),
+            patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
+            patch("mindroom.turn_controller.should_handle_interactive_text_response", return_value=False),
+            patch.object(
+                bot._conversation_resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$thread_root"),
+            ),
+            patch.object(
+                bot._response_runner,
+                "has_active_response_for_target",
+                return_value=True,
+            ),
+            patch.object(
+                bot._response_runner,
+                "reserve_waiting_human_message",
+                return_value=MagicMock(),
+            ) as mock_reserve_waiting_human_message,
+            patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
+            patch.object(bot._coalescing_gate, "enqueue", new=AsyncMock()) as mock_enqueue,
+        ):
+            handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+                room,
+                _PrecheckedEvent(event=sidecar_event, requester_user_id="@user:localhost"),
+            )
+
+        assert handled is True
+        mock_dispatch.assert_not_awaited()
+        mock_reserve_waiting_human_message.assert_called_once()
+        mock_enqueue.assert_awaited_once()
+        key, pending_event = mock_enqueue.await_args.args
+        assert key == (room.room_id, "$thread_root", "@user:localhost")
+        assert isinstance(pending_event, PendingEvent)
+        assert pending_event.event is prepared_event
+        assert pending_event.source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
+        assert len(pending_event.dispatch_metadata) == 1
+        metadata = pending_event.dispatch_metadata[0]
+        assert metadata.kind == "queued_notice_reservation"
+        assert metadata.payload is mock_reserve_waiting_human_message.return_value
+        assert metadata.requires_solo_batch is True
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_team_defers_placeholder_creation_to_coordinator(
