@@ -1440,6 +1440,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.cli.config"
 depends_on = [
+    "mindroom.cli.owner",
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.credentials_sync",
@@ -1449,7 +1450,18 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.cli.connect"
+depends_on = [
+    "mindroom.cli.owner",
+    "mindroom.constants",
+]
+
+[[modules]]
+path = "mindroom.cli.owner"
 depends_on = ["mindroom.constants"]
+visibility = [
+    "mindroom.cli.config",
+    "mindroom.cli.connect",
+]
 
 [[modules]]
 path = "mindroom.cli.doctor"

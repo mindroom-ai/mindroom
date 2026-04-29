@@ -10,15 +10,16 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
+from mindroom.constants import (
+    OWNER_MATRIX_USER_ID_ENV,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 _PAIR_CODE_RE = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
-_MATRIX_USER_ID_RE = re.compile(r"^@[^:\s]+:[^\s]+$")
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]{4,32}$")
-_LEGACY_OWNER_PLACEHOLDER = "__PLACEHOLDER__"
 
 
 @dataclass(frozen=True)
@@ -76,7 +77,7 @@ def complete_local_pairing(
         raise TypeError(msg)
 
     raw_owner_user_id = data.get("owner_user_id")
-    parsed_owner_user_id = _parse_owner_user_id(raw_owner_user_id)
+    parsed_owner_user_id = parse_owner_matrix_user_id(raw_owner_user_id)
     owner_user_id_invalid = (
         isinstance(raw_owner_user_id, str) and bool(raw_owner_user_id.strip()) and parsed_owner_user_id is None
     )
@@ -103,6 +104,7 @@ def persist_local_provisioning_env(
     client_id: str,
     client_secret: str,
     namespace: str,
+    owner_user_id: str | None = None,
     config_path: str | Path,
 ) -> Path:
     """Write local provisioning credentials to .env next to the active config file."""
@@ -117,6 +119,8 @@ def persist_local_provisioning_env(
         "MINDROOM_LOCAL_CLIENT_SECRET": client_secret,
         "MINDROOM_NAMESPACE": namespace,
     }
+    if parsed_owner_user_id := parse_owner_matrix_user_id(owner_user_id):
+        updates[OWNER_MATRIX_USER_ID_ENV] = parsed_owner_user_id
     for key, value in updates.items():
         lines = _upsert_env_var(lines, key, value)
 
@@ -126,19 +130,13 @@ def persist_local_provisioning_env(
 
 def replace_owner_placeholders_in_config(*, config_path: Path, owner_user_id: str) -> bool:
     """Replace owner placeholder tokens in config.yaml if they are still present."""
-    if not _MATRIX_USER_ID_RE.fullmatch(owner_user_id):
+    if parse_owner_matrix_user_id(owner_user_id) is None:
         return False
     if not config_path.exists():
         return False
 
     content = config_path.read_text(encoding="utf-8")
-    # Quote the Matrix user ID so the leading '@' doesn't break YAML parsing
-    # (@ starts a YAML tag/anchor when unquoted).
-    quoted = f'"{owner_user_id}"'
-    replaced = content.replace(OWNER_MATRIX_USER_ID_PLACEHOLDER, quoted).replace(
-        _LEGACY_OWNER_PLACEHOLDER,
-        quoted,
-    )
+    replaced = replace_owner_placeholders_in_text(content, owner_user_id)
     if replaced == content:
         return False
 
@@ -155,18 +153,6 @@ def _required_non_empty_string(data: dict[str, object], key: str) -> str:
             return value
     msg = f"Provisioning response missing {key}."
     raise ValueError(msg)
-
-
-def _parse_owner_user_id(raw_value: object) -> str | None:
-    """Parse optional owner_user_id from pairing response."""
-    if not isinstance(raw_value, str):
-        return None
-    candidate_owner_user_id = raw_value.strip()
-    if not candidate_owner_user_id:
-        return None
-    if _MATRIX_USER_ID_RE.fullmatch(candidate_owner_user_id):
-        return candidate_owner_user_id
-    return None
 
 
 def _parse_namespace(raw_value: object) -> str | None:

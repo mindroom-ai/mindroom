@@ -318,6 +318,7 @@ def connect(
             client_id=credentials.client_id,
             client_secret=credentials.client_secret,
             namespace=credentials.namespace,
+            owner_user_id=credentials.owner_user_id,
             config_path=resolved_config_path,
         )
         console.print("[green]Paired successfully.[/green]")
@@ -359,6 +360,7 @@ def _print_pairing_success_with_exports(
     console.print(f"  export MINDROOM_LOCAL_CLIENT_SECRET={client_secret}")
     console.print(f"  export MINDROOM_NAMESPACE={namespace}")
     if owner_user_id:
+        console.print(f"  export MINDROOM_OWNER_USER_ID={owner_user_id}")
         console.print(
             f"\nOwner user ID from pairing: {owner_user_id} (not persisted in --no-persist-env mode).",
         )

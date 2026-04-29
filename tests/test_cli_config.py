@@ -23,7 +23,7 @@ from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli.config import _activate_cli_runtime
 from mindroom.cli.main import _load_active_config_or_exit, app
 from mindroom.config.main import Config
-from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
@@ -401,6 +401,35 @@ class TestConfigInit:
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
         assert "MATRIX_SERVER_NAME=mindroom.chat" in env_content
         assert "MATRIX_REGISTRATION_TOKEN=" in env_content
+
+    def test_init_profile_public_uses_connect_created_owner_env(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Running `connect` before `config init` should still fill owner authorization."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n"
+            "MINDROOM_LOCAL_CLIENT_ID=client-123\n"
+            "MINDROOM_LOCAL_CLIENT_SECRET=secret-123\n"
+            "MINDROOM_NAMESPACE=a1b2c3d4\n"
+            f"{OWNER_MATRIX_USER_ID_ENV}=@alice:mindroom.chat\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--profile", "public-vertexai-anthropic"],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        config_content = target.read_text(encoding="utf-8")
+        config = yaml.safe_load(config_content)
+        assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in config_content
+        assert config["authorization"]["global_users"] == ["@alice:mindroom.chat"]
+        assert config["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat"]
 
     def test_init_profile_public_codex_writes_hosted_codex_defaults(self, tmp_path: Path) -> None:
         """Hosted Codex profile should use Codex defaults and hosted Matrix settings."""
@@ -2097,7 +2126,7 @@ class TestConnect:
         assert "MINDROOM_LOCAL_CLIENT_ID=client-123" in env_content
         assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
         assert "MINDROOM_NAMESPACE=a1b2c3d4" in env_content
-        assert "MINDROOM_OWNER_USER_ID=" not in env_content
+        assert f"{OWNER_MATRIX_USER_ID_ENV}=@alice:mindroom.chat" in env_content
         updated_config = cfg.read_text()
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_config
         assert "@alice:mindroom.chat" in updated_config
@@ -2199,8 +2228,8 @@ class TestConnect:
         assert "export MINDROOM_LOCAL_CLIENT_ID=client-123" in result.output
         assert "export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in result.output
         assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
+        assert "export MINDROOM_OWNER_USER_ID=@alice:mindroom.chat" in result.output
         assert "Owner user ID from pairing: @alice:mindroom.chat" in result.output
-        assert "export MINDROOM_OWNER_USER_ID=" not in result.output
         assert not (tmp_path / ".env").exists()
 
     def test_connect_uses_runtime_env_default_provisioning_url(
@@ -2236,8 +2265,8 @@ class TestConnect:
         assert called["url"] == "https://env-provisioning.example/v1/local-mindroom/pair/complete"
         assert "export MINDROOM_PROVISIONING_URL=https://env-provisioning.example" in result.output
         assert "export MINDROOM_NAMESPACE=a1b2c3d4" in result.output
+        assert "export MINDROOM_OWNER_USER_ID=@alice:mindroom.chat" in result.output
         assert "Owner user ID from pairing: @alice:mindroom.chat" in result.output
-        assert "export MINDROOM_OWNER_USER_ID=" not in result.output
 
     def test_connect_warns_when_owner_user_id_is_malformed(
         self,
@@ -2273,6 +2302,8 @@ class TestConnect:
 
         assert result.exit_code == 0
         assert "malformed owner_user_id" in normalize_console_output(result.output)
+        env_content = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert "MINDROOM_OWNER_USER_ID=" not in env_content
         updated_config = cfg.read_text()
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in updated_config
 

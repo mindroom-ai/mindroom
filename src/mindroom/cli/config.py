@@ -18,6 +18,7 @@ from dotenv import dotenv_values
 from rich.console import Console
 from rich.syntax import Syntax
 
+from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,
@@ -26,6 +27,7 @@ from mindroom.config.main import (
     load_config,
 )
 from mindroom.constants import (
+    OWNER_MATRIX_USER_ID_ENV,
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
     VERTEXAI_CLAUDE_ENV_KEYS,
     RuntimePaths,
@@ -99,15 +101,21 @@ def _config_init_storage_plan(
     config_dir: Path,
     env_path: Path,
     *,
-    write_env_file: bool,
+    replace_env_file: bool,
 ) -> tuple[Path, bool]:
     """Return the storage root and whether the starter config can use the env placeholder."""
     runtime_paths = resolve_runtime_paths(config_path=config_dir / "config.yaml")
-    if write_env_file:
+    if replace_env_file:
         return runtime_paths.storage_root, True
     if "MINDROOM_STORAGE_PATH" in runtime_paths.env_file_values and env_path.is_file():
         return runtime_paths.storage_root, True
     return runtime_paths.storage_root, False
+
+
+def _config_init_owner_user_id(config_path: Path) -> str | None:
+    """Return the paired owner MXID available to config init, if one was persisted."""
+    runtime_paths = resolve_runtime_paths(config_path=config_path)
+    return parse_owner_matrix_user_id(runtime_paths.env_value(OWNER_MATRIX_USER_ID_ENV))
 
 
 def _default_mind_workspace(storage_root: Path) -> Path:
@@ -157,6 +165,9 @@ def _write_env_file(
         return True
 
     if not replace_existing:
+        # `connect` can create .env before `config init`; public profiles still
+        # need hosted Matrix defaults, so preserve user-owned values and append
+        # only the missing hosted keys.
         if selected_profile == "public":
             return _append_missing_env_defaults(
                 env_path,
@@ -196,8 +207,8 @@ def _append_missing_env_defaults(
     return True
 
 
-def _should_write_env_file(env_path: Path, *, force: bool) -> bool:
-    """Return whether config init should create or overwrite the env file."""
+def _should_replace_env_file(env_path: Path, *, force: bool) -> bool:
+    """Return whether config init should create or overwrite the full env template."""
     if not env_path.exists():
         return True
     return force or typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False)
@@ -221,13 +232,13 @@ def _config_init_env_hint(selected_profile: _ConfigInitProfile, selected_preset:
 def _print_config_init_next_steps(
     env_path: Path,
     *,
-    env_created: bool,
+    env_changed: bool,
     selected_profile: _ConfigInitProfile,
     selected_preset: _ProviderPreset,
 ) -> None:
     """Print post-init guidance for the selected profile."""
     console.print("\nNext steps:")
-    if env_created:
+    if env_changed:
         env_hint = _config_init_env_hint(selected_profile, selected_preset)
         console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
     if selected_profile == "public":
@@ -368,11 +379,11 @@ def config_init(
         minimal=minimal,
         provider=provider,
     )
-    write_env_file = _should_write_env_file(env_path, force=force)
+    replace_env_file = _should_replace_env_file(env_path, force=force)
     storage_root, use_storage_env_placeholder = _config_init_storage_plan(
         target.parent,
         env_path,
-        write_env_file=write_env_file,
+        replace_env_file=replace_env_file,
     )
 
     if selected_profile == "minimal":
@@ -387,24 +398,30 @@ def config_init(
             profile=full_profile,
         )
 
+    # `connect` can run before `config init`, when no config exists to patch.
+    # In that order, connect persists the owner MXID in .env so init can render
+    # authorization defaults without leaving pairing placeholders behind.
+    if owner_user_id := _config_init_owner_user_id(target):
+        content = replace_owner_placeholders_in_text(content, owner_user_id)
+
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
     if selected_profile != "minimal":
         _ensure_mind_workspace(_default_mind_workspace(storage_root), force=force)
 
-    env_created = _write_env_file(
+    env_changed = _write_env_file(
         env_path,
         selected_profile,
         selected_preset,
         storage_root=storage_root,
-        replace_existing=write_env_file,
+        replace_existing=replace_env_file,
     )
 
     console.print(f"[green]Config created:[/green] {target}")
     _print_config_init_next_steps(
         env_path,
-        env_created=env_created,
+        env_changed=env_changed,
         selected_profile=selected_profile,
         selected_preset=selected_preset,
     )
