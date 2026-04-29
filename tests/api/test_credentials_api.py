@@ -376,11 +376,10 @@ class TestCredentialsAPI:
         assert status_response.status_code == 200
         assert status_response.json()["has_credentials"] is True
         assert set(status_response.json()["key_names"]) == {"list_files", "max_read_size"}
-        assert token_response.status_code == 200
-        assert token_response.json() == {"service": "google_drive_oauth", "credentials": {}}
-        assert token_status_response.status_code == 200
-        assert token_status_response.json()["has_credentials"] is True
-        assert token_status_response.json()["key_names"] is None
+        assert token_response.status_code == 400
+        assert "OAuth token credentials" in token_response.json()["detail"]
+        assert token_status_response.status_code == 400
+        assert "OAuth token credentials" in token_status_response.json()["detail"]
 
     def test_get_orphaned_oauth_credentials_filters_token_fields(
         self,
@@ -392,6 +391,7 @@ class TestCredentialsAPI:
         manager.save_credentials(
             "removed_oauth_provider",
             {
+                "access_token": "orphaned-access-token-value",
                 "token": "orphaned-access-value",
                 "refresh_token": "orphaned-refresh-value",
                 "client_id": "client-id",
@@ -405,12 +405,20 @@ class TestCredentialsAPI:
 
         response = client.get("/api/credentials/removed_oauth_provider")
         status_response = client.get("/api/credentials/removed_oauth_provider/status")
+        api_key_response = client.get(
+            "/api/credentials/removed_oauth_provider/api-key?key_name=access_token&include_value=true",
+        )
+        copy_response = client.post("/api/credentials/copied_service/copy-from/removed_oauth_provider")
 
         assert response.status_code == 200
         assert response.json() == {"service": "removed_oauth_provider", "credentials": {}}
         assert status_response.status_code == 200
         assert status_response.json()["has_credentials"] is True
         assert status_response.json()["key_names"] is None
+        assert api_key_response.status_code == 400
+        assert "OAuth token credentials" in api_key_response.json()["detail"]
+        assert copy_response.status_code == 400
+        assert "OAuth token credentials" in copy_response.json()["detail"]
 
     def test_oauth_token_service_rejects_generic_credential_writes(
         self,
@@ -424,6 +432,75 @@ class TestCredentialsAPI:
 
         assert response.status_code == 400
         assert "OAuth token credentials" in response.json()["detail"]
+
+    def test_oauth_token_service_rejects_legacy_credential_routes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth token services should not be manageable through generic credential routes."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials("google_drive", {"list_files": True, "_source": "ui"})
+        manager.save_credentials(
+            "google_drive_oauth",
+            {
+                "token": "drive-access-value",
+                "refresh_token": "drive-refresh-value",
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+            },
+        )
+
+        responses = [
+            client.post(
+                "/api/credentials/google_drive_oauth/api-key",
+                json={"service": "google_drive_oauth", "api_key": "posted-token", "key_name": "token"},
+            ),
+            client.get("/api/credentials/google_drive_oauth/api-key?key_name=token&include_value=true"),
+            client.delete("/api/credentials/google_drive_oauth"),
+            client.post("/api/credentials/copied_service/copy-from/google_drive_oauth"),
+            client.post("/api/credentials/google_drive_oauth/copy-from/google_drive"),
+        ]
+
+        for response in responses:
+            assert response.status_code == 400
+            assert "OAuth token credentials" in response.json()["detail"]
+
+    def test_oauth_tool_settings_reject_oauth_reserved_api_key_fields(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth tool settings should not accept token-shaped fields through the api-key helper."""
+        post_response = client.post(
+            "/api/credentials/google_drive/api-key",
+            json={"service": "google_drive", "api_key": "drive-token", "key_name": "token"},
+        )
+        get_response = client.get("/api/credentials/google_drive/api-key?key_name=token&include_value=true")
+
+        assert post_response.status_code == 400
+        assert "OAuth field 'token'" in post_response.json()["detail"]
+        assert get_response.status_code == 400
+        assert "OAuth field 'token'" in get_response.json()["detail"]
+
+    def test_non_oauth_services_can_use_access_token_api_key_field(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Reserved OAuth field names remain valid for unrelated non-OAuth integrations."""
+        post_response = client.post(
+            "/api/credentials/homeassistant/api-key",
+            json={"service": "homeassistant", "api_key": "ha-token", "key_name": "access_token"},
+        )
+        get_response = client.get(
+            "/api/credentials/homeassistant/api-key?key_name=access_token&include_value=true",
+        )
+        status_response = client.get("/api/credentials/homeassistant/status")
+
+        assert post_response.status_code == 200
+        assert get_response.status_code == 200
+        assert get_response.json()["api_key"] == "ha-token"
+        assert status_response.status_code == 200
+        assert status_response.json()["key_names"] == ["access_token"]
 
     def test_oauth_tool_settings_do_not_touch_private_token_service(
         self,
@@ -528,8 +605,8 @@ class TestCredentialsAPI:
         assert status_response.status_code == 200
         assert status_response.json()["has_credentials"] is True
         assert set(status_response.json()["key_names"]) == {"list_files", "max_read_size"}
-        assert token_response.status_code == 200
-        assert token_response.json() == {"service": "google_drive_oauth", "credentials": {}}
+        assert token_response.status_code == 400
+        assert "OAuth token credentials" in token_response.json()["detail"]
 
     def test_non_oauth_tool_settings_still_reject_private_scopes(
         self,

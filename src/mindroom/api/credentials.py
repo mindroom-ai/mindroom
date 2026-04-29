@@ -516,6 +516,32 @@ def _oauth_service_match(request: Request, service: str) -> OAuthCredentialServi
     return None
 
 
+def _reject_oauth_token_service(
+    oauth_service_match: OAuthCredentialServiceMatch | None,
+) -> None:
+    if oauth_service_match is None or not oauth_service_match.token_service:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail="OAuth token credentials must be managed through the OAuth connect flow.",
+    )
+
+
+def _reject_oauth_api_key_field(
+    oauth_service_match: OAuthCredentialServiceMatch | None,
+    *,
+    key_name: str,
+) -> None:
+    if oauth_service_match is None or not oauth_service_match.tool_config_service:
+        return
+    if key_name not in OAUTH_CREDENTIAL_FIELDS:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=f"OAuth field '{key_name}' must be managed through the OAuth connect flow.",
+    )
+
+
 def _allow_private_scopes_for_service(
     *,
     oauth_service_match: OAuthCredentialServiceMatch | None,
@@ -602,6 +628,7 @@ async def get_credential_status(
     """Get the status of credentials for a service."""
     service = _validated_service(service)
     oauth_service_match = _oauth_service_match(request, service)
+    _reject_oauth_token_service(oauth_service_match)
     target = resolve_request_credentials_target(
         request,
         agent_name=agent_name,
@@ -635,6 +662,7 @@ async def set_credentials(
     """Set multiple credentials for a service."""
     service = _validated_service(service)
     oauth_service_match = _oauth_service_match(http_request, service)
+    _reject_oauth_token_service(oauth_service_match)
     target = resolve_request_credentials_target(
         http_request,
         agent_name=agent_name,
@@ -648,11 +676,6 @@ async def set_credentials(
 
     # Mark as UI-sourced and save
     if oauth_service_match is not None:
-        if oauth_service_match.token_service:
-            raise HTTPException(
-                status_code=400,
-                detail="OAuth token credentials must be managed through the OAuth connect flow.",
-            )
         creds = _dashboard_credentials_for_save(payload.credentials, strip_oauth_fields=True)
     else:
         creds = _dashboard_credentials_for_save(payload.credentials, strip_oauth_fields=False)
@@ -673,9 +696,17 @@ async def set_api_key(
     request_service = _validated_service(payload.service)
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
+    oauth_service_match = _oauth_service_match(http_request, service)
+    _reject_oauth_token_service(oauth_service_match)
+    _reject_oauth_api_key_field(oauth_service_match, key_name=payload.key_name)
 
     target = resolve_request_credentials_target(http_request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target) or {}
+    if _looks_like_oauth_credentials(credentials):
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth token credentials must be managed through the OAuth connect flow.",
+        )
     credentials[payload.key_name] = payload.api_key
     credentials["_source"] = "ui"
     target.target_manager.save_credentials(service, credentials)
@@ -693,8 +724,16 @@ async def get_api_key(
 ) -> dict[str, Any]:
     """Get API key metadata for a service, and optionally the full key value."""
     service = _validated_service(service)
+    oauth_service_match = _oauth_service_match(request, service)
+    _reject_oauth_token_service(oauth_service_match)
+    _reject_oauth_api_key_field(oauth_service_match, key_name=key_name)
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target) or {}
+    if _looks_like_oauth_credentials(credentials):
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth token credentials must be managed through the OAuth connect flow.",
+        )
     api_key = credentials.get(key_name)
 
     if api_key:
@@ -723,6 +762,7 @@ async def get_credentials(
     """Get credentials for a service (for editing)."""
     service = _validated_service(service)
     oauth_service_match = _oauth_service_match(request, service)
+    _reject_oauth_token_service(oauth_service_match)
     target = resolve_request_credentials_target(
         request,
         agent_name=agent_name,
@@ -752,6 +792,7 @@ async def delete_credentials(
 ) -> dict[str, str]:
     """Delete all credentials for a service."""
     service = _validated_service(service)
+    _reject_oauth_token_service(_oauth_service_match(request, service))
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     target.target_manager.delete_credentials(service)
 
@@ -768,6 +809,8 @@ async def copy_credentials(
     """Copy credentials from one service to another."""
     service = _validated_service(service)
     source_service = _validated_service(source_service)
+    _reject_oauth_token_service(_oauth_service_match(request, service))
+    _reject_oauth_token_service(_oauth_service_match(request, source_service))
     target = resolve_request_credentials_target(
         request,
         agent_name=agent_name,
@@ -777,6 +820,11 @@ async def copy_credentials(
 
     if not source_creds:
         raise HTTPException(status_code=404, detail=f"No credentials found for {source_service}")
+    if _looks_like_oauth_credentials(source_creds):
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth token credentials must be managed through the OAuth connect flow.",
+        )
 
     # Copy credentials, marking as UI-sourced
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}

@@ -24,6 +24,7 @@ OAUTH_CREDENTIAL_FIELDS = frozenset(
         "_oauth_claims",
         "_oauth_provider",
         "_source",
+        "access_token",
         "client_id",
         "expires_at",
         "refresh_token",

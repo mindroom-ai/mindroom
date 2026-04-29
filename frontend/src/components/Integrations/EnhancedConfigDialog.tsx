@@ -258,8 +258,10 @@ export function EnhancedConfigDialog({
     const normalized: Record<string, ConfigValue> = {};
     filteredFields.forEach((field) => {
       const value = configValues[field.name];
-      if (field.type === "number" && value !== undefined && value !== "") {
-        normalized[field.name] = Number(value);
+      if (field.type === "number") {
+        if (value !== undefined && value !== "") {
+          normalized[field.name] = Number(value);
+        }
       } else if (value !== undefined) {
         normalized[field.name] = value;
       }

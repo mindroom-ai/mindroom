@@ -40,7 +40,11 @@ class GoogleDriveTools(AgnoGoogleDriveTools):
             msg = "GoogleDriveTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
         if "max_read_size" in kwargs:
-            kwargs["max_read_size"] = self._coerce_max_read_size(kwargs["max_read_size"])
+            max_read_size = self._coerce_max_read_size(kwargs["max_read_size"])
+            if max_read_size is None:
+                kwargs.pop("max_read_size")
+            else:
+                kwargs["max_read_size"] = max_read_size
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         self._worker_target = worker_target

@@ -176,3 +176,32 @@ def test_google_drive_saved_numeric_config_is_coerced_before_tool_init(tmp_path:
 
     assert isinstance(tool, GoogleDriveTools)
     assert tool.max_read_size == 42
+
+
+def test_google_drive_blank_numeric_config_uses_tool_default(tmp_path: Path) -> None:
+    runtime_paths = constants.resolve_runtime_paths(
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
+            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
+        },
+    )
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google_drive",
+        {
+            "max_read_size": "",
+            "_source": "ui",
+        },
+    )
+
+    tool = get_tool_by_name(
+        "google_drive",
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        disable_sandbox_proxy=True,
+    )
+
+    assert isinstance(tool, GoogleDriveTools)
+    assert tool.max_read_size == 10485760
