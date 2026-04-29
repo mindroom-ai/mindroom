@@ -60,7 +60,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
 
@@ -3789,7 +3789,7 @@ async def _capture_gate_dispatches(
 
     async def record_response(*args: object, **_kwargs: object) -> None:
         dispatch = cast("PreparedDispatch", args[2])
-        build_payload = cast("Callable[[MessageContext], object]", args[4])
+        build_payload = cast("Callable[[MessageContext], Awaitable[DispatchPayload]]", args[4])
         await build_payload(dispatch.context)
 
     async def record_payload_request(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
@@ -4168,7 +4168,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
 
     async def record_response(*args: object, **_kwargs: object) -> None:
         dispatch = cast("PreparedDispatch", args[2])
-        build_payload = cast("Callable[[MessageContext], object]", args[4])
+        build_payload = cast("Callable[[MessageContext], Awaitable[DispatchPayload]]", args[4])
         await build_payload(dispatch.context)
 
     with (

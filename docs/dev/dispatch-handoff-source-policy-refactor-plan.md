@@ -153,9 +153,9 @@ Future policy markers must not be added to `source_kind`.
 
 `PreparedTextEvent.source_kind_override` should not carry active-follow-up policy.
 
-`PreparedTextEvent.dispatch_policy_source_kind_override` should become unnecessary once `DispatchHandoff` is threaded through dispatch.
+`PreparedTextEvent.dispatch_policy_source_kind_override` must be removed once `DispatchHandoff` is threaded through dispatch.
 
-The mergeable endpoint is that no production path reads dispatch policy from `PreparedTextEvent`.
+The mergeable endpoint is that no production path or test fixture can express dispatch policy through `PreparedTextEvent`.
 
 Direct callers should either create a `DispatchHandoff` or pass explicit source metadata into the wrapper that creates one.
 
@@ -507,11 +507,11 @@ Stop assigning `active_thread_follow_up` to `PreparedTextEvent.source_kind_overr
 
 Stop using `PreparedTextEvent.dispatch_policy_source_kind_override` on the coalesced path.
 
-Remove the production read of `PreparedTextEvent.dispatch_policy_source_kind_override` from all dispatch paths.
+Remove `PreparedTextEvent.dispatch_policy_source_kind_override` from the shared event type and all callers.
 
 Wrap direct callers into `DispatchHandoff` or pass explicit neutral ingress metadata.
 
-The mergeable endpoint is that no production path reads dispatch policy from `PreparedTextEvent`.
+The mergeable endpoint is that no production path or test fixture can express dispatch policy through `PreparedTextEvent`.
 
 ### Step 7: Update Replay And Newer-Message Guards
 
@@ -775,11 +775,11 @@ No review fix should require asking whether `source_kind` means modality or poli
 
 Search for `source_kind=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP`.
 
-Only tests for explicitly invalid or legacy compatibility paths should remain.
+No production path or test fixture should use active-follow-up policy as `source_kind`.
 
 Search for `dispatch_policy_source_kind_override`.
 
-It should be gone, or no production dispatch path should read it.
+It must be gone from production code and tests.
 
 Search for `source_kind_override=COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP`.
 
