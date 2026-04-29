@@ -446,22 +446,31 @@ class CoalescingGate:
             self._wake(gate)
             return
 
-        existing_drain_task = existing_gate.drain_task
-        gate.queue = deque(
+        source_in_flight = gate.phase is GatePhase.IN_FLIGHT
+        destination_in_flight = existing_gate.phase is GatePhase.IN_FLIGHT
+        owner_gate = existing_gate if destination_in_flight or not source_in_flight else gate
+        retired_gate = gate if owner_gate is existing_gate else existing_gate
+
+        owner_gate.queue = deque(
             sorted(
-                [*gate.queue, *existing_gate.queue],
+                [*owner_gate.queue, *retired_gate.queue],
                 key=lambda queued: queued.pending_event.enqueue_time,
             ),
         )
-        gate.drain_all_requested = gate.drain_all_requested or existing_gate.drain_all_requested
-        existing_gate.queue.clear()
+        owner_gate.drain_all_requested = owner_gate.drain_all_requested or retired_gate.drain_all_requested
+        retired_gate.queue.clear()
         self._gates.pop(old_key, None)
-        self._gates.pop(new_key, None)
-        self._gates[new_key] = gate
-        if existing_drain_task is not None and not existing_drain_task.done():
-            existing_drain_task.cancel()
-        self._ensure_drain_task(new_key, gate)
-        self._wake(gate)
+        self._gates[new_key] = owner_gate
+        retired_drain_task = retired_gate.drain_task
+        if (
+            retired_drain_task is not None
+            and not retired_drain_task.done()
+            and retired_drain_task is not asyncio.current_task()
+            and retired_gate.phase is not GatePhase.IN_FLIGHT
+        ):
+            retired_drain_task.cancel()
+        self._ensure_drain_task(new_key, owner_gate)
+        self._wake(owner_gate)
 
     def _resolve_gate_entry(
         self,

@@ -23,7 +23,7 @@ The new design makes one invariant central: per-key queue order is the source of
 - A failed claimed batch may be lost and logged, but unclaimed backlog remains queued.
 - After a claimed batch failure, the drain continues processing unclaimed backlog unless the gate is shutting down.
 - Shutdown drains queued work without debounce or upload-grace waits.
-- Retargeting moves the whole gate and preserves queue ownership.
+- Retargeting preserves drain ownership for already-claimed work.
 - If the final implementation still needs `immediate`, `deferred_pending`, `force_flush_pending`, or a new ordering flag, the rewrite missed the point.
 
 ## State Model
@@ -158,6 +158,26 @@ Unclaimed queue entries remain in order.
 
 If this is not shutdown and work remains, restart or continue the drain.
 
+## Retarget Lifecycle
+
+One gate owns one drain task.
+
+Claimed work belongs to the drain that popped it until that dispatch finishes, fails, or is cancelled by shutdown.
+
+Retarget may merge unclaimed queue entries.
+
+Retarget must not cancel a drain that has already claimed work.
+
+If the source and destination gates both exist, prefer the in-flight owner when exactly one gate is in flight.
+
+If the destination gate is in flight, keep the destination gate as owner because it may already have claimed canonical-thread work.
+
+If neither gate is in flight, keep the destination gate as owner and merge the source queue into it.
+
+After a merge, exactly one gate remains mapped to the canonical key and that gate is woken.
+
+Retarget may cancel only a retired drain that has not claimed work.
+
 ## Tests
 
 Add or update focused tests for these cases.
@@ -175,6 +195,8 @@ Add or update focused tests for these cases.
 - Cancelled dispatch with queued backlog still drains backlog.
 - Shutdown drains queued work without waits.
 - Retargeting preserves queued work and drain ownership.
+- Retargeting into an in-flight destination gate does not cancel the claimed destination batch.
+- Retargeting two in-flight gates does not cancel either already-claimed batch.
 
 ## Commit Strategy
 

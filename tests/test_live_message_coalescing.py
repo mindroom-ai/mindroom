@@ -1717,6 +1717,128 @@ async def test_retarget_merges_existing_destination_gate_queue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retarget_preserves_in_flight_destination_dispatch() -> None:
+    """Retargeting into an active canonical gate must not cancel claimed destination work."""
+    room = _make_room()
+    destination_dispatch_started = asyncio.Event()
+    release_destination_dispatch = asyncio.Event()
+    dispatched_source_event_ids: list[list[str]] = []
+    cancelled_source_event_ids: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        source_event_ids = list(batch.source_event_ids)
+        if source_event_ids == ["$m2"]:
+            destination_dispatch_started.set()
+            try:
+                await release_destination_dispatch.wait()
+            except asyncio.CancelledError:
+                cancelled_source_event_ids.append(source_event_ids)
+                raise
+        dispatched_source_event_ids.append(source_event_ids)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    old_key = ("!room:localhost", None, "@user:localhost")
+    new_key = ("!room:localhost", "$m1", "@user:localhost")
+
+    await gate.enqueue(
+        new_key,
+        PendingEvent(
+            event=_text_event(event_id="$m2", body="follow-up", thread_id="$m1"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await destination_dispatch_started.wait()
+    await gate.enqueue(
+        old_key,
+        PendingEvent(
+            event=_text_event(event_id="$m1", body="first"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+
+    gate.retarget(old_key, new_key)
+    await asyncio.sleep(0)
+
+    assert cancelled_source_event_ids == []
+    assert set(gate._gates) == {new_key}
+    release_destination_dispatch.set()
+    await gate.drain_all()
+
+    assert cancelled_source_event_ids == []
+    assert dispatched_source_event_ids == [["$m2"], ["$m1"]]
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
+async def test_retarget_preserves_both_in_flight_dispatches() -> None:
+    """Retargeting two active gates must not cancel either already-claimed batch."""
+    room = _make_room()
+    dispatch_started = {"$m1": asyncio.Event(), "$m2": asyncio.Event()}
+    release_dispatch = {"$m1": asyncio.Event(), "$m2": asyncio.Event()}
+    dispatched_source_event_ids: list[list[str]] = []
+    cancelled_source_event_ids: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        source_event_ids = list(batch.source_event_ids)
+        event_id = source_event_ids[0]
+        dispatch_started[event_id].set()
+        try:
+            await release_dispatch[event_id].wait()
+        except asyncio.CancelledError:
+            cancelled_source_event_ids.append(source_event_ids)
+            raise
+        dispatched_source_event_ids.append(source_event_ids)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    old_key = ("!room:localhost", None, "@user:localhost")
+    new_key = ("!room:localhost", "$m1", "@user:localhost")
+
+    await gate.enqueue(
+        old_key,
+        PendingEvent(
+            event=_text_event(event_id="$m1", body="first"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await dispatch_started["$m1"].wait()
+    await gate.enqueue(
+        new_key,
+        PendingEvent(
+            event=_text_event(event_id="$m2", body="follow-up", thread_id="$m1"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await dispatch_started["$m2"].wait()
+
+    gate.retarget(old_key, new_key)
+    await asyncio.sleep(0)
+
+    assert cancelled_source_event_ids == []
+    assert set(gate._gates) == {new_key}
+    release_dispatch["$m1"].set()
+    release_dispatch["$m2"].set()
+    await gate.drain_all()
+
+    assert cancelled_source_event_ids == []
+    assert sorted(dispatched_source_event_ids) == [["$m1"], ["$m2"]]
+    assert gate.is_idle()
+
+
+@pytest.mark.asyncio
 async def test_zero_debounce_immediate_flush_logs_pending_count_before_clearing() -> None:
     """Immediate-flush telemetry should report the batch size before _flush clears pending."""
     room = _make_room()
