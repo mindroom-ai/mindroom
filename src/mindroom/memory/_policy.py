@@ -56,6 +56,19 @@ def team_uses_disabled_memory_backend(config: Config, agent_names: list[str]) ->
     return all(use_disabled_memory_backend(config, agent_name=agent_name) for agent_name in agent_names)
 
 
+def team_members_by_memory_backend(config: Config, agent_names: list[str]) -> dict[str, list[str]]:
+    """Group team members by their effective memory backend."""
+    config.assert_team_agents_supported(agent_names)
+    members_by_backend: dict[str, list[str]] = {"mem0": [], "file": [], "none": []}
+    for member_name in agent_names:
+        backend = config.get_agent_memory_backend(member_name)
+        if backend not in members_by_backend:
+            msg = f"Unsupported memory backend for team member {member_name}: {backend}"
+            raise ValueError(msg)
+        members_by_backend[backend].append(member_name)
+    return members_by_backend
+
+
 def effective_storage_paths_for_context(
     caller_context: str | list[str],
     storage_path: Path,
@@ -119,7 +132,8 @@ def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
     return team_ids
 
 
-def _team_members_from_scope_user_id(scope_user_id: str, config: Config) -> list[str] | None:
+def team_members_from_scope_user_id(scope_user_id: str, config: Config) -> list[str] | None:
+    """Resolve team member names from a team-scoped memory user ID."""
     if not scope_user_id.startswith("team_"):
         return None
     if config.teams:
@@ -136,11 +150,20 @@ def storage_paths_for_scope_user_id(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
+    *,
+    target_agent_names: list[str] | None = None,
 ) -> list[Path]:
     """Return the canonical storage roots for one memory scope."""
-    if (team_members := _team_members_from_scope_user_id(scope_user_id, config)) is not None:
+    if (team_members := team_members_from_scope_user_id(scope_user_id, config)) is not None:
+        storage_members = team_members
+        if target_agent_names is not None:
+            unsupported_members = [agent_name for agent_name in target_agent_names if agent_name not in team_members]
+            if unsupported_members:
+                msg = f"Target agents are not members of {scope_user_id}: {unsupported_members}"
+                raise ValueError(msg)
+            storage_members = target_agent_names
         return effective_storage_paths_for_context(
-            team_members,
+            storage_members,
             storage_path,
             config,
             runtime_paths,

@@ -12,6 +12,8 @@ MindRoom supports three memory backends:
 
 Set the global default backend with `memory.backend`.
 Override the backend per agent with `agents.<name>.memory_backend`.
+Team memory writes follow each member's effective backend.
+In mixed teams, file-backed members receive shared team memory in file team scope, and Mem0-backed members receive it in Mem0 team scope.
 When an agent uses `memory_backend: file`, its file memory lives in its canonical workspace root.
 When an agent uses `memory_backend: none`, MindRoom skips prompt memory lookup, automatic memory persistence, and the explicit `memory` tool for that agent.
 Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root.
@@ -190,7 +192,8 @@ Agent file memory is stored under each agent's canonical workspace root:
 - `agents/<agent>/workspace/MEMORY.md`
 - `agents/<agent>/workspace/memory/YYYY-MM-DD.md`
 
-Team file memory is mirrored under each participating agent's storage directory:
+For all-file teams, team file memory is mirrored under each participating agent's storage directory.
+For mixed teams, it is written only under file-backed members' storage directories while the scope ID still names the full team:
 
 - `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
 - `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
