@@ -1,6 +1,8 @@
 {{- $fullname := include "mindroom-runtime.fullname" . -}}
 {{- $proxyTokenSecretName := include "mindroom-runtime.proxyTokenSecretName" . -}}
 {{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
+{{- $eventCacheDatabaseUrlSecretName := include "mindroom-runtime.eventCacheDatabaseUrlSecretName" . -}}
+{{- $eventCacheDatabaseUrlSecretKey := include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -95,6 +97,13 @@ spec:
             {{- if .Values.runtime.timing }}
             - name: MINDROOM_TIMING
               value: "1"
+            {{- end }}
+            {{- if and (eq .Values.eventCache.backend "postgres") $eventCacheDatabaseUrlSecretName }}
+            - name: {{ .Values.eventCache.databaseUrlEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $eventCacheDatabaseUrlSecretName }}
+                  key: {{ $eventCacheDatabaseUrlSecretKey }}
             {{- end }}
             - name: MINDROOM_WORKER_BACKEND
               value: {{ .Values.workers.backend | quote }}

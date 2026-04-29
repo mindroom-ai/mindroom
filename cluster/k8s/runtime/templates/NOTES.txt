@@ -7,6 +7,7 @@ Configuration:
   ConfigMap: {{ include "mindroom-runtime.configMapName" . }}
   Storage PVC: {{ include "mindroom-runtime.storageClaimName" . }}
   Worker backend: {{ .Values.workers.backend }}
+  Event cache: {{ .Values.eventCache.backend }}{{- if and (eq .Values.eventCache.backend "postgres") .Values.eventCache.postgres.create }} (chart-managed PostgreSQL: {{ include "mindroom-runtime.eventCachePostgresName" . }}){{- end }}
 
-For production use, provide Matrix settings, runtime secrets, and either an
-existing config ConfigMap or a chart-managed config value.
+For production use, provide Matrix settings, runtime secrets, and either an existing config ConfigMap or a chart-managed config value.
+For externally managed PostgreSQL, set eventCache.databaseUrl.existingSecret.

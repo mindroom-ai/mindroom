@@ -1,12 +1,10 @@
 # MindRoom Runtime Chart
 
-This chart deploys only the MindRoom runtime. It is for clusters that already
-provide the surrounding platform pieces such as Matrix, ingress, storage,
-secrets, model gateways, and optional backing services.
+This chart deploys only the MindRoom runtime and its own runtime support resources.
+It is for clusters that already provide surrounding platform pieces such as Matrix, ingress, deployment-specific secrets, model gateways, and optional external backing services.
 
-Use the instance chart in `cluster/k8s/instance` when you want a complete
-MindRoom instance with its own Matrix homeserver. Use this chart when MindRoom
-should run inside an existing platform.
+Use the instance chart in `cluster/k8s/instance` when you want a complete MindRoom instance with its own Matrix homeserver.
+Use this chart when MindRoom should run inside an existing platform.
 
 ## Minimal Install
 
@@ -16,8 +14,67 @@ helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
   --create-namespace
 ```
 
-The default values render a self-contained Deployment, Service, ConfigMap, and
-PVC. A real deployment should provide a useful config and Matrix settings.
+The default values render a self-contained Deployment, Service, ConfigMap, runtime PVC, and PostgreSQL event-cache StatefulSet.
+A real deployment should provide a useful config and Matrix settings.
+
+## Event Cache
+
+The runtime chart defaults to PostgreSQL for MindRoom's Matrix event cache, because Kubernetes deployments need a restart-safe cache backend.
+The chart can either create a small PostgreSQL StatefulSet for this cache or wire the runtime to an externally managed database.
+
+Use the chart-managed database for a simple cluster deployment:
+
+```yaml
+eventCache:
+  backend: postgres
+  postgres:
+    create: true
+    persistence:
+      size: 20Gi
+```
+
+For GitOps or `helm template` workflows, set `eventCache.postgres.auth.password` or provide existing Secrets so renders do not rotate generated credentials.
+When adopting an existing PostgreSQL StatefulSet, keep the service name and password source stable:
+
+```yaml
+eventCache:
+  backend: postgres
+  postgres:
+    create: true
+    nameOverride: existing-event-cache-postgres
+    selectorLabels:
+      app: existing-event-cache-postgres
+    auth:
+      existingSecret: existing-event-cache-secrets
+      passwordKey: POSTGRES_PASSWORD
+    persistence:
+      volumeName: existing-event-cache-postgres-data
+  databaseUrl:
+    existingSecret: existing-event-cache-secrets
+    key: DATABASE_URL
+```
+
+Use an external database by providing a Secret with a full PostgreSQL connection URL:
+
+```yaml
+eventCache:
+  backend: postgres
+  postgres:
+    create: false
+  databaseUrl:
+    existingSecret: event-cache-database-url
+    key: DATABASE_URL
+```
+
+Use SQLite only for lightweight or local-style installs:
+
+```yaml
+eventCache:
+  backend: sqlite
+```
+
+When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `cache` section follows `eventCache`.
+When using `config.existingConfigMap` or custom `config.data`, keep that config's cache settings aligned with the chart values.
 
 ## Existing Platform Example
 
@@ -50,6 +107,14 @@ env:
     - configMapRef:
         name: mindroom-env
 
+eventCache:
+  backend: postgres
+  postgres:
+    create: false
+  databaseUrl:
+    existingSecret: event-cache-database-url
+    key: DATABASE_URL
+
 workers:
   backend: kubernetes
   sandbox:
@@ -69,36 +134,24 @@ workers:
 ## Notes
 
 - The chart does not create ingress or a Matrix homeserver.
-- Set `workers.sandbox.proxyToken.existingSecret` or
-  `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
-- `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime
-  pod.
-- `workers.backend: kubernetes` lets the runtime create dedicated worker
-  Deployments and Services on demand. The chart can create the worker-manager
-  RBAC and a worker NetworkPolicy for the same namespace.
-- If workers run in a different namespace, provide storage, service accounts,
-  and network policy behavior that are valid for that namespace. Kubernetes
-  owner references are only set by default for same-namespace workers. When
-  using an existing sandbox proxy token secret, create it in both the runtime
-  namespace and the worker namespace. When using
-  `workers.sandbox.proxyToken.value`, the chart creates both copies.
-- Mount arbitrary platform-specific files, projected secrets, ConfigMaps, init
-  containers, and sidecars through `extraVolumes`, `extraVolumeMounts`,
-  `initContainers`, and `extraContainers`.
-- Use `nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`,
-  and `podDisruptionBudget` for cluster-specific scheduling and availability
-  policy.
-- Set `selectorLabels` when adopting an existing Deployment with an immutable
-  selector.
-- Set `storage.volumeName` or `workers.kubernetes.networkPolicy.name` when
-  adopting existing resources with established names.
-- Override `probes.*.custom` when a deployment needs custom Kubernetes
-  startup, readiness, or liveness probes.
+- The chart can create PostgreSQL for MindRoom's event cache, or use an external PostgreSQL URL from an existing Secret.
+- Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
+- `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
+- `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.
+  The chart can create the worker-manager RBAC and a worker NetworkPolicy for the same namespace.
+- If workers run in a different namespace, provide storage, service accounts, and network policy behavior that are valid for that namespace.
+  Kubernetes owner references are only set by default for same-namespace workers.
+  When using an existing sandbox proxy token secret, create it in both the runtime namespace and the worker namespace.
+  When using `workers.sandbox.proxyToken.value`, the chart creates both copies.
+- Mount arbitrary platform-specific files, projected secrets, ConfigMaps, init containers, and sidecars through `extraVolumes`, `extraVolumeMounts`, `initContainers`, and `extraContainers`.
+- Use `nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`, and `podDisruptionBudget` for cluster-specific scheduling and availability policy.
+- Set `selectorLabels` when adopting an existing Deployment with an immutable selector.
+- Set `storage.volumeName`, `eventCache.postgres.selectorLabels`, `eventCache.postgres.persistence.volumeName`, or `workers.kubernetes.networkPolicy.name` when adopting existing resources with established names.
+- Override `probes.*.custom` when a deployment needs custom Kubernetes startup, readiness, or liveness probes.
 
 ## Adopting Existing Resources
 
-When replacing hand-written manifests for an existing runtime, keep immutable
-and externally referenced names stable in values:
+When replacing hand-written manifests for an existing runtime, keep immutable and externally referenced names stable in values:
 
 ```yaml
 fullnameOverride: mindroom
@@ -115,6 +168,21 @@ storage:
   create: false
   existingClaim: mindroom-data
   volumeName: data
+
+eventCache:
+  backend: postgres
+  postgres:
+    nameOverride: existing-event-cache-postgres
+    selectorLabels:
+      app: existing-event-cache-postgres
+    auth:
+      existingSecret: existing-event-cache-secrets
+      passwordKey: POSTGRES_PASSWORD
+    persistence:
+      volumeName: existing-event-cache-postgres-data
+  databaseUrl:
+    existingSecret: existing-event-cache-secrets
+    key: DATABASE_URL
 
 workers:
   backend: kubernetes

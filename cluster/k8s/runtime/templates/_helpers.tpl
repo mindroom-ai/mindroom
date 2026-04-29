@@ -126,3 +126,76 @@ app.kubernetes.io/component: runtime
 {{- define "mindroom-runtime.workerNetworkPolicyName" -}}
 {{- default (printf "%s-workers" (include "mindroom-runtime.fullname" .)) .Values.workers.kubernetes.networkPolicy.name -}}
 {{- end -}}
+
+{{- define "mindroom-runtime.eventCacheNamespace" -}}
+{{- default .Release.Namespace .Values.eventCache.namespace -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.eventCacheDatabaseUrlSecretKey" -}}
+{{- default .Values.eventCache.databaseUrlEnv .Values.eventCache.databaseUrl.key -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.eventCachePostgresName" -}}
+{{- default (printf "%s-event-cache-postgres" (include "mindroom-runtime.fullname" .)) .Values.eventCache.postgres.nameOverride -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.eventCachePostgresSecretName" -}}
+{{- printf "%s-auth" (include "mindroom-runtime.eventCachePostgresName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.eventCachePostgresPasswordSecretName" -}}
+{{- if .Values.eventCache.postgres.auth.existingSecret -}}
+{{- .Values.eventCache.postgres.auth.existingSecret -}}
+{{- else -}}
+{{- include "mindroom-runtime.eventCachePostgresSecretName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.eventCacheDatabaseUrlSecretName" -}}
+{{- if .Values.eventCache.databaseUrl.existingSecret -}}
+{{- .Values.eventCache.databaseUrl.existingSecret -}}
+{{- else if and .Values.eventCache.postgres.create (not .Values.eventCache.postgres.auth.existingSecret) -}}
+{{- include "mindroom-runtime.eventCachePostgresSecretName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.eventCachePostgresImage" -}}
+{{- printf "%s:%s" .Values.eventCache.postgres.image.repository .Values.eventCache.postgres.image.tag -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.eventCachePostgresSelectorLabels" -}}
+{{- if .Values.eventCache.postgres.selectorLabels -}}
+{{- toYaml .Values.eventCache.postgres.selectorLabels -}}
+{{- else -}}
+app.kubernetes.io/name: {{ include "mindroom-runtime.name" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
+app.kubernetes.io/component: event-cache-postgres
+{{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.eventCachePostgresVolumeName" -}}
+{{- default "data" .Values.eventCache.postgres.persistence.volumeName -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.eventCachePostgresNetworkPolicyName" -}}
+{{- default (include "mindroom-runtime.eventCachePostgresName" .) .Values.eventCache.postgres.networkPolicy.name -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.eventCachePostgresDatabaseUrl" -}}
+{{- $root := .root -}}
+{{- $password := .password -}}
+{{- printf "postgresql://%s:%s@%s:%v/%s" ($root.Values.eventCache.postgres.auth.username | urlquery) ($password | urlquery) (include "mindroom-runtime.eventCachePostgresName" $root) $root.Values.eventCache.postgres.service.port ($root.Values.eventCache.postgres.auth.database | urlquery) -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.defaultConfig" -}}
+agents: {}
+models: {}
+cache:
+  backend: {{ .Values.eventCache.backend | quote }}
+{{- if eq .Values.eventCache.backend "postgres" }}
+  database_url_env: {{ .Values.eventCache.databaseUrlEnv | quote }}
+  namespace: {{ include "mindroom-runtime.eventCacheNamespace" . | quote }}
+{{- else if .Values.eventCache.sqlite.dbPath }}
+  db_path: {{ .Values.eventCache.sqlite.dbPath | quote }}
+{{- end }}
+{{- end -}}
