@@ -18,6 +18,9 @@ imagePullSecrets: []
 deploymentAnnotations: {}
 podAnnotations: {}
 podLabels: {}
+# Leave empty for the chart default. Set this when adopting an existing
+# Deployment whose selector is immutable.
+selectorLabels: {}
 priorityClassName: ""
 nodeSelector: {}
 tolerations: []
@@ -31,10 +34,7 @@ serviceAccount:
   automountServiceAccountToken: true
 
 podSecurityContext:
-  runAsUser: 1000
-  runAsGroup: 1000
   fsGroup: 1000
-  runAsNonRoot: true
   fsGroupChangePolicy: OnRootMismatch
 
 securityContext:
@@ -72,6 +72,7 @@ config:
 storage:
   create: true
   existingClaim: ""
+  volumeName: storage
   accessModes:
     - ReadWriteOnce
   storageClassName: ""
@@ -102,31 +103,28 @@ resources:
 probes:
   startup:
     enabled: true
-    spec:
-      httpGet:
-        path: /api/ready
-        port: api
-      periodSeconds: 5
-      timeoutSeconds: 10
-      failureThreshold: 120
+    custom: {}
+    path: /api/ready
+    port: api
+    periodSeconds: 5
+    timeoutSeconds: 10
+    failureThreshold: 120
   readiness:
     enabled: true
-    spec:
-      httpGet:
-        path: /api/ready
-        port: api
-      periodSeconds: 10
-      timeoutSeconds: 5
-      failureThreshold: 6
+    custom: {}
+    path: /api/ready
+    port: api
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
   liveness:
     enabled: true
-    spec:
-      httpGet:
-        path: /api/health
-        port: api
-      periodSeconds: 30
-      timeoutSeconds: 10
-      failureThreshold: 6
+    custom: {}
+    path: /api/health
+    port: api
+    periodSeconds: 30
+    timeoutSeconds: 10
+    failureThreshold: 6
 
 workers:
   # static_runner keeps a sandbox-runner sidecar in this pod.
@@ -167,6 +165,7 @@ workers:
       create: true
     networkPolicy:
       create: true
+      name: ""
     port: 8766
     readyTimeoutSeconds: 60
     idleTimeoutSeconds: 1800

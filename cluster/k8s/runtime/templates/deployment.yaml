@@ -54,8 +54,10 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.podSecurityContext }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.initContainers }}
       initContainers:
         {{- toYaml . | nindent 8 }}
@@ -82,8 +84,10 @@ spec:
               value: {{ .Values.config.mountPath | quote }}
             - name: HOME
               value: {{ .Values.storage.mountPath | quote }}
+            {{- if .Values.runtime.logLevel }}
             - name: LOG_LEVEL
               value: {{ .Values.runtime.logLevel | quote }}
+            {{- end }}
             {{- if .Values.runtime.timezone }}
             - name: TZ
               value: {{ .Values.runtime.timezone | quote }}
@@ -200,26 +204,55 @@ spec:
           {{- end }}
           {{- if .Values.probes.startup.enabled }}
           startupProbe:
-            {{- toYaml .Values.probes.startup.spec | nindent 12 }}
+            {{- if .Values.probes.startup.custom }}
+            {{- toYaml .Values.probes.startup.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: {{ .Values.probes.startup.port }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            {{- end }}
           {{- end }}
           {{- if .Values.probes.readiness.enabled }}
           readinessProbe:
-            {{- toYaml .Values.probes.readiness.spec | nindent 12 }}
+            {{- if .Values.probes.readiness.custom }}
+            {{- toYaml .Values.probes.readiness.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: {{ .Values.probes.readiness.port }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            {{- end }}
           {{- end }}
           {{- if .Values.probes.liveness.enabled }}
           livenessProbe:
-            {{- toYaml .Values.probes.liveness.spec | nindent 12 }}
+            {{- if .Values.probes.liveness.custom }}
+            {{- toYaml .Values.probes.liveness.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: {{ .Values.probes.liveness.port }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            {{- end }}
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.securityContext }}
           securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: config
               mountPath: {{ .Values.config.mountPath }}
               subPath: {{ .Values.config.key }}
               readOnly: true
-            - name: storage
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
@@ -256,14 +289,16 @@ spec:
             {{- end }}
           resources:
             {{- toYaml .Values.workers.staticRunner.resources | nindent 12 }}
+          {{- with .Values.securityContext }}
           securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: config
               mountPath: {{ .Values.config.mountPath }}
               subPath: {{ .Values.config.key }}
               readOnly: true
-            - name: storage
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ .Values.storage.mountPath }}
             - name: sandbox-workspace
               mountPath: /app/workspace
@@ -275,7 +310,7 @@ spec:
         - name: config
           configMap:
             name: {{ include "mindroom-runtime.configMapName" . }}
-        - name: storage
+        - name: {{ include "mindroom-runtime.storageVolumeName" . }}
           persistentVolumeClaim:
             claimName: {{ include "mindroom-runtime.storageClaimName" . }}
         {{- if eq .Values.workers.backend "static_runner" }}

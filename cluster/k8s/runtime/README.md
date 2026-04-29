@@ -88,5 +88,54 @@ workers:
 - Use `nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`,
   and `podDisruptionBudget` for cluster-specific scheduling and availability
   policy.
-- Override `probes.*.spec` when a deployment needs custom Kubernetes
+- Set `selectorLabels` when adopting an existing Deployment with an immutable
+  selector.
+- Set `storage.volumeName` or `workers.kubernetes.networkPolicy.name` when
+  adopting existing resources with established names.
+- Override `probes.*.custom` when a deployment needs custom Kubernetes
   startup, readiness, or liveness probes.
+
+## Adopting Existing Resources
+
+When replacing hand-written manifests for an existing runtime, keep immutable
+and externally referenced names stable in values:
+
+```yaml
+fullnameOverride: mindroom
+
+selectorLabels:
+  app: mindroom
+
+config:
+  create: false
+  existingConfigMap: mindroom-config
+  key: config.yaml
+
+storage:
+  create: false
+  existingClaim: mindroom-data
+  volumeName: data
+
+workers:
+  backend: kubernetes
+  kubernetes:
+    networkPolicy:
+      name: mindroom-workers
+
+probes:
+  liveness:
+    custom:
+      tcpSocket:
+        port: api
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 6
+```
+
+Render and diff the chart before applying it to existing objects:
+
+```bash
+helm template mindroom ./cluster/k8s/runtime \
+  --namespace mindroom \
+  -f runtime-values.yaml
+```

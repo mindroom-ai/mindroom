@@ -30,9 +30,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- end -}}
 
 {{- define "mindroom-runtime.selectorLabels" -}}
+{{- if .Values.selectorLabels -}}
+{{- toYaml .Values.selectorLabels -}}
+{{- else -}}
 app.kubernetes.io/name: {{ include "mindroom-runtime.name" . | quote }}
 app.kubernetes.io/instance: {{ .Release.Name | quote }}
 app.kubernetes.io/component: runtime
+{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.image" -}}
@@ -75,6 +79,10 @@ app.kubernetes.io/component: runtime
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.storageVolumeName" -}}
+{{- default "storage" .Values.storage.volumeName -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "mindroom-runtime.fullname" .) .Values.serviceAccount.name -}}
@@ -113,4 +121,8 @@ app.kubernetes.io/component: runtime
 
 {{- define "mindroom-runtime.workerNamespace" -}}
 {{- default .Release.Namespace .Values.workers.kubernetes.namespace -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.workerNetworkPolicyName" -}}
+{{- default (printf "%s-workers" (include "mindroom-runtime.fullname" .)) .Values.workers.kubernetes.networkPolicy.name -}}
 {{- end -}}
