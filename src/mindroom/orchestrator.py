@@ -1793,6 +1793,8 @@ async def _wait_for_runtime_completion(
         if api_task is not None and api_task not in done:
             await _await_api_task_graceful_shutdown(
                 api_task,
+                orchestrator_task=orchestrator_task,
+                shutdown_wait_task=shutdown_wait_task,
                 shutdown_requested=shutdown_requested,
                 api_server=api_server,
             )
@@ -1849,27 +1851,41 @@ async def _await_api_task_completion(
 async def _await_api_task_graceful_shutdown(
     api_task: asyncio.Task[None],
     *,
+    orchestrator_task: asyncio.Task[None],
+    shutdown_wait_task: asyncio.Task[bool],
     shutdown_requested: asyncio.Event,
     api_server: _EmbeddedApiServerContext,
 ) -> None:
     """Give Uvicorn a bounded window to run FastAPI lifespan shutdown."""
-    try:
-        await asyncio.wait_for(
-            asyncio.shield(api_task),
-            timeout=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS,
+    grace_deadline = time.monotonic() + _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS
+    monitored_tasks: set[asyncio.Task] = {api_task, orchestrator_task}
+    while api_task in monitored_tasks:
+        timeout_seconds = grace_deadline - time.monotonic()
+        if timeout_seconds <= 0:
+            break
+        done, _pending = await asyncio.wait(
+            monitored_tasks,
+            timeout=timeout_seconds,
+            return_when=asyncio.FIRST_COMPLETED,
         )
-    except TimeoutError:
-        logger.warning(
-            "embedded_api_server_shutdown_timeout",
-            **api_server.log_context(),
-            timeout_seconds=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS,
+        if not done:
+            break
+        await _consume_completed_runtime_tasks(
+            done,
+            orchestrator_task=orchestrator_task,
+            shutdown_wait_task=shutdown_wait_task,
+            api_task=api_task,
+            shutdown_requested=shutdown_requested,
+            api_server=api_server,
         )
-        return
+        if api_task in done:
+            return
+        monitored_tasks.difference_update(done)
 
-    await _await_api_task_completion(
-        api_task,
-        shutdown_requested=shutdown_requested,
-        api_server=api_server,
+    logger.warning(
+        "embedded_api_server_shutdown_timeout",
+        **api_server.log_context(),
+        timeout_seconds=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS,
     )
 
 

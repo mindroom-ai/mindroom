@@ -70,9 +70,10 @@ If the API task completed and `shutdown_requested` is not set, the runtime raise
 If the API task completed and `shutdown_requested` is set, the runtime treats API completion as expected.
 
 If `shutdown_requested` completed and the API task is still pending, the runtime waits for bounded API graceful shutdown.
+During that grace window, the runtime continues monitoring and draining completed critical tasks.
 If API graceful shutdown finishes inside the grace window, final teardown proceeds without cancelling the API task.
 If API graceful shutdown does not finish inside the grace window, the runtime logs `embedded_api_server_shutdown_timeout` and final teardown cancels the API task.
-The grace wait must shield the API task so timeout records the handoff decision without cancelling Uvicorn before final teardown.
+The grace wait must use timeout semantics that do not cancel the API task before final teardown.
 
 If the orchestrator task fails, the runtime raises that failure.
 If the orchestrator task returns cleanly before shutdown is requested, that is suspicious and should be considered for future tightening, but the current PR does not need to solve that path unless a concrete bug appears.
@@ -91,7 +92,8 @@ Keep `_wait_for_runtime_completion` responsible for top-level critical task coor
 Keep `_consume_completed_runtime_tasks` responsible for draining all tasks in the completed set.
 Keep `_await_api_task_completion` responsible for classifying one API task completion.
 Add or keep `_await_api_task_graceful_shutdown` for the bounded wait after shutdown request wins.
-Use `asyncio.shield(api_task)` inside the bounded grace wait so `asyncio.wait_for` timeout does not cancel the API task before final teardown.
+Keep `_await_api_task_graceful_shutdown` monitoring the orchestrator task during the API grace window so orchestrator failures cannot be hidden by requested shutdown.
+Use `asyncio.wait` with a timeout inside the bounded grace wait so timeout does not cancel the API task before final teardown.
 
 The grace timeout should be a named module constant.
 The initial value can be `5.0` seconds because it is long enough for local FastAPI lifespan cleanup and short enough for CLI shutdown.
@@ -102,11 +104,12 @@ Tests should patch the constant down rather than sleeping for real time.
 1. Include the bounded API graceful-shutdown fix in the committed PR diff.
 2. Ensure `_wait_for_runtime_completion` waits for `_await_api_task_graceful_shutdown` only when `shutdown_wait_task` wins and `api_task` is still pending.
 3. Ensure `_consume_completed_runtime_tasks` still drains the API task when it is already done in the first completed set.
-4. Ensure `_SignalAwareUvicornServer.handle_exit` does not call `super().handle_exit`.
-5. Preserve Uvicorn's important behavior by setting `should_exit` on the first signal and `force_exit` on repeated `SIGINT`.
-6. Keep final teardown cancellation in `main` as the last-resort cleanup path for any task still pending.
-7. Keep the API shutdown timeout log structured with host, port, and timeout seconds.
-8. Update the PR description so it names the bounded graceful-shutdown invariant.
+4. Ensure `_await_api_task_graceful_shutdown` still drains orchestrator failures that complete during the API grace window.
+5. Ensure `_SignalAwareUvicornServer.handle_exit` does not call `super().handle_exit`.
+6. Preserve Uvicorn's important behavior by setting `should_exit` on the first signal and `force_exit` on repeated `SIGINT`.
+7. Keep final teardown cancellation in `main` as the last-resort cleanup path for any task still pending.
+8. Keep the API shutdown timeout log structured with host, port, and timeout seconds.
+9. Update the PR description so it names the bounded graceful-shutdown invariant.
 
 ## Required Tests
 
@@ -114,6 +117,7 @@ Tests should patch the constant down rather than sleeping for real time.
 - `_run_api_server` raises when `server.serve()` returns before shutdown is requested.
 - `_run_api_server` allows `server.serve()` to return after shutdown is requested.
 - Simultaneous orchestrator failure and clean API completion raises the orchestrator failure.
+- Orchestrator failure during the API graceful-shutdown window raises instead of being hidden by final teardown.
 - `main` waits for API graceful shutdown after `shutdown_requested` is set and does not cancel an API task that finishes inside the grace window.
 - `main` waits for API graceful shutdown, logs `embedded_api_server_shutdown_timeout` on grace expiry, then cancels the API task when the API shutdown path is stuck.
 - `main` still raises when the API task fails unexpectedly.

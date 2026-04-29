@@ -1301,6 +1301,40 @@ class TestAgentBot:
             await asyncio.gather(orchestrator_task, shutdown_wait_task, api_task, return_exceptions=True)
 
     @pytest.mark.asyncio
+    async def test_runtime_completion_raises_orchestrator_failure_during_api_shutdown_grace(self) -> None:
+        """API shutdown grace must keep observing orchestrator failures."""
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+
+        async def _failed_orchestrator() -> None:
+            await asyncio.sleep(0.01)
+            msg = "orchestrator failed during API shutdown grace"
+            raise RuntimeError(msg)
+
+        async def _blocked_api() -> None:
+            await asyncio.Event().wait()
+
+        orchestrator_task = asyncio.create_task(_failed_orchestrator(), name="orchestrator")
+        shutdown_wait_task = asyncio.create_task(shutdown_requested.wait(), name="application_shutdown_wait")
+        api_task = asyncio.create_task(_blocked_api(), name="api_server")
+
+        try:
+            with (
+                patch("mindroom.orchestrator._EMBEDDED_API_SHUTDOWN_GRACE_SECONDS", 0.05),
+                pytest.raises(RuntimeError, match="orchestrator failed during API shutdown grace"),
+            ):
+                await _wait_for_runtime_completion(
+                    orchestrator_task=orchestrator_task,
+                    shutdown_wait_task=shutdown_wait_task,
+                    api_task=api_task,
+                    shutdown_requested=shutdown_requested,
+                    api_server=_EmbeddedApiServerContext(host="127.0.0.1", port=0),
+                )
+        finally:
+            api_task.cancel()
+            await asyncio.gather(orchestrator_task, shutdown_wait_task, api_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
     async def test_orchestrator_main_logs_api_shutdown_timeout_before_cancelling_stuck_api_task(
         self,
         tmp_path: Path,
