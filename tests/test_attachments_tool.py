@@ -332,6 +332,7 @@ async def test_attachments_tool_get_attachment_execution_mode_off_saves_primary_
     "worker_tools_override",
     [
         ["coding"],
+        ["python"],
         ["shell", "coding"],
     ],
 )
@@ -339,7 +340,7 @@ async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_w
     tmp_path: Path,
     worker_tools_override: list[str],
 ) -> None:
-    """Attachment saves should land on the worker when coding or shell can consume the workspace."""
+    """Attachment saves should land on the worker when workspace tools can consume the workspace."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     runtime_env = {

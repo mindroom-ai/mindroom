@@ -60,7 +60,7 @@ _EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 _SANDBOX_PROXY_SAVE_ATTACHMENT_PATH = "/api/sandbox-runner/save-attachment"
 _INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
 DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
-_ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS = frozenset({"file", "coding", "shell"})
+_ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS = frozenset({"file", "coding", "python", "shell"})
 
 
 @dataclass(frozen=True)

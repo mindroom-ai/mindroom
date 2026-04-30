@@ -86,7 +86,7 @@ Simply present your findings naturally, as if you already knew the information.
 
 OUTPUT_REDIRECT_PROMPT = (
     "To save a tool's full supported output to a file in your workspace instead of returning it, pass "
-    "`mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, or shell tools."
+    "`mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools."
 )
 
 CODE_AGENT_PROMPT = """## Core Expertise

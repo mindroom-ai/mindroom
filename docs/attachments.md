@@ -81,7 +81,7 @@ agents:
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
 
 When `mindroom_output_path` is omitted, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`.
-For worker-routed agents, prefer `get_attachment("att_...", mindroom_output_path="incoming/file.ext")` before processing an attachment with `file`, `coding`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
+For worker-routed agents, prefer `get_attachment("att_...", mindroom_output_path="incoming/file.ext")` before processing an attachment with `file`, `coding`, `python`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
 `mindroom_output_path` must be a file path relative to the agent workspace.
 It must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, or use environment or user expansion.
 When the save succeeds, the response includes `mindroom_tool_output` with `status: "saved_to_file"`, `path`, byte count, `format: "binary"`, and `sha256`.

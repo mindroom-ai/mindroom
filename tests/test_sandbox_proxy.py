@@ -1066,12 +1066,12 @@ def test_save_attachment_to_worker_request_failure_does_not_record_worker_failur
     assert manager.touched == [worker_target.worker_key]
 
 
-@pytest.mark.parametrize("worker_tools_override", [["coding"], ["shell", "coding"]])
+@pytest.mark.parametrize("worker_tools_override", [["coding"], ["python"], ["shell", "coding"]])
 def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
     monkeypatch: pytest.MonkeyPatch,
     worker_tools_override: list[str],
 ) -> None:
-    """Attachment saves should follow coding/shell worker workspaces, not only file workspaces."""
+    """Attachment saves should follow worker-routed workspace consumers, not only file workspaces."""
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,

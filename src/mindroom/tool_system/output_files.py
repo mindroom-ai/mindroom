@@ -31,7 +31,7 @@ OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "Optional MindRoom-managed workspace-relative path. "
     "If set, the full supported tool output is written to this file in your workspace and the tool returns only a "
     "compact receipt. "
-    "Use this for large output you plan to inspect later with file, coding, or shell tools."
+    "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
 )
 MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
