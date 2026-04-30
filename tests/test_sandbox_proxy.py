@@ -327,7 +327,10 @@ def test_sandbox_proxy_schema_keeps_mindroom_output_path(monkeypatch: pytest.Mon
     function = tool.functions["add"].model_copy(deep=True)
     function.process_entrypoint()
 
-    assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
+    output_schema = function.parameters["properties"][OUTPUT_PATH_ARGUMENT]
+    assert output_schema["description"].startswith("Optional")
+    assert output_schema["default"] is None
+    assert OUTPUT_PATH_ARGUMENT not in function.parameters["required"]
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
 

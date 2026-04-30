@@ -10,7 +10,8 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast, get_type_hints
+from types import MethodType
+from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
 
 from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
@@ -136,7 +137,8 @@ def _has_output_path_argument(function: Function) -> bool:
     return isinstance(properties, dict) and OUTPUT_PATH_ARGUMENT in properties
 
 
-def _add_output_path_schema(function: Function) -> None:
+def ensure_output_path_schema_optional(function: Function) -> None:
+    """Keep MindRoom's reserved output-path argument optional in one tool schema."""
     parameters = dict(function.parameters or _DEFAULT_PARAMETERS)
     properties = dict(parameters.get("properties") or {})
     properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
@@ -148,6 +150,62 @@ def _add_output_path_schema(function: Function) -> None:
     else:
         parameters["required"] = []
     function.parameters = parameters
+
+
+def _normalize_output_path_argument(raw_path: object) -> object | None:
+    if raw_path is None:
+        return None
+    if isinstance(raw_path, str) and raw_path.strip() == "":
+        return None
+    return raw_path
+
+
+def normalize_output_path_argument(raw_path: object) -> object | None:
+    """Return the canonical runtime value for the reserved output-path argument."""
+    return _normalize_output_path_argument(raw_path)
+
+
+def _process_entrypoint_with_output_path_schema(self: Function, strict: bool = False) -> None:
+    effective_strict = False if self.strict is False else strict
+    Function.process_entrypoint(self, strict=effective_strict)
+    ensure_output_path_schema_optional(self)
+
+
+def _copy_function_model(self: Function, *, update: Mapping[str, object] | None, deep: bool) -> Function:
+    model_copy_parameters = inspect.signature(Function.model_copy).parameters
+    if "update" in model_copy_parameters:
+        copied = cast("Any", Function.model_copy)(self, update=update, deep=deep)
+    else:
+        copied = Function.model_copy(self, deep=deep)
+        if update:
+            for field_name, value in update.items():
+                object.__setattr__(copied, field_name, value)
+    return copied
+
+
+def _model_copy_with_output_path_schema(
+    self: Function,
+    *,
+    update: Mapping[str, object] | None = None,
+    deep: bool = False,
+) -> Function:
+    copied = _copy_function_model(self, update=update, deep=deep)
+    _install_output_path_schema_postprocessor(copied)
+    return copied
+
+
+def _install_output_path_schema_postprocessor(function: Function) -> None:
+    """Install a per-function schema sanitizer that survives Agno's Function copies."""
+    object.__setattr__(
+        function,
+        "process_entrypoint",
+        MethodType(_process_entrypoint_with_output_path_schema, function),
+    )
+    object.__setattr__(
+        function,
+        "model_copy",
+        MethodType(_model_copy_with_output_path_schema, function),
+    )
 
 
 def _path_has_environment_expansion(raw_path: str) -> bool:
@@ -421,9 +479,10 @@ def _wrap_entrypoint(
         async_entrypoint = cast("Callable[..., Awaitable[object]]", entrypoint)
 
         async def async_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            if mindroom_output_path is None:
+            normalized_output_path = _normalize_output_path_argument(mindroom_output_path)
+            if normalized_output_path is None:
                 return await async_entrypoint(*args, **kwargs)
-            validated_path = _validate_output_path(policy, mindroom_output_path)
+            validated_path = _validate_output_path(policy, normalized_output_path)
             if isinstance(validated_path, str):
                 return _error_receipt(validated_path)
             result = await async_entrypoint(*args, **kwargs)
@@ -433,9 +492,10 @@ def _wrap_entrypoint(
     else:
 
         def sync_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            if mindroom_output_path is None:
+            normalized_output_path = _normalize_output_path_argument(mindroom_output_path)
+            if normalized_output_path is None:
                 return entrypoint(*args, **kwargs)
-            validated_path = _validate_output_path(policy, mindroom_output_path)
+            validated_path = _validate_output_path(policy, normalized_output_path)
             if isinstance(validated_path, str):
                 return _error_receipt(validated_path)
             result = entrypoint(*args, **kwargs)
@@ -466,8 +526,10 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
 
     uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != _DEFAULT_PARAMETERS
     function.entrypoint = _wrap_entrypoint(function.entrypoint, policy)
+    function.strict = False
+    _install_output_path_schema_postprocessor(function)
     if uses_custom_parameters:
-        _add_output_path_schema(function)
+        ensure_output_path_schema_optional(function)
     return function
 
 

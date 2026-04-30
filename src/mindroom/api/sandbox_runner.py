@@ -39,7 +39,7 @@ from mindroom.tool_system.catalog import (
     sanitize_tool_init_overrides,
     validate_authored_tool_entry_overrides,
 )
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, normalize_output_path_argument
 from mindroom.tool_system.sandbox_proxy import (
     sandbox_proxy_config,
     to_json_compatible,
@@ -710,7 +710,7 @@ async def _execute_request_inprocess(
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
-    output_path = request.kwargs.get(OUTPUT_PATH_ARGUMENT)
+    output_path = normalize_output_path_argument(request.kwargs.get(OUTPUT_PATH_ARGUMENT))
     kwargs = request.kwargs
     if output_path is None and OUTPUT_PATH_ARGUMENT in kwargs:
         kwargs = dict(kwargs)
