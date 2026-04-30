@@ -99,12 +99,6 @@ _RUNTIME_STARTUP_SECRET_SUFFIXES = (
 )
 _RUNTIME_DATABASE_URL_NAMES = frozenset({"DATABASE_URL"})
 _RUNTIME_DATABASE_URL_SUFFIXES = ("_DATABASE_URL",)
-_OAUTH_CLIENT_CONFIG_ENV_PATTERN = re.compile(
-    r"(?:MINDROOM_OAUTH_[A-Z0-9_]+|GOOGLE(?:_[A-Z0-9]+)*)_(?:CLIENT_(?:ID|SECRET)|REDIRECT_URI)",
-)
-_OAUTH_CLIENT_SECRET_ENV_PATTERN = re.compile(
-    r"(?:MINDROOM_OAUTH_[A-Z0-9_]+|GOOGLE(?:_[A-Z0-9]+)*)_CLIENT_SECRET",
-)
 _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
     {
         *_RUNTIME_STARTUP_EXCLUDED_NAMES,
@@ -379,31 +373,6 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     }
 
 
-def _is_startup_manifest_env_name(name: str) -> bool:
-    return not _OAUTH_CLIENT_SECRET_ENV_PATTERN.fullmatch(name)
-
-
-def _serialize_startup_manifest_runtime_paths(
-    runtime_paths: RuntimePaths,
-    *,
-    public_runtime: bool,
-) -> dict[str, object]:
-    serialized = (
-        serialize_public_runtime_paths(runtime_paths) if public_runtime else serialize_runtime_paths(runtime_paths)
-    )
-    serialized["process_env"] = {
-        key: value
-        for key, value in cast("dict[str, str]", serialized["process_env"]).items()
-        if _is_startup_manifest_env_name(key)
-    }
-    serialized["env_file_values"] = {
-        key: value
-        for key, value in cast("dict[str, str]", serialized["env_file_values"]).items()
-        if _is_startup_manifest_env_name(key)
-    }
-    return serialized
-
-
 def _is_public_runtime_startup_env_name(name: str) -> bool:
     if name in _RUNTIME_STARTUP_EXCLUDED_NAMES:
         return False
@@ -419,8 +388,6 @@ def _is_isolated_runtime_public_env_name(name: str) -> bool:
         return False
     if is_runtime_database_url_env_name(name):
         return False
-    if _OAUTH_CLIENT_CONFIG_ENV_PATTERN.fullmatch(name):
-        return True
     if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _ISOLATED_RUNTIME_ENV_EXTRA_KEYS):
         return False
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
@@ -431,10 +398,6 @@ def _is_sandbox_execution_runtime_env_name(name: str) -> bool:
         return False
     if is_runtime_database_url_env_name(name):
         return False
-    if _OAUTH_CLIENT_SECRET_ENV_PATTERN.fullmatch(name):
-        return False
-    if _OAUTH_CLIENT_CONFIG_ENV_PATTERN.fullmatch(name):
-        return True
     if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _ISOLATED_RUNTIME_ENV_EXTRA_KEYS):
         return False
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
@@ -464,10 +427,9 @@ def serialize_startup_manifest(
 ) -> dict[str, object]:
     """Return one JSON-compatible startup manifest for sandbox runners."""
     return {
-        "runtime_paths": _serialize_startup_manifest_runtime_paths(
-            runtime_paths,
-            public_runtime=public_runtime,
-        ),
+        "runtime_paths": serialize_public_runtime_paths(runtime_paths)
+        if public_runtime
+        else serialize_runtime_paths(runtime_paths),
         "tool_validation_snapshot": dict(tool_validation_snapshot or {}),
     }
 
@@ -621,8 +583,6 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
 def _is_known_worker_credential_env_name(name: str) -> bool:
     return name in {
         "GOOGLE_APPLICATION_CREDENTIALS",
-        "GOOGLE_CLIENT_ID",
-        "GOOGLE_CLIENT_SECRET",
         "GITHUB_TOKEN",
         *VERTEXAI_CLAUDE_ENV_KEYS,
     }
@@ -710,8 +670,6 @@ def shell_extra_env_values(
         if key in _RUNNER_CONTROL_ENV_EXCLUDED_NAMES:
             continue
         if key.startswith("MINDROOM_SANDBOX_"):
-            continue
-        if _OAUTH_CLIENT_SECRET_ENV_PATTERN.fullmatch(key):
             continue
         if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns):
             selected_env[key] = value

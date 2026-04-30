@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from html import escape
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -19,7 +19,7 @@ from mindroom.api.credentials import (
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.oauth import (
     OAuthClaimValidationError,
     OAuthProvider,
@@ -30,12 +30,11 @@ from mindroom.oauth.service import (
     OAuthConnectTarget,
     consume_oauth_connect_token,
     lookup_oauth_connect_token,
-    oauth_connect_target_payload,
     oauth_credentials_usable,
     oauth_success_redirect_url,
     sanitized_oauth_token_result,
 )
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope, resolve_worker_target
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 
 if TYPE_CHECKING:
     from mindroom.api.credentials import RequestCredentialsTarget
@@ -107,14 +106,20 @@ def _issue_authorization_url(
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _verify_connect_target_authorized(request, connect_target, runtime_paths)
+        target = resolve_request_credentials_target(
+            request,
+            agent_name=agent_name,
+            service_names=(provider.credential_service,),
+            allow_private_scopes=True,
+        )
         state = issue_pending_oauth_state(
             request,
             provider.id,
-            connect_target.agent_name,
-            payload=oauth_connect_target_payload(connect_target),
+            agent_name,
+            payload=_target_binding_payload(provider, target),
         )
         try:
-            auth_url = provider.authorization_uri(runtime_paths, state=state)
+            auth_url = provider.authorization_uri(target.runtime_paths, state=state)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         try:
@@ -157,94 +162,18 @@ def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsT
     }
 
 
-def _state_payload_target_mode(payload: dict[str, str] | None) -> str:
-    if payload is None:
-        return ""
-    return payload.get("target_mode", "")
-
-
-def _worker_scope_from_payload(payload: dict[str, str]) -> WorkerScope | None:
-    value = payload.get("worker_scope")
-    if value in ("shared", "user", "user_agent"):
-        return cast("WorkerScope", value)
-    if value == "unscoped":
-        return None
-    raise HTTPException(status_code=400, detail="OAuth state has an invalid worker scope")
-
-
-def _verify_worker_binding_authorized(
-    request: Request,
-    *,
-    worker_scope: str,
-    agent_name: str | None,
-    requester_id: str | None,
-    tenant_id: str | None,
-    account_id: str | None,
-    runtime_paths: RuntimePaths,
-) -> None:
-    dashboard_identity = build_dashboard_execution_identity(
-        request,
-        agent_name or "oauth",
-        runtime_paths=runtime_paths,
-    )
-    if worker_scope in ("user", "user_agent") and not requester_id:
-        raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
-    if requester_id and requester_id != dashboard_identity.requester_id:
-        raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
-
-    if tenant_id and tenant_id != dashboard_identity.tenant_id:
-        raise HTTPException(status_code=403, detail="OAuth connect link does not belong to this tenant")
-    if account_id and account_id != dashboard_identity.account_id:
-        raise HTTPException(status_code=403, detail="OAuth connect link does not belong to this account")
-
-
 def _verify_connect_target_authorized(
     request: Request,
     connect_target: OAuthConnectTarget,
     runtime_paths: RuntimePaths,
 ) -> None:
-    _verify_worker_binding_authorized(
+    dashboard_identity = build_dashboard_execution_identity(
         request,
-        worker_scope=connect_target.worker_scope,
-        agent_name=connect_target.agent_name,
-        requester_id=connect_target.requester_id,
-        tenant_id=connect_target.tenant_id,
-        account_id=connect_target.account_id,
+        "oauth",
         runtime_paths=runtime_paths,
     )
-
-
-def _verify_worker_payload_authorized(
-    request: Request,
-    payload: dict[str, str],
-    runtime_paths: RuntimePaths,
-) -> None:
-    _verify_worker_binding_authorized(
-        request,
-        worker_scope=payload.get("worker_scope", ""),
-        agent_name=payload.get("agent_name") or None,
-        requester_id=payload.get("requester_id") or None,
-        tenant_id=payload.get("tenant_id") or None,
-        account_id=payload.get("account_id") or None,
-        runtime_paths=runtime_paths,
-    )
-
-
-def _worker_target_from_payload(provider: OAuthProvider, payload: dict[str, str]) -> ResolvedWorkerTarget:
-    if payload.get("provider") != provider.id or payload.get("credential_service") != provider.credential_service:
-        raise HTTPException(status_code=400, detail="OAuth state does not match this provider")
-    worker_key = payload.get("worker_key")
-    if not worker_key:
-        raise HTTPException(status_code=400, detail="OAuth state is missing a credential target")
-    agent_name = payload.get("agent_name") or None
-    return ResolvedWorkerTarget(
-        worker_scope=_worker_scope_from_payload(payload),
-        routing_agent_name=agent_name,
-        execution_identity=None,
-        tenant_id=payload.get("tenant_id") or None,
-        account_id=payload.get("account_id") or None,
-        worker_key=worker_key,
-    )
+    if connect_target.requester_id and connect_target.requester_id != dashboard_identity.requester_id:
+        raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
 
 
 def _verify_pending_target_binding(
@@ -374,36 +303,26 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
     provider, runtime_paths = _load_provider(request, provider_id)
     pending = consume_pending_oauth_request(request, provider.id, state)
     worker_target: ResolvedWorkerTarget | None = None
-    target: RequestCredentialsTarget | None = None
-    if _state_payload_target_mode(pending.payload) == "worker_key":
-        if pending.payload is None:
-            raise HTTPException(status_code=400, detail="OAuth state is missing a credential target")
-        _verify_worker_payload_authorized(request, pending.payload, runtime_paths)
-        worker_target = _worker_target_from_payload(provider, pending.payload)
-    else:
-        target = resolve_request_credentials_target(
-            request,
-            agent_name=pending.agent_name,
-            service_names=(provider.credential_service,),
-            execution_scope_override_provided=pending.execution_scope_override_provided,
-            execution_scope_override=pending.execution_scope_override,
-            allow_private_scopes=True,
-        )
-        _verify_pending_target_binding(provider, pending.payload, target)
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=pending.agent_name,
+        service_names=(provider.credential_service,),
+        execution_scope_override_provided=pending.execution_scope_override_provided,
+        execution_scope_override=pending.execution_scope_override,
+        allow_private_scopes=True,
+    )
+    _verify_pending_target_binding(provider, pending.payload, target)
 
     try:
         token_result = await provider.exchange_code(code, runtime_paths)
         provider.validate_claims(token_result, runtime_paths)
         safe_result = sanitized_oauth_token_result(provider, token_result)
-        if target is not None:
-            worker_target = resolve_worker_target(
-                target.worker_scope,
-                target.agent_name,
-                execution_identity=target.execution_identity,
-            )
-        credentials_manager = (
-            target.base_manager if target is not None else get_runtime_credentials_manager(runtime_paths)
+        worker_target = resolve_worker_target(
+            target.worker_scope,
+            target.agent_name,
+            execution_identity=target.execution_identity,
         )
+        credentials_manager = target.base_manager
         existing_credentials = load_scoped_credentials(
             provider.credential_service,
             credentials_manager=credentials_manager,

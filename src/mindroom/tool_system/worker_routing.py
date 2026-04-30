@@ -32,10 +32,22 @@ SHARED_ONLY_INTEGRATION_NAMES = frozenset(
 LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
     {
         "attachments",
+        "gmail",
+        "google_calendar",
+        "google_drive",
+        "google_sheets",
         "homeassistant",
     },
 )
-LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset({"homeassistant"})
+LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
+    {
+        "google_calendar",
+        "google_drive",
+        "google_gmail",
+        "google_sheets",
+        "homeassistant",
+    },
+)
 
 
 @runtime_checkable

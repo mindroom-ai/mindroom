@@ -45,7 +45,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, AgnoGoogleDriveTools):
                 kwargs["max_read_size"] = max_read_size
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
-        self._worker_target = worker_target
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
             provided_creds=provided_creds,
