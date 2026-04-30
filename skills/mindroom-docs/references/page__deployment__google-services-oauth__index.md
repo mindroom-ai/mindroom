@@ -67,5 +67,5 @@ GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com
 ## Runtime Behavior
 
 Dashboard and agent-issued connect links use `/api/oauth/{provider}/connect` or `/api/oauth/{provider}/authorize`.
-OAuth callback state is signed and bound to the authenticated dashboard user and scoped credential target.
+OAuth callback state is stored server-side as an opaque token and bound to the authenticated dashboard user and scoped credential target.
 Disconnecting a provider removes both the token service and that provider's settings service for the selected scope.

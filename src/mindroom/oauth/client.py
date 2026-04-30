@@ -154,7 +154,7 @@ class ScopedOAuthClientMixin:
 
     def _should_skip_auth(self) -> bool:
         """Return whether tool auth can return early with already-valid provided credentials."""
-        return bool(self.creds and self.creds.valid)
+        return bool(self._provided_creds and self.creds and self.creds.valid)
 
     def _auth(self) -> None:
         """Authenticate using MindRoom-scoped OAuth credentials."""

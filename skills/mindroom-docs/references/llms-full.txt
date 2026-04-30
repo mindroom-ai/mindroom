@@ -11588,7 +11588,7 @@ GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com
 
 ## Runtime Behavior
 
-Dashboard and agent-issued connect links use `/api/oauth/{provider}/connect` or `/api/oauth/{provider}/authorize`. OAuth callback state is signed and bound to the authenticated dashboard user and scoped credential target. Disconnecting a provider removes both the token service and that provider's settings service for the selected scope.
+Dashboard and agent-issued connect links use `/api/oauth/{provider}/connect` or `/api/oauth/{provider}/authorize`. OAuth callback state is stored server-side as an opaque token and bound to the authenticated dashboard user and scoped credential target. Disconnecting a provider removes both the token service and that provider's settings service for the selected scope.
 
 # Google Services OAuth For Individuals
 
@@ -12119,7 +12119,7 @@ Agent-level `worker_tools` overrides `defaults.worker_tools`. With `MINDROOM_WOR
 
 ## Worker Scope
 
-`worker_tools` controls which tools run in the sandbox proxy. `worker_scope` controls how those sandbox runtimes are shared between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`. Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
+`worker_tools` controls which tools run in the sandbox proxy. `worker_scope` controls how those sandbox runtimes are shared between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `homeassistant`. Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 
 You can set `worker_scope` per agent or in `defaults`:
 

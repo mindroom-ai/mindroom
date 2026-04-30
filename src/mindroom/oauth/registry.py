@@ -104,13 +104,34 @@ def _load_plugin_oauth_providers(
 def _provider_registry(providers: Iterable[OAuthProvider]) -> dict[str, OAuthProvider]:
     registry: dict[str, OAuthProvider] = {}
     duplicate_ids: set[str] = set()
+    service_owners: dict[str, tuple[str, str]] = {}
+    duplicate_services: list[str] = []
     for provider in providers:
         if provider.id in registry:
             duplicate_ids.add(provider.id)
         registry[provider.id] = provider
+        provider_services = [
+            ("credential_service", provider.credential_service),
+            ("tool_config_service", provider.tool_config_service),
+        ]
+        for role, service_name in provider_services:
+            if service_name is None:
+                continue
+            owner = service_owners.get(service_name)
+            if owner is None:
+                service_owners[service_name] = (provider.id, role)
+                continue
+            owner_provider_id, owner_role = owner
+            duplicate_services.append(
+                f"{service_name} ({owner_provider_id}.{owner_role}, {provider.id}.{role})",
+            )
     if duplicate_ids:
         duplicate_list = ", ".join(sorted(duplicate_ids))
         msg = f"Duplicate OAuth provider id(s): {duplicate_list}"
+        raise plugin_imports.PluginValidationError(msg)
+    if duplicate_services:
+        duplicate_list = ", ".join(sorted(duplicate_services))
+        msg = f"Duplicate OAuth provider service name(s): {duplicate_list}"
         raise plugin_imports.PluginValidationError(msg)
     return registry
 

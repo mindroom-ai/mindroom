@@ -22,6 +22,13 @@ import { homeAssistantIntegration } from "./homeassistant";
 
 const OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete";
 
+type OAuthStatus = {
+  connected: boolean;
+  hasClientConfig: boolean;
+  toolConfigService?: string;
+  statusError?: string;
+};
+
 function isOAuthCompleteMessage(
   event: MessageEvent,
   authWindow: Window,
@@ -63,7 +70,7 @@ class GenericOAuthIntegrationProvider implements IntegrationProvider {
       scope?.agentName ?? null,
       scope?.executionScope,
     );
-    return {
+    const integrationStatus: Partial<Integration> = {
       status: status.connected
         ? "connected"
         : status.hasClientConfig
@@ -71,7 +78,12 @@ class GenericOAuthIntegrationProvider implements IntegrationProvider {
           : "not_connected",
       connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
+      config_service: status.toolConfigService,
     };
+    if (status.statusError) {
+      integrationStatus.helper_text = status.statusError;
+    }
+    return integrationStatus;
   }
 
   private async connect(
@@ -122,7 +134,7 @@ class GenericOAuthIntegrationProvider implements IntegrationProvider {
   private async checkConnection(
     agentName?: string | null,
     executionScope?: WorkerScope | null,
-  ): Promise<{ connected: boolean; hasClientConfig: boolean }> {
+  ): Promise<OAuthStatus> {
     try {
       const response = await fetch(
         withAgentExecutionScope(
@@ -132,16 +144,37 @@ class GenericOAuthIntegrationProvider implements IntegrationProvider {
         ),
       );
       if (!response.ok) {
-        return { connected: false, hasClientConfig: false };
+        let detail = `Failed to load ${this.integration.name} OAuth status.`;
+        try {
+          const data = await response.json();
+          if (typeof data.detail === "string" && data.detail.length > 0) {
+            detail = data.detail;
+          }
+        } catch {
+          // Keep the generic status error when the response body is not JSON.
+        }
+        return {
+          connected: false,
+          hasClientConfig: true,
+          statusError: detail,
+        };
       }
       const data = await response.json();
       return {
         connected: data.connected === true,
         hasClientConfig: data.has_client_config === true,
+        toolConfigService:
+          typeof data.tool_config_service === "string"
+            ? data.tool_config_service
+            : undefined,
       };
     } catch (error) {
       console.error(`Failed to load ${this.providerId} status:`, error);
-      return { connected: false, hasClientConfig: false };
+      return {
+        connected: false,
+        hasClientConfig: true,
+        statusError: `Failed to load ${this.integration.name} OAuth status.`,
+      };
     }
   }
 

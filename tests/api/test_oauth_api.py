@@ -24,6 +24,7 @@ from mindroom.oauth import OAuthClientConfig, OAuthProvider, OAuthTokenResult, l
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.state import _reset_oauth_state_for_tests
+from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 
 
@@ -236,6 +237,98 @@ def test_plugin_config_registers_oauth_provider(tmp_path: Path) -> None:
 
     assert providers["plugin_drive"].display_name == "Plugin OAuth"
     assert providers["plugin_drive"].credential_service == "plugin_drive"
+
+
+def test_plugin_oauth_provider_rejects_duplicate_service_names(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "mindroom.plugin.json").write_text(
+        '{"name": "oauth_plugin", "oauth_module": "oauth_provider.py"}',
+        encoding="utf-8",
+    )
+    (plugin_dir / "oauth_provider.py").write_text(
+        "\n".join(
+            [
+                "from mindroom.oauth import OAuthProvider",
+                "",
+                "def register_oauth_providers(settings, runtime_paths):",
+                "    del settings, runtime_paths",
+                "    return [",
+                "        OAuthProvider(",
+                "            id='plugin_one',",
+                "            display_name='Plugin One',",
+                "            authorization_url='https://auth.example.test/one/authorize',",
+                "            token_url='https://auth.example.test/one/token',",
+                "            scopes=('plugin.read',),",
+                "            credential_service='plugin_oauth',",
+                "            client_id_env='PLUGIN_CLIENT_ID',",
+                "            client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "        ),",
+                "        OAuthProvider(",
+                "            id='plugin_two',",
+                "            display_name='Plugin Two',",
+                "            authorization_url='https://auth.example.test/two/authorize',",
+                "            token_url='https://auth.example.test/two/token',",
+                "            scopes=('plugin.read',),",
+                "            credential_service='plugin_oauth',",
+                "            client_id_env='PLUGIN_CLIENT_ID',",
+                "            client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "        ),",
+                "    ]",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            **_config_payload(),
+            "plugins": [{"path": str(plugin_dir)}],
+        },
+    )
+
+    with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
+        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+
+
+def test_plugin_oauth_provider_rejects_tool_config_overlap(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "mindroom.plugin.json").write_text(
+        '{"name": "oauth_plugin", "oauth_module": "oauth_provider.py"}',
+        encoding="utf-8",
+    )
+    (plugin_dir / "oauth_provider.py").write_text(
+        "\n".join(
+            [
+                "from mindroom.oauth import OAuthProvider",
+                "",
+                "def register_oauth_providers(settings, runtime_paths):",
+                "    del settings, runtime_paths",
+                "    return [OAuthProvider(",
+                "        id='plugin_drive',",
+                "        display_name='Plugin Drive',",
+                "        authorization_url='https://auth.example.test/authorize',",
+                "        token_url='https://auth.example.test/token',",
+                "        scopes=('plugin.read',),",
+                "        credential_service='google_drive',",
+                "        client_id_env='PLUGIN_CLIENT_ID',",
+                "        client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "    )]",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            **_config_payload(),
+            "plugins": [{"path": str(plugin_dir)}],
+        },
+    )
+
+    with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
+        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
 
 
 def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -> None:

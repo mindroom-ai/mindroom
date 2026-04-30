@@ -25,6 +25,7 @@ export interface Integration {
   dashboard_configuration_supported?: boolean;
   execution_scope_supported?: boolean;
   oauth_client_configured?: boolean;
+  config_service?: string;
 }
 
 export interface IntegrationScope {

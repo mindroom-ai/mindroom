@@ -52,4 +52,20 @@ describe("Generic OAuth integration provider", () => {
 
     expect(authWindow.close).toHaveBeenCalled();
   });
+
+  it("does not report missing client config when OAuth status fails", async () => {
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({ detail: "server error" }),
+    });
+
+    const status = await integrationProviders.google_drive.loadStatus!();
+
+    expect(status).toMatchObject({
+      status: "available",
+      connected: false,
+      oauth_client_configured: true,
+    });
+  });
 });

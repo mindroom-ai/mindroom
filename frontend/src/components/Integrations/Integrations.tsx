@@ -224,6 +224,10 @@ export function Integrations() {
             providerTool?.execution_scope_supported ??
             config.integration.execution_scope_supported,
           ...status,
+          config_service:
+            providerTool?.name ??
+            status.config_service ??
+            config.integration.config_service,
         });
       }
 
@@ -252,6 +256,7 @@ export function Integrations() {
                 ? "connected"
                 : mapped.status,
             auth_provider: tool.auth_provider ?? undefined,
+            config_service: tool.name,
           } as Integration & { auth_provider?: string };
         });
 
@@ -303,7 +308,7 @@ export function Integrations() {
       return false;
     }
     setConfigDialog({
-      service: integration.id,
+      service: integration.config_service ?? integration.id,
       displayName: integration.name,
       description: integration.description,
       configFields: integration.config_fields,

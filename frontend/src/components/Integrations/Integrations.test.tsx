@@ -68,12 +68,15 @@ const {
   mockGoogleOnAction,
   mockGoogleDriveOnAction,
   mockGoogleDriveOnDisconnect,
+  mockGoogleGmailOnAction,
+  mockGoogleGmailOnDisconnect,
   mockSpotifyOnAction,
   mockSpotifyOnDisconnect,
   mockPlexOnAction,
   mockPlexOnDisconnect,
   mockGoogleLoadStatus,
   mockGoogleDriveLoadStatus,
+  mockGoogleGmailLoadStatus,
   mockSpotifyLoadStatus,
   mockPlexLoadStatus,
 } = vi.hoisted(() => ({
@@ -81,6 +84,8 @@ const {
   mockGoogleOnAction: vi.fn(),
   mockGoogleDriveOnAction: vi.fn(),
   mockGoogleDriveOnDisconnect: vi.fn(),
+  mockGoogleGmailOnAction: vi.fn(),
+  mockGoogleGmailOnDisconnect: vi.fn(),
   mockSpotifyOnAction: vi.fn(),
   mockSpotifyOnDisconnect: vi.fn(),
   mockPlexOnAction: vi.fn(),
@@ -89,6 +94,9 @@ const {
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
   mockGoogleDriveLoadStatus: vi
+    .fn()
+    .mockResolvedValue({ status: "available", connected: false }),
+  mockGoogleGmailLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
   mockSpotifyLoadStatus: vi
@@ -162,10 +170,15 @@ vi.mock("@/lib/api", () => ({
 
 // Mock EnhancedConfigDialog
 vi.mock("./EnhancedConfigDialog", () => ({
-  EnhancedConfigDialog: ({ onSuccess }: any) => {
+  EnhancedConfigDialog: ({ onSuccess, service }: any) => {
     // Auto-call success when dialog opens
     setTimeout(() => onSuccess?.(), 0);
-    return <div>Enhanced Config Dialog</div>;
+    return (
+      <>
+        <div>Enhanced Config Dialog</div>
+        <div>Service: {service}</div>
+      </>
+    );
   },
 }));
 
@@ -205,6 +218,23 @@ vi.mock("./integrations/index", () => ({
         onDisconnect: mockGoogleDriveOnDisconnect,
       }),
       loadStatus: mockGoogleDriveLoadStatus,
+    },
+    google_gmail: {
+      getConfig: () => ({
+        integration: {
+          id: "google_gmail",
+          name: "Gmail",
+          description: "Read, search, and manage Gmail emails",
+          category: "email",
+          icon: <span>Gmail Icon</span>,
+          status: "available",
+          setup_type: "oauth",
+          connected: false,
+        },
+        onAction: mockGoogleGmailOnAction,
+        onDisconnect: mockGoogleGmailOnDisconnect,
+      }),
+      loadStatus: mockGoogleGmailLoadStatus,
     },
     spotify: {
       getConfig: () => ({
@@ -280,6 +310,23 @@ vi.mock("./integrations/index", () => ({
     {
       getConfig: () => ({
         integration: {
+          id: "google_gmail",
+          name: "Gmail",
+          description: "Read, search, and manage Gmail emails",
+          category: "email",
+          icon: <span>Gmail Icon</span>,
+          status: "available",
+          setup_type: "oauth",
+          connected: false,
+        },
+        onAction: mockGoogleGmailOnAction,
+        onDisconnect: mockGoogleGmailOnDisconnect,
+      }),
+      loadStatus: mockGoogleGmailLoadStatus,
+    },
+    {
+      getConfig: () => ({
+        integration: {
           id: "spotify",
           name: "Spotify",
           description: "Music streaming service",
@@ -323,6 +370,8 @@ describe("Integrations", () => {
     mockGoogleOnAction.mockResolvedValue(undefined);
     mockGoogleDriveOnAction.mockResolvedValue(undefined);
     mockGoogleDriveOnDisconnect.mockResolvedValue(undefined);
+    mockGoogleGmailOnAction.mockResolvedValue(undefined);
+    mockGoogleGmailOnDisconnect.mockResolvedValue(undefined);
     mockSpotifyOnAction.mockResolvedValue(undefined);
     mockSpotifyOnDisconnect.mockResolvedValue(undefined);
     mockPlexOnAction.mockResolvedValue(undefined);
@@ -332,6 +381,10 @@ describe("Integrations", () => {
       connected: false,
     });
     mockGoogleDriveLoadStatus.mockResolvedValue({
+      status: "available",
+      connected: false,
+    });
+    mockGoogleGmailLoadStatus.mockResolvedValue({
       status: "available",
       connected: false,
     });
@@ -1040,6 +1093,69 @@ describe("Integrations", () => {
       expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
     });
     expect(mockGoogleDriveOnAction).not.toHaveBeenCalled();
+  });
+
+  it("opens Gmail OAuth provider configuration using the Gmail tool service", async () => {
+    mockGoogleGmailLoadStatus.mockResolvedValue({
+      status: "connected",
+      connected: true,
+    });
+    const gmailTools = [
+      ...mockTools,
+      {
+        name: "gmail",
+        display_name: "Gmail",
+        description: "Read and manage Gmail emails",
+        icon: "SiGmail",
+        icon_color: "text-red-500",
+        category: "email",
+        status: "available",
+        setup_type: "oauth",
+        auth_provider: "google_gmail",
+        config_fields: [
+          {
+            name: "max_results",
+            label: "Max Results",
+            type: "number",
+            required: false,
+            default: 10,
+            description: "Maximum emails to return.",
+          },
+        ],
+        helper_text: null,
+        docs_url: null,
+        dependencies: null,
+      },
+    ];
+    mockUseTools.mockImplementation(() => ({
+      tools: gmailTools,
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    }));
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Gmail")).toBeInTheDocument();
+    });
+
+    const gmailCard = screen.getByText("Gmail").closest(".h-full");
+    expect(gmailCard).toBeInstanceOf(HTMLElement);
+    const editButton = await waitFor(() => {
+      const button = within(gmailCard as HTMLElement).getByRole("button", {
+        name: /edit/i,
+      });
+      expect(button).not.toBeDisabled();
+      return button;
+    });
+    fireEvent.click(editButton);
+
+    await waitFor(() => {
+      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+      expect(screen.getByText("Service: gmail")).toBeInTheDocument();
+    });
+    expect(mockGoogleGmailOnAction).not.toHaveBeenCalled();
   });
 
   it("ignores stale shared-scope reloads after switching scope mid-action", async () => {
