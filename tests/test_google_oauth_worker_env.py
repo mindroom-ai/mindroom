@@ -53,6 +53,36 @@ if TYPE_CHECKING:
             "MINDROOM_OAUTH_GOOGLE_GMAIL_CLIENT_ID",
             "MINDROOM_OAUTH_GOOGLE_GMAIL_CLIENT_SECRET",
         ),
+        (
+            google_drive_oauth_provider(),
+            GoogleDriveTools,
+            "GOOGLE_DRIVE_CLIENT_ID",
+            "GOOGLE_DRIVE_CLIENT_SECRET",
+        ),
+        (
+            google_calendar_oauth_provider(),
+            GoogleCalendarTools,
+            "GOOGLE_CALENDAR_CLIENT_ID",
+            "GOOGLE_CALENDAR_CLIENT_SECRET",
+        ),
+        (
+            google_sheets_oauth_provider(),
+            GoogleSheetsTools,
+            "GOOGLE_SHEETS_CLIENT_ID",
+            "GOOGLE_SHEETS_CLIENT_SECRET",
+        ),
+        (
+            google_gmail_oauth_provider(),
+            GmailTools,
+            "GOOGLE_GMAIL_CLIENT_ID",
+            "GOOGLE_GMAIL_CLIENT_SECRET",
+        ),
+        (
+            google_drive_oauth_provider(),
+            GoogleDriveTools,
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET",
+        ),
     ],
 )
 def test_isolated_runtime_keeps_google_oauth_client_secret(
