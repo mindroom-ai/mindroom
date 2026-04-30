@@ -624,6 +624,42 @@ async def test_env_passthrough_preserved(tmp_path: Path) -> None:
     assert result == "async-shell-works"
 
 
+@pytest.mark.asyncio
+async def test_login_bash_preserves_runtime_path_after_profile_reset(tmp_path: Path) -> None:
+    """MindRoom shell calls should keep runtime PATH even when login startup rewrites it."""
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_bash = fake_bin / "bash"
+    fake_bash.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"-lc\" ]; then\n"
+        "  export PATH=/profile/default\n"
+        "  exec /bin/sh -c \"$2\"\n"
+        "fi\n"
+        "exec /bin/sh \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_bash.chmod(0o755)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"PATH": "/worker-env/bin:/usr/bin:/bin"},
+    )
+    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint([str(fake_bash), "-lc", "printf '%s' \"$PATH\""])
+
+    assert result == "/worker-env/bin:/usr/bin:/bin"
+
+
 # ---------------------------------------------------------------------------
 # Handle persistence across toolkit instances (sandbox runner path)
 # ---------------------------------------------------------------------------

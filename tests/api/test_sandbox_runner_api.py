@@ -3478,6 +3478,99 @@ def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_pat
     assert overlay["PATH"].startswith(f"{workspace.resolve()}/.local/bin:")
 
 
+def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The subprocess child should receive the post-hook env, not the stale original request env."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage", process_env={})
+    config = Config.validate_with_runtime({}, runtime_paths)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_workspace_env_hook(workspace, "export PATH=/hook/bin:$PATH\n")
+    captured_envelope: dict[str, object] = {}
+
+    def fake_subprocess_run(
+        _command: list[str],
+        *,
+        input: str,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+        check: bool,
+        env: dict[str, str] | None,
+        cwd: str | None,
+    ) -> subprocess.CompletedProcess[str]:
+        captured_envelope["payload"] = sandbox_protocol_module.parse_subprocess_envelope(input)
+        captured_envelope["env"] = env
+        captured_envelope["cwd"] = cwd
+        assert capture_output is True
+        assert text is True
+        assert timeout >= 1.0
+        assert check is False
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
+        return subprocess.CompletedProcess(
+            args=_command,
+            returncode=0,
+            stdout="",
+            stderr=sandbox_protocol_module.response_marker_payload(response.model_dump_json()),
+        )
+
+    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_subprocess_run)
+
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        args=[["bash", "-lc", "echo ok"]],
+        kwargs={},
+        execution_env={"PATH": "/usr/bin:/bin"},
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+    response = sandbox_runner_module._execute_request_subprocess_sync(request, runtime_paths, config)
+
+    assert response.ok is True
+    envelope = captured_envelope["payload"]
+    assert isinstance(envelope, sandbox_protocol_module.SandboxSubprocessEnvelope)
+    assert envelope.request["execution_env"]["PATH"] == "/hook/bin:/usr/bin:/bin"
+    env = captured_envelope["env"]
+    assert isinstance(env, dict)
+    assert env["PATH"] == "/hook/bin:/usr/bin:/bin"
+
+
+def test_workspace_env_hook_shell_side_effects_do_not_reach_command(tmp_path: Path) -> None:
+    """Hook shell state such as `cd` should not leak into the command process."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage", process_env={})
+    config = Config.validate_with_runtime({}, runtime_paths)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_workspace_env_hook(workspace, "export WORKSPACE_HOOK_TOKEN=hooked\ncd /\n")
+
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        args=[["bash", "-c", 'printf "%s|%s" "$WORKSPACE_HOOK_TOKEN" "$PWD"']],
+        kwargs={},
+        execution_env={"PATH": os.environ["PATH"]},
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+    response = sandbox_runner_module._execute_request_subprocess_sync(request, runtime_paths, config)
+
+    assert response.ok is True, response
+    token, pwd = str(response.result).split("|", 1)
+    assert token == "hooked"  # noqa: S105
+    assert pwd == str(workspace)
+
+
 def test_workspace_env_hook_skips_non_execution_tools_for_routed_agent(tmp_path: Path) -> None:
     """Routed non-execution tools should not be blocked by a shell env hook."""
     config_path = tmp_path / "config.yaml"

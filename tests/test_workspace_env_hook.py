@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from mindroom.constants import resolve_runtime_paths, shell_execution_runtime_env_values
 from mindroom.api import sandbox_exec
 from mindroom.api.sandbox_exec import (
     WORKSPACE_ENV_HOOK_RELATIVE_PATH,
@@ -31,6 +32,24 @@ def _write_hook(workspace: Path, body: str) -> Path:
     hook_path = hook_dir / "worker-env.sh"
     hook_path.write_text(body, encoding="utf-8")
     return hook_path
+
+
+def test_trusted_workspace_env_overlay_wins_over_execution_env_path(tmp_path: Path) -> None:
+    """Hook-exported PATH should not be overwritten by the runner's base PATH."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"PATH": "/usr/bin:/bin"},
+    )
+
+    overlaid_paths = sandbox_exec.runtime_paths_with_execution_env(
+        runtime_paths,
+        {"PATH": "/usr/bin:/bin"},
+        trusted_env_overlay={"PATH": "/workspace/.local/bin:/usr/bin:/bin"},
+    )
+    shell_env = shell_execution_runtime_env_values(overlaid_paths)
+
+    assert shell_env["PATH"].startswith("/workspace/.local/bin:")
 
 
 def test_resolve_workspace_env_hook_path_returns_none_when_missing(tmp_path: Path) -> None:
