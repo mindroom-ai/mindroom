@@ -489,6 +489,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment(tmp_path: Path
     }
     assert container["resources"]["requests"] == {"memory": "256Mi", "cpu": "100m"}
     assert container["resources"]["limits"] == {"memory": "1Gi", "cpu": "500m"}
+    assert deployment["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
     assert deployment["spec"]["template"]["spec"]["enableServiceLinks"] is False
     assert container["startupProbe"] == {
         "httpGet": {"path": "/healthz", "port": "api"},

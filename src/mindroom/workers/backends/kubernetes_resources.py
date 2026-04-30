@@ -545,6 +545,7 @@ class KubernetesResourceManager:
         }
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
+            "automountServiceAccountToken": False,
             "enableServiceLinks": self.config.enable_service_links,
             "securityContext": {
                 "runAsUser": 1000,
