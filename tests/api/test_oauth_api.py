@@ -1346,6 +1346,99 @@ def test_status_rejects_expired_access_token_without_refresh(tmp_path: Path) -> 
     assert status_response.json()["connected"] is False
 
 
+def test_oauth_credentials_usable_rejects_refresh_only_without_expiry(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = _fake_provider()
+
+    assert (
+        oauth_service.oauth_credentials_usable(
+            provider,
+            runtime_paths,
+            {
+                "refresh_token": "stored-refresh-token",
+                "scopes": list(provider.scopes),
+                "_source": "oauth",
+                "_oauth_provider": provider.id,
+            },
+        )
+        is False
+    )
+
+
+def test_status_rejects_refresh_only_credentials_without_expiry(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).save_credentials(
+        provider.credential_service,
+        {
+            "refresh_token": "stored-refresh-token",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["connected"] is False
+
+
+def test_oauth_credentials_usable_accepts_access_token_without_expiry(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = _fake_provider()
+
+    assert oauth_service.oauth_credentials_usable(
+        provider,
+        runtime_paths,
+        {
+            "token": "stored-token",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+
+
+def test_oauth_credentials_usable_accepts_expired_access_token_with_refresh(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = _fake_provider()
+
+    assert oauth_service.oauth_credentials_usable(
+        provider,
+        runtime_paths,
+        {
+            "token": "expired-access-token",
+            "refresh_token": "stored-refresh-token",
+            "expires_at": 1.0,
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+
+
 def test_status_rejects_refresh_token_without_required_scopes(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,

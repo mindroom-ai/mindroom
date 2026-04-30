@@ -213,18 +213,22 @@ def oauth_credentials_usable(
     if not oauth_credentials_have_required_scopes(provider, credentials):
         return False
 
-    refresh_token = credentials.get("refresh_token")
-    if isinstance(refresh_token, str) and refresh_token:
-        return True
-
     token = credentials.get("token") or credentials.get("access_token")
-    if not isinstance(token, str) or not token:
-        return False
+    refresh_token = credentials.get("refresh_token")
+    has_refresh_token = isinstance(refresh_token, str) and bool(refresh_token)
+    if isinstance(token, str) and token:
+        expires_at = credentials.get("expires_at")
+        if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
+            return True
+        return (
+            float(expires_at) > (now if now is not None else time.time()) + _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS
+            or has_refresh_token
+        )
 
     expires_at = credentials.get("expires_at")
     if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
         return False
-    return float(expires_at) > (now if now is not None else time.time()) + _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS
+    return has_refresh_token
 
 
 def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials: dict[str, object]) -> bool:
