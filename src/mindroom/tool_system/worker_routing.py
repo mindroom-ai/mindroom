@@ -35,6 +35,7 @@ SHARED_ONLY_INTEGRATION_NAMES = frozenset(
 )
 LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
     {
+        "attachments",
         "homeassistant",
         "gmail",
         "google_calendar",

@@ -632,11 +632,11 @@ async def test_login_bash_preserves_runtime_path_after_profile_reset(tmp_path: P
     fake_bash = fake_bin / "bash"
     fake_bash.write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = \"-lc\" ]; then\n"
+        'if [ "$1" = "-lc" ]; then\n'
         "  export PATH=/profile/default\n"
-        "  exec /bin/sh -c \"$2\"\n"
+        '  exec /bin/sh -c "$2"\n'
         "fi\n"
-        "exec /bin/sh \"$@\"\n",
+        'exec /bin/sh "$@"\n',
         encoding="utf-8",
     )
     fake_bash.chmod(0o755)

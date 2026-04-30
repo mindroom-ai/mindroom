@@ -202,7 +202,7 @@ list_files()
 - `restrict_to_base_dir` only constrains the file helper paths, not what arbitrary Python code can do once executed.
 - `safe_globals` and `safe_locals` are exposed directly from the upstream constructor and are mainly useful for advanced programmatic wiring, not typical hand-written YAML.
 - If you need runtime-scoped environment isolation, rely on worker-routed execution instead of assuming in-process Python emulation is a security boundary.
-- Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`, `UV_CACHE_DIR`). Worker-routed `coding` and `file` subprocesses receive the same overlay as process env, though their documented behavior is file operations rather than env inspection. See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
+- Worker-routed `python` execution also receives `.mindroom/worker-env.sh` overlay env via `os.environ` (e.g., `PIP_INDEX_URL`, `UV_CACHE_DIR`). See "Workspace env hook" in `docs/deployment/sandbox-proxy.md`.
 
 ## \[`coding`\]
 

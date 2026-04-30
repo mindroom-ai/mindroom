@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from mindroom.constants import resolve_runtime_paths, shell_execution_runtime_env_values
 from mindroom.api import sandbox_exec
 from mindroom.api.sandbox_exec import (
     WORKSPACE_ENV_HOOK_RELATIVE_PATH,
@@ -18,6 +17,7 @@ from mindroom.api.sandbox_exec import (
     resolve_workspace_env_hook_path,
     source_workspace_env_hook,
 )
+from mindroom.constants import resolve_runtime_paths, shell_execution_runtime_env_values
 
 REQUIRES_BASH = pytest.mark.skipif(
     (sys.platform != "linux" and sys.platform != "darwin")

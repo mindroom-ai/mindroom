@@ -31,7 +31,7 @@ OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "Optional MindRoom-managed workspace-relative path. "
     "If set, the full supported tool output is written to this file in your workspace and the tool returns only a "
     "compact receipt. "
-    "Use this for large output you plan to inspect later with file, coding, or shell tools."
+    "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
 )
 MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -73,7 +73,17 @@ class _ValidatedOutputPath:
 @dataclass(frozen=True)
 class _SerializedToolOutput:
     payload: bytes
-    format: Literal["text", "json"]
+    format: Literal["text", "json", "binary"]
+
+
+@dataclass(frozen=True)
+class ToolOutputWriteResult:
+    """Result from writing caller-managed bytes to a validated output path."""
+
+    receipt: dict[str, object]
+    absolute_path: Path
+    byte_count: int
+    overwritten: bool
 
 
 def _output_redirect_max_bytes(runtime_paths: RuntimePaths) -> int:
@@ -99,7 +109,7 @@ def _success_receipt(
     *,
     path: str,
     byte_count: int,
-    output_format: Literal["text", "json"],
+    output_format: Literal["text", "json", "binary"],
     overwritten: bool,
 ) -> dict[str, object]:
     return {
@@ -270,6 +280,18 @@ def _validate_output_path(policy: ToolOutputFilePolicy, raw_path: object) -> _Va
     )
 
 
+def validate_output_path(policy: ToolOutputFilePolicy, raw_path: object) -> str | None:
+    """Validate one output path without creating parent directories or writing bytes."""
+    validation = _validate_output_path(policy, raw_path)
+    return validation if isinstance(validation, str) else None
+
+
+def validate_output_path_syntax(raw_path: object) -> str | None:
+    """Validate output-path syntax when the destination workspace is remote."""
+    validation = _validate_raw_output_path(raw_path)
+    return validation if isinstance(validation, str) else None
+
+
 def _validate_parent_components(workspace_root: Path, relative_parent: Path) -> str | None:
     """Reject existing unsafe parent components without creating anything."""
     if relative_parent == Path():
@@ -368,7 +390,14 @@ def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
     return serialized
 
 
-def _write_atomic(path: Path, payload: bytes, workspace_root: Path, relative_path: Path) -> str | None:
+def _write_atomic(
+    path: Path,
+    payload: bytes,
+    workspace_root: Path,
+    relative_path: Path,
+    *,
+    file_mode: int | None = None,
+) -> str | None:
     parent_error = _ensure_parent_directory(workspace_root, relative_path.parent)
     if parent_error is not None:
         return parent_error
@@ -394,6 +423,8 @@ def _write_atomic(path: Path, payload: bytes, workspace_root: Path, relative_pat
             temp_file.flush()
             os.fsync(temp_file.fileno())
             temp_path = Path(temp_file.name)
+        if file_mode is not None:
+            temp_path.chmod(file_mode)
         os.replace(temp_path, path)  # noqa: PTH105
     except OSError as exc:
         if temp_path is not None:
@@ -401,6 +432,46 @@ def _write_atomic(path: Path, payload: bytes, workspace_root: Path, relative_pat
         logger.warning("tool_output_redirect_write_failed", error_type=type(exc).__name__)
         return "Failed to write redirected tool output."
     return None
+
+
+def write_bytes_to_output_path(
+    policy: ToolOutputFilePolicy,
+    raw_path: object,
+    payload: bytes,
+    *,
+    output_format: Literal["binary"] = "binary",
+    file_mode: int | None = None,
+) -> ToolOutputWriteResult | str:
+    """Validate and atomically write caller-owned bytes to a MindRoom output path."""
+    validated_path = _validate_output_path(policy, raw_path)
+    if isinstance(validated_path, str):
+        return validated_path
+
+    byte_count = len(payload)
+    if byte_count > policy.max_bytes:
+        return f"Redirected tool output is {byte_count} bytes, which exceeds the {policy.max_bytes} byte limit."
+
+    write_error = _write_atomic(
+        validated_path.absolute_path,
+        payload,
+        policy.workspace_root,
+        validated_path.relative_path,
+        file_mode=file_mode,
+    )
+    if write_error is not None:
+        return write_error
+
+    return ToolOutputWriteResult(
+        receipt=_success_receipt(
+            path=validated_path.requested_path,
+            byte_count=byte_count,
+            output_format=output_format,
+            overwritten=validated_path.overwritten,
+        ),
+        absolute_path=validated_path.absolute_path,
+        byte_count=byte_count,
+        overwritten=validated_path.overwritten,
+    )
 
 
 def _redirect_result_to_file(

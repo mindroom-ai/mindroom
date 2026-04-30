@@ -9,7 +9,7 @@ import pytest
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
 from mindroom.constants import RuntimePaths
-from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA
+from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolManagedInitArg
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_sheets", "openclaw_compat"}
@@ -68,8 +68,8 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
         # Skip **kwargs as it's for forward compatibility
         if param.kind == inspect.Parameter.VAR_KEYWORD:
             continue
-        # runtime_paths is injected by MindRoom, not end-user tool config.
-        if name == "runtime_paths":
+        # Managed init args are injected by MindRoom, not end-user tool config.
+        if name in {managed_arg.value for managed_arg in ToolManagedInitArg}:
             continue
         agno_params[name] = {
             "type": resolved_type_hints.get(name),
