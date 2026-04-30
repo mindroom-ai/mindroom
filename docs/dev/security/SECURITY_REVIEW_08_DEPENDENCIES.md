@@ -211,11 +211,11 @@ sdist = { hash = "sha256:e80b3f02a047421be8939e278a168503576a612f6c9e75eb1984598
 
 ### Protection Mechanisms:
 
-✅ **Strong**: Lock files with hashes
-✅ **Strong**: Official source verification
-✅ **Strong**: Multi-stage Docker builds
-⚠️ **Moderate**: Base image security
-❌ **Weak**: Automated monitoring
+- ✅ **Strong**: Lock files with hashes
+- ✅ **Strong**: Official source verification
+- ✅ **Strong**: Multi-stage Docker builds
+- ⚠️ **Moderate**: Base image security
+- ❌ **Weak**: Automated monitoring
 
 ## Remediation Plan
 

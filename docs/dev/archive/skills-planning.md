@@ -2,17 +2,14 @@
 
 Last updated: 2026-02-03
 
-This document is the entry point for all work on the "skills + plugins" feature. It is a
-living plan: update it as we learn, revise assumptions, or change direction.
+This document is the entry point for all work on the "skills + plugins" feature. It is a living plan: update it as we learn, revise assumptions, or change direction.
 
-Update rule: if any implementation choice changes or a new constraint is discovered, add a
-short note to the Change Log at the end and update the relevant section.
+Update rule: if any implementation choice changes or a new constraint is discovered, add a short note to the Change Log at the end and update the relevant section.
 
 ## 1) Background
 
-Mindroom currently has tools registered in code (`src/mindroom/tools/*` and
-`src/mindroom/tools_metadata.py`) and agents select tools directly in `config.yaml`. We want
-an OpenClaw-style model:
+Mindroom currently has tools registered in code (`src/mindroom/tools/*` and `src/mindroom/tools_metadata.py`) and agents select tools directly in `config.yaml`.
+We want an OpenClaw-style model:
 
 - Skills are instruction packs (`SKILL.md`) and do not add capabilities.
 - Plugins provide tools and optionally ship skills.
@@ -47,8 +44,7 @@ an OpenClaw-style model:
 - Skill orchestration uses Agno's `Skills` (prompt snippet + get_skill_* tools).
 - Skills are loaded via Agno `LocalSkills(validate=False)` and normalized to preserve OpenClaw metadata.
 - Plugin manifest filename: `mindroom.plugin.json`.
-- Tool metadata delivery: API builds from the in-memory registry at runtime; `tools_metadata.json`
-  remains for frontend/icon build scripts.
+- Tool metadata delivery: API builds from the in-memory registry at runtime; `tools_metadata.json` remains for frontend/icon build scripts.
 
 ## 5) Open Questions (Track Here)
 
@@ -128,8 +124,7 @@ Behavior:
 ### 6.3 Tool registry changes
 
 Current:
-- Tools are registered in `src/mindroom/tools/*` and imported by
-  `src/mindroom/tools/__init__.py`.
+- Tools are registered in `src/mindroom/tools/*` and imported by `src/mindroom/tools/__init__.py`.
 
 Target:
 - Keep core tools as-is for now.
@@ -210,8 +205,7 @@ Prompt rule:
 - `skills` (array of relative paths, optional; defaults to none)
 
 Behavior:
-- If `tools_module` is present, import it and expect tool registration via
-  `register_tool_with_metadata(...)`.
+- If `tools_module` is present, import it and expect tool registration via `register_tool_with_metadata(...)`.
 - If `skills` is present, add those directories to the skills search path.
 
 ## 8) Implementation Plan (Phased)
@@ -243,8 +237,7 @@ Status: complete (2026-02-02)
 ### Phase 4: Skill command / dispatch (OpenClaw-style)
 Status: complete (2026-02-03)
 
-- [x] Parse command dispatch fields from `SKILL.md` (e.g., `command-dispatch`, `command-tool`,
-  `command-arg-mode`, `user-invocable`).
+- [x] Parse command dispatch fields from `SKILL.md` (e.g., `command-dispatch`, `command-tool`, `command-arg-mode`, `user-invocable`).
 - [x] Add a chat command handler (`!skill <name> [args]`) that:
   - Resolves the skill by name (same precedence as normal skill discovery).
   - Optionally maps to a tool call (`command-tool`) or uses model-driven skill execution.
