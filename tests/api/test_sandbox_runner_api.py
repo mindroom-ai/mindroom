@@ -3076,8 +3076,8 @@ def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
         ToolExecutionIdentity(
             channel="matrix",
             agent_name="persistent_worker_lab",
-            requester_id="@smoketest_a:chat-internal.example.com",
-            room_id="!persistent-workers:chat-internal.example.com",
+            requester_id="@smoketest_a:example.org",
+            room_id="!persistent-workers:example.org",
             thread_id="$thread",
             resolved_thread_id="$thread",
             session_id="session-1",
