@@ -2848,7 +2848,7 @@ This page documents the built-in tools in the `data-and-databases` group. Use th
 - \[`csv`\] - Pre-registered CSV reading and DuckDB-backed SQL queries over CSV files.
 - \[`pandas`\] - In-memory dataframe creation and dataframe method execution.
 - \[`google_bigquery`\] - BigQuery dataset inspection and SQL queries.
-- \[`google_sheets`\] - Google Sheets access through Google OAuth, with read support verified by default and upstream support for create, update, and duplicate operations.
+- \[`google_sheets`\] - Google Sheets access through the per-service Google Sheets OAuth provider, with read support verified by default and upstream support for create, update, and duplicate operations.
 - \[`openbb`\] - Stock prices, company search, news, profiles, and price targets through OpenBB.
 - \[`yfinance`\] - Yahoo Finance market data, fundamentals, news, and history.
 - \[`financial_datasets_api`\] - Structured financial statements, filings, ownership, and crypto data from Financial Datasets.
@@ -3230,7 +3230,7 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 ### Notes
 
 - Configure `dataset`, `project`, and `location` explicitly in MindRoom, because that is the documented and validated path in the live metadata.
-- `google_bigquery` does not use the shared Google Services OAuth integration.
+- `google_bigquery` does not use a MindRoom Google OAuth provider.
 - If `credentials` is unset, the BigQuery SDK falls back to the process's default Google Cloud authentication behavior.
 
 ## \[`google_sheets`\]
@@ -3239,7 +3239,7 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ### What It Does
 
-The underlying Agno toolkit supports `read_sheet()`, `create_sheet()`, `update_sheet()`, and `create_duplicate_sheet()`. MindRoom wraps Agno's Google Sheets toolkit with `ScopedOAuthClientMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files. The upstream toolkit selects read-only Sheets scope when only reads are enabled, and it selects write scope when create, update, or duplicate operations are enabled. `create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on the provider's `drive.file` scope in addition to Sheets access. If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call. MindRoom maps the dashboard config fields `read`, `create`, `update`, and `duplicate` onto Agno's constructor flags.
+The underlying Agno toolkit supports `read_sheet()`, `create_sheet()`, `update_sheet()`, and `create_duplicate_sheet()`. MindRoom wraps Agno's Google Sheets toolkit with `ScopedOAuthClientMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files. MindRoom's `google_sheets` OAuth provider requests Sheets access plus the narrower `drive.file` scope, and dashboard flags only gate which Agno methods are exposed. `create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on the provider's `drive.file` scope in addition to Sheets access. If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call. MindRoom maps the dashboard config fields `read`, `create`, `update`, and `duplicate` onto Agno's constructor flags. When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to Agno's local token flow.
 
 ### Configuration
 
@@ -3274,7 +3274,7 @@ read_sheet(
 
 ### Notes
 
-- `google_sheets` uses the `google_sheets` OAuth provider and can use scoped OAuth credentials for isolated worker scopes.
+- `google_sheets` uses the per-service `google_sheets` OAuth provider and can use scoped OAuth credentials for isolated worker scopes.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
 - The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets and Drive scopes.
 
@@ -5720,7 +5720,7 @@ This page documents the built-in tools in the `messaging-and-social` group. Use 
 
 ### What It Does
 
-MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail credentials are loaded from MindRoom's scoped OAuth credential store instead of a local `token.json` file. The wrapper refreshes stored Google tokens when needed and raises `OAuthConnectionRequired` with a connect URL when no usable stored OAuth credentials are available. It only bypasses MindRoom OAuth when configured for Google service-account auth. The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`. Draft and send operations accept local file-system paths for attachments.
+MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail credentials are loaded from MindRoom's scoped OAuth credential store instead of a local `token.json` file. The wrapper refreshes stored Google tokens when needed and raises `OAuthConnectionRequired` with a connect URL when no usable stored OAuth credentials are available. It does not fall back to Agno's local OAuth flow when MindRoom credentials are missing. It only bypasses MindRoom OAuth when configured for Google service-account auth. The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`. Draft and send operations accept local file-system paths for attachments.
 
 ### Configuration
 
@@ -5758,7 +5758,7 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 - Connect Gmail through the `google_gmail` OAuth provider rather than storing a Gmail-specific API key.
 - The Gmail provider requests Gmail read, modify, and compose scopes.
 - `gmail` can use scoped OAuth credentials for isolated worker scopes.
-- The current registry exposes the eight boolean fields above, but the installed `agno.tools.gmail.GmailTools` constructor does not consume those selector kwargs directly on this branch, so `- gmail` plus Google OAuth is the verified setup path.
+- The current registry exposes the eight boolean fields above, but the installed `agno.tools.gmail.GmailTools` constructor does not consume those selector kwargs directly on this branch, so `- gmail` plus the `google_gmail` OAuth provider is the verified setup path.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
 
 ## \[`slack`\]
@@ -6663,7 +6663,7 @@ This page documents the built-in tools in the `calendar-and-scheduling` group. U
 
 ## Common Setup Notes
 
-`google_calendar` is a Google-backed OAuth integration. It uses the `google_calendar` OAuth provider instead of an API key form. It can use scoped OAuth credentials for isolated worker scopes. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction. `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys. Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread. MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
+`google_calendar` is a per-service Google OAuth integration. It uses the `google_calendar` OAuth provider instead of an API key form. It can use scoped OAuth credentials for isolated worker scopes. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction. `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys. Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread. MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
 
 ## \[`google_calendar`\]
 
@@ -6671,14 +6671,14 @@ This page documents the built-in tools in the `calendar-and-scheduling` group. U
 
 ### What It Does
 
-`google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`. MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`. The OAuth provider requests Google Calendar scope once, while MindRoom gates write methods with the `allow_update` setting. Write calls are still part of the tool surface, but they are only exposed when `allow_update: true` is configured. `find_available_slots()` derives openings from the user's current calendar events plus working-hours settings inferred from Google Calendar settings and locale.
+`google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`. MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`. The OAuth provider requests a consistent Google Calendar scope, while MindRoom gates write methods with the `allow_update` setting. Write calls are still part of the tool surface, but they are only exposed when `allow_update: true` is configured. When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to Agno's local token flow. `find_available_slots()` derives openings from the user's current calendar events plus working-hours settings inferred from Google Calendar settings and locale.
 
 ### Configuration
 
-| Option         | Type      | Required | Default   | Notes                                                                     |
-| -------------- | --------- | -------- | --------- | ------------------------------------------------------------------------- |
-| `calendar_id`  | `text`    | `no`     | `primary` | Google Calendar ID to query or update.                                    |
-| `allow_update` | `boolean` | `no`     | `false`   | Request write-capable behavior for create, update, and delete operations. |
+| Option         | Type      | Required | Default   | Notes                                         |
+| -------------- | --------- | -------- | --------- | --------------------------------------------- |
+| `calendar_id`  | `text`    | `no`     | `primary` | Google Calendar ID to query or update.        |
+| `allow_update` | `boolean` | `no`     | `false`   | Expose create, update, and delete operations. |
 
 ### Example
 
@@ -12154,7 +12154,7 @@ If `worker_scope` is unset, proxied tools still run in the sandbox, but each cal
 **Important notes:**
 
 - `worker_scope` does **not** change where agent data is stored. All scopes read and write the same agent storage directory (`agents/<name>/`).
-- The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` manage credentials through their worker runtime.
+- The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`. OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception. For those providers, the dashboard can connect scoped `user` and `user_agent` credentials that land in the same worker credential target used at runtime. Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files. Use `user_agent` for per-agent isolation.
 
 ## Without configured worker routing

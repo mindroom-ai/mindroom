@@ -42,6 +42,7 @@ Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gma
 
 MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail credentials are loaded from MindRoom's scoped OAuth credential store instead of a local `token.json` file.
 The wrapper refreshes stored Google tokens when needed and raises `OAuthConnectionRequired` with a connect URL when no usable stored OAuth credentials are available.
+It does not fall back to Agno's local OAuth flow when MindRoom credentials are missing.
 It only bypasses MindRoom OAuth when configured for Google service-account auth.
 The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`.
 Draft and send operations accept local file-system paths for attachments.
@@ -82,7 +83,7 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 - Connect Gmail through the `google_gmail` OAuth provider rather than storing a Gmail-specific API key.
 - The Gmail provider requests Gmail read, modify, and compose scopes.
 - `gmail` can use scoped OAuth credentials for isolated worker scopes.
-- The current registry exposes the eight boolean fields above, but the installed `agno.tools.gmail.GmailTools` constructor does not consume those selector kwargs directly on this branch, so `- gmail` plus Google OAuth is the verified setup path.
+- The current registry exposes the eight boolean fields above, but the installed `agno.tools.gmail.GmailTools` constructor does not consume those selector kwargs directly on this branch, so `- gmail` plus the `google_gmail` OAuth provider is the verified setup path.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
 
 ## \[`slack`\]

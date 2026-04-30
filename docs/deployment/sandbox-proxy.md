@@ -435,8 +435,10 @@ If `worker_scope` is unset, proxied tools still run in the sandbox, but each cal
 
 - `worker_scope` does **not** change where agent data is stored.
   All scopes read and write the same agent storage directory (`agents/<name>/`).
-- The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`.
-  Agents using `user` or `user_agent` manage credentials through their worker runtime.
+- The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
+  OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception.
+  For those providers, the dashboard can connect scoped `user` and `user_agent` credentials that land in the same worker credential target used at runtime.
+  Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files.
   Use `user_agent` for per-agent isolation.
 

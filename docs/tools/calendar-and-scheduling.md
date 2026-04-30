@@ -19,7 +19,7 @@ Use these tools when you need Google Calendar access, Cal.com booking APIs, or M
 
 ## Common Setup Notes
 
-`google_calendar` is a Google-backed OAuth integration.
+`google_calendar` is a per-service Google OAuth integration.
 It uses the `google_calendar` OAuth provider instead of an API key form.
 It can use scoped OAuth credentials for isolated worker scopes.
 Use [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md) to connect Google before enabling `google_calendar`.
@@ -36,8 +36,9 @@ MindRoom also includes `scheduler` in `defaults.tools` by default on this branch
 
 `google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`.
 MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`.
-The OAuth provider requests Google Calendar scope once, while MindRoom gates write methods with the `allow_update` setting.
+The OAuth provider requests a consistent Google Calendar scope, while MindRoom gates write methods with the `allow_update` setting.
 Write calls are still part of the tool surface, but they are only exposed when `allow_update: true` is configured.
+When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to Agno's local token flow.
 `find_available_slots()` derives openings from the user's current calendar events plus working-hours settings inferred from Google Calendar settings and locale.
 
 ### Configuration
@@ -45,7 +46,7 @@ Write calls are still part of the tool surface, but they are only exposed when `
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `calendar_id` | `text` | `no` | `primary` | Google Calendar ID to query or update. |
-| `allow_update` | `boolean` | `no` | `false` | Request write-capable behavior for create, update, and delete operations. |
+| `allow_update` | `boolean` | `no` | `false` | Expose create, update, and delete operations. |
 
 ### Example
 
