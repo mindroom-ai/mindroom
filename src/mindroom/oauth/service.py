@@ -41,6 +41,23 @@ OAUTH_CREDENTIAL_FIELDS = frozenset(
     },
 )
 _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
+_SCOPE_IMPLICATIONS = {
+    "https://www.googleapis.com/auth/calendar": frozenset(
+        {"https://www.googleapis.com/auth/calendar.readonly"},
+    ),
+    "https://www.googleapis.com/auth/drive": frozenset(
+        {
+            "https://www.googleapis.com/auth/drive.file",
+            "https://www.googleapis.com/auth/drive.readonly",
+        },
+    ),
+    "https://www.googleapis.com/auth/gmail.modify": frozenset(
+        {"https://www.googleapis.com/auth/gmail.readonly"},
+    ),
+    "https://www.googleapis.com/auth/spreadsheets": frozenset(
+        {"https://www.googleapis.com/auth/spreadsheets.readonly"},
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -219,7 +236,10 @@ def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials:
     raw_scope = credentials.get("scope")
     if isinstance(raw_scope, str):
         granted_scopes.update(scope for scope in raw_scope.split() if scope)
-    return set(provider.scopes).issubset(granted_scopes)
+    expanded_granted_scopes = set(granted_scopes)
+    for scope in granted_scopes:
+        expanded_granted_scopes.update(_SCOPE_IMPLICATIONS.get(scope, ()))
+    return set(provider.scopes).issubset(expanded_granted_scopes)
 
 
 def build_oauth_authorize_url(

@@ -93,6 +93,7 @@ def _fake_provider(
     include_refresh_token: bool = True,
     allowed_email_domains: tuple[str, ...] = (),
     allowed_hosted_domains: tuple[str, ...] = (),
+    scopes: tuple[str, ...] = ("scope.read",),
 ) -> OAuthProvider:
     async def _exchange(
         provider: OAuthProvider,
@@ -126,7 +127,7 @@ def _fake_provider(
         display_name="Test Drive",
         authorization_url=f"https://auth.example.test/{provider_id}/authorize",
         token_url=f"https://auth.example.test/{provider_id}/token",
-        scopes=("scope.read",),
+        scopes=scopes,
         credential_service=credential_service,
         tool_config_service=tool_config_service,
         client_id_env="TEST_OAUTH_CLIENT_ID",
@@ -1288,3 +1289,27 @@ def test_status_rejects_refresh_token_without_required_scopes(tmp_path: Path) ->
     assert status_response.status_code == 200
     assert status_response.json()["has_client_config"] is True
     assert status_response.json()["connected"] is False
+
+
+def test_required_scope_check_accepts_google_scope_supersets() -> None:
+    calendar_provider = _fake_provider(scopes=("https://www.googleapis.com/auth/calendar.readonly",))
+    gmail_provider = _fake_provider(scopes=("https://www.googleapis.com/auth/gmail.readonly",))
+    drive_provider = _fake_provider(scopes=("https://www.googleapis.com/auth/drive.file",))
+    sheets_provider = _fake_provider(scopes=("https://www.googleapis.com/auth/spreadsheets.readonly",))
+
+    assert oauth_service.oauth_credentials_have_required_scopes(
+        calendar_provider,
+        {"scopes": ["https://www.googleapis.com/auth/calendar"]},
+    )
+    assert oauth_service.oauth_credentials_have_required_scopes(
+        gmail_provider,
+        {"scope": "https://www.googleapis.com/auth/gmail.modify"},
+    )
+    assert oauth_service.oauth_credentials_have_required_scopes(
+        drive_provider,
+        {"scopes": ["https://www.googleapis.com/auth/drive"]},
+    )
+    assert oauth_service.oauth_credentials_have_required_scopes(
+        sheets_provider,
+        {"scope": "https://www.googleapis.com/auth/spreadsheets"},
+    )
