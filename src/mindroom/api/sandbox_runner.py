@@ -725,11 +725,8 @@ def _apply_workspace_home_contract(
         return {}
 
     contract_env = _workspace_home_contract_env(workspace=workspace, prepared=prepared)
-    applied: dict[str, str] = {}
-    for name, value in contract_env.items():
-        execution_env[name] = value
-        applied[name] = value
-    return applied
+    execution_env.update(contract_env)
+    return contract_env
 
 
 def _workspace_env_hook_workspace_for_request(
