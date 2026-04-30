@@ -575,6 +575,7 @@ def test_safe_token_result_drops_raw_id_token() -> None:
                 "token": "access-token",
                 "_id_token": "header.payload.signature",
                 "id_token": "standard.header.payload",
+                "client_secret": "stored-client-secret",
                 "_oauth_claims": {"email": "unverified@example.test"},
             },
             claims={"email": "alice@example.com", "sub": "google-subject"},
@@ -584,6 +585,7 @@ def test_safe_token_result_drops_raw_id_token() -> None:
 
     assert "_id_token" not in safe_result.token_data
     assert "id_token" not in safe_result.token_data
+    assert "client_secret" not in safe_result.token_data
     assert safe_result.token_data["_oauth_claims"] == {
         "email": "alice@example.com",
         "sub": "google-subject",

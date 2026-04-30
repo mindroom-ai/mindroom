@@ -469,6 +469,7 @@ class OAuthProvider:
         token_data = dict(result.token_data)
         token_data.pop("_id_token", None)
         token_data.pop("id_token", None)
+        token_data.pop("client_secret", None)
         token_data.pop("_oauth_claims", None)
         if result.claims:
             token_data["_oauth_claims"] = _safe_claim_summary(result.claims)
