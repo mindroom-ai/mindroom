@@ -156,7 +156,3 @@ def consume_opaque_oauth_state(
         msg = "OAuth state is invalid or expired"
         raise OAuthProviderError(msg)
     return data
-
-
-def _reset_oauth_state_for_tests() -> None:
-    """Clear in-process OAuth state locks for tests."""

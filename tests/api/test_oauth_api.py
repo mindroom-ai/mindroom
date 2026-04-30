@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -23,7 +22,6 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import OAuthClientConfig, OAuthProvider, OAuthTokenResult, load_oauth_providers
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.google_drive import google_drive_oauth_provider
-from mindroom.oauth.state import _reset_oauth_state_for_tests
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 
@@ -82,13 +80,6 @@ def _publish_config(
         ),
         supabase_auth=None,
     )
-
-
-@pytest.fixture(autouse=True)
-def clear_pending_oauth_state() -> Generator[None, None, None]:
-    _reset_oauth_state_for_tests()
-    yield
-    _reset_oauth_state_for_tests()
 
 
 def _fake_provider(

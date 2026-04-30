@@ -12,7 +12,6 @@ from mindroom.api import credentials as credentials_api
 from mindroom.api.main import initialize_api_app
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
-from mindroom.oauth.state import _reset_oauth_state_for_tests
 
 
 @pytest.fixture
@@ -46,14 +45,6 @@ def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestC
         # Store the mock for use in tests
         client.mock_manager = mock_credentials_manager
         yield client
-
-
-@pytest.fixture(autouse=True)
-def clear_pending_oauth_state() -> Generator[None, None, None]:
-    """Reset pending OAuth state between tests."""
-    _reset_oauth_state_for_tests()
-    yield
-    _reset_oauth_state_for_tests()
 
 
 def _oauth_state_test_app(tmp_path: Path) -> FastAPI:
