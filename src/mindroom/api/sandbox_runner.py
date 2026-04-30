@@ -77,15 +77,6 @@ logger = get_logger(__name__)
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
-_WORKER_OWNED_ENV_NAMES = frozenset(
-    {
-        "PIP_CACHE_DIR",
-        "PYTHONPYCACHEPREFIX",
-        "UV_CACHE_DIR",
-        "VIRTUAL_ENV",
-        "XDG_CACHE_HOME",
-    },
-)
 
 
 def _startup_manifest_path_from_env() -> Path:
@@ -698,12 +689,12 @@ def _worker_owned_env(prepared: sandbox_worker_prep.PreparedWorkerRequest | None
 
 def _trusted_workspace_overlay_for_runtime_paths(
     overlay: dict[str, str],
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+    worker_owned_env: dict[str, str],
 ) -> dict[str, str]:
     """Return hook overlay values that may influence runtime path reconstruction."""
-    if prepared is None:
+    if not worker_owned_env:
         return overlay
-    return {name: value for name, value in overlay.items() if name not in _WORKER_OWNED_ENV_NAMES}
+    return {name: value for name, value in overlay.items() if name not in worker_owned_env}
 
 
 def _apply_workspace_home_contract(
@@ -842,8 +833,9 @@ async def _execute_request_inprocess(
         return overlay_failure
     if overlay:
         execution_env.update(overlay)
-    execution_env.update(_worker_owned_env(prepared))
-    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, prepared)
+    worker_owned_env = _worker_owned_env(prepared)
+    execution_env.update(worker_owned_env)
+    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, worker_owned_env)
     runtime_overrides = _request_runtime_overrides(request, prepared)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
@@ -997,8 +989,9 @@ def _execute_request_subprocess_sync(
         return overlay_failure
     if overlay:
         execution_env.update(overlay)
-    execution_env.update(_worker_owned_env(prepared))
-    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, prepared)
+    worker_owned_env = _worker_owned_env(prepared)
+    execution_env.update(worker_owned_env)
+    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, worker_owned_env)
     subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, execution_env)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
