@@ -1242,7 +1242,51 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
     )
     remaining_settings = manager.for_worker(owner_worker_key).load_credentials("test_drive")
     assert remaining_token_credentials is None
-    assert remaining_settings is None
+    assert remaining_settings is not None
+    assert remaining_settings["list_files"] is False
+    assert remaining_settings["max_read_size"] == 42
+
+
+def test_disconnect_preserves_tool_config_settings(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(credential_service="test_calendar_oauth", tool_config_service="test_calendar")
+    manager = get_runtime_credentials_manager(runtime_paths)
+    owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
+    manager.for_worker(owner_worker_key).save_credentials(
+        provider.credential_service,
+        {
+            "token": "stored-token",
+            "refresh_token": "stored-refresh-token",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+        },
+    )
+    manager.for_worker(owner_worker_key).save_credentials(
+        "test_calendar",
+        {
+            "allow_update": True,
+            "_source": "ui",
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
+
+    assert response.status_code == 200
+    assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
+    settings = manager.for_worker(owner_worker_key).load_credentials("test_calendar")
+    assert settings is not None
+    assert settings["allow_update"] is True
 
 
 def test_status_requires_client_config_for_connected_true(tmp_path: Path) -> None:

@@ -455,7 +455,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
 
 @router.post("/{provider_id}/disconnect")
 async def disconnect(provider_id: str, request: Request, agent_name: str | None = None) -> dict[str, str]:
-    """Remove scoped OAuth credentials and provider tool settings for one provider."""
+    """Remove scoped OAuth credentials for one provider while preserving tool settings."""
     await _require_oauth_api_user(request)
     provider, _runtime_paths = _load_provider(request, provider_id)
     target = resolve_request_credentials_target(
@@ -465,6 +465,4 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
         allow_private_scopes=True,
     )
     target.target_manager.delete_credentials(provider.credential_service)
-    if provider.tool_config_service is not None:
-        target.target_manager.delete_credentials(provider.tool_config_service)
     return {"status": "disconnected", "provider": provider.id}
