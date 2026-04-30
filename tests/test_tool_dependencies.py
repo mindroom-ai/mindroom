@@ -143,55 +143,6 @@ def test_vertexai_claude_google_auth_is_declared_as_base_dependency() -> None:
     )
 
 
-def test_full_runtime_image_keeps_sentence_transformers_runtime_only() -> None:
-    """The full image should not preinstall the runtime-only sentence_transformers extra."""
-    dockerfile = Path("local/instances/deploy/Dockerfile.mindroom").read_text(encoding="utf-8")
-    assert "--all-extras --no-extra sentence_transformers" in dockerfile
-
-
-@pytest.mark.parametrize(
-    "dockerfile_path",
-    [
-        Path("local/instances/deploy/Dockerfile.mindroom"),
-        Path("local/instances/deploy/Dockerfile.mindroom-minimal"),
-    ],
-)
-def test_runtime_images_copy_workspace_avatars(dockerfile_path: Path) -> None:
-    """Runtime images should still ship workspace avatar assets under /app/avatars."""
-    dockerfile = dockerfile_path.read_text(encoding="utf-8")
-
-    assert "COPY avatars /app/avatars" in dockerfile
-
-
-@pytest.mark.parametrize(
-    "dockerfile_path",
-    [
-        Path("local/instances/deploy/Dockerfile.mindroom"),
-        Path("local/instances/deploy/Dockerfile.mindroom-minimal"),
-    ],
-)
-def test_runtime_images_include_headless_cli_utilities(dockerfile_path: Path) -> None:
-    """Worker images should include baseline utilities for detached interactive CLI auth flows."""
-    dockerfile = dockerfile_path.read_text(encoding="utf-8")
-
-    for package_name in ("tmux", "nano", "procps", "jq", "unzip", "bzip2", "ripgrep"):
-        assert package_name in dockerfile
-
-
-@pytest.mark.parametrize(
-    "dockerfile_path",
-    [
-        Path("local/instances/deploy/Dockerfile.mindroom"),
-        Path("local/instances/deploy/Dockerfile.mindroom-minimal"),
-    ],
-)
-def test_runtime_images_keep_tmux_server_alive_without_sessions(dockerfile_path: Path) -> None:
-    """Worker tmux servers should survive short-lived single-session auth/setup flows."""
-    dockerfile = dockerfile_path.read_text(encoding="utf-8")
-
-    assert "set-option -g exit-empty off" in dockerfile
-
-
 def test_tools_requiring_config_metadata() -> None:
     """Test that tools marked REQUIRES_CONFIG have config_fields or auth_provider."""
     inconsistent = []

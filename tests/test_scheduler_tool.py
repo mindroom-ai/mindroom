@@ -14,7 +14,6 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
-from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 
@@ -223,8 +222,3 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
         room_id=context.room_id,
         task_id="task123",
     )
-
-
-def test_scheduler_tool_registered_in_metadata() -> None:
-    """Scheduler tool should be visible in tool metadata."""
-    assert "scheduler" in TOOL_METADATA

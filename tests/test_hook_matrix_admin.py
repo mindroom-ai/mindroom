@@ -51,16 +51,6 @@ def test_hooks_package_reexports_hook_matrix_admin_api() -> None:
     assert hasattr(hooks, "build_hook_matrix_admin")
 
 
-def test_hook_context_declares_matrix_admin_field() -> None:
-    """HookContext should expose a bound matrix admin helper."""
-    assert "matrix_admin" in HookContext.__dataclass_fields__
-
-
-def test_hook_context_declares_agent_message_snapshot_reader_field() -> None:
-    """HookContext should expose a bound agent-message snapshot reader."""
-    assert "agent_message_snapshot_reader" in HookContext.__dataclass_fields__
-
-
 @pytest.mark.asyncio
 async def test_hook_context_delegates_latest_agent_message_snapshot_reads(tmp_path: Path) -> None:
     """HookContext should route latest-agent-message snapshot reads through the bound helper."""

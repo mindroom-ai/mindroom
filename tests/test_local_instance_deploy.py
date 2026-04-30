@@ -8,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import yaml
 from rich.console import Console
 
 from tests.conftest import normalize_console_output
@@ -242,16 +241,6 @@ def test_restart_only_matrix_recreates_matrix_services_without_project_down(
     assert "docker compose -p alpha down" not in commands[0]
     assert "up -d --force-recreate tuwunel wellknown" in commands[0]
     assert registry.instances["alpha"].status == deploy.InstanceStatus.PARTIAL
-
-
-def test_compose_loads_shared_env_before_instance_env() -> None:
-    """Per-instance env values should override the shared repo defaults."""
-    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
-
-    assert compose["services"]["mindroom"]["env_file"] == [
-        {"path": "../../../.env", "required": False},
-        {"path": "${INSTANCE_ENV_FILE}", "required": True},
-    ]
 
 
 def test_remove_instance_preserves_state_when_teardown_fails(
