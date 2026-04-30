@@ -9,9 +9,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import constants
+from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
+from mindroom.oauth.google_calendar import GOOGLE_CALENDAR_OAUTH_SCOPES, google_calendar_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
@@ -77,6 +80,58 @@ def test_google_calendar_loads_tokens_from_oauth_service(tmp_path: Path) -> None
     assert token_data is not None
     assert token_data["token"] == "access-token"  # noqa: S105
     assert "calendar_id" not in token_data
+
+
+def test_google_calendar_default_config_disables_write_methods(tmp_path: Path) -> None:
+    tool = get_tool_by_name(
+        "google_calendar",
+        _runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+        disable_sandbox_proxy=True,
+    )
+
+    assert isinstance(tool, GoogleCalendarTools)
+    assert "create_event" not in tool.functions
+    assert "update_event" not in tool.functions
+    assert "delete_event" not in tool.functions
+    assert "quick_add_event" not in tool.functions
+    assert "move_event" not in tool.functions
+    assert "respond_to_event" not in tool.functions
+    assert "https://www.googleapis.com/auth/calendar.readonly" in tool.scopes
+    assert "https://www.googleapis.com/auth/calendar" not in tool.scopes
+
+
+def test_google_calendar_allow_update_enables_write_methods(tmp_path: Path) -> None:
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials("google_calendar", {"allow_update": True, "_source": "ui"})
+
+    tool = get_tool_by_name(
+        "google_calendar",
+        _runtime_paths(tmp_path),
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        disable_sandbox_proxy=True,
+    )
+
+    assert isinstance(tool, GoogleCalendarTools)
+    assert "create_event" in tool.functions
+    assert "update_event" in tool.functions
+    assert "delete_event" in tool.functions
+    assert "quick_add_event" in tool.functions
+    assert "move_event" in tool.functions
+    assert "respond_to_event" in tool.functions
+    assert "https://www.googleapis.com/auth/calendar" in tool.scopes
+
+
+def test_google_calendar_provider_defaults_to_readonly_scope() -> None:
+    provider = google_calendar_oauth_provider()
+    write_provider = google_calendar_oauth_provider(allow_update=True)
+
+    assert provider.scopes == GOOGLE_CALENDAR_OAUTH_SCOPES
+    assert "https://www.googleapis.com/auth/calendar.readonly" in provider.scopes
+    assert "https://www.googleapis.com/auth/calendar" not in provider.scopes
+    assert "https://www.googleapis.com/auth/calendar" in write_provider.scopes
 
 
 def test_google_calendar_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:

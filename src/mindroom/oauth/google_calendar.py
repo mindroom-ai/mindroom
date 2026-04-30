@@ -13,11 +13,15 @@ from mindroom.oauth.providers import OAuthProvider
 
 GOOGLE_CALENDAR_OAUTH_SCOPES = (
     *GOOGLE_IDENTITY_SCOPES,
+    "https://www.googleapis.com/auth/calendar.readonly",
+)
+GOOGLE_CALENDAR_WRITE_OAUTH_SCOPES = (
+    *GOOGLE_IDENTITY_SCOPES,
     "https://www.googleapis.com/auth/calendar",
 )
 
 
-def google_calendar_oauth_provider() -> OAuthProvider:
+def google_calendar_oauth_provider(*, allow_update: bool = False) -> OAuthProvider:
     """Return the built-in Google Calendar provider definition."""
     client_id_env, client_secret_env = _google_provider_env_names("google_calendar")
     return OAuthProvider(
@@ -25,7 +29,7 @@ def google_calendar_oauth_provider() -> OAuthProvider:
         display_name="Google Calendar",
         authorization_url="https://accounts.google.com/o/oauth2/v2/auth",
         token_url="https://oauth2.googleapis.com/token",  # noqa: S106
-        scopes=GOOGLE_CALENDAR_OAUTH_SCOPES,
+        scopes=GOOGLE_CALENDAR_WRITE_OAUTH_SCOPES if allow_update else GOOGLE_CALENDAR_OAUTH_SCOPES,
         credential_service="google_calendar_oauth",
         tool_config_service="google_calendar",
         client_id_env=client_id_env,

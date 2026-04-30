@@ -42,6 +42,19 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, AgnoGoogleCalendarTools):
         unified credential storage and passes them to the Agno GoogleCalendarTools.
         """
         provided_creds = kwargs.pop("creds", None)
+        allow_update = kwargs.get("allow_update") is True
+        kwargs.update(
+            {
+                "create_event": allow_update,
+                "update_event": allow_update,
+                "delete_event": allow_update,
+                "quick_add_event": allow_update,
+                "move_event": allow_update,
+                "respond_to_event": allow_update,
+                "scopes": list(google_calendar_oauth_provider(allow_update=allow_update).scopes),
+            },
+        )
+        self._oauth_provider = google_calendar_oauth_provider(allow_update=allow_update)
         if credentials_manager is None:
             msg = "GoogleCalendarTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
