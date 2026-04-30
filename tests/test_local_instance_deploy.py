@@ -254,14 +254,14 @@ def test_compose_loads_shared_env_before_instance_env() -> None:
     ]
 
 
-def test_sandbox_runner_mounts_only_oauth_state_directory() -> None:
-    """The static runner must not receive the full MindRoom storage tree."""
+def test_sandbox_runner_does_not_mount_mindroom_storage() -> None:
+    """The static runner must not receive the MindRoom storage tree."""
     compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
     runner = compose["services"]["sandbox-runner"]
 
-    assert "${DATA_DIR}/mindroom_data/oauth_state:/app/shared/oauth_state" in runner["volumes"]
+    assert all("${DATA_DIR}/mindroom_data" not in volume for volume in runner["volumes"])
     assert "${DATA_DIR}/mindroom_data:/app/shared/.mindroom" not in runner["volumes"]
-    assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared" in runner["environment"]
+    assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared" not in runner["environment"]
 
 
 def test_remove_instance_preserves_state_when_teardown_fails(

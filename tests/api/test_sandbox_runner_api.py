@@ -1169,34 +1169,6 @@ def test_sandbox_execution_env_excludes_arbitrary_runner_env_secrets(
     assert effective_runtime_paths.env_value("MY_SECRET") is None
 
 
-def test_sandbox_execution_env_excludes_oauth_client_secrets_from_worker_runtime(tmp_path: Path) -> None:
-    """Shell execution should not receive OAuth client secrets through serialized runtime paths."""
-    runtime_paths = resolve_runtime_paths(
-        storage_path=tmp_path / "storage",
-        process_env={
-            "GOOGLE_CLIENT_ID": "google-client-id",
-            "GOOGLE_CLIENT_SECRET": "google-client-secret",
-            "OPENAI_API_KEY": "openai-secret",
-        },
-    )
-    worker_runtime_paths = sandbox_runner_module.constants.isolated_runtime_paths(runtime_paths)
-
-    execution_env = sandbox_exec_module.request_execution_env("shell", None, worker_runtime_paths)
-    effective_runtime_paths = sandbox_exec_module.runtime_paths_with_execution_env(
-        worker_runtime_paths,
-        execution_env,
-        include_base_execution_env=False,
-    )
-
-    assert "GOOGLE_CLIENT_ID" not in execution_env
-    assert "GOOGLE_CLIENT_SECRET" not in execution_env
-    assert "OPENAI_API_KEY" not in execution_env
-    assert worker_runtime_paths.env_value("GOOGLE_CLIENT_ID") == "google-client-id"
-    assert effective_runtime_paths.env_value("GOOGLE_CLIENT_ID") is None
-    assert effective_runtime_paths.env_value("GOOGLE_CLIENT_SECRET") is None
-    assert effective_runtime_paths.env_value("OPENAI_API_KEY") is None
-
-
 @pytest.mark.asyncio
 async def test_execute_request_inprocess_reuses_passed_config_without_execution_env(
     monkeypatch: pytest.MonkeyPatch,

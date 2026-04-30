@@ -1587,7 +1587,6 @@ def test_worker_env_excludes_openai_api_key_unless_extra_env_passthrough(
         process_env={
             "OPENAI_API_KEY": "sk-primary",
             "ANTHROPIC_API_KEY": "sk-ant-primary",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "oauth-client-secret",
         },
     )
 
@@ -1600,7 +1599,6 @@ def test_worker_env_excludes_openai_api_key_unless_extra_env_passthrough(
 
     assert worker_paths.env_value("OPENAI_API_KEY") is None
     assert worker_paths.env_value("ANTHROPIC_API_KEY") is None
-    assert worker_paths.env_value("GOOGLE_DRIVE_CLIENT_SECRET") == "oauth-client-secret"
     assert shell_env["OPENAI_API_KEY"] == "sk-primary"
 
 
@@ -3658,7 +3656,7 @@ class TestWorkerToolsOverride:
 
     @pytest.mark.parametrize(
         "tool_name",
-        ["homeassistant"],
+        ["gmail", "google_calendar", "google_drive", "google_sheets", "homeassistant"],
     )
     def test_local_only_tools_never_proxy(
         self,

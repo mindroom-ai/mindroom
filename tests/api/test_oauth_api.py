@@ -903,14 +903,20 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert worker_target.execution_identity is not None
+    connect_token = oauth_service.issue_oauth_connect_token(
+        provider,
+        runtime_paths,
+        worker_target.execution_identity.requester_id,
+    )
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             _login(client)
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
                 follow_redirects=False,
             )
             state = _state_from_auth_url(authorize_response.headers["location"])
@@ -933,39 +939,6 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
     assert standalone_credentials is None
 
 
-def test_worker_connect_token_can_be_consumed_from_shared_storage_root(tmp_path: Path) -> None:
-    primary_runtime_paths = _runtime_paths(
-        tmp_path / "primary",
-        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
-    )
-    worker_runtime_paths = _runtime_paths(
-        tmp_path / "worker",
-        {
-            "TEST_OAUTH_CLIENT_ID": "client-id",
-            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
-            "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT": str(primary_runtime_paths.storage_root),
-        },
-    )
-    provider = _fake_provider()
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
-    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-
-    connect_token = oauth_service.issue_oauth_connect_token(provider, worker_runtime_paths, worker_target)
-    assert connect_token is not None
-    connect_target = oauth_service.consume_oauth_connect_token(provider, primary_runtime_paths, connect_token)
-
-    assert connect_target.worker_key == worker_target.worker_key
-    assert not (worker_runtime_paths.storage_root / "oauth_state" / "oauth_state.json").exists()
-
-
 def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path / "wrong-user",
@@ -983,14 +956,20 @@ def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Pat
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert worker_target.execution_identity is not None
+    connect_token = oauth_service.issue_oauth_connect_token(
+        provider,
+        runtime_paths,
+        worker_target.execution_identity.requester_id,
+    )
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             _login(client)
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
                 follow_redirects=False,
             )
 
@@ -1021,56 +1000,25 @@ def test_shared_agent_connect_token_rejects_wrong_authenticated_requester(tmp_pa
         session_id=None,
     )
     worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert worker_target.execution_identity is not None
+    connect_token = oauth_service.issue_oauth_connect_token(
+        provider,
+        runtime_paths,
+        worker_target.execution_identity.requester_id,
+    )
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             _login(client)
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared"
+                f"&connect_token={connect_token}",
                 follow_redirects=False,
             )
 
     assert authorize_response.status_code == 403
     assert "current user" in authorize_response.json()["detail"]
-
-
-def test_agent_connect_token_rejects_unprovable_tenant_binding(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {
-            "TEST_OAUTH_CLIENT_ID": "client-id",
-            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
-            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
-        },
-    )
-    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider()
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-        tenant_id="tenant-a",
-    )
-    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
-    assert connect_token is not None
-
-    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
-        with TestClient(api_app) as client:
-            _login(client)
-            response = client.get(
-                f"/api/oauth/{provider.id}/authorize?connect_token={connect_token}",
-                follow_redirects=False,
-            )
-
-    assert response.status_code == 403
-    assert "tenant" in response.json()["detail"]
 
 
 def test_callback_rejects_wrong_provider_state(tmp_path: Path) -> None:
