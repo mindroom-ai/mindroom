@@ -1480,6 +1480,26 @@ def test_shell_subprocess_env_preserves_workspace_home_contract_names() -> None:
     assert env["VIRTUAL_ENV"] == "/worker-venv"
 
 
+def test_shell_subprocess_env_prefers_runtime_env_when_no_workspace_contract() -> None:
+    """Direct shell runtime env should not be overwritten by ordinary process env."""
+    env = shell_tool_module._shell_subprocess_env(
+        {
+            "HOME": "/runtime-home",
+            "XDG_CONFIG_HOME": "/runtime-config",
+            "VIRTUAL_ENV": "/runtime-venv",
+        },
+        base_process_env={
+            "HOME": "/process-home",
+            "XDG_CONFIG_HOME": "/process-config",
+            "VIRTUAL_ENV": "/process-venv",
+        },
+    )
+
+    assert env["HOME"] == "/runtime-home"
+    assert env["XDG_CONFIG_HOME"] == "/runtime-config"
+    assert env["VIRTUAL_ENV"] == "/runtime-venv"
+
+
 def test_execution_env_payload_denies_provider_env_by_default_in_isolated_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
