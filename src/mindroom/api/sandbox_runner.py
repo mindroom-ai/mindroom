@@ -661,14 +661,13 @@ def _workspace_home_contract_env(
     workspace: Path,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
 ) -> dict[str, str]:
-    """Build the default env contract for one resolved worker workspace."""
-    resolved_workspace = workspace.expanduser().resolve()
+    """Build the env contract for an already-resolved worker workspace."""
     env = {
-        "HOME": str(resolved_workspace),
-        "MINDROOM_AGENT_WORKSPACE": str(resolved_workspace),
-        "XDG_CONFIG_HOME": str(resolved_workspace / ".config"),
-        "XDG_DATA_HOME": str(resolved_workspace / ".local" / "share"),
-        "XDG_STATE_HOME": str(resolved_workspace / ".local" / "state"),
+        "HOME": str(workspace),
+        "MINDROOM_AGENT_WORKSPACE": str(workspace),
+        "XDG_CONFIG_HOME": str(workspace / ".config"),
+        "XDG_DATA_HOME": str(workspace / ".local" / "share"),
+        "XDG_STATE_HOME": str(workspace / ".local" / "state"),
     }
     env.update(_worker_owned_env(prepared))
     return env
@@ -714,20 +713,8 @@ def _apply_workspace_home_contract_for_request(
     )
     if workspace is None:
         return None
-
-    return _apply_workspace_home_contract_for_workspace(workspace, prepared=prepared, execution_env=execution_env)
-
-
-def _apply_workspace_home_contract_for_workspace(
-    workspace: Path,
-    *,
-    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
-    execution_env: dict[str, str],
-) -> Path:
-    """Overlay the workspace-home env contract and return the resolved workspace."""
     resolved_workspace = workspace.expanduser().resolve()
-    contract_env = _workspace_home_contract_env(workspace=resolved_workspace, prepared=prepared)
-    execution_env.update(contract_env)
+    execution_env.update(_workspace_home_contract_env(workspace=resolved_workspace, prepared=prepared))
     return resolved_workspace
 
 
@@ -1018,6 +1005,7 @@ def _execute_request_subprocess_sync(
     execution_env.update(protected_env)
     trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
     subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, execution_env)
+    # python's subprocess inherits this cwd as Path.cwd(); shell sets its own cwd via base_dir.
     if workspace_home is not None and request.tool_name == "python":
         cwd = str(workspace_home)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(

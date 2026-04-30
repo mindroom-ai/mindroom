@@ -3656,7 +3656,10 @@ def test_workspace_home_contract_protects_owned_names_after_hook_overlay(tmp_pat
         "VIRTUAL_ENV": "/hook-venv",
     }
     execution_env.update(overlay)
-    protected_env = sandbox_runner_module._workspace_home_contract_env(workspace=workspace, prepared=prepared)
+    protected_env = sandbox_runner_module._workspace_home_contract_env(
+        workspace=workspace.resolve(),
+        prepared=prepared,
+    )
     execution_env.update(protected_env)
     trusted_overlay = sandbox_runner_module._trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
     effective_runtime_paths = sandbox_exec_module.runtime_paths_with_execution_env(
