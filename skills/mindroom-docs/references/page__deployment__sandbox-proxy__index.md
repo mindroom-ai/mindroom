@@ -160,16 +160,17 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 
 ### Primary MindRoom runtime (proxy client)
 
-| Variable                                        | Description                                                 | Default                                       |
-| ----------------------------------------------- | ----------------------------------------------------------- | --------------------------------------------- |
-| `MINDROOM_WORKER_BACKEND`                       | Worker backend name: `static_runner` or `kubernetes`        | `static_runner`                               |
-| `MINDROOM_SANDBOX_PROXY_URL`                    | URL of the shared sandbox runner when using `static_runner` | *(none — proxy disabled for `static_runner`)* |
-| `MINDROOM_SANDBOX_PROXY_TOKEN`                  | Shared auth token used by the worker runtime                | *(required for worker-routed execution)*      |
-| `MINDROOM_SANDBOX_EXECUTION_MODE`               | `selective`, `all`, `off`                                   | *(unset — uses proxy tools list)*             |
-| `MINDROOM_SANDBOX_PROXY_TOOLS`                  | Comma-separated tool names to proxy                         | `*` (all, unless mode is `selective`)         |
-| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS`        | HTTP timeout for proxy calls                                | `120`                                         |
-| `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime                                   | `60`                                          |
-| `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`       | JSON mapping tool selectors to credential services          | `{}`                                          |
+| Variable                                        | Description                                                                                                                                                           | Default                                       |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `MINDROOM_WORKER_BACKEND`                       | Worker backend name: `static_runner` or `kubernetes`                                                                                                                  | `static_runner`                               |
+| `MINDROOM_SANDBOX_PROXY_URL`                    | URL of the shared sandbox runner when using `static_runner`                                                                                                           | *(none — proxy disabled for `static_runner`)* |
+| `MINDROOM_SANDBOX_PROXY_TOKEN`                  | Shared auth token used by the worker runtime                                                                                                                          | *(required for worker-routed execution)*      |
+| `MINDROOM_SANDBOX_EXECUTION_MODE`               | `selective`, `all`, `off`                                                                                                                                             | *(unset — uses proxy tools list)*             |
+| `MINDROOM_SANDBOX_PROXY_TOOLS`                  | Comma-separated tool names to proxy                                                                                                                                   | `*` (all, unless mode is `selective`)         |
+| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS`        | HTTP timeout for proxy calls                                                                                                                                          | `120`                                         |
+| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`     | Maximum attachment bytes the primary runtime will inline when saving context attachments into a worker workspace with `get_attachment(..., mindroom_output_path=...)` | `16777216` (16 MiB)                           |
+| `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime                                                                                                                                             | `60`                                          |
+| `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`       | JSON mapping tool selectors to credential services                                                                                                                    | `{}`                                          |
 
 When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker endpoints through the Kubernetes backend and does not use `MINDROOM_SANDBOX_PROXY_URL`. The Helm chart sets the Kubernetes backend environment variables automatically. If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/index.md) and `src/mindroom/workers/backends/kubernetes_config.py` for the required environment surface.
 
