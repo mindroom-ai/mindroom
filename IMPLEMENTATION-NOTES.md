@@ -10,6 +10,7 @@
 - Updated disconnect to clear both OAuth token credentials and per-tool configuration credentials.
 - Replaced the frontend legacy Google integration with per-service Google OAuth providers.
 - Rewrote Google OAuth docs for the per-provider model and regenerated the MindRoom docs skill references.
+- Closed the final follow-up review gaps: plugin OAuth services are rejected when they collide with ordinary tool services, stored under-scoped tokens are rejected before decorated tool runtime paths can use them, and Google Sheets dashboard fields now map to Agno's constructor flags while duplicate support requests the full Drive scope it requires.
 
 ## Paths Touched
 
@@ -28,14 +29,15 @@
 - Extended Gmail, Calendar, Sheets, and Drive tool tests for env-only service account fallback and stored-token scope validation.
 - Extended OAuth API tests for plugin credential/config service-name collision rejection.
 - Extended frontend integration tests for OAuth status errors and Gmail provider config service routing.
+- Extended Google Drive and Sheets tests for decorated runtime scope validation, Sheets dashboard config mapping, and Drive-scope coverage for duplicate support.
 
 ## Validation
 
 - `uv sync --all-extras`
-- `uv run pytest -x -n auto --no-cov -v`
+- `uv run pytest -x -n auto --no-cov -v` (`5760 passed, 29 skipped`)
 - `uv run pre-commit run --all-files`
 - `uv run tach check --dependencies --interfaces`
-- `cd frontend && npm test`
+- `cd frontend && npm test` (`433 passed, 1 skipped`)
 - `cd frontend && npm run build`
 - `uv run python -c "from mindroom.oauth.registry import load_oauth_providers; from mindroom.config.main import Config; from mindroom.constants import RuntimePaths; print(sorted(load_oauth_providers(Config.model_validate({}), RuntimePaths.from_env())))"`
 
@@ -48,6 +50,8 @@ Provider smoke output:
 ## Git Log
 
 ```text
+a9f0c4d8c fix(oauth): close provider collision and Sheets gaps
+ab3b6e17b docs: refresh PR 809 implementation notes
 7e67e2328 fix(oauth): close Google provider review gaps
 b4c0560eb docs: update PR 809 implementation notes
 e980774b0 fix(oauth): harden Google provider migration
