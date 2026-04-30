@@ -168,7 +168,7 @@ def request_execution_env(
         return dict(execution_env)
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
-    return dict(constants.execution_runtime_env_values(runtime_paths))
+    return dict(constants.sandbox_execution_runtime_env_values(runtime_paths))
 
 
 def runtime_paths_with_execution_env(
@@ -181,9 +181,8 @@ def runtime_paths_with_execution_env(
     if not execution_env and not trusted_env_overlay:
         return runtime_paths
 
-    process_env = dict(runtime_paths.process_env)
-    process_env.update(execution_env)
-    env_file_values = dict(runtime_paths.env_file_values)
+    process_env = dict(execution_env)
+    env_file_values: dict[str, str] = {}
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)

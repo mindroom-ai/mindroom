@@ -1108,6 +1108,29 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
     assert "MINDROOM_API_KEY" not in execution_env
 
 
+def test_sandbox_execution_env_excludes_oauth_client_secrets_from_worker_runtime(tmp_path: Path) -> None:
+    """Shell execution should not receive OAuth client secrets through serialized runtime paths."""
+    runtime_paths = resolve_runtime_paths(
+        storage_path=tmp_path / "storage",
+        process_env={
+            "GOOGLE_CLIENT_ID": "google-client-id",
+            "GOOGLE_CLIENT_SECRET": "google-client-secret",
+        },
+    )
+    worker_runtime_paths = sandbox_runner_module.constants.isolated_runtime_paths(runtime_paths)
+
+    execution_env = sandbox_exec_module.request_execution_env("shell", None, worker_runtime_paths)
+    effective_runtime_paths = sandbox_exec_module.runtime_paths_with_execution_env(
+        worker_runtime_paths,
+        execution_env,
+    )
+
+    assert execution_env["GOOGLE_CLIENT_ID"] == "google-client-id"
+    assert "GOOGLE_CLIENT_SECRET" not in execution_env
+    assert effective_runtime_paths.env_value("GOOGLE_CLIENT_ID") == "google-client-id"
+    assert effective_runtime_paths.env_value("GOOGLE_CLIENT_SECRET") is None
+
+
 @pytest.mark.asyncio
 async def test_execute_request_inprocess_reuses_passed_config_without_execution_env(
     monkeypatch: pytest.MonkeyPatch,
