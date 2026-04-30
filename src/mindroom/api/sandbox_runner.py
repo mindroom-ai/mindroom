@@ -478,6 +478,22 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
+async def _run_toolkit_entrypoint(
+    toolkit: Toolkit,
+    entrypoint: Callable[..., object],
+    args: list[Any],
+    kwargs: dict[str, Any],
+) -> object:
+    if not toolkit.requires_connect:
+        return await _maybe_await(entrypoint(*args, **kwargs))
+
+    await _maybe_await(toolkit.connect())
+    try:
+        return await _maybe_await(entrypoint(*args, **kwargs))
+    finally:
+        await _maybe_await(toolkit.close())
+
+
 def _runtime_paths_for_runner_agent_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Return runtime paths rooted at the shared storage visible to this runner."""
     shared_storage_root = sandbox_exec.runner_storage_root(runtime_paths)
@@ -959,14 +975,17 @@ async def _execute_request_inprocess(
                 private_agent_names=_request_private_agent_names(request),
                 tool_output_workspace_root=tool_output_workspace_root,
             )
-            if toolkit.requires_connect:
-                await _maybe_await(toolkit.connect())
-                try:
-                    result = await _maybe_await(entrypoint(*request.args, **kwargs))
-                finally:
-                    await _maybe_await(toolkit.close())
-            else:
-                result = await _maybe_await(entrypoint(*request.args, **kwargs))
+        except OAuthConnectionRequired as exc:
+            logger.info(
+                "sandbox_tool_oauth_connection_required",
+                tool_name=request.tool_name,
+                function_name=request.function_name,
+                provider_id=exc.provider_id,
+            )
+            return SandboxRunnerExecuteResponse(ok=True, result=_oauth_connection_required_result(exc))
+
+        try:
+            result = await _run_toolkit_entrypoint(toolkit, entrypoint, request.args, kwargs)
         except OAuthConnectionRequired as exc:
             logger.info(
                 "sandbox_tool_oauth_connection_required",
