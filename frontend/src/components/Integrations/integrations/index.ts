@@ -155,7 +155,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         }
         return {
           connected: false,
-          hasClientConfig: true,
+          hasClientConfig: false,
           statusError: detail,
         };
       }
@@ -172,7 +172,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       console.error(`Failed to load ${this.providerId} status:`, error);
       return {
         connected: false,
-        hasClientConfig: true,
+        hasClientConfig: false,
         statusError: `Failed to load ${this.integration.name} OAuth status.`,
       };
     }

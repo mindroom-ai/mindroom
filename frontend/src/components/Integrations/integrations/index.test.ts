@@ -86,7 +86,7 @@ describe("Generic OAuth integration provider", () => {
     await rejection;
   });
 
-  it("does not report missing client config when OAuth status fails", async () => {
+  it("fails closed when OAuth status fails", async () => {
     (global.fetch as any).mockResolvedValueOnce({
       ok: false,
       status: 500,
@@ -96,9 +96,21 @@ describe("Generic OAuth integration provider", () => {
     const status = await integrationProviders.google_drive.loadStatus!();
 
     expect(status).toMatchObject({
-      status: "available",
+      status: "not_connected",
       connected: false,
-      oauth_client_configured: true,
+      oauth_client_configured: false,
+    });
+  });
+
+  it("fails closed when OAuth status cannot be loaded", async () => {
+    (global.fetch as any).mockRejectedValueOnce(new Error("network error"));
+
+    const status = await integrationProviders.google_drive.loadStatus!();
+
+    expect(status).toMatchObject({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: false,
     });
   });
 });
