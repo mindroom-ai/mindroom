@@ -1679,7 +1679,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert tool["name"] == "google_drive"
     assert tool["status"] == "requires_config"
 
-    scoped_manager.save_credentials(
+    manager.save_credentials(
         "google_drive_oauth",
         {
             "token": "drive-token",

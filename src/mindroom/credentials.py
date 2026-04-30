@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import worker_root_path
+from mindroom.tool_system.worker_routing import service_uses_local_shared_credentials, worker_root_path
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -474,7 +474,11 @@ def load_scoped_credentials(
     resolved_allowed_shared_services = allowed_shared_services
     if resolved_allowed_shared_services is None and manager.shared_base_path == manager.base_path:
         resolved_allowed_shared_services = frozenset()
-    if manager.shared_base_path != manager.base_path or resolved_allowed_shared_services is None:
+    if (
+        service_uses_local_shared_credentials(service, worker_target.worker_scope)
+        or manager.shared_base_path != manager.base_path
+        or resolved_allowed_shared_services is None
+    ):
         shared_credentials = shared_manager.load_credentials(service)
     else:
         shared_credentials = load_worker_grantable_shared_credentials(

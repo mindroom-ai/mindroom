@@ -42,9 +42,14 @@ LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
 LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
         "google_calendar",
+        "google_calendar_oauth",
         "google_drive",
+        "google_drive_oauth",
         "google_gmail",
+        "google_gmail_oauth",
         "google_sheets",
+        "google_sheets_oauth",
+        "gmail",
         "homeassistant",
     },
 )
