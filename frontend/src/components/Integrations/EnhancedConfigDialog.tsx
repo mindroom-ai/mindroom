@@ -216,24 +216,19 @@ export function EnhancedConfigDialog({
       return `${field.label} is required`;
     }
 
-    if (
-      value !== undefined &&
-      value !== "" &&
-      field.validation &&
-      field.type === "number"
-    ) {
+    if (value !== undefined && value !== "" && field.type === "number") {
       const numValue = Number(value);
-      if (isNaN(numValue)) {
+      if (!Number.isFinite(numValue)) {
         return `${field.label} must be a number`;
       }
       if (
-        field.validation.min !== undefined &&
+        field.validation?.min !== undefined &&
         numValue < field.validation.min
       ) {
         return `${field.label} must be at least ${field.validation.min}`;
       }
       if (
-        field.validation.max !== undefined &&
+        field.validation?.max !== undefined &&
         numValue > field.validation.max
       ) {
         return `${field.label} must be at most ${field.validation.max}`;
@@ -260,7 +255,10 @@ export function EnhancedConfigDialog({
       const value = configValues[field.name];
       if (field.type === "number") {
         if (value !== undefined && value !== "") {
-          normalized[field.name] = Number(value);
+          const numericValue = Number(value);
+          if (Number.isFinite(numericValue)) {
+            normalized[field.name] = numericValue;
+          }
         }
       } else if (value !== undefined) {
         normalized[field.name] = value;

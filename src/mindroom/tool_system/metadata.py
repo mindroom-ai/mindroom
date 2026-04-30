@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import math
 import os
 import sys
 from dataclasses import asdict, dataclass
@@ -347,8 +348,11 @@ def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: obj
     if isinstance(value, bool):
         msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
         raise ToolConfigOverrideError(msg)
-    if isinstance(value, int | float):
+    if isinstance(value, int | float) and math.isfinite(value):
         return value
+    if isinstance(value, int | float):
+        msg = f"Stored config value for '{tool_name}.{field_name}' must be a finite number."
+        raise ToolConfigOverrideError(msg)
     if isinstance(value, str):
         raw_value = value.strip()
         if not raw_value:
@@ -358,6 +362,9 @@ def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: obj
         except ValueError as exc:
             msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
             raise ToolConfigOverrideError(msg) from exc
+        if not math.isfinite(parsed):
+            msg = f"Stored config value for '{tool_name}.{field_name}' must be a finite number."
+            raise ToolConfigOverrideError(msg)
         return int(parsed) if parsed.is_integer() else parsed
     msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
     raise ToolConfigOverrideError(msg)

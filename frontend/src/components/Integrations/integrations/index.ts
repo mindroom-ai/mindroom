@@ -16,6 +16,28 @@ import { googleIntegration } from "./google";
 import { spotifyIntegration } from "./spotify";
 import { homeAssistantIntegration } from "./homeassistant";
 
+const OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete";
+
+function isOAuthCompleteMessage(
+  event: MessageEvent,
+  authWindow: Window,
+  providerId: string,
+): boolean {
+  if (
+    event.source !== authWindow ||
+    event.data === null ||
+    typeof event.data !== "object"
+  ) {
+    return false;
+  }
+  const data = event.data as Record<string, unknown>;
+  return (
+    data.type === OAUTH_COMPLETE_MESSAGE_TYPE &&
+    data.provider === providerId &&
+    data.status === "connected"
+  );
+}
+
 class GenericOAuthIntegrationProvider implements IntegrationProvider {
   constructor(
     private readonly integration: Integration,
@@ -117,12 +139,32 @@ class GenericOAuthIntegrationProvider implements IntegrationProvider {
       throw new Error("OAuth popup was blocked");
     }
     return new Promise((resolve) => {
-      const pollInterval = window.setInterval(() => {
+      let completed = false;
+      let pollInterval = 0;
+      const finish = () => {
+        if (completed) {
+          return;
+        }
+        completed = true;
+        window.clearInterval(pollInterval);
+        window.removeEventListener("message", handleMessage);
+        resolve();
+      };
+      const handleMessage = (event: MessageEvent) => {
+        if (!isOAuthCompleteMessage(event, authWindow, this.providerId)) {
+          return;
+        }
+        if (!authWindow.closed) {
+          authWindow.close();
+        }
+        finish();
+      };
+      pollInterval = window.setInterval(() => {
         if (authWindow.closed) {
-          window.clearInterval(pollInterval);
-          resolve();
+          finish();
         }
       }, 1000);
+      window.addEventListener("message", handleMessage);
     });
   }
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import secrets
 import threading
 import time
@@ -26,14 +27,19 @@ OAUTH_CREDENTIAL_FIELDS = frozenset(
         "_source",
         "access_token",
         "client_id",
+        "client_secret",
         "expires_at",
+        "expires_in",
+        "id_token",
         "refresh_token",
+        "scope",
         "scopes",
         "token",
         "token_type",
         "token_uri",
     },
 )
+_OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -162,7 +168,32 @@ def mindroom_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvide
 def oauth_success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str:
     """Return the post-callback browser destination for one provider."""
     base_url = mindroom_public_base_url(runtime_paths, provider)
-    return f"{base_url}/?oauth_provider={provider.id}&oauth=connected"
+    return f"{base_url}/api/oauth/{provider.id}/success"
+
+
+def oauth_credentials_usable(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    credentials: dict[str, object] | None,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Return whether stored OAuth credentials can currently authenticate provider calls."""
+    if not credentials or provider.client_config(runtime_paths) is None:
+        return False
+
+    refresh_token = credentials.get("refresh_token")
+    if isinstance(refresh_token, str) and refresh_token:
+        return True
+
+    token = credentials.get("token") or credentials.get("access_token")
+    if not isinstance(token, str) or not token:
+        return False
+
+    expires_at = credentials.get("expires_at")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
+        return False
+    return float(expires_at) > (now if now is not None else time.time()) + _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS
 
 
 def build_oauth_authorize_url(

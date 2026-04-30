@@ -1601,7 +1601,15 @@ def test_get_tools_shared_scope_local_only_integrations_ignore_worker_allowlist(
 def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: TestClient) -> None:
     """Generic OAuth-backed tools should not look connected from config-only credentials."""
     config = _config_with_worker_scope("shared")
-    runtime_paths = main._app_runtime_paths(main.app)
+    app_runtime_paths = main._app_runtime_paths(main.app)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=app_runtime_paths.config_path,
+        storage_path=app_runtime_paths.storage_root,
+        process_env={
+            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
+            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
+        },
+    )
     manager = get_runtime_credentials_manager(runtime_paths)
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -1656,6 +1664,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
         "google_drive_oauth",
         {
             "token": "drive-token",
+            "refresh_token": "drive-refresh-token",
             "_source": "oauth",
         },
     )
@@ -1750,6 +1759,8 @@ def test_get_tools_uses_one_runtime_snapshot(
             worker_target=None,
             allowed_shared_services=None,
             auth_provider_credential_services={},
+            oauth_providers={},
+            runtime_paths=runtime_paths,
         )
 
     with (

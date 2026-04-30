@@ -52,6 +52,17 @@ def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     context.config_load_result = main.ConfigLoadResult(success=True)
 
 
+def _use_owner_runtime(api_app: object, matrix_user_id: str = "@alice:example.org") -> constants.RuntimePaths:
+    runtime_paths = main._app_runtime_paths(api_app)
+    owner_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=runtime_paths.config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env={constants.OWNER_MATRIX_USER_ID_ENV: matrix_user_id},
+    )
+    initialize_api_app(api_app, owner_runtime_paths)
+    return owner_runtime_paths
+
+
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
     """Create a test client for the API."""
@@ -381,11 +392,11 @@ class TestCredentialsAPI:
         assert token_status_response.status_code == 400
         assert "OAuth token credentials" in token_status_response.json()["detail"]
 
-    def test_get_orphaned_oauth_credentials_filters_token_fields(
+    def test_orphaned_oauth_credentials_reject_generic_routes(
         self,
         client: TestClient,
     ) -> None:
-        """OAuth-shaped credentials should stay hidden even if their provider is no longer registered."""
+        """OAuth-shaped credentials should stay opaque even if their provider is no longer registered."""
         runtime_paths = main._app_runtime_paths(client.app)
         manager = get_runtime_credentials_manager(runtime_paths)
         manager.save_credentials(
@@ -395,6 +406,9 @@ class TestCredentialsAPI:
                 "token": "orphaned-access-value",
                 "refresh_token": "orphaned-refresh-value",
                 "client_id": "client-id",
+                "client_secret": "client-secret",
+                "id_token": "id-token",
+                "provider_session_secret": "provider-secret",
                 "token_uri": "https://oauth.example.test/token",
                 "scopes": ["drive.read"],
                 "expires_at": 1234.0,
@@ -402,26 +416,47 @@ class TestCredentialsAPI:
                 "_source": "oauth",
             },
         )
+        manager.save_credentials("normal_source", {"api_key": "normal-key", "_source": "ui"})
+        manager.save_credentials(
+            "removed_oauth_destination",
+            {
+                "token": "orphaned-destination-token",
+                "_oauth_provider": "removed_provider",
+                "_source": "oauth",
+            },
+        )
 
         response = client.get("/api/credentials/removed_oauth_provider")
         status_response = client.get("/api/credentials/removed_oauth_provider/status")
+        set_response = client.post(
+            "/api/credentials/removed_oauth_provider",
+            json={"credentials": {"api_key": "replacement"}},
+        )
         api_key_response = client.get(
             "/api/credentials/removed_oauth_provider/api-key?key_name=access_token&include_value=true",
         )
+        delete_response = client.delete("/api/credentials/removed_oauth_provider")
         copy_response = client.post("/api/credentials/copied_service/copy-from/removed_oauth_provider")
+        copy_destination_response = client.post(
+            "/api/credentials/removed_oauth_destination/copy-from/normal_source",
+        )
         test_response = client.post("/api/credentials/removed_oauth_provider/test")
 
-        assert response.status_code == 200
-        assert response.json() == {"service": "removed_oauth_provider", "credentials": {}}
-        assert status_response.status_code == 200
-        assert status_response.json()["has_credentials"] is True
-        assert status_response.json()["key_names"] is None
-        assert api_key_response.status_code == 400
-        assert "OAuth token credentials" in api_key_response.json()["detail"]
-        assert copy_response.status_code == 400
-        assert "OAuth token credentials" in copy_response.json()["detail"]
-        assert test_response.status_code == 400
-        assert "OAuth token credentials" in test_response.json()["detail"]
+        responses = [
+            response,
+            status_response,
+            set_response,
+            api_key_response,
+            delete_response,
+            copy_response,
+            copy_destination_response,
+            test_response,
+        ]
+        for route_response in responses:
+            assert route_response.status_code == 400
+            assert "OAuth token credentials" in route_response.json()["detail"]
+        assert manager.load_credentials("removed_oauth_provider")["token"] == "orphaned-access-value"  # noqa: S105
+        assert manager.load_credentials("removed_oauth_destination")["token"] == "orphaned-destination-token"  # noqa: S105
 
     def test_oauth_token_service_rejects_generic_credential_writes(
         self,
@@ -511,6 +546,7 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """OAuth-backed tool options may save in private scopes without replacing tokens."""
+        _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user_agent")
         _publish_committed_runtime_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
@@ -518,7 +554,7 @@ class TestCredentialsAPI:
         identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="general",
-            requester_id="standalone",
+            requester_id="@alice:example.org",
             room_id=None,
             thread_id=None,
             resolved_thread_id=None,
@@ -562,6 +598,7 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """Private-scope OAuth config reads should not return stored OAuth tokens."""
+        _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user_agent")
         _publish_committed_runtime_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
@@ -569,7 +606,7 @@ class TestCredentialsAPI:
         identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="general",
-            requester_id="standalone",
+            requester_id="@alice:example.org",
             room_id=None,
             thread_id=None,
             resolved_thread_id=None,

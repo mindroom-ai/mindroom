@@ -174,12 +174,14 @@ def _default_token_parser(
     return OAuthTokenResult(token_data=token_data, claims=claims, claims_verified=False)
 
 
-def _safe_claim_summary(claims: Mapping[str, Any]) -> dict[str, str]:
-    summary: dict[str, str] = {}
+def _safe_claim_summary(claims: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
     for key in ("sub", "email", "hd"):
         value = claims.get(key)
         if isinstance(value, str) and value:
             summary[key] = value
+    if claims.get("email_verified") is True:
+        summary["email_verified"] = True
     return summary
 
 
@@ -401,6 +403,9 @@ class OAuthProvider:
             raise OAuthClaimValidationError(msg)
 
         if allowed_email_domains:
+            if result.claims.get("email_verified") is not True:
+                msg = "OAuth account email ownership is not verified"
+                raise OAuthClaimValidationError(msg)
             email_domain = _claim_email_domain(result.claims)
             if email_domain is None or email_domain not in allowed_email_domains:
                 msg = "OAuth account email domain is not allowed"

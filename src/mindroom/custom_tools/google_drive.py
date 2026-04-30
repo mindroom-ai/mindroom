@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from typing import Any, NoReturn
 
@@ -56,8 +57,11 @@ class GoogleDriveTools(AgnoGoogleDriveTools):
         if isinstance(value, bool):
             msg = "Google Drive max_read_size must be a number"
             raise TypeError(msg)
-        if isinstance(value, int | float):
+        if isinstance(value, int | float) and math.isfinite(value):
             return value
+        if isinstance(value, int | float):
+            msg = "Google Drive max_read_size must be a finite number"
+            raise TypeError(msg)
         if isinstance(value, str):
             raw_value = value.strip()
             if not raw_value:
@@ -67,6 +71,9 @@ class GoogleDriveTools(AgnoGoogleDriveTools):
             except ValueError as exc:
                 msg = "Google Drive max_read_size must be a number"
                 raise ValueError(msg) from exc
+            if not math.isfinite(parsed):
+                msg = "Google Drive max_read_size must be a finite number"
+                raise ValueError(msg)
             return int(parsed) if parsed.is_integer() else parsed
         msg = "Google Drive max_read_size must be a number"
         raise TypeError(msg)
@@ -100,7 +107,9 @@ class GoogleDriveTools(AgnoGoogleDriveTools):
 
     def _expiry_from_token_data(self, token_data: dict[str, Any]) -> datetime | None:
         expires_at = token_data.get("expires_at")
-        if not isinstance(expires_at, int | float) or expires_at <= 0:
+        if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
+            return None
+        if expires_at <= 0:
             return None
         return datetime.fromtimestamp(float(expires_at), tz=UTC).replace(tzinfo=None)
 

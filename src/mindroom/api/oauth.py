@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from html import escape
 from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
@@ -24,6 +26,7 @@ from mindroom.oauth.service import (
     consume_oauth_connect_token,
     lookup_oauth_connect_token,
     oauth_connect_target_payload,
+    oauth_credentials_usable,
     oauth_success_redirect_url,
     sanitized_oauth_token_result,
 )
@@ -34,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
+_OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete"
 
 
 class OAuthConnectResponse(BaseModel):
@@ -179,9 +183,9 @@ def _verify_worker_binding_authorized(
     if worker_scope in ("user", "user_agent") and (not requester_id or requester_id != dashboard_identity.requester_id):
         raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
 
-    if tenant_id and dashboard_identity.tenant_id and tenant_id != dashboard_identity.tenant_id:
+    if tenant_id and tenant_id != dashboard_identity.tenant_id:
         raise HTTPException(status_code=403, detail="OAuth connect link does not belong to this tenant")
-    if account_id and dashboard_identity.account_id and account_id != dashboard_identity.account_id:
+    if account_id and account_id != dashboard_identity.account_id:
         raise HTTPException(status_code=403, detail="OAuth connect link does not belong to this account")
 
 
@@ -251,6 +255,10 @@ def _claim_str(credentials: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _script_json(value: object) -> str:
+    return json.dumps(value).replace("</", "<\\/")
+
+
 @router.post("/{provider_id}/connect")
 async def connect(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthConnectResponse:
     """Start a provider OAuth flow and return the external authorization URL."""
@@ -279,6 +287,36 @@ async def authorize(
         connect_token=connect_token,
     )
     return RedirectResponse(url=response.auth_url)
+
+
+@router.get("/{provider_id}/success", response_class=HTMLResponse)
+async def success(provider_id: str, request: Request) -> HTMLResponse:
+    """Signal OAuth completion to the dashboard popup opener."""
+    provider, _runtime_paths = _load_provider(request, provider_id)
+    message = {
+        "type": _OAUTH_COMPLETE_MESSAGE_TYPE,
+        "provider": provider.id,
+        "status": "connected",
+    }
+    escaped_display_name = escape(provider.display_name)
+    html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>{escaped_display_name} connected</title>
+  </head>
+  <body>
+    <p>{escaped_display_name} is connected. You can close this window.</p>
+    <script>
+      const message = {_script_json(message)};
+      if (window.opener && !window.opener.closed) {{
+        window.opener.postMessage(message, "*");
+      }}
+      window.close();
+    </script>
+  </body>
+</html>"""
+    return HTMLResponse(html)
 
 
 @router.get("/{provider_id}/callback")
@@ -334,7 +372,6 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
                 target.base_manager if target is not None else get_runtime_credentials_manager(runtime_paths)
             ),
             worker_target=worker_target,
-            merge_existing=True,
         )
     except OAuthClaimValidationError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -359,7 +396,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
     )
     credentials = load_credentials_for_target(provider.credential_service, target) or {}
     has_client_config = provider.client_config(runtime_paths) is not None
-    connected = has_client_config and bool(credentials.get("token") or credentials.get("refresh_token"))
+    connected = oauth_credentials_usable(provider, runtime_paths, credentials)
     return OAuthStatusResponse(
         provider=provider.id,
         display_name=provider.display_name,

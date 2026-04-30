@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
+_OAUTH_TOKEN_CREDENTIALS_ERROR = "OAuth token credentials must be managed through the OAuth connect flow."  # noqa: S105
 _pending_oauth_state_lock = threading.Lock()
 
 
@@ -148,6 +149,27 @@ def dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimeP
     auth_user = _request_auth_user(request) or {}
     user_id = auth_user.get("user_id")
     return user_id if isinstance(user_id, str) and user_id else None
+
+
+def _looks_like_matrix_user_id(value: str | None) -> bool:
+    return isinstance(value, str) and value.startswith("@") and ":" in value[1:] and " " not in value
+
+
+def _reject_unbound_private_dashboard_requester(
+    execution_scope: WorkerScope,
+    execution_identity: ToolExecutionIdentity,
+) -> None:
+    if execution_scope not in {"user", "user_agent"}:
+        return
+    if _looks_like_matrix_user_id(execution_identity.requester_id):
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Dashboard credential management for private user scopes requires a Matrix requester identity. "
+            "Set MINDROOM_OWNER_USER_ID for standalone deployments or use an agent-issued connect link."
+        ),
+    )
 
 
 def _prune_expired_pending_oauth_states(now: float) -> None:
@@ -446,6 +468,7 @@ def resolve_request_credentials_target(
         scope_request.agent_name,
         runtime_paths=runtime_paths,
     )
+    _reject_unbound_private_dashboard_requester(execution_scope, execution_identity)
     worker_key = require_worker_key_for_scope(
         execution_scope,
         execution_identity=execution_identity,
@@ -521,10 +544,13 @@ def _reject_oauth_token_service(
 ) -> None:
     if oauth_service_match is None or not oauth_service_match.token_service:
         return
-    raise HTTPException(
-        status_code=400,
-        detail="OAuth token credentials must be managed through the OAuth connect flow.",
-    )
+    raise HTTPException(status_code=400, detail=_OAUTH_TOKEN_CREDENTIALS_ERROR)
+
+
+def _reject_oauth_credentials_document(credentials: dict[str, Any]) -> None:
+    if not _looks_like_oauth_credentials(credentials):
+        return
+    raise HTTPException(status_code=400, detail=_OAUTH_TOKEN_CREDENTIALS_ERROR)
 
 
 def _reject_oauth_api_key_field(
@@ -642,6 +668,7 @@ async def get_credential_status(
     credentials = load_credentials_for_target(service, target)
 
     if credentials:
+        _reject_oauth_credentials_document(credentials)
         filtered = _filter_credentials_for_response(credentials, is_oauth_service=oauth_service_match is not None)
         return CredentialStatus(
             service=service,
@@ -663,6 +690,7 @@ async def set_credentials(
     service = _validated_service(service)
     oauth_service_match = _oauth_service_match(http_request, service)
     _reject_oauth_token_service(oauth_service_match)
+    _reject_oauth_credentials_document(payload.credentials)
     target = resolve_request_credentials_target(
         http_request,
         agent_name=agent_name,
@@ -673,12 +701,14 @@ async def set_credentials(
             agent_name=agent_name,
         ),
     )
+    existing_credentials = load_credentials_for_target(service, target)
+    if existing_credentials:
+        _reject_oauth_credentials_document(existing_credentials)
 
-    # Mark as UI-sourced and save
-    if oauth_service_match is not None:
-        creds = _dashboard_credentials_for_save(payload.credentials, strip_oauth_fields=True)
-    else:
-        creds = _dashboard_credentials_for_save(payload.credentials, strip_oauth_fields=False)
+    creds = _dashboard_credentials_for_save(
+        payload.credentials,
+        strip_oauth_fields=oauth_service_match is not None,
+    )
     target.target_manager.save_credentials(service, creds)
 
     return {"status": "success", "message": f"Credentials saved for {service}"}
@@ -702,11 +732,7 @@ async def set_api_key(
 
     target = resolve_request_credentials_target(http_request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target) or {}
-    if _looks_like_oauth_credentials(credentials):
-        raise HTTPException(
-            status_code=400,
-            detail="OAuth token credentials must be managed through the OAuth connect flow.",
-        )
+    _reject_oauth_credentials_document(credentials)
     credentials[payload.key_name] = payload.api_key
     credentials["_source"] = "ui"
     target.target_manager.save_credentials(service, credentials)
@@ -729,11 +755,7 @@ async def get_api_key(
     _reject_oauth_api_key_field(oauth_service_match, key_name=key_name)
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target) or {}
-    if _looks_like_oauth_credentials(credentials):
-        raise HTTPException(
-            status_code=400,
-            detail="OAuth token credentials must be managed through the OAuth connect flow.",
-        )
+    _reject_oauth_credentials_document(credentials)
     api_key = credentials.get(key_name)
 
     if api_key:
@@ -777,6 +799,7 @@ async def get_credentials(
 
     if not credentials:
         return {"service": service, "credentials": {}}
+    _reject_oauth_credentials_document(credentials)
 
     return {
         "service": service,
@@ -794,6 +817,9 @@ async def delete_credentials(
     service = _validated_service(service)
     _reject_oauth_token_service(_oauth_service_match(request, service))
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
+    existing_credentials = load_credentials_for_target(service, target)
+    if existing_credentials:
+        _reject_oauth_credentials_document(existing_credentials)
     target.target_manager.delete_credentials(service)
 
     return {"status": "success", "message": f"Credentials deleted for {service}"}
@@ -817,14 +843,13 @@ async def copy_credentials(
         service_names=(service, source_service),
     )
     source_creds = load_credentials_for_target(source_service, target)
+    destination_creds = load_credentials_for_target(service, target)
 
     if not source_creds:
         raise HTTPException(status_code=404, detail=f"No credentials found for {source_service}")
-    if _looks_like_oauth_credentials(source_creds):
-        raise HTTPException(
-            status_code=400,
-            detail="OAuth token credentials must be managed through the OAuth connect flow.",
-        )
+    _reject_oauth_credentials_document(source_creds)
+    if destination_creds:
+        _reject_oauth_credentials_document(destination_creds)
 
     # Copy credentials, marking as UI-sourced
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
@@ -849,11 +874,7 @@ async def validate_credentials(
 
     if not credentials:
         raise HTTPException(status_code=404, detail=f"No credentials found for {service}")
-    if _looks_like_oauth_credentials(credentials):
-        raise HTTPException(
-            status_code=400,
-            detail="OAuth token credentials must be managed through the OAuth connect flow.",
-        )
+    _reject_oauth_credentials_document(credentials)
 
     # For now, just check if credentials exist
     # In the future, we could implement actual validation per service
