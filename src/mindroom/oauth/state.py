@@ -21,11 +21,12 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _oauth_state_lock = threading.Lock()
+_OAUTH_STATE_DIR_NAME = "oauth_state"
 _OAUTH_STATE_FILE_NAME = "oauth_state.json"
 
 
 def _state_file(runtime_paths: RuntimePaths) -> Path:
-    return runtime_paths.storage_root / _OAUTH_STATE_FILE_NAME
+    return runtime_paths.storage_root / _OAUTH_STATE_DIR_NAME / _OAUTH_STATE_FILE_NAME
 
 
 def _state_lock_file(runtime_paths: RuntimePaths) -> Path:

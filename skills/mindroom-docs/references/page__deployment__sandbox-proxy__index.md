@@ -67,34 +67,33 @@ services:
     command: ["/app/run-sandbox-runner.sh"]
     user: "1000:1000"
     volumes:
-      - ./mindroom_data:/app/mindroom_data:rw
       - sandbox-workspace:/app/workspace
-      - ./mindroom_data:/app/shared/.mindroom:rw
+      - ./mindroom_data/oauth_state:/app/shared/oauth_state:rw
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
-      - MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared/.mindroom
+      - MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared
 
 volumes:
   sandbox-workspace:
 ```
 
-Add a shared volume or bind mount for agent storage that both the main process and the runner can access.
-Keep secrets and other main-process-only files on separate mounts that are not exposed to the runner.
+Mount only `mindroom_data/oauth_state` into the runner.
+Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
 
 > [!IMPORTANT] The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume: `bash docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace` Alternatively, omit the `user:` directive to run as root (less secure).
 
 Key differences from the primary MindRoom runtime:
 
 - **No `env_file`** — runner has no API keys, no Matrix credentials
-- **Shared agent data** — the runner reads and writes the same agent storage directories used by the main process
+- **Shared OAuth state only** — the runner can write scoped OAuth connect tokens without seeing the rest of `mindroom_data`
 - **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
-- **`MINDROOM_SANDBOX_SHARED_STORAGE_ROOT`** — pointed at the shared agent-data mount so runner-issued OAuth connect tokens can be redeemed by the primary API
+- **`MINDROOM_SANDBOX_SHARED_STORAGE_ROOT`** — pointed at the narrow shared root that contains only the `oauth_state` directory
 
-> [!WARNING] **Filesystem isolation depends on the worker backend.** Shared-runner and local backends expose all agent storage to the runner process — there is no per-agent filesystem boundary. Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes). The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files. Use `user_agent` for per-agent filesystem isolation.
+> [!WARNING] **Filesystem isolation depends on the worker backend.** Static shared-runner deployments should mount only the narrow `oauth_state` directory into the runner. Local in-process execution still shares the primary process filesystem. Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes). The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files. Use `user_agent` for per-agent filesystem isolation.
 
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
@@ -154,12 +153,12 @@ Run MindRoom directly on the host while isolating code-execution tools in a Dock
 docker run -d \
   --name mindroom-sandbox-runner \
   -p 8766:8766 \
-  -v "$PWD/mindroom_data:/app/shared/.mindroom:rw" \
+  -v "$PWD/mindroom_data/oauth_state:/app/shared/oauth_state:rw" \
   -e MINDROOM_WORKER_BACKEND=static_runner \
   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
-  -e MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared/.mindroom \
+  -e MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared \
   ghcr.io/mindroom-ai/mindroom:latest \
   /app/run-sandbox-runner.sh
 
@@ -184,7 +183,7 @@ MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 
 This gives you the convenience of running MindRoom natively while keeping code-execution tools inside a container boundary.
 
-> [!TIP] If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them: `bash docker run -d \ --name mindroom-sandbox-runner \ -p 8766:8766 \ -v ./config.yaml:/app/config.yaml:ro \ -v "$PWD/mindroom_data:/app/shared/.mindroom:rw" \ -e MINDROOM_CONFIG_PATH=/app/config.yaml \ -e MINDROOM_SANDBOX_RUNNER_MODE=true \ -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \ -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \ -e MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared/.mindroom \ ghcr.io/mindroom-ai/mindroom:latest \ /app/run-sandbox-runner.sh`
+> [!TIP] If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them: `bash docker run -d \ --name mindroom-sandbox-runner \ -p 8766:8766 \ -v ./config.yaml:/app/config.yaml:ro \ -v "$PWD/mindroom_data/oauth_state:/app/shared/oauth_state:rw" \ -e MINDROOM_CONFIG_PATH=/app/config.yaml \ -e MINDROOM_SANDBOX_RUNNER_MODE=true \ -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \ -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \ -e MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared \ ghcr.io/mindroom-ai/mindroom:latest \ /app/run-sandbox-runner.sh`
 
 ## Environment variable reference
 
@@ -215,7 +214,7 @@ The Helm chart sets the Kubernetes backend environment variables automatically. 
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE`             | `inprocess` or `subprocess`                                                                                                        | `inprocess`                                                   |
 | `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout                                                                                                                 | `120`                                                         |
 | `MINDROOM_STORAGE_PATH`                              | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`)                               | `mindroom_data` next to config *(will fail if not writable)*  |
-| `MINDROOM_SANDBOX_SHARED_STORAGE_ROOT`               | Shared MindRoom storage mount used for scoped OAuth connect tokens (e.g., `/app/shared/.mindroom`)                                 | *(required for static runners that issue scoped OAuth links)* |
+| `MINDROOM_SANDBOX_SHARED_STORAGE_ROOT`               | Shared root containing only the `oauth_state` mount used for scoped OAuth connect tokens (e.g., `/app/shared`)                     | *(required for static runners that issue scoped OAuth links)* |
 | `MINDROOM_CONFIG_PATH`                               | Path to config.yaml (for plugin tool registration)                                                                                 | *(optional)*                                                  |
 
 ## Execution modes

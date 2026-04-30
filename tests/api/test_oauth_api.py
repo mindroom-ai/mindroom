@@ -430,7 +430,7 @@ def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -
     assert params["scope"] == ["scope.read"]
     assert params["state"][0] != "general"
     assert "." not in params["state"][0]
-    state_store = runtime_paths.storage_root / "oauth_state.json"
+    state_store = runtime_paths.storage_root / "oauth_state" / "oauth_state.json"
     assert state_store.exists()
     assert params["state"][0] in state_store.read_text(encoding="utf-8")
 
@@ -963,7 +963,7 @@ def test_worker_connect_token_can_be_consumed_from_shared_storage_root(tmp_path:
     connect_target = oauth_service.consume_oauth_connect_token(provider, primary_runtime_paths, connect_token)
 
     assert connect_target.worker_key == worker_target.worker_key
-    assert not (worker_runtime_paths.storage_root / "oauth_state.json").exists()
+    assert not (worker_runtime_paths.storage_root / "oauth_state" / "oauth_state.json").exists()
 
 
 def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Path) -> None:

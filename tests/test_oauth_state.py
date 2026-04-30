@@ -55,5 +55,5 @@ def test_issue_opaque_oauth_state_keeps_concurrent_process_writes(tmp_path: Path
     for token in tokens:
         assert read_opaque_oauth_state(runtime_paths, kind="test_state", token=token)["pid"]
 
-    stored = json.loads((storage_root / "oauth_state.json").read_text(encoding="utf-8"))
+    stored = json.loads((storage_root / "oauth_state" / "oauth_state.json").read_text(encoding="utf-8"))
     assert tokens <= set(stored["states"])

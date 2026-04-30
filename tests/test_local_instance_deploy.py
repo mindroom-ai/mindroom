@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from rich.console import Console
 
 from tests.conftest import normalize_console_output
@@ -241,6 +242,26 @@ def test_restart_only_matrix_recreates_matrix_services_without_project_down(
     assert "docker compose -p alpha down" not in commands[0]
     assert "up -d --force-recreate tuwunel wellknown" in commands[0]
     assert registry.instances["alpha"].status == deploy.InstanceStatus.PARTIAL
+
+
+def test_compose_loads_shared_env_before_instance_env() -> None:
+    """Per-instance env values should override the shared repo defaults."""
+    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+
+    assert compose["services"]["mindroom"]["env_file"] == [
+        {"path": "../../../.env", "required": False},
+        {"path": "${INSTANCE_ENV_FILE}", "required": True},
+    ]
+
+
+def test_sandbox_runner_mounts_only_oauth_state_directory() -> None:
+    """The static runner must not receive the full MindRoom storage tree."""
+    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+    runner = compose["services"]["sandbox-runner"]
+
+    assert "${DATA_DIR}/mindroom_data/oauth_state:/app/shared/oauth_state" in runner["volumes"]
+    assert "${DATA_DIR}/mindroom_data:/app/shared/.mindroom" not in runner["volumes"]
+    assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared" in runner["environment"]
 
 
 def test_remove_instance_preserves_state_when_teardown_fails(

@@ -66,13 +66,13 @@ services:
     command: ["/app/run-sandbox-runner.sh"]
     volumes:
       - sandbox-workspace:/app/workspace
-      - ${DATA_DIR}/mindroom_data:/app/shared/.mindroom
+      - ${DATA_DIR}/mindroom_data/oauth_state:/app/shared/oauth_state
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN:-sandbox-secret}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
-      - MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared/.mindroom
+      - MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared
     networks:
       - mindroom-network
 
