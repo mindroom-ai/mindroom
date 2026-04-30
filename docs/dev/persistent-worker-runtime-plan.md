@@ -298,8 +298,8 @@ OAuth-heavy dashboard integrations used to be an explicit exception to isolated 
 Spotify and Home Assistant remain shared-only.
 The Google-backed `gmail`, `google_calendar`, and `google_sheets` tools now use scoped per-provider OAuth credentials.
 The credential-backed `homeassistant` tool also stays local even for `worker_scope=shared` rather than being routed through the sandbox runner.
-Google-backed tools use scoped per-provider OAuth credentials and can run through the sandbox runner when configured there.
-This keeps the generic worker-routing model clean while Google OAuth moves onto the scoped provider model.
+Google-backed `gmail`, `google_calendar`, `google_drive`, and `google_sheets` tools use scoped per-provider OAuth credentials and stay in the primary runtime rather than running through the sandbox runner.
+This keeps worker runtimes from needing Google OAuth client secrets while Google OAuth stays on the scoped provider model.
 Dashboard credential management follows the same product boundary more generally.
 The dashboard may only read, write, test, or disconnect credentials for unscoped agents and agents with `worker_scope=shared`.
 Isolated worker scopes remain runtime-owned state rather than dashboard-managed state.

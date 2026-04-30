@@ -26,7 +26,7 @@ MindRoom validates inline overrides against the declared `config_fields`, and `t
 Their upstream Agno toolkits also support environment fallbacks through `GOOGLE_MAPS_API_KEY`, `OPENWEATHER_API_KEY`, `SHOPIFY_SHOP_NAME`, and `SHOPIFY_ACCESS_TOKEN`.
 `homeassistant` is different because MindRoom ships a dedicated integration flow in `src/mindroom/api/homeassistant_integration.py` with both OAuth and long-lived-token setup paths.
 `homeassistant` is also a shared-only integration, so it requires `worker_scope` to be unset or `shared`.
-Unlike `google` and `spotify`, `homeassistant` always stays local and is never proxied through worker sandbox routing.
+Like the Google OAuth tools and unlike `spotify`, `homeassistant` always stays local and is never proxied through worker sandbox routing.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## [`google_maps`]
@@ -206,7 +206,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 ### Notes
 
 - `homeassistant` requires `worker_scope` to be unset or `shared`, and it is unavailable for `worker_scope: user` or `worker_scope: user_agent`.
-- `homeassistant` always stays local and is never proxied through the sandbox, even if you change `worker_tools`.
+- `homeassistant`, `gmail`, `google_calendar`, `google_drive`, and `google_sheets` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
 - The current setup path is the dedicated Home Assistant integration flow in the dashboard or `src/mindroom/api/homeassistant_integration.py`, not generic env-to-credentials syncing.
 - That integration supports both OAuth and long-lived access tokens, and the OAuth flow requires a Home Assistant OAuth application with the callback URL `/api/homeassistant/callback` on the MindRoom dashboard host.
 - The runtime tool itself looks for stored `instance_url` plus either `access_token` or `long_lived_token`, which is why tool availability checks differ from the raw metadata field names.

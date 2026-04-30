@@ -1496,7 +1496,7 @@ The `!config` chat command and the `config_manager` tool preserve inline overrid
 
 ## Worker Routing
 
-`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process. When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default. `worker_scope` controls how those sandbox runtimes are reused between calls. The shared-only integrations require `worker_scope` unset or `shared`. That list includes `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools. Of those, `homeassistant` also always stays local regardless of `worker_tools` (it is never proxied to the sandbox). `spotify` can still be proxied through the sandbox.
+`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process. When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default. `worker_scope` controls how those sandbox runtimes are reused between calls. The shared-only integrations require `worker_scope` unset or `shared`. That list includes `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools. Of those, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant` also always stay local regardless of `worker_tools` (they are never proxied to the sandbox). `spotify` can still be proxied through the sandbox.
 
 The supported `worker_scope` values are:
 
@@ -7673,7 +7673,7 @@ This page documents the built-in tools in the `location-commerce-and-home` group
 
 ## Common Setup Notes
 
-All four tools on this page are `requires_config`, so they only become available after the needed credentials or integration setup is present. MindRoom validates inline overrides against the declared `config_fields`, and `type="password"` fields such as `key`, `api_key`, `access_token`, and `HOMEASSISTANT_TOKEN` must be stored through the dashboard or credential store instead of inline YAML. `google_maps`, `openweather`, and `shopify` are standard credential-backed tools with no dedicated MindRoom integration routes in `src/mindroom/api/integrations.py`. Their upstream Agno toolkits also support environment fallbacks through `GOOGLE_MAPS_API_KEY`, `OPENWEATHER_API_KEY`, `SHOPIFY_SHOP_NAME`, and `SHOPIFY_ACCESS_TOKEN`. `homeassistant` is different because MindRoom ships a dedicated integration flow in `src/mindroom/api/homeassistant_integration.py` with both OAuth and long-lived-token setup paths. `homeassistant` is also a shared-only integration, so it requires `worker_scope` to be unset or `shared`. Unlike `google` and `spotify`, `homeassistant` always stays local and is never proxied through worker sandbox routing. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+All four tools on this page are `requires_config`, so they only become available after the needed credentials or integration setup is present. MindRoom validates inline overrides against the declared `config_fields`, and `type="password"` fields such as `key`, `api_key`, `access_token`, and `HOMEASSISTANT_TOKEN` must be stored through the dashboard or credential store instead of inline YAML. `google_maps`, `openweather`, and `shopify` are standard credential-backed tools with no dedicated MindRoom integration routes in `src/mindroom/api/integrations.py`. Their upstream Agno toolkits also support environment fallbacks through `GOOGLE_MAPS_API_KEY`, `OPENWEATHER_API_KEY`, `SHOPIFY_SHOP_NAME`, and `SHOPIFY_ACCESS_TOKEN`. `homeassistant` is different because MindRoom ships a dedicated integration flow in `src/mindroom/api/homeassistant_integration.py` with both OAuth and long-lived-token setup paths. `homeassistant` is also a shared-only integration, so it requires `worker_scope` to be unset or `shared`. Like the Google OAuth tools and unlike `spotify`, `homeassistant` always stays local and is never proxied through worker sandbox routing. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## \[`google_maps`\]
 
@@ -7836,7 +7836,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 ### Notes
 
 - `homeassistant` requires `worker_scope` to be unset or `shared`, and it is unavailable for `worker_scope: user` or `worker_scope: user_agent`.
-- `homeassistant` always stays local and is never proxied through the sandbox, even if you change `worker_tools`.
+- `homeassistant`, `gmail`, `google_calendar`, `google_drive`, and `google_sheets` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
 - The current setup path is the dedicated Home Assistant integration flow in the dashboard or `src/mindroom/api/homeassistant_integration.py`, not generic env-to-credentials syncing.
 - That integration supports both OAuth and long-lived access tokens, and the OAuth flow requires a Home Assistant OAuth application with the callback URL `/api/homeassistant/callback` on the MindRoom dashboard host.
 - The runtime tool itself looks for stored `instance_url` plus either `access_token` or `long_lived_token`, which is why tool availability checks differ from the raw metadata field names.
@@ -11587,7 +11587,7 @@ GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com
 
 ## Runtime Behavior
 
-Dashboard and agent-issued connect links use `/api/oauth/{provider}/connect` or `/api/oauth/{provider}/authorize`. OAuth callback state is stored server-side as an opaque token and bound to the authenticated dashboard user and scoped credential target. Disconnecting a provider removes both the token service and that provider's settings service for the selected scope.
+Dashboard and agent-issued connect links use `/api/oauth/{provider}/connect` or `/api/oauth/{provider}/authorize`. OAuth callback state is stored server-side as an opaque token and bound to the authenticated dashboard user and scoped credential target. Disconnecting a provider removes the token service for the selected scope and preserves that provider's editable tool settings.
 
 # Google Services OAuth For Individuals
 
