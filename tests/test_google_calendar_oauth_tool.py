@@ -98,8 +98,7 @@ def test_google_calendar_default_config_disables_write_methods(tmp_path: Path) -
     assert "quick_add_event" not in tool.functions
     assert "move_event" not in tool.functions
     assert "respond_to_event" not in tool.functions
-    assert "https://www.googleapis.com/auth/calendar.readonly" in tool.scopes
-    assert "https://www.googleapis.com/auth/calendar" not in tool.scopes
+    assert "https://www.googleapis.com/auth/calendar" in tool.scopes
 
 
 def test_google_calendar_allow_update_enables_write_methods(tmp_path: Path) -> None:
@@ -124,14 +123,11 @@ def test_google_calendar_allow_update_enables_write_methods(tmp_path: Path) -> N
     assert "https://www.googleapis.com/auth/calendar" in tool.scopes
 
 
-def test_google_calendar_provider_defaults_to_readonly_scope() -> None:
+def test_google_calendar_provider_uses_write_scope_for_method_gated_tools() -> None:
     provider = google_calendar_oauth_provider()
-    write_provider = google_calendar_oauth_provider(allow_update=True)
 
     assert provider.scopes == GOOGLE_CALENDAR_OAUTH_SCOPES
-    assert "https://www.googleapis.com/auth/calendar.readonly" in provider.scopes
-    assert "https://www.googleapis.com/auth/calendar" not in provider.scopes
-    assert "https://www.googleapis.com/auth/calendar" in write_provider.scopes
+    assert "https://www.googleapis.com/auth/calendar" in provider.scopes
 
 
 def test_google_calendar_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:

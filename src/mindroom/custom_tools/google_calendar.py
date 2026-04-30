@@ -51,10 +51,8 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, AgnoGoogleCalendarTools):
                 "quick_add_event": allow_update,
                 "move_event": allow_update,
                 "respond_to_event": allow_update,
-                "scopes": list(google_calendar_oauth_provider(allow_update=allow_update).scopes),
             },
         )
-        self._oauth_provider = google_calendar_oauth_provider(allow_update=allow_update)
         if credentials_manager is None:
             msg = "GoogleCalendarTools requires an explicit credentials_manager"
             raise RuntimeError(msg)

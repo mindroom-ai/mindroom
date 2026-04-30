@@ -36,8 +36,8 @@ MindRoom also includes `scheduler` in `defaults.tools` by default on this branch
 
 `google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`.
 MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`.
-Read-oriented calls work with calendar read scopes.
-Write calls are still part of the tool surface, but they only succeed when `allow_update: true` is configured and the connected Google account has granted calendar write scope.
+The OAuth provider requests Google Calendar scope once, while MindRoom gates write methods with the `allow_update` setting.
+Write calls are still part of the tool surface, but they are only exposed when `allow_update: true` is configured.
 `find_available_slots()` derives openings from the user's current calendar events plus working-hours settings inferred from Google Calendar settings and locale.
 
 ### Configuration
@@ -74,7 +74,7 @@ create_event(
 ### Notes
 
 - `calendar_id` defaults to `primary`, and `list_calendars()` can return the other calendar IDs available to the connected account.
-- If the Google Calendar connection was authorized without calendar scopes, `google_calendar` stays unavailable until the user reconnects and grants the missing scopes.
+- If the Google Calendar connection is missing the required calendar scope, `google_calendar` stays unavailable until the user reconnects and grants it.
 - Use the Google Services OAuth guides for consent-screen setup, redirect URIs, and environment variables.
 
 ## [`cal_com`]
