@@ -72,8 +72,25 @@ def _is_oauth_client_secret_env_name(name: str) -> bool:
     )
 
 
+def _is_automatic_execution_secret_env_name(name: str) -> bool:
+    provider_secret_names = set(constants.PROVIDER_ENV_KEYS.values()) - {"OLLAMA_HOST"}
+    return name == "GITHUB_TOKEN" or name in provider_secret_names or _is_oauth_client_secret_env_name(name)
+
+
 def _without_oauth_client_secrets(env: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in env.items() if not _is_oauth_client_secret_env_name(key)}
+
+
+def _without_automatic_execution_secrets(
+    env: Mapping[str, str],
+    *,
+    allowed_secret_names: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in env.items()
+        if key in allowed_secret_names or not _is_automatic_execution_secret_env_name(key)
+    }
 
 
 def runner_execution_mode(runtime_paths: RuntimePaths) -> str:
@@ -180,23 +197,37 @@ def request_execution_env(
         return _without_oauth_client_secrets(execution_env)
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
-    return _without_oauth_client_secrets(constants.execution_runtime_env_values(runtime_paths))
+    env = constants.execution_runtime_env_values(runtime_paths)
+    if tool_name == "shell":
+        return _without_automatic_execution_secrets(env)
+    return _without_oauth_client_secrets(env)
 
 
 def runtime_paths_with_execution_env(
     runtime_paths: RuntimePaths,
     execution_env: dict[str, str],
     *,
+    allowed_execution_secret_names: frozenset[str] = frozenset(),
     trusted_env_overlay: Mapping[str, str] | None = None,
 ) -> RuntimePaths:
     """Return runtime paths overlaid with one execution env snapshot."""
     if not execution_env and not trusted_env_overlay:
         return runtime_paths
 
-    process_env = _without_oauth_client_secrets(constants.execution_runtime_env_values(runtime_paths))
-    process_env.update(_without_oauth_client_secrets(execution_env))
+    process_env = _without_automatic_execution_secrets(
+        constants.execution_runtime_env_values(runtime_paths),
+        allowed_secret_names=allowed_execution_secret_names,
+    )
+    process_env.update(
+        _without_automatic_execution_secrets(
+            _without_oauth_client_secrets(execution_env),
+            allowed_secret_names=allowed_execution_secret_names,
+        ),
+    )
     env_file_values = {
-        key: value for key, value in runtime_paths.env_file_values.items() if not _is_oauth_client_secret_env_name(key)
+        key: value
+        for key, value in runtime_paths.env_file_values.items()
+        if key in allowed_execution_secret_names or not _is_automatic_execution_secret_env_name(key)
     }
     if trusted_env_overlay:
         clean_overlay = _without_oauth_client_secrets(trusted_env_overlay)

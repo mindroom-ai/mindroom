@@ -285,6 +285,17 @@ def _request_runtime_overrides(
     return merged_runtime_overrides
 
 
+def _request_allowed_execution_secret_names(request: SandboxRunnerExecuteRequest) -> frozenset[str]:
+    """Return env names explicitly exposed through shell passthrough settings."""
+    if request.tool_name != "shell" or request.extra_env_passthrough is None:
+        return frozenset()
+    resolved = constants.shell_extra_env_values(
+        extra_env_passthrough=request.extra_env_passthrough,
+        process_env=request.execution_env,
+    )
+    return frozenset(resolved)
+
+
 class SandboxRunnerExecuteRequest(BaseModel):
     """Tool call payload forwarded from a primary runtime to the sandbox runtime.
 
@@ -933,6 +944,7 @@ async def _execute_request_inprocess(
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
         execution_env,
+        allowed_execution_secret_names=_request_allowed_execution_secret_names(request),
         trusted_env_overlay=trusted_overlay,
     )
     execution_identity: ToolExecutionIdentity | None = None
@@ -1100,6 +1112,7 @@ def _execute_request_subprocess_sync(
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
         execution_env,
+        allowed_execution_secret_names=_request_allowed_execution_secret_names(request),
         trusted_env_overlay=trusted_overlay,
     )
     subprocess_request = request.model_copy(update={"execution_env": execution_env})

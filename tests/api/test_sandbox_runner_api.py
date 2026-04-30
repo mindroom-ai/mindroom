@@ -1040,7 +1040,10 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
-    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "TEST_EXECUTION_ENV=visible-in-shell\nOPENAI_API_KEY=dotenv-secret\n",
+        encoding="utf-8",
+    )
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -1051,7 +1054,7 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
             tool_name="shell",
             function_name="run_shell_command",
-            args=[["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""]],
+            args=[["bash", "-lc", 'printf \'%s|%s\' "$TEST_EXECUTION_ENV" "$OPENAI_API_KEY"']],
             kwargs={},
         ),
         runtime_paths,
@@ -1060,7 +1063,7 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
     )
 
     assert response.ok is True
-    assert response.result == "visible-in-shell"
+    assert response.result == "visible-in-shell|"
 
 
 def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_env(
@@ -1099,9 +1102,9 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
         runtime_paths,
     )
 
-    assert execution_env["OPENAI_API_KEY"] == "dotenv-secret"
     assert execution_env["TEST_EXECUTION_ENV"] == "visible-in-shell"
     assert execution_env["MINDROOM_STORAGE_PATH"] == str((tmp_path / "storage").resolve())
+    assert "OPENAI_API_KEY" not in execution_env
     assert "MINDROOM_EVENT_CACHE_DATABASE_URL" not in execution_env
     assert "MINDROOM_CACHE_DATABASE_URL" not in execution_env
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in execution_env
@@ -1115,6 +1118,7 @@ def test_sandbox_execution_env_excludes_oauth_client_secrets_from_worker_runtime
         process_env={
             "GOOGLE_CLIENT_ID": "google-client-id",
             "GOOGLE_CLIENT_SECRET": "google-client-secret",
+            "OPENAI_API_KEY": "openai-secret",
         },
     )
     worker_runtime_paths = sandbox_runner_module.constants.isolated_runtime_paths(runtime_paths)
@@ -1127,8 +1131,10 @@ def test_sandbox_execution_env_excludes_oauth_client_secrets_from_worker_runtime
 
     assert execution_env["GOOGLE_CLIENT_ID"] == "google-client-id"
     assert "GOOGLE_CLIENT_SECRET" not in execution_env
+    assert "OPENAI_API_KEY" not in execution_env
     assert effective_runtime_paths.env_value("GOOGLE_CLIENT_ID") == "google-client-id"
     assert effective_runtime_paths.env_value("GOOGLE_CLIENT_SECRET") is None
+    assert effective_runtime_paths.env_value("OPENAI_API_KEY") is None
 
 
 @pytest.mark.asyncio
