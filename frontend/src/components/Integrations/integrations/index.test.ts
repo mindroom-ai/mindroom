@@ -11,6 +11,7 @@ global.window.open = vi.fn();
 
 describe("Generic OAuth integration provider", () => {
   beforeEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
     (global.fetch as any).mockReset();
   });
@@ -51,6 +52,38 @@ describe("Generic OAuth integration provider", () => {
     await connectPromise;
 
     expect(authWindow.close).toHaveBeenCalled();
+  });
+
+  it("rejects connect when the OAuth popup closes without completion", async () => {
+    vi.useFakeTimers();
+    const authWindowState = { closed: false };
+    const authWindow = {
+      get closed() {
+        return authWindowState.closed;
+      },
+      close: vi.fn(() => {
+        authWindowState.closed = true;
+      }),
+    } as unknown as Window;
+    (global.window.open as any).mockReturnValue(authWindow);
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
+    });
+
+    const config = integrationProviders.google_drive.getConfig();
+    const connectPromise = config.onAction!(config.integration);
+
+    await vi.waitFor(() => {
+      expect(global.window.open).toHaveBeenCalled();
+    });
+    const rejection = expect(connectPromise).rejects.toThrow(
+      "Google Drive authorization was cancelled",
+    );
+    authWindowState.closed = true;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await rejection;
   });
 
   it("does not report missing client config when OAuth status fails", async () => {

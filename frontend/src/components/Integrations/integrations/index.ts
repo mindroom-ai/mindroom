@@ -183,22 +183,28 @@ class GenericOAuthIntegrationProvider implements IntegrationProvider {
     if (!authWindow) {
       throw new Error("OAuth popup was blocked");
     }
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       let completed = false;
+      let receivedCompletion = false;
       let pollInterval = 0;
-      const finish = () => {
+      const finish = (error?: Error) => {
         if (completed) {
           return;
         }
         completed = true;
         window.clearInterval(pollInterval);
         window.removeEventListener("message", handleMessage);
+        if (error) {
+          reject(error);
+          return;
+        }
         resolve();
       };
       const handleMessage = (event: MessageEvent) => {
         if (!isOAuthCompleteMessage(event, authWindow, this.providerId)) {
           return;
         }
+        receivedCompletion = true;
         if (!authWindow.closed) {
           authWindow.close();
         }
@@ -206,7 +212,13 @@ class GenericOAuthIntegrationProvider implements IntegrationProvider {
       };
       pollInterval = window.setInterval(() => {
         if (authWindow.closed) {
-          finish();
+          finish(
+            receivedCompletion
+              ? undefined
+              : new Error(
+                  `${this.integration.name} authorization was cancelled`,
+                ),
+          );
         }
       }, 1000);
       window.addEventListener("message", handleMessage);
