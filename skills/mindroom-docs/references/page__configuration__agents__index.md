@@ -256,6 +256,8 @@ agents:
 ```
 
 `research` still inherits `enable_run_shell_command: true`, but `extra_env_passthrough` falls back to the lower layer (persisted tool config if set, otherwise the tool's normal default).
+For sandboxed `shell`, provider API keys and other committed runtime credentials are denied by default in both worker startup env and command env.
+Use `extra_env_passthrough` when a specific exported process env value must be visible to shell commands.
 
 Required non-secret field example:
 

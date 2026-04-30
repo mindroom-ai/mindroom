@@ -620,7 +620,6 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
 
 def _is_known_worker_credential_env_name(name: str) -> bool:
     return name in {
-        *PROVIDER_ENV_KEYS.values(),
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GOOGLE_CLIENT_ID",
         "GOOGLE_CLIENT_SECRET",

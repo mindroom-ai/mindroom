@@ -36,7 +36,9 @@ from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     VENDOR_TELEMETRY_ENV_VALUES,
     RuntimePaths,
+    isolated_runtime_paths,
     resolve_runtime_paths,
+    sandbox_shell_execution_runtime_env_values,
     shell_execution_runtime_env_values,
     shell_extra_env_values,
 )
@@ -1573,6 +1575,56 @@ def test_execution_env_payload_keeps_provider_env_denied_even_with_worker_creden
     assert execution_env is not None
     assert "OPENAI_API_KEY" not in execution_env
     assert "OPENAI_BASE_URL" not in execution_env
+
+
+def test_worker_env_excludes_openai_api_key_unless_extra_env_passthrough(
+    tmp_path: Path,
+) -> None:
+    """Isolated worker startup env should not inherit provider API keys by default."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "OPENAI_API_KEY": "sk-primary",
+            "ANTHROPIC_API_KEY": "sk-ant-primary",
+            "GOOGLE_DRIVE_CLIENT_SECRET": "oauth-client-secret",
+        },
+    )
+
+    worker_paths = isolated_runtime_paths(runtime_paths)
+    shell_env = sandbox_shell_execution_runtime_env_values(
+        worker_paths,
+        extra_env_passthrough="OPENAI_API_KEY",
+        process_env=runtime_paths.process_env,
+    )
+
+    assert worker_paths.env_value("OPENAI_API_KEY") is None
+    assert worker_paths.env_value("ANTHROPIC_API_KEY") is None
+    assert worker_paths.env_value("GOOGLE_DRIVE_CLIENT_SECRET") == "oauth-client-secret"
+    assert shell_env["OPENAI_API_KEY"] == "sk-primary"
+
+
+def test_worker_env_includes_extra_env_passthrough(tmp_path: Path) -> None:
+    """Explicit shell passthrough should still expose selected process env values."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MY_VAR": "visible",
+            "OTHER_VAR": "hidden",
+        },
+    )
+
+    worker_paths = isolated_runtime_paths(runtime_paths)
+    shell_env = sandbox_shell_execution_runtime_env_values(
+        worker_paths,
+        extra_env_passthrough="MY_VAR",
+        process_env=runtime_paths.process_env,
+    )
+
+    assert worker_paths.env_value("MY_VAR") is None
+    assert shell_env["MY_VAR"] == "visible"
+    assert "OTHER_VAR" not in shell_env
 
 
 @pytest.mark.asyncio

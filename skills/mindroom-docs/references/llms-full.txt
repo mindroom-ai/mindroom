@@ -1448,7 +1448,7 @@ agents:
           extra_env_passthrough: __MINDROOM_INHERIT__
 ```
 
-`research` still inherits `enable_run_shell_command: true`, but `extra_env_passthrough` falls back to the lower layer (persisted tool config if set, otherwise the tool's normal default).
+`research` still inherits `enable_run_shell_command: true`, but `extra_env_passthrough` falls back to the lower layer (persisted tool config if set, otherwise the tool's normal default). For sandboxed `shell`, provider API keys and other committed runtime credentials are denied by default in both worker startup env and command env. Use `extra_env_passthrough` when a specific exported process env value must be visible to shell commands.
 
 Required non-secret field example:
 
@@ -12010,7 +12010,7 @@ When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker e
 
 ## Shell env and PATH
 
-When `shell` runs through the sandbox proxy, it receives only a small non-secret system env by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale variables, proxy variables, and certificate path variables. Committed runtime `.env` values and provider credentials are not forwarded implicitly. Configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit. `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries. To prevent the runner from leaking its own control-plane credentials to tools, shell passthrough drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`. Everything else that matches your configured names or globs passes through, including service tokens and provider credentials. If you don't want a value to reach shell commands, don't match it with `extra_env_passthrough`.
+When `shell` runs through the sandbox proxy, it receives only a small non-secret system env by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale variables, proxy variables, and certificate path variables. Committed runtime `.env` values and provider credentials are not forwarded implicitly. Worker startup env also denies provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` by default. Configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit. `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries. To prevent the runner from leaking its own control-plane credentials to tools, shell passthrough drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`. Everything else that matches your configured names or globs passes through, including service tokens and provider credentials. If you don't want a value to reach shell commands, don't match it with `extra_env_passthrough`.
 
 If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`. This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates. That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
 
