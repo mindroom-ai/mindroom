@@ -15,6 +15,7 @@ from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system import plugin_imports
+from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.plugins import _load_plugin_module
 
 if TYPE_CHECKING:
@@ -133,7 +134,33 @@ def _provider_registry(providers: Iterable[OAuthProvider]) -> dict[str, OAuthPro
         duplicate_list = ", ".join(sorted(duplicate_services))
         msg = f"Duplicate OAuth provider service name(s): {duplicate_list}"
         raise plugin_imports.PluginValidationError(msg)
+    _reject_tool_service_collisions(registry.values())
     return registry
+
+
+def _registered_tool_service_auth_providers() -> dict[str, str | None]:
+    import mindroom.tools as _mindroom_tools  # noqa: F401, PLC0415
+
+    return {tool_name: metadata.auth_provider for tool_name, metadata in TOOL_METADATA.items()}
+
+
+def _reject_tool_service_collisions(providers: Iterable[OAuthProvider]) -> None:
+    tool_auth_providers = _registered_tool_service_auth_providers()
+    collisions: list[str] = []
+    for provider in providers:
+        if provider.credential_service in tool_auth_providers:
+            collisions.append(f"{provider.credential_service} ({provider.id}.credential_service, tool service)")
+        if provider.tool_config_service is None:
+            continue
+        if provider.tool_config_service not in tool_auth_providers:
+            continue
+        tool_auth_provider = tool_auth_providers[provider.tool_config_service]
+        if tool_auth_provider != provider.id:
+            collisions.append(f"{provider.tool_config_service} ({provider.id}.tool_config_service, tool service)")
+    if collisions:
+        collision_list = ", ".join(sorted(collisions))
+        msg = f"OAuth provider service name(s) overlap existing tool service(s): {collision_list}"
+        raise plugin_imports.PluginValidationError(msg)
 
 
 def load_oauth_providers(

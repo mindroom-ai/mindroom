@@ -145,7 +145,12 @@ class TestGmailTools:
             mock_parent_init.return_value = None
             GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
 
-            mock_logger.exception.assert_called_once()
+            mock_credentials_class.assert_not_called()
+            mock_logger.warning.assert_called_once_with(
+                "oauth_credentials_missing_required_scopes",
+                tool_name="gmail",
+                provider_id="google_gmail",
+            )
             mock_parent_init.assert_called_once_with(creds=None)
 
     @patch("google.auth.transport.requests.Request")

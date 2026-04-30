@@ -9,9 +9,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import constants
+from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
+from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
@@ -77,6 +80,41 @@ def test_google_sheets_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
     assert token_data is not None
     assert token_data["token"] == "access-token"  # noqa: S105
     assert "spreadsheet_id" not in token_data
+
+
+def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_path: Path) -> None:
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google_sheets",
+        {
+            "read": False,
+            "create": True,
+            "update": True,
+            "duplicate": True,
+            "_source": "ui",
+        },
+    )
+
+    tool = get_tool_by_name(
+        "google_sheets",
+        _runtime_paths(tmp_path),
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        disable_sandbox_proxy=True,
+    )
+
+    assert isinstance(tool, GoogleSheetsTools)
+    assert [registered.__name__ for registered in tool.tools] == [
+        "create_sheet",
+        "update_sheet",
+        "create_duplicate_sheet",
+    ]
+
+
+def test_google_sheets_provider_includes_drive_scope_for_duplicate_support() -> None:
+    provider = google_sheets_oauth_provider()
+
+    assert "https://www.googleapis.com/auth/drive" in provider.scopes
 
 
 def test_google_sheets_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:

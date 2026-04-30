@@ -445,12 +445,11 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 ### What It Does
 
 The underlying Agno toolkit supports `read_sheet()`, `create_sheet()`, `update_sheet()`, and `create_duplicate_sheet()`.
-MindRoom wraps Agno's Google Sheets toolkit with `ScopedGoogleOAuthMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files.
+MindRoom wraps Agno's Google Sheets toolkit with `ScopedOAuthClientMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files.
 The upstream toolkit selects read-only Sheets scope when only reads are enabled, and it selects write scope when create, update, or duplicate operations are enabled.
 `create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on Google Drive scope in addition to Sheets access.
 If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call.
-On this branch, the declared MindRoom config fields are `read`, `create`, `update`, and `duplicate`, while the upstream constructor consumes `enable_read_sheet`, `enable_create_sheet`, `enable_update_sheet`, and `enable_create_duplicate_sheet`.
-That means the read path is the verified default behavior here, while the write toggles should be treated as intended metadata until the field names are aligned with the upstream constructor.
+MindRoom maps the dashboard config fields `read`, `create`, `update`, and `duplicate` onto Agno's constructor flags.
 
 ### Configuration
 
@@ -487,8 +486,7 @@ read_sheet(
 
 - `google_sheets` uses the `google_sheets` OAuth provider and can use scoped OAuth credentials for isolated worker scopes.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md).
-- The current metadata field names `read`, `create`, `update`, and `duplicate` do not match Agno's `enable_*` constructor args, so treat read access as the verified default behavior on this branch unless the tool is instantiated programmatically with the upstream names.
-- The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
+- The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets and Drive scopes.
 
 ## [`openbb`]
 

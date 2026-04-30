@@ -10,7 +10,7 @@ There is no bundled `/api/google/*` OAuth flow.
 | --------------- | ----------------- | ------------------------------------- | ----------------------- | ----------------- | --------------------------------------------------------- |
 | Google Drive    | `google_drive`    | `/api/oauth/google_drive/callback`    | `google_drive_oauth`    | `google_drive`    | Drive read-only plus OpenID email/profile                 |
 | Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar` | Calendar read/write plus OpenID email/profile             |
-| Google Sheets   | `google_sheets`   | `/api/oauth/google_sheets/callback`   | `google_sheets_oauth`   | `google_sheets`   | Sheets read/write plus OpenID email/profile               |
+| Google Sheets   | `google_sheets`   | `/api/oauth/google_sheets/callback`   | `google_sheets_oauth`   | `google_sheets`   | Sheets read/write, Drive copy, plus OpenID email/profile  |
 | Gmail           | `google_gmail`    | `/api/oauth/google_gmail/callback`    | `google_gmail_oauth`    | `gmail`           | Gmail readonly, modify, compose plus OpenID email/profile |
 
 ## Google Cloud Setup

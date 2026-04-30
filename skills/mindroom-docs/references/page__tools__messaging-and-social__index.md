@@ -36,11 +36,11 @@ Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gma
 
 ## \[`gmail`\]
 
-`gmail` is the mailbox-oriented tool for reading, searching, drafting, sending, and labeling Gmail messages through the shared Google integration.
+`gmail` is the mailbox-oriented tool for reading, searching, drafting, sending, and labeling Gmail messages through the Google Gmail OAuth provider.
 
 ### What It Does
 
-MindRoom wraps Agno's `GmailTools` with `ScopedGoogleOAuthMixin`, so Gmail credentials are loaded from MindRoom's unified Google credential store instead of a local `token.json` file.
+MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail credentials are loaded from MindRoom's scoped OAuth credential store instead of a local `token.json` file.
 The wrapper refreshes stored Google tokens when needed and falls back to the upstream auth flow only when no stored credentials are available.
 The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`.
 Draft and send operations accept local file-system paths for attachments.

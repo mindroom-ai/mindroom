@@ -21,6 +21,13 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_CONFIG_FIELD_INIT_ARG_ALIASES = {
+    "read": "read_sheet",
+    "create": "create_sheet",
+    "update": "update_sheet",
+    "duplicate": "create_duplicate_sheet",
+}
+
 
 class GoogleSheetsTools(ScopedOAuthClientMixin, AgnoGoogleSheetsTools):
     """Google Sheets tools wrapper that uses MindRoom's credential management."""
@@ -42,6 +49,7 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, AgnoGoogleSheetsTools):
         unified credential storage and passes them to the Agno GoogleSheetsTools.
         """
         provided_creds = kwargs.pop("creds", None)
+        self._normalize_dashboard_config_kwargs(kwargs)
         if credentials_manager is None:
             msg = "GoogleSheetsTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
@@ -62,3 +70,13 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, AgnoGoogleSheetsTools):
     def _should_fallback_to_original_auth(self) -> bool:
         """Prefer the upstream auth path when a service account is configured."""
         return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
+
+    def _normalize_dashboard_config_kwargs(self, kwargs: dict[str, Any]) -> None:
+        """Map dashboard field names onto Agno's constructor argument names."""
+        for field_name, init_arg in _CONFIG_FIELD_INIT_ARG_ALIASES.items():
+            if field_name not in kwargs:
+                continue
+            if init_arg in kwargs:
+                msg = f"Google Sheets received both {field_name!r} and {init_arg!r}"
+                raise ValueError(msg)
+            kwargs[init_arg] = kwargs.pop(field_name)

@@ -8,13 +8,10 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
-
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
-from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -195,8 +192,10 @@ def test_google_drive_rejects_stored_token_missing_required_scopes(tmp_path: Pat
         worker_target=None,
     )
 
-    with pytest.raises(OAuthConnectionRequired):
-        tool._auth()
+    assert tool.creds is None
+    result = json.loads(tool.search_files(query="name contains 'plan'", max_results=1))
+
+    assert "Google Drive is not connected for this agent" in result["error"]
 
 
 def test_google_drive_saved_numeric_config_is_coerced_before_tool_init(tmp_path: Path) -> None:

@@ -14,7 +14,7 @@ from mindroom.oauth.providers import OAuthProvider
 GOOGLE_SHEETS_OAUTH_SCOPES = (
     *GOOGLE_IDENTITY_SCOPES,
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
 )
 
 
@@ -39,6 +39,6 @@ def google_sheets_oauth_provider() -> OAuthProvider:
             "include_granted_scopes": "true",
             "prompt": "consent",
         },
-        status_capabilities=("Sheets read/write", "Drive file copy"),
+        status_capabilities=("Sheets read/write", "Drive copy"),
         token_parser=_google_token_parser,
     )

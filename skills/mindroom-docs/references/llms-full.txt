@@ -3239,7 +3239,7 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ### What It Does
 
-The underlying Agno toolkit supports `read_sheet()`, `create_sheet()`, `update_sheet()`, and `create_duplicate_sheet()`. MindRoom wraps Agno's Google Sheets toolkit with `ScopedGoogleOAuthMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files. The upstream toolkit selects read-only Sheets scope when only reads are enabled, and it selects write scope when create, update, or duplicate operations are enabled. `create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on Google Drive scope in addition to Sheets access. If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call. On this branch, the declared MindRoom config fields are `read`, `create`, `update`, and `duplicate`, while the upstream constructor consumes `enable_read_sheet`, `enable_create_sheet`, `enable_update_sheet`, and `enable_create_duplicate_sheet`. That means the read path is the verified default behavior here, while the write toggles should be treated as intended metadata until the field names are aligned with the upstream constructor.
+The underlying Agno toolkit supports `read_sheet()`, `create_sheet()`, `update_sheet()`, and `create_duplicate_sheet()`. MindRoom wraps Agno's Google Sheets toolkit with `ScopedOAuthClientMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files. The upstream toolkit selects read-only Sheets scope when only reads are enabled, and it selects write scope when create, update, or duplicate operations are enabled. `create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on Google Drive scope in addition to Sheets access. If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call. MindRoom maps the dashboard config fields `read`, `create`, `update`, and `duplicate` onto Agno's constructor flags.
 
 ### Configuration
 
@@ -3276,8 +3276,7 @@ read_sheet(
 
 - `google_sheets` uses the `google_sheets` OAuth provider and can use scoped OAuth credentials for isolated worker scopes.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
-- The current metadata field names `read`, `create`, `update`, and `duplicate` do not match Agno's `enable_*` constructor args, so treat read access as the verified default behavior on this branch unless the tool is instantiated programmatically with the upstream names.
-- The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
+- The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets and Drive scopes.
 
 ## \[`openbb`\]
 
@@ -5717,11 +5716,11 @@ This page documents the built-in tools in the `messaging-and-social` group. Use 
 
 ## \[`gmail`\]
 
-`gmail` is the mailbox-oriented tool for reading, searching, drafting, sending, and labeling Gmail messages through the shared Google integration.
+`gmail` is the mailbox-oriented tool for reading, searching, drafting, sending, and labeling Gmail messages through the Google Gmail OAuth provider.
 
 ### What It Does
 
-MindRoom wraps Agno's `GmailTools` with `ScopedGoogleOAuthMixin`, so Gmail credentials are loaded from MindRoom's unified Google credential store instead of a local `token.json` file. The wrapper refreshes stored Google tokens when needed and falls back to the upstream auth flow only when no stored credentials are available. The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`. Draft and send operations accept local file-system paths for attachments.
+MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail credentials are loaded from MindRoom's scoped OAuth credential store instead of a local `token.json` file. The wrapper refreshes stored Google tokens when needed and falls back to the upstream auth flow only when no stored credentials are available. The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`. Draft and send operations accept local file-system paths for attachments.
 
 ### Configuration
 
@@ -11535,7 +11534,7 @@ MindRoom uses the generic OAuth framework for Google tools. Each Google service 
 | --------------- | ----------------- | ------------------------------------- | ----------------------- | ----------------- | --------------------------------------------------------- |
 | Google Drive    | `google_drive`    | `/api/oauth/google_drive/callback`    | `google_drive_oauth`    | `google_drive`    | Drive read-only plus OpenID email/profile                 |
 | Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar` | Calendar read/write plus OpenID email/profile             |
-| Google Sheets   | `google_sheets`   | `/api/oauth/google_sheets/callback`   | `google_sheets_oauth`   | `google_sheets`   | Sheets read/write plus OpenID email/profile               |
+| Google Sheets   | `google_sheets`   | `/api/oauth/google_sheets/callback`   | `google_sheets_oauth`   | `google_sheets`   | Sheets read/write, Drive copy, plus OpenID email/profile  |
 | Gmail           | `google_gmail`    | `/api/oauth/google_gmail/callback`    | `google_gmail_oauth`    | `gmail`           | Gmail readonly, modify, compose plus OpenID email/profile |
 
 ## Google Cloud Setup

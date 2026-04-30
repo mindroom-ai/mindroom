@@ -331,6 +331,87 @@ def test_plugin_oauth_provider_rejects_tool_config_overlap(tmp_path: Path) -> No
         load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
 
 
+def test_plugin_oauth_provider_rejects_ordinary_tool_credential_service_overlap(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "mindroom.plugin.json").write_text(
+        '{"name": "oauth_plugin", "oauth_module": "oauth_provider.py"}',
+        encoding="utf-8",
+    )
+    (plugin_dir / "oauth_provider.py").write_text(
+        "\n".join(
+            [
+                "from mindroom.oauth import OAuthProvider",
+                "",
+                "def register_oauth_providers(settings, runtime_paths):",
+                "    del settings, runtime_paths",
+                "    return [OAuthProvider(",
+                "        id='plugin_weather',",
+                "        display_name='Plugin Weather',",
+                "        authorization_url='https://auth.example.test/authorize',",
+                "        token_url='https://auth.example.test/token',",
+                "        scopes=('plugin.read',),",
+                "        credential_service='openweather',",
+                "        client_id_env='PLUGIN_CLIENT_ID',",
+                "        client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "    )]",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            **_config_payload(),
+            "plugins": [{"path": str(plugin_dir)}],
+        },
+    )
+
+    with pytest.raises(plugin_imports.PluginValidationError, match="overlap existing tool service"):
+        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+
+
+def test_plugin_oauth_provider_rejects_unrelated_tool_config_service_overlap(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "mindroom.plugin.json").write_text(
+        '{"name": "oauth_plugin", "oauth_module": "oauth_provider.py"}',
+        encoding="utf-8",
+    )
+    (plugin_dir / "oauth_provider.py").write_text(
+        "\n".join(
+            [
+                "from mindroom.oauth import OAuthProvider",
+                "",
+                "def register_oauth_providers(settings, runtime_paths):",
+                "    del settings, runtime_paths",
+                "    return [OAuthProvider(",
+                "        id='plugin_weather',",
+                "        display_name='Plugin Weather',",
+                "        authorization_url='https://auth.example.test/authorize',",
+                "        token_url='https://auth.example.test/token',",
+                "        scopes=('plugin.read',),",
+                "        credential_service='plugin_weather_oauth',",
+                "        tool_config_service='openweather',",
+                "        client_id_env='PLUGIN_CLIENT_ID',",
+                "        client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "    )]",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            **_config_payload(),
+            "plugins": [{"path": str(plugin_dir)}],
+        },
+    )
+
+    with pytest.raises(plugin_imports.PluginValidationError, match="overlap existing tool service"):
+        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+
+
 def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
