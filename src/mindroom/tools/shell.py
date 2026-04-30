@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import signal
 import time
 import uuid
@@ -143,6 +144,59 @@ def _shell_subprocess_env(
     else:
         env["PATH"] = path_value
     return env
+
+
+def _login_bash_command_index(args: list[str]) -> int | None:
+    """Return the command index for `bash -lc ...` style invocations."""
+    if not args or Path(args[0]).name != "bash":
+        return None
+
+    login_shell = False
+    command_index: int | None = None
+    for index, arg in enumerate(args[1:], start=1):
+        if arg == "--":
+            break
+        if not arg.startswith("-"):
+            break
+        if arg in {"-l", "--login"}:
+            login_shell = True
+            continue
+        if arg.startswith("--"):
+            continue
+        if "l" in arg:
+            login_shell = True
+        if "c" in arg:
+            command_index = index + 1
+            break
+
+    if not login_shell or command_index is None or command_index >= len(args):
+        return None
+    return command_index
+
+
+def _restore_env_exports_for_login_shell(env: dict[str, str]) -> str:
+    """Return shell exports that restore env values commonly reset by login startup."""
+    path_value = env.get("PATH")
+    if path_value is None:
+        return ""
+    return f"export PATH={shlex.quote(path_value)}; "
+
+
+def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
+    """Return argv adjusted for shell startup files that rewrite env overlays."""
+    command_index = _login_bash_command_index(args)
+    if command_index is None:
+        return args
+
+    env_restore = _restore_env_exports_for_login_shell(env)
+    if not env_restore:
+        return args
+
+    adjusted_args = list(args)
+    # Login bash can reset PATH in /etc/profile after subprocess env is applied.
+    # Restore MindRoom's captured execution PATH without re-sourcing workspace hooks.
+    adjusted_args[command_index] = env_restore + adjusted_args[command_index]
+    return adjusted_args
 
 
 def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> str:
@@ -320,16 +374,17 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             self._sweep_stale_records()
 
             try:
+                subprocess_env = _shell_subprocess_env(
+                    self._runtime_env,
+                    base_process_env=self._base_process_env,
+                    shell_path_prepend=self._shell_path_prepend,
+                )
                 process = await asyncio.create_subprocess_exec(
-                    *args,
+                    *_shell_subprocess_args(args, subprocess_env),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(self.base_dir) if self.base_dir else None,
-                    env=_shell_subprocess_env(
-                        self._runtime_env,
-                        base_process_env=self._base_process_env,
-                        shell_path_prepend=self._shell_path_prepend,
-                    ),
+                    env=subprocess_env,
                     start_new_session=True,
                 )
             except Exception as exc:

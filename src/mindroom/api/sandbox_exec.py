@@ -185,6 +185,7 @@ def runtime_paths_with_execution_env(
     env_file_values = dict(runtime_paths.env_file_values)
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
+        process_env.update(trusted_env_overlay)
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,

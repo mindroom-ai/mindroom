@@ -853,8 +853,9 @@ def _execute_request_subprocess_sync(
         execution_env,
         trusted_env_overlay=overlay,
     )
+    subprocess_request = request.model_copy(update={"execution_env": execution_env})
     envelope = sandbox_protocol.serialize_subprocess_envelope(
-        request=request.model_dump(mode="json"),
+        request=subprocess_request.model_dump(mode="json"),
         runtime_paths=constants.serialize_runtime_paths(effective_runtime_paths),
         committed_config=base64.b64encode(pickle.dumps(config)).decode("ascii"),
     )
