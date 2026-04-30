@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 from typing import TYPE_CHECKING
@@ -45,3 +46,8 @@ def _disable_loaded_vendor_modules() -> None:
 
     if hf_constants_module := sys.modules.get("huggingface_hub.constants"):
         vars(hf_constants_module)["HF_HUB_DISABLE_TELEMETRY"] = True
+
+    if composio_sentry_module := sys.modules.get("composio.utils.sentry"):
+        update_dsn = vars(composio_sentry_module).get("update_dsn")
+        if callable(update_dsn):
+            atexit.unregister(update_dsn)

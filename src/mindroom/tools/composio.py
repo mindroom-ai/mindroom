@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
+from mindroom.vendor_telemetry import disable_vendor_telemetry
 
 if TYPE_CHECKING:
     from composio_agno import ComposioToolSet
@@ -195,4 +196,5 @@ def composio_tools() -> type[ComposioToolSet]:
     """Return Composio tools for accessing 1000+ integrations."""
     from composio_agno import ComposioToolSet
 
+    disable_vendor_telemetry()
     return ComposioToolSet

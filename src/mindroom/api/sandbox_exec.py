@@ -281,6 +281,7 @@ def subprocess_env_for_request(
 
     env = dict(base_env)
     env.update(execution_env)
+    env.update(vendor_telemetry_env_values())
     return env
 
 

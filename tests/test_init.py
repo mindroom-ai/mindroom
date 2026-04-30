@@ -5,11 +5,14 @@ import json
 import os
 import subprocess
 import sys
+import types
 
 import pytest
 
 import mindroom
+from mindroom import vendor_telemetry
 from mindroom.constants import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.tools.composio import composio_tools
 from mindroom.vendor_telemetry import disable_vendor_telemetry
 
 
@@ -31,6 +34,50 @@ def test_disable_vendor_telemetry_updates_supplied_env() -> None:
     disable_vendor_telemetry(env)
 
     assert env == dict(VENDOR_TELEMETRY_ENV_VALUES)
+
+
+def test_disable_vendor_telemetry_unregisters_loaded_composio_atexit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composio's Sentry DSN fetch should be removed when the module is already loaded."""
+    sentry_module = types.ModuleType("composio.utils.sentry")
+
+    def update_dsn() -> None:
+        pass
+
+    sentry_module.update_dsn = update_dsn
+    unregistered: list[object] = []
+    monkeypatch.setitem(sys.modules, "composio.utils.sentry", sentry_module)
+    monkeypatch.setattr(vendor_telemetry.atexit, "unregister", unregistered.append)
+
+    disable_vendor_telemetry()
+
+    assert unregistered == [update_dsn]
+
+
+def test_composio_tools_reapplies_vendor_telemetry_after_lazy_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lazy Composio toolkit imports should still unregister import-time atexit callbacks."""
+
+    class FakeComposioToolSet:
+        pass
+
+    composio_agno_module = types.ModuleType("composio_agno")
+    composio_agno_module.ComposioToolSet = FakeComposioToolSet
+    sentry_module = types.ModuleType("composio.utils.sentry")
+
+    def update_dsn() -> None:
+        pass
+
+    sentry_module.update_dsn = update_dsn
+    unregistered: list[object] = []
+    monkeypatch.setitem(sys.modules, "composio_agno", composio_agno_module)
+    monkeypatch.setitem(sys.modules, "composio.utils.sentry", sentry_module)
+    monkeypatch.setattr(vendor_telemetry.atexit, "unregister", unregistered.append)
+
+    assert composio_tools() is FakeComposioToolSet
+    assert unregistered == [update_dsn]
 
 
 def test_cli_import_disables_vendor_telemetry_before_cli_dependencies() -> None:

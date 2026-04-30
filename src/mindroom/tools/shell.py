@@ -132,7 +132,6 @@ def _shell_subprocess_env(
 ) -> dict[str, str]:
     """Build the env passed to shell subprocesses."""
     env = {key: value for key, value in os.environ.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS}
-    env.update(vendor_telemetry_env_values())
     if base_process_env is not None:
         env.update({key: value for key, value in base_process_env.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS})
     env.update(runtime_env)
@@ -145,6 +144,7 @@ def _shell_subprocess_env(
         env.pop("PATH", None)
     else:
         env["PATH"] = path_value
+    env.update(vendor_telemetry_env_values())
     return env
 
 
