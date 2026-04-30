@@ -488,7 +488,12 @@ def test_provider_exchange_and_refresh_use_oauth_client(
     result = asyncio.run(provider.exchange_code("auth-code", runtime_paths))
     refreshed = asyncio.run(
         provider.refresh_token_data(
-            result.token_data,
+            {
+                **result.token_data,
+                "_id_token": "old-raw-id-token",
+                "id_token": "old-standard-id-token",
+                "client_secret": "old-client-secret",
+            },
             runtime_paths,
         ),
     )
@@ -512,6 +517,9 @@ def test_provider_exchange_and_refresh_use_oauth_client(
     assert refreshed["_oauth_provider"] == provider.id
     assert refreshed["refresh_token"] == "refresh-token"
     assert refreshed["expires_at"] == 2234.0
+    assert "_id_token" not in refreshed
+    assert "id_token" not in refreshed
+    assert "client_secret" not in refreshed
 
 
 def test_custom_token_exchanger_metadata_is_stamped_by_core(tmp_path: Path) -> None:
@@ -761,6 +769,9 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
+            "_id_token": "old-raw-id-token",
+            "id_token": "old-standard-id-token",
+            "client_secret": "old-client-secret",
             "_source": "oauth",
             "_oauth_provider": provider.id,
         },
@@ -781,6 +792,9 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
     assert stored_credentials is not None
     assert stored_credentials["token"] == "test_drive-access-token"
     assert stored_credentials["refresh_token"] == "old-refresh-token"
+    assert "_id_token" not in stored_credentials
+    assert "id_token" not in stored_credentials
+    assert "client_secret" not in stored_credentials
 
 
 def test_callback_replaces_old_refresh_token_when_provider_returns_new_one(tmp_path: Path) -> None:

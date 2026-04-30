@@ -264,6 +264,17 @@ def _claim_str(credentials: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _token_data_preserving_refresh_token(
+    existing_credentials: dict[str, Any] | None,
+    safe_token_data: dict[str, Any],
+) -> dict[str, Any]:
+    token_data = dict(safe_token_data)
+    existing_refresh_token = (existing_credentials or {}).get("refresh_token")
+    if "refresh_token" not in token_data and isinstance(existing_refresh_token, str) and existing_refresh_token:
+        token_data["refresh_token"] = existing_refresh_token
+    return token_data
+
+
 def _script_json(value: object) -> str:
     return json.dumps(value).replace("</", "<\\/")
 
@@ -382,7 +393,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
             credentials_manager=credentials_manager,
             worker_target=worker_target,
         )
-        token_data = {**(existing_credentials or {}), **safe_result.token_data}
+        token_data = _token_data_preserving_refresh_token(existing_credentials, safe_result.token_data)
         save_scoped_credentials(
             provider.credential_service,
             token_data,

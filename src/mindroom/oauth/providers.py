@@ -403,13 +403,17 @@ class OAuthProvider:
                 return None
         if not isinstance(response_data, Mapping):
             return None
-        merged_response = {**dict(token_data), **response_data}
+        merged_response = dict(response_data)
+        existing_claims = token_data.get("_oauth_claims")
+        if "refresh_token" not in merged_response:
+            merged_response["refresh_token"] = refresh_token
+        if "_oauth_claims" not in merged_response and isinstance(existing_claims, Mapping):
+            merged_response["_oauth_claims"] = dict(existing_claims)
         parsed = _token_result_with_core_metadata(
             self,
             (self.token_parser or _default_token_parser)(self, merged_response, client_config, runtime_paths),
         )
-        refreshed = dict(token_data)
-        refreshed.update(parsed.token_data)
+        refreshed = dict(parsed.token_data)
         if "refresh_token" not in parsed.token_data:
             refreshed["refresh_token"] = refresh_token
         return refreshed
