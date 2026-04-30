@@ -87,7 +87,6 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 - Connect Gmail through the `google_gmail` OAuth provider rather than storing a Gmail-specific API key.
 - The Gmail provider requests Gmail read, modify, and compose scopes.
 - `gmail` can use scoped OAuth credentials for isolated worker scopes.
-- The current registry exposes the eight boolean fields above, but the installed `agno.tools.gmail.GmailTools` constructor does not consume those selector kwargs directly on this branch, so `- gmail` plus the `google_gmail` OAuth provider is the verified setup path.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
 
 ## [`slack`]
