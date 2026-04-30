@@ -5,6 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2 import id_token as google_id_token
+
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
     OAuthClientConfig,
@@ -12,12 +15,10 @@ from mindroom.oauth.providers import (
     OAuthTokenResult,
     oauth_expires_at_from_response,
 )
-from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-_GOOGLE_ID_TOKEN_DEPS = ["google-auth"]
 GOOGLE_IDENTITY_SCOPES = (
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -29,7 +30,7 @@ def _google_token_parser(
     provider: OAuthProvider,
     token_response: Mapping[str, Any],
     client_config: OAuthClientConfig,
-    runtime_paths: RuntimePaths,
+    _runtime_paths: RuntimePaths,
 ) -> OAuthTokenResult:
     access_token = token_response.get("access_token")
     refresh_token = token_response.get("refresh_token")
@@ -45,10 +46,6 @@ def _google_token_parser(
         msg = "Google did not return a verifiable identity token"
         raise OAuthClaimValidationError(msg)
     else:
-        ensure_tool_deps(_GOOGLE_ID_TOKEN_DEPS, provider.id, runtime_paths)
-        from google.auth.transport.requests import Request as GoogleRequest  # noqa: PLC0415
-        from google.oauth2 import id_token as google_id_token  # noqa: PLC0415
-
         claims = google_id_token.verify_oauth2_token(
             id_token,
             GoogleRequest(),
