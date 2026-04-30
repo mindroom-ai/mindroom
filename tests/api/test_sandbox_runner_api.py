@@ -3758,12 +3758,12 @@ def test_workspace_env_hook_overlays_worker_routed_python_default_mode(
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
-def test_workspace_env_hook_overlays_worker_routed_coding_default_mode(
+def test_workspace_env_hook_skips_worker_routed_coding_default_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker-keyed coding sees hook PATH changes in the default inprocess runner mode."""
+    """Worker-keyed coding should not source the workspace env hook."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     workspace = storage_root / "agents" / "general" / "workspace"
@@ -3794,16 +3794,16 @@ def test_workspace_env_hook_overlays_worker_routed_coding_default_mode(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    assert payload["result"] == "Error running grep: hook-rg"
+    assert payload["result"] == "note.txt:1:needle"
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
-def test_workspace_env_hook_failure_blocks_worker_routed_file_default_mode(
+def test_workspace_env_hook_failure_does_not_block_worker_routed_file_default_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker-keyed file requests source the hook before running."""
+    """Worker-keyed file requests should not source the workspace env hook."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     workspace = storage_root / "agents" / "general" / "workspace"
@@ -3828,10 +3828,9 @@ def test_workspace_env_hook_failure_blocks_worker_routed_file_default_mode(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["ok"] is False, payload
-    assert payload["failure_kind"] == "tool"
-    assert "exited with code 6" in payload["error"]
-    assert not (workspace / "note.txt").exists()
+    assert payload["ok"] is True, payload
+    assert payload["result"] == "note.txt"
+    assert (workspace / "note.txt").read_text(encoding="utf-8") == "should not be written"
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
