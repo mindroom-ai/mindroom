@@ -222,7 +222,10 @@ matrix_api(
 
 `attachments` exposes `list_attachments()`, `get_attachment()`, and `register_attachment()`.
 `list_attachments()` returns the attachment IDs currently available in tool runtime context, the resolved metadata payloads, and any `missing_attachment_ids`.
-`get_attachment()` returns a single attachment record, including the local file path that other tools can use.
+`get_attachment()` returns a single attachment record, including the runtime-local path, when called with only an attachment ID.
+`get_attachment(attachment_id, mindroom_output_path="relative/path")` saves the attachment bytes into the agent workspace and returns a `mindroom_tool_output` save receipt with the saved path, byte count, binary format, and SHA256 digest.
+Use `mindroom_output_path` before handing attachments to worker-routed workspace tools such as `file`, `coding`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
+The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, or use environment or user expansion.
 `register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
 This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`, `reply`, or `thread-reply`.
@@ -243,6 +246,7 @@ agents:
 ```python
 list_attachments()
 get_attachment("att_abc123")
+get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
 register_attachment("/tmp/plan.pdf")
 matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=["att_abc123"])
 ```

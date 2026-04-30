@@ -66,11 +66,13 @@ agents:
 
 ### Operations
 
-| Operation                        | Description                                                                                                                                    |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list_attachments(target?)`      | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, created_at) |
-| `get_attachment(attachment_id)`  | Return one context attachment record, including its local file path                                                                            |
-| `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`)                                                                                |
+| Operation                                              | Description                                                                                                                                    |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_attachments(target?)`                            | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, created_at) |
+| `get_attachment(attachment_id, mindroom_output_path?)` | Return one context attachment record, or save its bytes to a workspace-relative path and return a save receipt                                 |
+| `register_attachment(file_path)`                       | Register a local file path as a context attachment ID (`att_*`)                                                                                |
+
+When `mindroom_output_path` is omitted, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`. For worker-routed agents, prefer `get_attachment("att_...", mindroom_output_path="incoming/file.ext")` before processing an attachment with `file`, `coding`, or `shell`, because the runtime-local path may not exist inside the worker workspace. `mindroom_output_path` must be a file path relative to the agent workspace. It must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, or use environment or user expansion. When the save succeeds, the response includes `mindroom_tool_output` with `status: "saved_to_file"`, `path`, byte count, `format: "binary"`, and `sha256`.
 
 `attachment_ids` accepts only context attachment IDs (`att_*`). `attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending. Use `matrix_message(action="send"|"reply"|"thread-reply", attachment_ids=..., attachment_file_paths=...)` to send attachments.
 
