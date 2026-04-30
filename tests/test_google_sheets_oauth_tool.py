@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -60,6 +61,20 @@ def test_google_sheets_missing_credentials_raises_structured_connect_instruction
     assert exc_info.value.connect_url is not None
     assert "/api/oauth/google_sheets/authorize?connect_token=" in exc_info.value.connect_url
     assert "@alice:example.org" not in str(exc_info.value)
+
+
+def test_google_sheets_public_method_returns_structured_connect_instruction(tmp_path: Path) -> None:
+    tool = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=_worker_target(),
+    )
+
+    result = json.loads(tool.read_sheet(spreadsheet_id="sheet-id", spreadsheet_range="A1:B2"))
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "google_sheets"
+    assert "/api/oauth/google_sheets/authorize?connect_token=" in result["connect_url"]
 
 
 def test_google_sheets_loads_tokens_from_oauth_service(tmp_path: Path) -> None:

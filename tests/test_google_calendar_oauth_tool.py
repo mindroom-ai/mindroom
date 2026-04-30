@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -60,6 +61,20 @@ def test_google_calendar_missing_credentials_raises_structured_connect_instructi
     assert exc_info.value.connect_url is not None
     assert "/api/oauth/google_calendar/authorize?connect_token=" in exc_info.value.connect_url
     assert "@alice:example.org" not in str(exc_info.value)
+
+
+def test_google_calendar_public_method_returns_structured_connect_instruction(tmp_path: Path) -> None:
+    tool = GoogleCalendarTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=_worker_target(),
+    )
+
+    result = json.loads(tool.list_calendars())
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "google_calendar"
+    assert "/api/oauth/google_calendar/authorize?connect_token=" in result["connect_url"]
 
 
 def test_google_calendar_loads_tokens_from_oauth_service(tmp_path: Path) -> None:

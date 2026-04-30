@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
@@ -95,6 +96,25 @@ class ScopedOAuthClientMixin:
 
     def _raise_connection_required(self) -> NoReturn:
         raise self._connection_required()
+
+    def _structured_auth_failure(self, exc: OAuthConnectionRequired) -> str:
+        return json.dumps(
+            {
+                "error": str(exc),
+                "oauth_connection_required": True,
+                "provider": exc.provider_id,
+                "connect_url": exc.connect_url,
+            },
+        )
+
+    def _ensure_structured_auth(self) -> str | None:
+        if self.creds and self.creds.valid:
+            return None
+        try:
+            self._auth()
+        except OAuthConnectionRequired as exc:
+            return self._structured_auth_failure(exc)
+        return None
 
     def _token_expiry(self, token_data: dict[str, Any]) -> datetime | None:
         expires_at = token_data.get("expires_at")

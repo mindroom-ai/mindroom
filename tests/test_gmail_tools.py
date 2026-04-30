@@ -1,5 +1,6 @@
 """Tests for the custom Gmail tools wrapper."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -127,6 +128,19 @@ class TestGmailTools:
             gmail_tools.service_account_path = None
 
         assert gmail_tools._should_fallback_to_original_auth() is True
+
+    def test_public_method_returns_structured_connect_instruction(self, runtime_paths: RuntimePaths) -> None:
+        """Test decorated public methods preserve structured OAuth connection details."""
+        gmail_tools = GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=CredentialsManager(runtime_paths.storage_root / "credentials"),
+        )
+
+        result = json.loads(gmail_tools.get_latest_emails(1))
+
+        assert result["oauth_connection_required"] is True
+        assert result["provider"] == "google_gmail"
+        assert "/api/oauth/google_gmail/authorize" in result["connect_url"]
 
     @patch("mindroom.custom_tools.gmail.logger")
     @patch("google.oauth2.credentials.Credentials")
