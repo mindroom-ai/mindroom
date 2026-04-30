@@ -619,6 +619,23 @@ def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp
     assert result.claims_verified is True
 
 
+def test_default_redirect_uri_uses_public_mindroom_origin(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
+            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
+            "MINDROOM_PUBLIC_URL": "https://prod.example",
+        },
+    )
+    provider = google_drive_oauth_provider()
+
+    client_config = provider.client_config(runtime_paths)
+
+    assert client_config is not None
+    assert client_config.redirect_uri == "https://prod.example/api/oauth/google_drive/callback"
+
+
 def test_authorize_redirects_unauthenticated_browser_to_login(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     api_app = _make_test_app(runtime_paths, _config_payload())

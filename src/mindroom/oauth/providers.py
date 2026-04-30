@@ -319,6 +319,11 @@ class OAuthProvider:
 
     def default_redirect_uri(self, runtime_paths: RuntimePaths) -> str:
         """Return the local default redirect URI for this provider."""
+        configured_origin = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or runtime_paths.env_value(
+            "MINDROOM_BASE_URL",
+        )
+        if configured_origin:
+            return f"{configured_origin.rstrip('/')}{self.redirect_path}"
         return f"http://localhost:{_runtime_port(runtime_paths)}{self.redirect_path}"
 
     def authorization_uri(self, runtime_paths: RuntimePaths, *, state: str) -> str:
