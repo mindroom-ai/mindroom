@@ -129,3 +129,20 @@ def test_isolated_runtime_keeps_google_oauth_client_secret(
         extra_env_passthrough="*",
         process_env=isolated_runtime_paths.process_env,
     )
+
+
+def test_isolated_runtime_keeps_google_oauth_redirect_uri(tmp_path: Path) -> None:
+    runtime_paths = constants.resolve_runtime_paths(
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
+            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
+            "GOOGLE_DRIVE_REDIRECT_URI": "https://mindroom.example/api/oauth/google_drive/callback",
+        },
+    )
+
+    isolated_runtime_paths = constants.isolated_runtime_paths(runtime_paths)
+
+    assert isolated_runtime_paths.env_value("GOOGLE_DRIVE_REDIRECT_URI") == (
+        "https://mindroom.example/api/oauth/google_drive/callback"
+    )

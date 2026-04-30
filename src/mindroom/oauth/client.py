@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from functools import wraps
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
-from google.auth.transport.requests import Request
+from google.auth.transport import requests as google_requests
 from google.oauth2 import credentials as google_credentials
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
@@ -233,7 +233,7 @@ class ScopedOAuthClientMixin:
             if self.creds is None:
                 self._raise_connection_required()
             if self.creds.expired and self.creds.refresh_token:
-                self.creds.refresh(Request())
+                self.creds.refresh(google_requests.Request())
                 refreshed = dict(token_data)
                 refreshed["token"] = self.creds.token
                 refreshed_expires_at = self._expires_at_from_credentials(self.creds)
