@@ -55,6 +55,48 @@ describe("Generic OAuth integration provider", () => {
     expect(authWindow.close).toHaveBeenCalled();
   });
 
+  it("accepts OAuth completion from the backend origin returned by connect", async () => {
+    const authWindowState = { closed: false };
+    const authWindow = {
+      get closed() {
+        return authWindowState.closed;
+      },
+      close: vi.fn(() => {
+        authWindowState.closed = true;
+      }),
+    } as unknown as Window;
+    (global.window.open as any).mockReturnValue(authWindow);
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        auth_url: "https://accounts.example.test/auth",
+        completion_origin: "https://backend.example.test",
+      }),
+    });
+
+    const config = integrationProviders.google_drive.getConfig();
+    const connectPromise = config.onAction!(config.integration);
+
+    await vi.waitFor(() => {
+      expect(global.window.open).toHaveBeenCalled();
+    });
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "mindroom:oauth-complete",
+          provider: "google_drive",
+          status: "connected",
+        },
+        source: authWindow,
+        origin: "https://backend.example.test",
+      }),
+    );
+
+    await connectPromise;
+
+    expect(authWindow.close).toHaveBeenCalled();
+  });
+
   it("ignores OAuth completion messages from other origins", async () => {
     vi.useFakeTimers();
     const authWindowState = { closed: false };

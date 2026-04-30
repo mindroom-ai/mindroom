@@ -33,9 +33,10 @@ function isOAuthCompleteMessage(
   event: MessageEvent,
   authWindow: Window,
   providerId: string,
+  expectedOrigin: string,
 ): boolean {
   if (
-    event.origin !== window.location.origin ||
+    event.origin !== expectedOrigin ||
     event.source !== authWindow ||
     event.data === null ||
     typeof event.data !== "object"
@@ -48,6 +49,16 @@ function isOAuthCompleteMessage(
     data.provider === providerId &&
     data.status === "connected"
   );
+}
+
+function oauthCompletionOrigin(rawOrigin: unknown): string {
+  if (typeof rawOrigin === "string" && rawOrigin.length > 0) {
+    return new URL(rawOrigin).origin;
+  }
+  if (API_BASE_URL && /^https?:\/\//.test(API_BASE_URL)) {
+    return new URL(API_BASE_URL).origin;
+  }
+  return window.location.origin;
 }
 
 export class GenericOAuthIntegrationProvider implements IntegrationProvider {
@@ -110,7 +121,10 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     if (typeof data.auth_url !== "string" || data.auth_url.length === 0) {
       throw new Error(`Failed to connect ${this.integration.name}`);
     }
-    await this.openAuthWindow(data.auth_url);
+    await this.openAuthWindow(
+      data.auth_url,
+      oauthCompletionOrigin(data.completion_origin),
+    );
   }
 
   private async disconnect(
@@ -180,7 +194,10 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     }
   }
 
-  private openAuthWindow(authUrl: string): Promise<void> {
+  private openAuthWindow(
+    authUrl: string,
+    expectedCompletionOrigin: string,
+  ): Promise<void> {
     const authWindow = window.open(authUrl, "_blank", "width=500,height=700");
     if (!authWindow) {
       throw new Error("OAuth popup was blocked");
@@ -203,7 +220,14 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         resolve();
       };
       const handleMessage = (event: MessageEvent) => {
-        if (!isOAuthCompleteMessage(event, authWindow, this.providerId)) {
+        if (
+          !isOAuthCompleteMessage(
+            event,
+            authWindow,
+            this.providerId,
+            expectedCompletionOrigin,
+          )
+        ) {
           return;
         }
         receivedCompletion = true;

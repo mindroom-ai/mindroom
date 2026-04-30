@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from html import escape
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -52,6 +53,7 @@ class OAuthConnectResponse(BaseModel):
 
     provider: str
     auth_url: str
+    completion_origin: str
 
 
 class OAuthStatusResponse(BaseModel):
@@ -129,7 +131,11 @@ def _issue_authorization_url(
             consume_oauth_connect_token(provider, runtime_paths, connect_token, expected_target=connect_target)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return OAuthConnectResponse(provider=provider.id, auth_url=auth_url)
+        return OAuthConnectResponse(
+            provider=provider.id,
+            auth_url=auth_url,
+            completion_origin=_oauth_success_origin(provider, runtime_paths),
+        )
 
     target = resolve_request_credentials_target(
         request,
@@ -147,7 +153,11 @@ def _issue_authorization_url(
         auth_url = provider.authorization_uri(target.runtime_paths, state=state)
     except OAuthProviderError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return OAuthConnectResponse(provider=provider.id, auth_url=auth_url)
+    return OAuthConnectResponse(
+        provider=provider.id,
+        auth_url=auth_url,
+        completion_origin=_oauth_success_origin(provider, runtime_paths),
+    )
 
 
 def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsTarget) -> dict[str, str]:
@@ -261,6 +271,12 @@ def _script_json(value: object) -> str:
     return json.dumps(value).replace("</", "<\\/")
 
 
+def _oauth_success_origin(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str:
+    success_url = oauth_success_redirect_url(provider, runtime_paths)
+    parsed = urlparse(success_url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 @router.post("/{provider_id}/connect")
 async def connect(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthConnectResponse:
     """Start a provider OAuth flow and return the external authorization URL."""
@@ -313,7 +329,7 @@ async def success(provider_id: str, request: Request) -> HTMLResponse:
     <script>
       const message = {_script_json(message)};
       if (window.opener && !window.opener.closed) {{
-        window.opener.postMessage(message, window.location.origin);
+        window.opener.postMessage(message, "*");
       }}
       window.close();
     </script>

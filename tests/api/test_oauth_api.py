@@ -448,9 +448,11 @@ def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -
             response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
 
     assert response.status_code == 200
-    auth_url = response.json()["auth_url"]
+    response_data = response.json()
+    auth_url = response_data["auth_url"]
     parsed = urlparse(auth_url)
     params = parse_qs(parsed.query)
+    assert response_data["completion_origin"] == "http://localhost:8765"
     assert parsed.scheme == "https"
     assert params["client_id"] == ["client-id"]
     assert params["scope"] == ["scope.read"]
@@ -742,7 +744,7 @@ def test_success_page_signals_oauth_completion_to_popup_opener(tmp_path: Path) -
     assert f'"provider": "{provider.id}"' in response.text
     assert '"status": "connected"' in response.text
     assert "window.opener.postMessage" in response.text
-    assert "window.location.origin" in response.text
+    assert 'postMessage(message, "*")' in response.text
     assert "window.close()" in response.text
 
 
