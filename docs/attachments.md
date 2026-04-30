@@ -85,6 +85,7 @@ For worker-routed agents, prefer `get_attachment("att_...", mindroom_output_path
 `mindroom_output_path` must be a file path relative to the agent workspace.
 It must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, or use environment or user expansion.
 When the save succeeds, the response includes `mindroom_tool_output` with `status: "saved_to_file"`, `path`, byte count, `format: "binary"`, and `sha256`.
+In worker-routed shell and python tools, that workspace is also exposed as `~`, `$HOME`, and `$MINDROOM_AGENT_WORKSPACE`, so `incoming/file.ext` and `~/incoming/file.ext` refer to the same saved file.
 
 `attachment_ids` accepts only context attachment IDs (`att_*`).
 `attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending.

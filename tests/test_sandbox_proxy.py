@@ -1439,6 +1439,25 @@ def test_subprocess_env_for_request_forces_vendor_telemetry_over_execution_env()
         assert env[name] == value
 
 
+def test_shell_subprocess_env_preserves_workspace_home_contract_names() -> None:
+    """Workspace-home env names should survive into the shell command process."""
+    env = shell_tool_module._shell_subprocess_env(
+        {"MINDROOM_AGENT_WORKSPACE": "/workspace"},
+        base_process_env={
+            "HOME": "/workspace",
+            "XDG_CONFIG_HOME": "/workspace/.config",
+            "XDG_DATA_HOME": "/workspace/.local/share",
+            "XDG_STATE_HOME": "/workspace/.local/state",
+        },
+    )
+
+    assert env["HOME"] == "/workspace"
+    assert env["MINDROOM_AGENT_WORKSPACE"] == "/workspace"
+    assert env["XDG_CONFIG_HOME"] == "/workspace/.config"
+    assert env["XDG_DATA_HOME"] == "/workspace/.local/share"
+    assert env["XDG_STATE_HOME"] == "/workspace/.local/state"
+
+
 def test_execution_env_payload_denies_provider_env_by_default_in_isolated_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

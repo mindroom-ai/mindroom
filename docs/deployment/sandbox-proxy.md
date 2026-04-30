@@ -266,11 +266,21 @@ Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to st
 These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts.
 To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE=subprocess`.
 
+## Workspace home contract
+
+For agent-routed worker requests with a resolved workspace, MindRoom sets `HOME` and `MINDROOM_AGENT_WORKSPACE` to that workspace before running shell or python tools.
+It also sets `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` under that workspace.
+Worker cache variables such as `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, and `PYTHONPYCACHEPREFIX` stay under the worker cache directory when a worker root exists.
+`VIRTUAL_ENV` is preserved from the active worker environment and is not pointed at the agent workspace.
+MindRoom reasserts these worker-owned cache and venv variables after request env passthrough and after `.mindroom/worker-env.sh`, so hooks can read them but cannot redirect them.
+The practical contract is that `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and file/coding relative paths all refer to the same workspace.
+For example, after `get_attachment("att_...", mindroom_output_path="incoming/file.txt")`, worker-routed shell can read both `incoming/file.txt` and `~/incoming/file.txt`.
+
 ## Workspace env hook (`.mindroom/worker-env.sh`)
 
 Agents can drop a shell script at `<workspace>/.mindroom/worker-env.sh` to set custom env for worker-routed tool calls without changing config or redeploying.
 
-The runner sources this script with `bash` before each worker-routed `shell` or `python` request, then merges its exported env into the tool's execution environment.
+The runner sources this script with `bash` after applying the workspace home contract and before each worker-routed `shell` or `python` request, then merges its exported env into the tool's execution environment.
 
 **Discovery:**
 

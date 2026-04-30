@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -10,7 +12,7 @@ import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
@@ -51,8 +53,12 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
 )
 from mindroom.workers.backends import local as local_workers_module
+<<<<<<< HEAD
 from mindroom.workers.backends.kubernetes_resources import worker_auth_token
 from mindroom.workers.models import WorkerSpec
+=======
+from mindroom.workers.models import WorkerHandle, WorkerSpec
+>>>>>>> 65716d8b (Fix worker workspace home contract)
 from tests.conftest import requires_linux
 
 if TYPE_CHECKING:
@@ -3470,6 +3476,468 @@ def _write_workspace_env_hook(workspace: Path, body: str) -> Path:
     return hook_path
 
 
+def _write_general_agent_config(config_path: Path) -> None:
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.4\n"
+            "agents:\n"
+            "  general:\n"
+            "    display_name: General\n"
+            "    memory_backend: file\n"
+            "router:\n"
+            "  model: default\n"
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_workspace_home_contract_runs_before_workspace_env_hook(tmp_path: Path) -> None:
+    """The platform HOME default should be visible to the hook, and the hook may override it."""
+    config_path = tmp_path / "config.yaml"
+    _write_general_agent_config(config_path)
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    workspace = agent_workspace_root_path(storage_root, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(
+        workspace,
+        (
+            'export HOOK_SAW_HOME="$HOME"\n'
+            'export HOOK_SAW_AGENT_WORKSPACE="$MINDROOM_AGENT_WORKSPACE"\n'
+            'export HOME="$PWD/hook-home"\n'
+        ),
+    )
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        routing_agent_name="general",
+        execution_env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+    )
+    execution_env = dict(request.execution_env)
+
+    sandbox_runner_module._apply_workspace_home_contract(
+        request,
+        prepared=None,
+        execution_env=execution_env,
+        runtime_paths=runtime_paths,
+        config=config,
+    )
+    overlay, failure = sandbox_runner_module._workspace_env_overlay_for_request(
+        request,
+        prepared=None,
+        execution_env=execution_env,
+        runtime_paths=runtime_paths,
+        config=config,
+        apply=True,
+    )
+
+    assert failure is None
+    assert execution_env["HOME"] == str(workspace.resolve())
+    assert execution_env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
+    assert overlay["HOOK_SAW_HOME"] == str(workspace.resolve())
+    assert overlay["HOOK_SAW_AGENT_WORKSPACE"] == str(workspace.resolve())
+    assert overlay["HOME"] == str(workspace.resolve() / "hook-home")
+
+
+def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_names(tmp_path: Path) -> None:
+    """Request env passthrough must not override workspace HOME or worker-owned runtime paths."""
+    config_path = tmp_path / "config.yaml"
+    _write_general_agent_config(config_path)
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    workspace = storage_root / "agents" / "general" / "workspace"
+    worker_key = "v1:tenant-123:shared:general"
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    prepared = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker-1",
+            worker_key=worker_key,
+            endpoint="/api/sandbox-runner/execute",
+            auth_token=SANDBOX_TOKEN,
+            status="ready",
+            backend_name="local",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=worker_paths,
+        runtime_overrides={"base_dir": workspace},
+    )
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_key=worker_key,
+        tool_init_overrides={"base_dir": str(workspace)},
+        execution_env={
+            "HOME": "/request-home",
+            "MINDROOM_AGENT_WORKSPACE": "/request-workspace",
+            "XDG_CONFIG_HOME": "/request-config",
+            "XDG_DATA_HOME": "/request-data",
+            "XDG_STATE_HOME": "/request-state",
+            "XDG_CACHE_HOME": "/request-cache",
+            "PIP_CACHE_DIR": "/request-pip-cache",
+            "UV_CACHE_DIR": "/request-uv-cache",
+            "PYTHONPYCACHEPREFIX": "/request-pycache",
+            "VIRTUAL_ENV": "/request-venv",
+        },
+    )
+    execution_env = dict(request.execution_env)
+
+    sandbox_runner_module._apply_workspace_home_contract(
+        request,
+        prepared=prepared,
+        execution_env=execution_env,
+        runtime_paths=runtime_paths,
+        config=config,
+    )
+
+    assert execution_env["HOME"] == str(workspace.resolve())
+    assert execution_env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
+    assert execution_env["XDG_CONFIG_HOME"] == str(workspace.resolve() / ".config")
+    assert execution_env["XDG_DATA_HOME"] == str(workspace.resolve() / ".local" / "share")
+    assert execution_env["XDG_STATE_HOME"] == str(workspace.resolve() / ".local" / "state")
+    assert execution_env["XDG_CACHE_HOME"] == str(worker_paths.cache_dir)
+    assert execution_env["PIP_CACHE_DIR"] == str(worker_paths.cache_dir / "pip")
+    assert execution_env["UV_CACHE_DIR"] == str(worker_paths.cache_dir / "uv")
+    assert execution_env["PYTHONPYCACHEPREFIX"] == str(worker_paths.cache_dir / "pycache")
+    assert execution_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
+
+
+def test_workspace_home_contract_protects_worker_owned_names_after_hook_overlay(tmp_path: Path) -> None:
+    """Hooks can override workspace-facing env, but not worker-owned cache or venv locations."""
+    config_path = tmp_path / "config.yaml"
+    _write_general_agent_config(config_path)
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    workspace = storage_root / "agents" / "general" / "workspace"
+    worker_key = "v1:tenant-123:shared:general"
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    prepared = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker-1",
+            worker_key=worker_key,
+            endpoint="/api/sandbox-runner/execute",
+            auth_token=SANDBOX_TOKEN,
+            status="ready",
+            backend_name="local",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=worker_paths,
+        runtime_overrides={"base_dir": workspace},
+    )
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_key=worker_key,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+    execution_env: dict[str, str] = {}
+
+    sandbox_runner_module._apply_workspace_home_contract(
+        request,
+        prepared=prepared,
+        execution_env=execution_env,
+        runtime_paths=runtime_paths,
+        config=config,
+    )
+    overlay = {
+        "HOME": "/hook-home",
+        "WORKSPACE_TOOLCHAIN_PATH": "/hook/bin",
+        "XDG_CACHE_HOME": "/hook-cache",
+        "PIP_CACHE_DIR": "/hook-pip-cache",
+        "UV_CACHE_DIR": "/hook-uv-cache",
+        "PYTHONPYCACHEPREFIX": "/hook-pycache",
+        "VIRTUAL_ENV": "/hook-venv",
+    }
+    execution_env.update(overlay)
+    execution_env.update(sandbox_runner_module._worker_owned_env(prepared))
+    trusted_overlay = sandbox_runner_module._trusted_workspace_overlay_for_runtime_paths(overlay, prepared)
+    effective_runtime_paths = sandbox_exec_module.runtime_paths_with_execution_env(
+        runtime_paths,
+        execution_env,
+        trusted_env_overlay=trusted_overlay,
+    )
+
+    assert execution_env["HOME"] == "/hook-home"
+    assert execution_env["WORKSPACE_TOOLCHAIN_PATH"] == "/hook/bin"
+    assert execution_env["XDG_CACHE_HOME"] == str(worker_paths.cache_dir)
+    assert execution_env["PIP_CACHE_DIR"] == str(worker_paths.cache_dir / "pip")
+    assert execution_env["UV_CACHE_DIR"] == str(worker_paths.cache_dir / "uv")
+    assert execution_env["PYTHONPYCACHEPREFIX"] == str(worker_paths.cache_dir / "pycache")
+    assert execution_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
+    assert trusted_overlay == {"HOME": "/hook-home", "WORKSPACE_TOOLCHAIN_PATH": "/hook/bin"}
+    assert effective_runtime_paths.process_env["XDG_CACHE_HOME"] == str(worker_paths.cache_dir)
+    assert effective_runtime_paths.process_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
+
+
+@pytest.mark.asyncio
+async def test_subprocess_child_preserves_parent_sourced_workspace_home_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The subprocess child should not re-clobber workspace-facing hook env from its parent."""
+    config_path = tmp_path / "config.yaml"
+    _write_general_agent_config(config_path)
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    workspace = storage_root / "agents" / "general" / "workspace"
+    worker_key = "v1:tenant-123:shared:general"
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    prepared = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker-1",
+            worker_key=worker_key,
+            endpoint="/api/sandbox-runner/execute",
+            auth_token=SANDBOX_TOKEN,
+            status="ready",
+            backend_name="local",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=worker_paths,
+        runtime_overrides={"base_dir": workspace},
+    )
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="python",
+        function_name="run_python_code",
+        worker_key=worker_key,
+        tool_init_overrides={"base_dir": str(workspace)},
+        execution_env={
+            "HOME": "/hook-home",
+            "MINDROOM_AGENT_WORKSPACE": "/hook-agent-workspace",
+            "XDG_CONFIG_HOME": "/hook-config",
+            "XDG_DATA_HOME": "/hook-data",
+            "XDG_STATE_HOME": "/hook-state",
+            "XDG_CACHE_HOME": "/hook-cache",
+            "PIP_CACHE_DIR": "/hook-pip-cache",
+            "UV_CACHE_DIR": "/hook-uv-cache",
+            "PYTHONPYCACHEPREFIX": "/hook-pycache",
+            "VIRTUAL_ENV": "/hook-venv",
+        },
+    )
+
+    def fake_resolve_entrypoint(**kwargs: object) -> tuple[SimpleNamespace, object]:
+        effective_runtime_paths = cast("RuntimePaths", kwargs["runtime_paths"])
+
+        def entrypoint() -> dict[str, str | None]:
+            return {
+                name: effective_runtime_paths.process_env.get(name)
+                for name in (
+                    "HOME",
+                    "MINDROOM_AGENT_WORKSPACE",
+                    "XDG_CONFIG_HOME",
+                    "XDG_DATA_HOME",
+                    "XDG_STATE_HOME",
+                    "XDG_CACHE_HOME",
+                    "PIP_CACHE_DIR",
+                    "UV_CACHE_DIR",
+                    "PYTHONPYCACHEPREFIX",
+                    "VIRTUAL_ENV",
+                )
+            }
+
+        return SimpleNamespace(requires_connect=False), entrypoint
+
+    monkeypatch.setattr(sandbox_runner_module, "_resolve_entrypoint", fake_resolve_entrypoint)
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        request,
+        runtime_paths,
+        config,
+        prepared_worker=prepared,
+        runner_token=SANDBOX_TOKEN,
+        apply_workspace_home_contract=False,
+        apply_workspace_env_hook=False,
+    )
+
+    assert response.ok is True
+    assert response.result == {
+        "HOME": "/hook-home",
+        "MINDROOM_AGENT_WORKSPACE": "/hook-agent-workspace",
+        "XDG_CONFIG_HOME": "/hook-config",
+        "XDG_DATA_HOME": "/hook-data",
+        "XDG_STATE_HOME": "/hook-state",
+        "XDG_CACHE_HOME": str(worker_paths.cache_dir),
+        "PIP_CACHE_DIR": str(worker_paths.cache_dir / "pip"),
+        "UV_CACHE_DIR": str(worker_paths.cache_dir / "uv"),
+        "PYTHONPYCACHEPREFIX": str(worker_paths.cache_dir / "pycache"),
+        "VIRTUAL_ENV": str(worker_paths.venv_dir),
+    }
+
+
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+def test_worker_routed_shell_uses_agent_workspace_as_home(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Agent workspace should be pwd, HOME, and the stable workspace env for shell."""
+    _set_sandbox_token(monkeypatch)
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+    _write_general_agent_config(config_path)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    worker_key = "v1:tenant-123:shared:general"
+    worker_root = storage_root / "workers" / worker_dir_name(worker_key)
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [
+                    [
+                        "bash",
+                        "-c",
+                        (
+                            'printf "%s|%s|%s|%s|%s|%s" '
+                            '"$PWD" "$HOME" "$MINDROOM_AGENT_WORKSPACE" '
+                            '"$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$VIRTUAL_ENV"'
+                        ),
+                    ],
+                ],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "routing_agent_name": "general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    pwd, home, agent_workspace, xdg_config, xdg_cache, virtual_env = payload["result"].split("|", 5)
+    assert pwd == str(workspace.resolve())
+    assert home == str(workspace.resolve())
+    assert agent_workspace == str(workspace.resolve())
+    assert xdg_config == str(workspace.resolve() / ".config")
+    assert xdg_cache == str(worker_root / "cache")
+    assert virtual_env == str(worker_root / "venv")
+
+
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+def test_worker_routed_python_path_home_is_agent_workspace(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Python should see Path.home() as the resolved agent workspace."""
+    _set_sandbox_token(monkeypatch)
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+    _write_general_agent_config(config_path)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    worker_key = "v1:tenant-123:shared:general"
+    worker_root = storage_root / "workers" / worker_dir_name(worker_key)
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "python",
+                "function_name": "run_python_code",
+                "args": [
+                    (
+                        "import os\n"
+                        "from pathlib import Path\n"
+                        "result = '|'.join([\n"
+                        "    str(Path.home()),\n"
+                        "    os.environ.get('MINDROOM_AGENT_WORKSPACE', ''),\n"
+                        "    os.environ.get('XDG_CACHE_HOME', ''),\n"
+                        "    os.environ.get('VIRTUAL_ENV', ''),\n"
+                        "])"
+                    ),
+                    "result",
+                ],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "routing_agent_name": "general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    home, agent_workspace, xdg_cache, virtual_env = str(payload["result"]).split("|", 3)
+    assert home == str(workspace.resolve())
+    assert agent_workspace == str(workspace.resolve())
+    assert xdg_cache == str(worker_root / "cache")
+    assert virtual_env == str(worker_root / "venv")
+
+
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+def test_worker_attachment_save_can_be_read_through_shell_home(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A workspace attachment save path should also be reachable through ~/."""
+    _set_sandbox_token(monkeypatch)
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+    _write_general_agent_config(config_path)
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    worker_key = "v1:tenant-123:shared:general"
+    payload_bytes = b"attachment payload"
+    sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        save_response = runner_client.post(
+            "/api/sandbox-runner/save-attachment",
+            headers=SANDBOX_HEADERS,
+            json={
+                "worker_key": worker_key,
+                "routing_agent_name": "general",
+                "attachment_id": "att_sample",
+                "mindroom_output_path": "incoming/sample.txt",
+                "sha256": sha256,
+                "size_bytes": len(payload_bytes),
+                "bytes_b64": base64.b64encode(payload_bytes).decode("ascii"),
+            },
+        )
+        read_response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [["bash", "-c", "cat ~/incoming/sample.txt"]],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "routing_agent_name": "general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert save_response.status_code == 200
+    assert save_response.json()["ok"] is True
+    assert (workspace / "incoming" / "sample.txt").read_bytes() == payload_bytes
+    assert read_response.status_code == 200
+    read_payload = read_response.json()
+    assert read_payload["ok"] is True, read_payload
+    assert read_payload["result"] == payload_bytes.decode()
+
+
 def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_path: Path) -> None:
     """Agent-routed requests should not depend on a tool base_dir to source the hook."""
     config_path = tmp_path / "config.yaml"
@@ -3635,15 +4103,25 @@ def test_workspace_env_hook_skips_non_execution_tools_for_routed_agent(tmp_path:
         function_name="read_file",
         routing_agent_name="general",
     )
+    execution_env = {"PATH": "/usr/bin:/bin"}
+    applied_home_env = sandbox_runner_module._apply_workspace_home_contract(
+        request,
+        prepared=None,
+        execution_env=execution_env,
+        runtime_paths=runtime_paths,
+        config=config,
+    )
     overlay, failure = sandbox_runner_module._workspace_env_overlay_for_request(
         request,
         prepared=None,
-        execution_env={"PATH": "/usr/bin:/bin"},
+        execution_env=execution_env,
         runtime_paths=runtime_paths,
         config=config,
         apply=True,
     )
 
+    assert applied_home_env == {}
+    assert execution_env == {"PATH": "/usr/bin:/bin"}
     assert overlay == {}
     assert failure is None
 
@@ -3975,7 +4453,17 @@ def test_workspace_env_hook_overlays_python_subprocess(
     storage_root = tmp_path / "storage"
     workspace = storage_root / "agents" / "general" / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
-    _write_workspace_env_hook(workspace, "export WORKSPACE_PIP_INDEX=https://wheels.example/simple\n")
+    _write_workspace_env_hook(
+        workspace,
+        (
+            "export WORKSPACE_PIP_INDEX=https://wheels.example/simple\n"
+            "export HOME=$PWD/hook-home\n"
+            "export MINDROOM_AGENT_WORKSPACE=$PWD/hook-workspace\n"
+            "export XDG_CONFIG_HOME=$PWD/hook-config\n"
+            "export XDG_DATA_HOME=$PWD/hook-data\n"
+            "export XDG_STATE_HOME=$PWD/hook-state\n"
+        ),
+    )
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
@@ -3992,7 +4480,19 @@ def test_workspace_env_hook_overlays_python_subprocess(
                 "tool_name": "python",
                 "function_name": "run_python_code",
                 "args": [
-                    'import os\nresult = os.environ.get("WORKSPACE_PIP_INDEX")',
+                    (
+                        "import os\n"
+                        "from pathlib import Path\n"
+                        "result = '|'.join([\n"
+                        "    os.environ.get('WORKSPACE_PIP_INDEX', ''),\n"
+                        "    str(Path.home()),\n"
+                        "    os.environ.get('HOME', ''),\n"
+                        "    os.environ.get('MINDROOM_AGENT_WORKSPACE', ''),\n"
+                        "    os.environ.get('XDG_CONFIG_HOME', ''),\n"
+                        "    os.environ.get('XDG_DATA_HOME', ''),\n"
+                        "    os.environ.get('XDG_STATE_HOME', ''),\n"
+                        "])"
+                    ),
                     "result",
                 ],
                 "kwargs": {},
@@ -4004,7 +4504,14 @@ def test_workspace_env_hook_overlays_python_subprocess(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    assert "https://wheels.example/simple" in str(payload["result"])
+    pip_index, home, env_home, agent_workspace, xdg_config, xdg_data, xdg_state = str(payload["result"]).split("|", 6)
+    assert pip_index == "https://wheels.example/simple"
+    assert home == str(workspace.resolve() / "hook-home")
+    assert env_home == str(workspace.resolve() / "hook-home")
+    assert agent_workspace == str(workspace.resolve() / "hook-workspace")
+    assert xdg_config == str(workspace.resolve() / "hook-config")
+    assert xdg_data == str(workspace.resolve() / "hook-data")
+    assert xdg_state == str(workspace.resolve() / "hook-state")
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
