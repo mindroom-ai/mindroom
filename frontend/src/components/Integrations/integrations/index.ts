@@ -35,6 +35,7 @@ function isOAuthCompleteMessage(
   providerId: string,
 ): boolean {
   if (
+    event.origin !== window.location.origin ||
     event.source !== authWindow ||
     event.data === null ||
     typeof event.data !== "object"

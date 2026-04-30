@@ -199,6 +199,73 @@ def test_google_drive_rejects_stored_token_missing_required_scopes(tmp_path: Pat
     assert "Google Drive is not connected for this agent" in result["error"]
 
 
+def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp_path: Path) -> None:
+    runtime_paths = constants.resolve_runtime_paths(
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
+            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
+            "GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS": "example.com",
+        },
+    )
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google_drive_oauth",
+        {
+            "token": "access-token",
+            "refresh_token": "refresh-token",
+            "scopes": list(GOOGLE_DRIVE_OAUTH_SCOPES),
+            "_source": "oauth",
+            "_oauth_provider": "google_drive",
+            "_oauth_claims": {"email": "alice@blocked.example", "email_verified": True},
+        },
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    assert tool.creds is None
+    result = json.loads(tool.search_files(query="name contains 'plan'", max_results=1))
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "google_drive"
+
+
+def test_google_drive_rejects_stored_token_missing_claims_when_identity_policy_configured(tmp_path: Path) -> None:
+    runtime_paths = constants.resolve_runtime_paths(
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
+            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
+            "GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS": "example.com",
+        },
+    )
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google_drive_oauth",
+        {
+            "token": "access-token",
+            "refresh_token": "refresh-token",
+            "scopes": list(GOOGLE_DRIVE_OAUTH_SCOPES),
+            "_source": "oauth",
+            "_oauth_provider": "google_drive",
+        },
+    )
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+
+    assert tool.creds is None
+    result = json.loads(tool.search_files(query="name contains 'plan'", max_results=1))
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "google_drive"
+
+
 def test_google_drive_stored_token_without_client_config_connects_on_invocation(tmp_path: Path) -> None:
     runtime_paths = constants.resolve_runtime_paths(
         storage_path=tmp_path / "mindroom_data",

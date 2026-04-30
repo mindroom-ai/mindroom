@@ -46,12 +46,58 @@ describe("Generic OAuth integration provider", () => {
           status: "connected",
         },
         source: authWindow,
+        origin: window.location.origin,
       }),
     );
 
     await connectPromise;
 
     expect(authWindow.close).toHaveBeenCalled();
+  });
+
+  it("ignores OAuth completion messages from other origins", async () => {
+    vi.useFakeTimers();
+    const authWindowState = { closed: false };
+    const authWindow = {
+      get closed() {
+        return authWindowState.closed;
+      },
+      close: vi.fn(() => {
+        authWindowState.closed = true;
+      }),
+    } as unknown as Window;
+    (global.window.open as any).mockReturnValue(authWindow);
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
+    });
+
+    const config = integrationProviders.google_drive.getConfig();
+    const connectPromise = config.onAction!(config.integration);
+
+    await vi.waitFor(() => {
+      expect(global.window.open).toHaveBeenCalled();
+    });
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "mindroom:oauth-complete",
+          provider: "google_drive",
+          status: "connected",
+        },
+        source: authWindow,
+        origin: "https://evil.example.test",
+      }),
+    );
+
+    const rejection = expect(connectPromise).rejects.toThrow(
+      "Google Drive authorization was cancelled",
+    );
+    authWindowState.closed = true;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await rejection;
+    expect(authWindow.close).not.toHaveBeenCalled();
   });
 
   it("rejects connect when the OAuth popup closes without completion", async () => {

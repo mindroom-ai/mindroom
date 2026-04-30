@@ -20,6 +20,7 @@ from mindroom.api.credentials import (
     resolve_request_credentials_target,
 )
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
+from mindroom.logging_config import get_logger
 from mindroom.oauth import (
     OAuthClaimValidationError,
     OAuthProvider,
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
+logger = get_logger(__name__)
 _OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete"
 # OAuth callbacks intentionally verify the browser user inline instead of relying on
 # standalone-public-path bypasses, because callbacks write scoped credentials.
@@ -106,12 +108,14 @@ def _issue_authorization_url(
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _verify_connect_target_authorized(request, connect_target, runtime_paths)
+        _verify_connect_target_query(connect_target, agent_name, request.query_params.get("execution_scope"))
         target = resolve_request_credentials_target(
             request,
             agent_name=agent_name,
             service_names=(provider.credential_service,),
             allow_private_scopes=True,
         )
+        _verify_connect_target_binding(provider, connect_target, target)
         state = issue_pending_oauth_state(
             request,
             provider.id,
@@ -174,6 +178,30 @@ def _verify_connect_target_authorized(
     )
     if connect_target.requester_id and connect_target.requester_id != dashboard_identity.requester_id:
         raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
+
+
+def _verify_connect_target_query(
+    connect_target: OAuthConnectTarget,
+    agent_name: str | None,
+    execution_scope: str | None,
+) -> None:
+    expected_scope = "" if connect_target.worker_scope == "unscoped" else connect_target.worker_scope
+    if (agent_name or "") != (connect_target.agent_name or "") or (execution_scope or "") != expected_scope:
+        raise HTTPException(status_code=400, detail="OAuth connect link target does not match this request")
+
+
+def _verify_connect_target_binding(
+    provider: OAuthProvider,
+    connect_target: OAuthConnectTarget,
+    target: RequestCredentialsTarget,
+) -> None:
+    expected = _target_binding_payload(provider, target)
+    if (
+        connect_target.agent_name != (expected["agent_name"] or None)
+        or connect_target.worker_scope != expected["worker_scope"]
+        or connect_target.worker_key != expected["worker_key"]
+    ):
+        raise HTTPException(status_code=400, detail="OAuth connect link target does not match this request")
 
 
 def _verify_pending_target_binding(
@@ -257,6 +285,7 @@ async def authorize(
 @router.get("/{provider_id}/success", response_class=HTMLResponse)
 async def success(provider_id: str, request: Request) -> HTMLResponse:
     """Signal OAuth completion to the dashboard popup opener."""
+    await _require_oauth_api_user(request)
     provider, _runtime_paths = _load_provider(request, provider_id)
     message = {
         "type": _OAUTH_COMPLETE_MESSAGE_TYPE,
@@ -275,7 +304,7 @@ async def success(provider_id: str, request: Request) -> HTMLResponse:
     <script>
       const message = {_script_json(message)};
       if (window.opener && !window.opener.closed) {{
-        window.opener.postMessage(message, "*");
+        window.opener.postMessage(message, window.location.origin);
       }}
       window.close();
     </script>
@@ -336,10 +365,15 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
             worker_target=worker_target,
         )
     except OAuthClaimValidationError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception(
+            "oauth_callback_failed",
+            provider_id=provider.id,
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(status_code=500, detail="OAuth callback failed") from exc
 
     return RedirectResponse(url=oauth_success_redirect_url(provider, runtime_paths))

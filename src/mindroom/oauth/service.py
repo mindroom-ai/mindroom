@@ -5,15 +5,15 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode, urlparse
 
-from mindroom.oauth.providers import OAuthProviderError
+from mindroom.oauth.providers import OAuthClaimValidationError, OAuthProviderError, OAuthTokenResult
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.oauth.providers import OAuthProvider, OAuthTokenResult
+    from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
@@ -64,24 +64,29 @@ class OAuthConnectTarget:
 
     provider_id: str
     credential_service: str
+    agent_name: str | None
+    worker_scope: str
+    worker_key: str
     requester_id: str | None
-    created_at: float
 
 
 def issue_oauth_connect_token(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
-    requester_id: str | None,
+    worker_target: ResolvedWorkerTarget | None,
 ) -> str | None:
-    """Create an opaque token that binds an OAuth link to one requester."""
-    if not requester_id:
+    """Create an opaque token that binds an OAuth link to one requester and target."""
+    if worker_target is None or worker_target.execution_identity is None or not worker_target.worker_key:
         return None
+    requester_id = worker_target.execution_identity.requester_id
 
     connect_target = OAuthConnectTarget(
         provider_id=provider.id,
         credential_service=provider.credential_service,
+        agent_name=worker_target.routing_agent_name,
+        worker_scope=worker_target.worker_scope or "unscoped",
+        worker_key=worker_target.worker_key,
         requester_id=requester_id,
-        created_at=0,
     )
     return issue_opaque_oauth_state(
         runtime_paths,
@@ -98,11 +103,18 @@ def _connect_target_from_payload(provider: OAuthProvider, payload: dict[str, obj
     if payload.get("credential_service") != provider.credential_service:
         msg = "OAuth connect link does not match this provider"
         raise OAuthProviderError(msg)
+    worker_scope = str(payload.get("worker_scope") or "")
+    worker_key = str(payload.get("worker_key") or "")
+    if worker_scope not in {"shared", "user", "user_agent", "unscoped"} or not worker_key:
+        msg = "OAuth connect link target is invalid"
+        raise OAuthProviderError(msg)
     return OAuthConnectTarget(
         provider_id=provider.id,
         credential_service=provider.credential_service,
+        agent_name=str(payload.get("agent_name") or "") or None,
+        worker_scope=worker_scope,
+        worker_key=worker_key,
         requester_id=str(payload.get("requester_id") or "") or None,
-        created_at=0,
     )
 
 
@@ -141,6 +153,9 @@ def oauth_connect_target_payload(connect_target: OAuthConnectTarget) -> dict[str
     return {
         "provider": connect_target.provider_id,
         "credential_service": connect_target.credential_service,
+        "agent_name": connect_target.agent_name or "",
+        "worker_scope": connect_target.worker_scope,
+        "worker_key": connect_target.worker_key,
         "requester_id": connect_target.requester_id or "",
     }
 
@@ -168,7 +183,7 @@ def oauth_success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePa
     return f"{base_url}/api/oauth/{provider.id}/success"
 
 
-def oauth_credentials_usable(
+def oauth_credentials_usable(  # noqa: PLR0911
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     credentials: dict[str, object] | None,
@@ -179,6 +194,8 @@ def oauth_credentials_usable(
     if not credentials or provider.client_config(runtime_paths) is None:
         return False
     if not oauth_credentials_have_required_scopes(provider, credentials):
+        return False
+    if not oauth_credentials_satisfy_identity_policy(provider, runtime_paths, credentials):
         return False
 
     token = credentials.get("token") or credentials.get("access_token")
@@ -214,6 +231,38 @@ def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials:
     return set(provider.scopes).issubset(expanded_granted_scopes)
 
 
+def oauth_credentials_satisfy_identity_policy(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    credentials: dict[str, object],
+) -> bool:
+    """Return whether stored credentials still satisfy configured identity policy."""
+    has_identity_policy = (
+        bool(provider.resolved_allowed_email_domains(runtime_paths))
+        or bool(provider.resolved_allowed_hosted_domains(runtime_paths))
+        or provider.claim_validator is not None
+    )
+    if not has_identity_policy:
+        return True
+
+    raw_claims = credentials.get("_oauth_claims")
+    if not isinstance(raw_claims, dict) or not raw_claims:
+        return False
+    claims = cast("dict[str, Any]", raw_claims)
+    try:
+        provider.validate_claims(
+            OAuthTokenResult(
+                token_data=dict(credentials),
+                claims=claims,
+                claims_verified=True,
+            ),
+            runtime_paths,
+        )
+    except OAuthClaimValidationError:
+        return False
+    return True
+
+
 def build_oauth_authorize_url(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
@@ -244,12 +293,7 @@ def oauth_connect_url(
     """Return a browser-openable MindRoom OAuth link for one credential scope."""
     agent_name = worker_target.routing_agent_name if worker_target is not None else None
     execution_scope = worker_target.worker_scope if worker_target is not None else None
-    requester_id = (
-        worker_target.execution_identity.requester_id
-        if worker_target is not None and worker_target.execution_identity is not None
-        else None
-    )
-    connect_token = issue_oauth_connect_token(provider, runtime_paths, requester_id)
+    connect_token = issue_oauth_connect_token(provider, runtime_paths, worker_target)
     return build_oauth_authorize_url(
         provider,
         runtime_paths,

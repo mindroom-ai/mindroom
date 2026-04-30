@@ -13,7 +13,11 @@ from google.oauth2 import credentials as google_credentials
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider
-from mindroom.oauth.service import oauth_connect_url, oauth_credentials_have_required_scopes
+from mindroom.oauth.service import (
+    oauth_connect_url,
+    oauth_credentials_have_required_scopes,
+    oauth_credentials_satisfy_identity_policy,
+)
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
@@ -190,6 +194,13 @@ class ScopedOAuthClientMixin:
                 provider_id=self._oauth_provider.id,
             )
             return None
+        if not oauth_credentials_satisfy_identity_policy(self._oauth_provider, self._runtime_paths, token_data):
+            self._oauth_logger.warning(
+                "oauth_credentials_identity_policy_failed",
+                tool_name=self._oauth_tool_name,
+                provider_id=self._oauth_provider.id,
+            )
+            return None
         try:
             creds = self._credentials_from_token_data(token_data)
         except Exception:
@@ -217,7 +228,11 @@ class ScopedOAuthClientMixin:
             return
 
         token_data = self._load_token_data()
-        if not token_data or not oauth_credentials_have_required_scopes(self._oauth_provider, token_data):
+        if (
+            not token_data
+            or not oauth_credentials_have_required_scopes(self._oauth_provider, token_data)
+            or not oauth_credentials_satisfy_identity_policy(self._oauth_provider, self._runtime_paths, token_data)
+        ):
             raise self._connection_required()
 
         try:

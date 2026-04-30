@@ -5,9 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from google.auth import exceptions as google_auth_exceptions
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token as google_id_token
+from requests import exceptions as requests_exceptions
 
+from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
     OAuthClientConfig,
@@ -18,6 +21,8 @@ from mindroom.oauth.providers import (
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
 
 GOOGLE_IDENTITY_SCOPES = (
     "openid",
@@ -46,11 +51,20 @@ def _google_token_parser(
         msg = "Google did not return a verifiable identity token"
         raise OAuthClaimValidationError(msg)
     else:
-        claims = google_id_token.verify_oauth2_token(
-            id_token,
-            GoogleRequest(),
-            client_config.client_id,
-        )
+        try:
+            claims = google_id_token.verify_oauth2_token(
+                id_token,
+                GoogleRequest(),
+                client_config.client_id,
+            )
+        except (ValueError, google_auth_exceptions.GoogleAuthError, requests_exceptions.RequestException) as exc:
+            logger.warning(
+                "google_id_token_verification_failed",
+                provider_id=provider.id,
+                error_type=type(exc).__name__,
+            )
+            msg = "Google identity token verification failed"
+            raise OAuthClaimValidationError(msg) from exc
         if not isinstance(claims, dict):
             msg = "Google identity token verification did not return claims"
             raise OAuthClaimValidationError(msg)
