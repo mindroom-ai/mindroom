@@ -82,6 +82,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     };
     if (status.statusError) {
       integrationStatus.helper_text = status.statusError;
+      integrationStatus.status_error = status.statusError;
     }
     return integrationStatus;
   }

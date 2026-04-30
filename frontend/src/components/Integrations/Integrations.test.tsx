@@ -450,20 +450,25 @@ describe("Integrations", () => {
     });
   });
 
-  it("shows OAuth status helper text when status loading fails", async () => {
+  it("shows OAuth status errors without client-config wording", async () => {
     mockGoogleDriveLoadStatus.mockResolvedValueOnce({
       status: "not_connected",
       connected: false,
-      helper_text: "Failed to load Google Drive OAuth status.",
+      oauth_client_configured: false,
+      status_error: "Requester binding failed.",
     });
 
     render(<Integrations />);
 
     await waitFor(() => {
       expect(
-        screen.getByText("Failed to load Google Drive OAuth status."),
+        screen.getByText("Status error: Requester binding failed."),
       ).toBeInTheDocument();
-      expect(screen.getByText("Needs setup")).toBeInTheDocument();
+      expect(screen.getByText("Status error")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Retry status" }),
+      ).toBeInTheDocument();
+      expect(screen.queryByText("Needs client config")).not.toBeInTheDocument();
     });
   });
 

@@ -684,6 +684,24 @@ export function Integrations() {
       }
     }
 
+    if (integration.setup_type === "oauth" && integration.status_error) {
+      return (
+        <div className="flex gap-2 items-center">
+          <Button disabled variant="outline" size="sm">
+            Status unavailable
+          </Button>
+          <Button
+            onClick={() => void loadIntegrations(false)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Retry status
+          </Button>
+        </div>
+      );
+    }
+
     if (
       integration.setup_type === "oauth" &&
       integration.oauth_client_configured === false
@@ -750,8 +768,11 @@ export function Integrations() {
 
   const IntegrationCard = ({ integration }: { integration: Integration }) => {
     const isConnected = integration.status === "connected";
-    const statusLabel =
-      integration.status === "not_connected" ? "Needs setup" : "Available";
+    const statusLabel = integration.status_error
+      ? "Status error"
+      : integration.status === "not_connected"
+        ? "Needs setup"
+        : "Available";
 
     return (
       <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
@@ -774,11 +795,15 @@ export function Integrations() {
             )}
           </div>
           <CardDescription>{integration.description}</CardDescription>
-          {integration.helper_text && (
+          {integration.status_error ? (
+            <p className="text-xs text-muted-foreground">
+              Status error: {integration.status_error}
+            </p>
+          ) : integration.helper_text ? (
             <p className="text-xs text-muted-foreground">
               {integration.helper_text}
             </p>
-          )}
+          ) : null}
         </CardHeader>
 
         <CardContent>
