@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode, urlparse
 
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
+_SANDBOX_SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 OAUTH_CREDENTIAL_FIELDS = frozenset(
     {
         "_id_token",
@@ -56,6 +58,13 @@ class OAuthConnectTarget:
     created_at: float
 
 
+def _connect_token_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
+    shared_storage_root = runtime_paths.env_value(_SANDBOX_SHARED_STORAGE_ROOT_ENV)
+    if not shared_storage_root:
+        return runtime_paths
+    return replace(runtime_paths, storage_root=Path(shared_storage_root).expanduser().resolve())
+
+
 def issue_oauth_connect_token(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
@@ -79,7 +88,7 @@ def issue_oauth_connect_token(
         created_at=0,
     )
     return issue_opaque_oauth_state(
-        runtime_paths,
+        _connect_token_runtime_paths(runtime_paths),
         kind=_OAUTH_CONNECT_TOKEN_KIND,
         ttl_seconds=_OAUTH_CONNECT_TOKEN_TTL_SECONDS,
         data=oauth_connect_target_payload(connect_target),
@@ -108,7 +117,11 @@ def _connect_target_from_payload(provider: OAuthProvider, payload: dict[str, obj
 
 def lookup_oauth_connect_token(provider: OAuthProvider, runtime_paths: RuntimePaths, token: str) -> OAuthConnectTarget:
     """Return one conversation-issued OAuth target token without consuming it."""
-    data = read_opaque_oauth_state(runtime_paths, kind=_OAUTH_CONNECT_TOKEN_KIND, token=token)
+    data = read_opaque_oauth_state(
+        _connect_token_runtime_paths(runtime_paths),
+        kind=_OAUTH_CONNECT_TOKEN_KIND,
+        token=token,
+    )
     return _connect_target_from_payload(provider, data)
 
 
@@ -120,7 +133,11 @@ def consume_oauth_connect_token(
     expected_target: OAuthConnectTarget | None = None,
 ) -> OAuthConnectTarget:
     """Consume one conversation-issued OAuth target token for a provider authorize request."""
-    data = consume_opaque_oauth_state(runtime_paths, kind=_OAUTH_CONNECT_TOKEN_KIND, token=token)
+    data = consume_opaque_oauth_state(
+        _connect_token_runtime_paths(runtime_paths),
+        kind=_OAUTH_CONNECT_TOKEN_KIND,
+        token=token,
+    )
     connect_target = _connect_target_from_payload(provider, data)
     if expected_target is not None and connect_target != expected_target:
         msg = "OAuth connect link target changed"

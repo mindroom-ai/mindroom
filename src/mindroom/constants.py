@@ -99,6 +99,7 @@ _RUNTIME_STARTUP_SECRET_SUFFIXES = (
 )
 _RUNTIME_DATABASE_URL_NAMES = frozenset({"DATABASE_URL"})
 _RUNTIME_DATABASE_URL_SUFFIXES = ("_DATABASE_URL",)
+_OAUTH_CLIENT_SECRET_ENV_PATTERN = re.compile(r"MINDROOM_OAUTH_[A-Z0-9_]+_CLIENT_SECRET")
 _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
     {
         *_RUNTIME_STARTUP_EXCLUDED_NAMES,
@@ -363,6 +364,8 @@ def _is_isolated_runtime_public_env_name(name: str) -> bool:
         return False
     if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _ISOLATED_RUNTIME_ENV_EXTRA_KEYS):
         return False
+    if _OAUTH_CLIENT_SECRET_ENV_PATTERN.fullmatch(name):
+        return True
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
 
 

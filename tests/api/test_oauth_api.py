@@ -866,6 +866,39 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
     assert standalone_credentials is None
 
 
+def test_worker_connect_token_can_be_consumed_from_shared_storage_root(tmp_path: Path) -> None:
+    primary_runtime_paths = _runtime_paths(
+        tmp_path / "primary",
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    worker_runtime_paths = _runtime_paths(
+        tmp_path / "worker",
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT": str(primary_runtime_paths.storage_root),
+        },
+    )
+    provider = _fake_provider()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+
+    connect_token = oauth_service.issue_oauth_connect_token(provider, worker_runtime_paths, worker_target)
+    assert connect_token is not None
+    connect_target = oauth_service.consume_oauth_connect_token(provider, primary_runtime_paths, connect_token)
+
+    assert connect_target.worker_key == worker_target.worker_key
+    assert not (worker_runtime_paths.storage_root / "oauth_state.json").exists()
+
+
 def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path / "wrong-user",
