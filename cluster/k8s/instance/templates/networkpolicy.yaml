@@ -27,6 +27,7 @@ spec:
   - from:
     - podSelector:
         matchLabels:
+          app: mindroom
           customer: {{ .Values.customer | quote }}
     ports:
     - port: {{ $workerPort }}

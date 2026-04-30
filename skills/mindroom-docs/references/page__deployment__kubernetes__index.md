@@ -166,7 +166,7 @@ When `workerBackend: kubernetes` is enabled, the chart creates:
 
 - A worker-manager ServiceAccount for the primary runtime.
 - A Role and RoleBinding that allow managing worker Deployments and Services in the instance namespace.
-- NetworkPolicy rules that allow the primary runtime to reach the internal worker port and allow worker traffic within the instance namespace.
+- NetworkPolicy rules that allow the primary runtime to reach the internal worker port while denying worker-to-worker runner ingress.
 
 ### Operations
 

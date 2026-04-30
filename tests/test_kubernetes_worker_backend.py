@@ -32,7 +32,7 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
-from mindroom.workers.backends.kubernetes_resources import ANNOTATION_STARTUP_MANIFEST_HASH
+from mindroom.workers.backends.kubernetes_resources import ANNOTATION_STARTUP_MANIFEST_HASH, worker_auth_token
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 
@@ -41,8 +41,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-_TEST_TOKEN_SECRET_NAME = "mindroom-secrets"  # noqa: S105
-_TEST_TOKEN_SECRET_KEY = "sandbox_proxy_token"  # noqa: S105
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _TEST_SCOPED_WORKER_KEY_A = "v1:tenant-123:shared:code"
 _TEST_SCOPED_WORKER_KEY_B = "v1:tenant-123:shared:research"
@@ -285,6 +283,7 @@ def _backend(
     resource_requests: dict[str, str] | None = None,
     resource_limits: dict[str, str] | None = None,
     extra_annotations: dict[str, str] | None = None,
+    enable_service_links: bool = False,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = _KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -298,8 +297,6 @@ def _backend(
         config_map_name=config_map_name,
         config_key="config.yaml",
         config_path="/app/config.yaml",
-        token_secret_name=_TEST_TOKEN_SECRET_NAME,
-        token_secret_key=_TEST_TOKEN_SECRET_KEY,
         idle_timeout_seconds=idle_timeout_seconds,
         ready_timeout_seconds=5.0,
         name_prefix=name_prefix,
@@ -311,6 +308,7 @@ def _backend(
         owner_deployment_name=owner_deployment_name,
         resource_requests=resource_requests if resource_requests is not None else {"memory": "256Mi", "cpu": "100m"},
         resource_limits=resource_limits if resource_limits is not None else {"memory": "1Gi", "cpu": "500m"},
+        enable_service_links=enable_service_links,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -402,6 +400,8 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment(tmp_path: Path
     handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
     assert handle.worker_key == worker_key
+    assert handle.auth_token == worker_auth_token(_TEST_AUTH_TOKEN, worker_key)
+    assert handle.auth_token != _TEST_AUTH_TOKEN
     assert handle.backend_name == "kubernetes"
     assert handle.endpoint.endswith("/api/sandbox-runner/execute")
     assert handle.debug_metadata["namespace"] == "chat"
@@ -424,7 +424,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment(tmp_path: Path
     assert "VIRTUAL_ENV" in env_names
     assert "PATH" in env_names
     assert "MINDROOM_SHARED_CREDENTIALS_PATH" in env_names
-    assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
+    assert env_values["MINDROOM_SANDBOX_PROXY_TOKEN"] == handle.auth_token
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
     manifest_path = env_values["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"]
@@ -489,6 +489,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment(tmp_path: Path
     }
     assert container["resources"]["requests"] == {"memory": "256Mi", "cpu": "100m"}
     assert container["resources"]["limits"] == {"memory": "1Gi", "cpu": "500m"}
+    assert deployment["spec"]["template"]["spec"]["enableServiceLinks"] is False
     assert container["startupProbe"] == {
         "httpGet": {"path": "/healthz", "port": "api"},
         "periodSeconds": 5,
@@ -799,6 +800,32 @@ def test_kubernetes_backend_config_resources_default_when_env_unset(tmp_path: Pa
 
     assert config.resource_requests == {"memory": "256Mi", "cpu": "100m"}
     assert config.resource_limits == {"memory": "1Gi", "cpu": "500m"}
+    assert config.enable_service_links is False
+
+
+def test_kubernetes_backend_config_allows_service_links_override(tmp_path: Path) -> None:
+    """Worker service-link env injection remains opt-in."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_WORKER_BACKEND=kubernetes\n"
+            "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+            "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS=true\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+
+    config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config.enable_service_links is True
 
 
 def test_kubernetes_backend_renders_configured_resources_on_worker_container(tmp_path: Path) -> None:
@@ -818,6 +845,16 @@ def test_kubernetes_backend_renders_configured_resources_on_worker_container(tmp
     container = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"]["requests"] == {"memory": "2Gi", "cpu": "500m"}
     assert container["resources"]["limits"] == {"memory": "8Gi", "cpu": "2"}
+
+
+def test_kubernetes_backend_renders_service_links_override_in_worker_template() -> None:
+    """Generated worker pod templates should carry the configured service-link setting."""
+    backend, apps_api, _core_api = _backend(enable_service_links=True)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    assert deployment["spec"]["template"]["spec"]["enableServiceLinks"] is True
 
 
 def test_kubernetes_backend_config_reads_worker_annotations_from_env(tmp_path: Path) -> None:

@@ -36,16 +36,14 @@
 - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
   value: {{ $controlPlaneNodeName | quote }}
 {{- end }}
-- name: MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_NAME
-  value: "mindroom-api-keys-{{ $values.customer }}"
-- name: MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_KEY
-  value: "sandbox_proxy_token"
 - name: MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS
   value: {{ $values.kubernetesWorkerIdleTimeoutSeconds | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS
   value: {{ $values.kubernetesWorkerReadyTimeoutSeconds | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_NAME_PREFIX
   value: {{ $values.kubernetesWorkerNamePrefix | quote }}
+- name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
+  value: {{ $values.kubernetesWorkerEnableServiceLinks | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
   value: {{ dict "customer" $values.customer | toJson | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME

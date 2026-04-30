@@ -51,6 +51,7 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
 )
 from mindroom.workers.backends import local as local_workers_module
+from mindroom.workers.backends.kubernetes_resources import worker_auth_token
 from mindroom.workers.models import WorkerSpec
 from tests.conftest import requires_linux
 
@@ -3248,6 +3249,40 @@ def test_dedicated_worker_mode_rejects_mismatched_worker_key(
     )
     assert response.status_code == 400
     assert "Dedicated sandbox worker is pinned" in response.json()["detail"]
+
+
+def test_dedicated_worker_runner_rejects_sibling_worker_token(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One worker's derived bearer token must not authorize another worker's runner."""
+    shared_control_plane_token = "shared-control-plane-token"  # noqa: S105
+    worker_a_token = worker_auth_token(shared_control_plane_token, "worker-a")
+    worker_b_token = worker_auth_token(shared_control_plane_token, "worker-b")
+    assert worker_a_token is not None
+    assert worker_b_token is not None
+    assert worker_a_token != worker_b_token
+
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", worker_b_token)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-b")
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(tmp_path / "worker-b"))
+    _refresh_runner_app_from_env()
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers={"x-mindroom-sandbox-token": worker_a_token},
+        json={
+            "tool_name": "file",
+            "function_name": "read_file",
+            "args": ["note.txt"],
+            "kwargs": {},
+            "worker_key": "worker-b",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Unauthorized sandbox runner request"
 
 
 def test_prepare_worker_uses_explicit_runtime_storage_root_for_local_workers(
