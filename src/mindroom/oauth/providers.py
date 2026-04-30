@@ -196,15 +196,9 @@ def _token_result_with_core_metadata(provider: OAuthProvider, result: OAuthToken
     )
 
 
-def _safe_claim_summary(claims: Mapping[str, Any]) -> dict[str, Any]:
-    summary: dict[str, Any] = {}
-    for key in ("sub", "email", "hd"):
-        value = claims.get(key)
-        if isinstance(value, str) and value:
-            summary[key] = value
-    if claims.get("email_verified") is True:
-        summary["email_verified"] = True
-    return summary
+def _verified_claims_for_storage(claims: Mapping[str, Any]) -> dict[str, Any]:
+    """Return verified claims needed for later identity-policy checks."""
+    return dict(claims)
 
 
 def _claim_email_domain(claims: Mapping[str, Any]) -> str | None:
@@ -474,7 +468,7 @@ class OAuthProvider:
         token_data.pop("_oauth_claims", None)
         token_data.pop("_oauth_claims_verified", None)
         if result.claims and result.claims_verified:
-            token_data["_oauth_claims"] = _safe_claim_summary(result.claims)
+            token_data["_oauth_claims"] = _verified_claims_for_storage(result.claims)
             token_data["_oauth_claims_verified"] = True
         return OAuthTokenResult(
             token_data=token_data,

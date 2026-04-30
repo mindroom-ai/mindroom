@@ -20,6 +20,7 @@ from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import (
+    OAuthClaimValidationContext,
     OAuthClaimValidationError,
     OAuthClientConfig,
     OAuthProvider,
@@ -28,6 +29,7 @@ from mindroom.oauth import (
 )
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.service import oauth_credentials_satisfy_identity_policy
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -643,6 +645,42 @@ def test_safe_token_result_does_not_persist_unverified_claims() -> None:
 
     assert "_oauth_claims" not in safe_result.token_data
     assert "_oauth_claims_verified" not in safe_result.token_data
+
+
+def test_safe_token_result_preserves_verified_claims_for_custom_validator(tmp_path: Path) -> None:
+    def _validate_org(context: OAuthClaimValidationContext) -> None:
+        if context.claims.get("org_id") != "acme":
+            msg = "OAuth account organization is not allowed"
+            raise OAuthClaimValidationError(msg)
+
+    provider = OAuthProvider(
+        id="custom_mail",
+        display_name="Custom Mail",
+        authorization_url="https://auth.example.test/custom/authorize",
+        token_url="https://auth.example.test/custom/token",
+        scopes=("mail.read",),
+        credential_service="custom_mail_oauth",
+        client_id_env="TEST_OAUTH_CLIENT_ID",
+        client_secret_env="TEST_OAUTH_CLIENT_SECRET",
+        claim_validator=_validate_org,
+    )
+    runtime_paths = _runtime_paths(tmp_path, {})
+    result = OAuthTokenResult(
+        token_data={"token": "access-token", "scopes": ["mail.read"]},
+        claims={
+            "sub": "custom-subject",
+            "email": "alice@example.com",
+            "email_verified": True,
+            "org_id": "acme",
+        },
+        claims_verified=True,
+    )
+
+    provider.validate_claims(result, runtime_paths)
+    safe_result = provider.token_result_with_safe_claims(result)
+
+    assert safe_result.token_data["_oauth_claims"]["org_id"] == "acme"
+    assert oauth_credentials_satisfy_identity_policy(provider, runtime_paths, safe_result.token_data)
 
 
 def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp_path: Path) -> None:
