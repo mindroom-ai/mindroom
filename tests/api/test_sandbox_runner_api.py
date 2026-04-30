@@ -3491,7 +3491,7 @@ def _write_general_agent_config(config_path: Path) -> None:
 
 
 def test_workspace_home_contract_runs_before_workspace_env_hook(tmp_path: Path) -> None:
-    """The platform HOME default should be visible to the hook, and the hook may override it."""
+    """The platform HOME default should be visible to the hook while sourcing."""
     config_path = tmp_path / "config.yaml"
     _write_general_agent_config(config_path)
     storage_root = tmp_path / "storage"
@@ -3515,7 +3515,7 @@ def test_workspace_home_contract_runs_before_workspace_env_hook(tmp_path: Path) 
     )
     execution_env = dict(request.execution_env)
 
-    sandbox_runner_module._apply_workspace_home_contract(
+    sandbox_runner_module._apply_workspace_home_contract_for_request(
         request,
         prepared=None,
         execution_env=execution_env,
@@ -3583,7 +3583,7 @@ def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_n
     )
     execution_env = dict(request.execution_env)
 
-    sandbox_runner_module._apply_workspace_home_contract(
+    sandbox_runner_module._apply_workspace_home_contract_for_request(
         request,
         prepared=prepared,
         execution_env=execution_env,
@@ -3603,8 +3603,8 @@ def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_n
     assert execution_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
 
 
-def test_workspace_home_contract_protects_worker_owned_names_after_hook_overlay(tmp_path: Path) -> None:
-    """Hooks can override workspace-facing env, but not worker-owned cache or venv locations."""
+def test_workspace_home_contract_protects_owned_names_after_hook_overlay(tmp_path: Path) -> None:
+    """Hooks cannot redirect workspace identity, worker cache, or venv locations."""
     config_path = tmp_path / "config.yaml"
     _write_general_agent_config(config_path)
     storage_root = tmp_path / "storage"
@@ -3635,7 +3635,7 @@ def test_workspace_home_contract_protects_worker_owned_names_after_hook_overlay(
     )
     execution_env: dict[str, str] = {}
 
-    sandbox_runner_module._apply_workspace_home_contract(
+    sandbox_runner_module._apply_workspace_home_contract_for_request(
         request,
         prepared=prepared,
         execution_env=execution_env,
@@ -3644,6 +3644,10 @@ def test_workspace_home_contract_protects_worker_owned_names_after_hook_overlay(
     )
     overlay = {
         "HOME": "/hook-home",
+        "MINDROOM_AGENT_WORKSPACE": "/hook-agent-workspace",
+        "XDG_CONFIG_HOME": "/hook-config",
+        "XDG_DATA_HOME": "/hook-data",
+        "XDG_STATE_HOME": "/hook-state",
         "WORKSPACE_TOOLCHAIN_PATH": "/hook/bin",
         "XDG_CACHE_HOME": "/hook-cache",
         "PIP_CACHE_DIR": "/hook-pip-cache",
@@ -3652,33 +3656,39 @@ def test_workspace_home_contract_protects_worker_owned_names_after_hook_overlay(
         "VIRTUAL_ENV": "/hook-venv",
     }
     execution_env.update(overlay)
-    worker_owned_env = sandbox_runner_module._worker_owned_env(prepared)
-    execution_env.update(worker_owned_env)
-    trusted_overlay = sandbox_runner_module._trusted_workspace_overlay_for_runtime_paths(overlay, worker_owned_env)
+    protected_env = sandbox_runner_module._workspace_home_contract_env(workspace=workspace, prepared=prepared)
+    execution_env.update(protected_env)
+    trusted_overlay = sandbox_runner_module._trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
     effective_runtime_paths = sandbox_exec_module.runtime_paths_with_execution_env(
         runtime_paths,
         execution_env,
         trusted_env_overlay=trusted_overlay,
     )
 
-    assert execution_env["HOME"] == "/hook-home"
+    assert execution_env["HOME"] == str(workspace.resolve())
+    assert execution_env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
+    assert execution_env["XDG_CONFIG_HOME"] == str(workspace.resolve() / ".config")
+    assert execution_env["XDG_DATA_HOME"] == str(workspace.resolve() / ".local" / "share")
+    assert execution_env["XDG_STATE_HOME"] == str(workspace.resolve() / ".local" / "state")
     assert execution_env["WORKSPACE_TOOLCHAIN_PATH"] == "/hook/bin"
     assert execution_env["XDG_CACHE_HOME"] == str(worker_paths.cache_dir)
     assert execution_env["PIP_CACHE_DIR"] == str(worker_paths.cache_dir / "pip")
     assert execution_env["UV_CACHE_DIR"] == str(worker_paths.cache_dir / "uv")
     assert execution_env["PYTHONPYCACHEPREFIX"] == str(worker_paths.cache_dir / "pycache")
     assert execution_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
-    assert trusted_overlay == {"HOME": "/hook-home", "WORKSPACE_TOOLCHAIN_PATH": "/hook/bin"}
+    assert trusted_overlay == {"WORKSPACE_TOOLCHAIN_PATH": "/hook/bin"}
+    assert effective_runtime_paths.process_env["HOME"] == str(workspace.resolve())
+    assert effective_runtime_paths.process_env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
     assert effective_runtime_paths.process_env["XDG_CACHE_HOME"] == str(worker_paths.cache_dir)
     assert effective_runtime_paths.process_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
 
 
 @pytest.mark.asyncio
-async def test_subprocess_child_preserves_parent_sourced_workspace_home_env(
+async def test_subprocess_child_preserves_parent_workspace_home_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The subprocess child should not re-clobber workspace-facing hook env from its parent."""
+    """The subprocess child should preserve the parent-owned workspace-home env."""
     config_path = tmp_path / "config.yaml"
     _write_general_agent_config(config_path)
     storage_root = tmp_path / "storage"
@@ -3707,11 +3717,11 @@ async def test_subprocess_child_preserves_parent_sourced_workspace_home_env(
         worker_key=worker_key,
         tool_init_overrides={"base_dir": str(workspace)},
         execution_env={
-            "HOME": "/hook-home",
-            "MINDROOM_AGENT_WORKSPACE": "/hook-agent-workspace",
-            "XDG_CONFIG_HOME": "/hook-config",
-            "XDG_DATA_HOME": "/hook-data",
-            "XDG_STATE_HOME": "/hook-state",
+            "HOME": str(workspace.resolve()),
+            "MINDROOM_AGENT_WORKSPACE": str(workspace.resolve()),
+            "XDG_CONFIG_HOME": str(workspace.resolve() / ".config"),
+            "XDG_DATA_HOME": str(workspace.resolve() / ".local" / "share"),
+            "XDG_STATE_HOME": str(workspace.resolve() / ".local" / "state"),
             "XDG_CACHE_HOME": "/hook-cache",
             "PIP_CACHE_DIR": "/hook-pip-cache",
             "UV_CACHE_DIR": "/hook-uv-cache",
@@ -3756,11 +3766,11 @@ async def test_subprocess_child_preserves_parent_sourced_workspace_home_env(
 
     assert response.ok is True
     assert response.result == {
-        "HOME": "/hook-home",
-        "MINDROOM_AGENT_WORKSPACE": "/hook-agent-workspace",
-        "XDG_CONFIG_HOME": "/hook-config",
-        "XDG_DATA_HOME": "/hook-data",
-        "XDG_STATE_HOME": "/hook-state",
+        "HOME": str(workspace.resolve()),
+        "MINDROOM_AGENT_WORKSPACE": str(workspace.resolve()),
+        "XDG_CONFIG_HOME": str(workspace.resolve() / ".config"),
+        "XDG_DATA_HOME": str(workspace.resolve() / ".local" / "share"),
+        "XDG_STATE_HOME": str(workspace.resolve() / ".local" / "state"),
         "XDG_CACHE_HOME": str(worker_paths.cache_dir),
         "PIP_CACHE_DIR": str(worker_paths.cache_dir / "pip"),
         "UV_CACHE_DIR": str(worker_paths.cache_dir / "uv"),
@@ -4170,7 +4180,7 @@ def test_workspace_env_hook_skips_non_execution_tools_for_routed_agent(tmp_path:
         routing_agent_name="general",
     )
     execution_env = {"PATH": "/usr/bin:/bin"}
-    sandbox_runner_module._apply_workspace_home_contract(
+    sandbox_runner_module._apply_workspace_home_contract_for_request(
         request,
         prepared=None,
         execution_env=execution_env,
@@ -4571,12 +4581,12 @@ def test_workspace_env_hook_overlays_python_subprocess(
     assert payload["ok"] is True, payload
     pip_index, home, env_home, agent_workspace, xdg_config, xdg_data, xdg_state = str(payload["result"]).split("|", 6)
     assert pip_index == "https://wheels.example/simple"
-    assert home == str(workspace.resolve() / "hook-home")
-    assert env_home == str(workspace.resolve() / "hook-home")
-    assert agent_workspace == str(workspace.resolve() / "hook-workspace")
-    assert xdg_config == str(workspace.resolve() / "hook-config")
-    assert xdg_data == str(workspace.resolve() / "hook-data")
-    assert xdg_state == str(workspace.resolve() / "hook-state")
+    assert home == str(workspace.resolve())
+    assert env_home == str(workspace.resolve())
+    assert agent_workspace == str(workspace.resolve())
+    assert xdg_config == str(workspace.resolve() / ".config")
+    assert xdg_data == str(workspace.resolve() / ".local" / "share")
+    assert xdg_state == str(workspace.resolve() / ".local" / "state")
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)

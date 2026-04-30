@@ -689,23 +689,23 @@ def _worker_owned_env(prepared: sandbox_worker_prep.PreparedWorkerRequest | None
 
 def _trusted_workspace_overlay_for_runtime_paths(
     overlay: dict[str, str],
-    worker_owned_env: dict[str, str],
+    protected_env: dict[str, str],
 ) -> dict[str, str]:
     """Return hook overlay values that may influence runtime path reconstruction."""
-    if not worker_owned_env:
+    if not protected_env:
         return overlay
-    return {name: value for name, value in overlay.items() if name not in worker_owned_env}
+    return {name: value for name, value in overlay.items() if name not in protected_env}
 
 
-def _apply_workspace_home_contract(
+def _apply_workspace_home_contract_for_request(
     request: SandboxRunnerExecuteRequest,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     execution_env: dict[str, str],
     *,
     runtime_paths: RuntimePaths,
     config: Config,
-) -> None:
-    """Overlay MindRoom's workspace-home defaults before hook execution."""
+) -> Path | None:
+    """Overlay MindRoom's workspace-home defaults and return the resolved workspace."""
     workspace = _request_workspace_home_root(
         request,
         prepared,
@@ -713,9 +713,9 @@ def _apply_workspace_home_contract(
         config=config,
     )
     if workspace is None:
-        return
+        return None
 
-    _apply_workspace_home_contract_for_workspace(workspace, prepared=prepared, execution_env=execution_env)
+    return _apply_workspace_home_contract_for_workspace(workspace, prepared=prepared, execution_env=execution_env)
 
 
 def _apply_workspace_home_contract_for_workspace(
@@ -729,6 +729,17 @@ def _apply_workspace_home_contract_for_workspace(
     contract_env = _workspace_home_contract_env(workspace=resolved_workspace, prepared=prepared)
     execution_env.update(contract_env)
     return resolved_workspace
+
+
+def _protected_execution_env(
+    *,
+    workspace_home: Path | None,
+    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+) -> dict[str, str]:
+    """Return env names owned by MindRoom for this request."""
+    if workspace_home is not None:
+        return _workspace_home_contract_env(workspace=workspace_home, prepared=prepared)
+    return _worker_owned_env(prepared)
 
 
 def _workspace_env_hook_workspace_for_request(
@@ -824,14 +835,17 @@ async def _execute_request_inprocess(
         worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
         worker_execution_env.update(execution_env)
         execution_env = worker_execution_env
-    if apply_workspace_home_contract:
-        _apply_workspace_home_contract(
+    workspace_home = (
+        _apply_workspace_home_contract_for_request(
             request,
             prepared,
             execution_env,
             runtime_paths=runtime_paths,
             config=config,
         )
+        if apply_workspace_home_contract
+        else None
+    )
     overlay, overlay_failure = _workspace_env_overlay_for_request(
         request,
         prepared,
@@ -844,9 +858,9 @@ async def _execute_request_inprocess(
         return overlay_failure
     if overlay:
         execution_env.update(overlay)
-    worker_owned_env = _worker_owned_env(prepared)
-    execution_env.update(worker_owned_env)
-    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, worker_owned_env)
+    protected_env = _protected_execution_env(workspace_home=workspace_home, prepared=prepared)
+    execution_env.update(protected_env)
+    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
     runtime_overrides = _request_runtime_overrides(request, prepared)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
@@ -980,18 +994,13 @@ def _execute_request_subprocess_sync(
     python_executable, subprocess_env, cwd = sandbox_exec.resolve_subprocess_worker_context(
         prepared.paths if prepared is not None else None,
     )
-    workspace_home = _request_workspace_home_root(
+    workspace_home = _apply_workspace_home_contract_for_request(
         request,
         prepared,
+        execution_env,
         runtime_paths=runtime_paths,
         config=config,
     )
-    if workspace_home is not None:
-        workspace_home = _apply_workspace_home_contract_for_workspace(
-            workspace_home,
-            prepared=prepared,
-            execution_env=execution_env,
-        )
     overlay, overlay_failure = _workspace_env_overlay_for_request(
         request,
         prepared,
@@ -1005,9 +1014,9 @@ def _execute_request_subprocess_sync(
         return overlay_failure
     if overlay:
         execution_env.update(overlay)
-    worker_owned_env = _worker_owned_env(prepared)
-    execution_env.update(worker_owned_env)
-    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, worker_owned_env)
+    protected_env = _protected_execution_env(workspace_home=workspace_home, prepared=prepared)
+    execution_env.update(protected_env)
+    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
     subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, execution_env)
     if workspace_home is not None and request.tool_name == "python":
         cwd = str(workspace_home)

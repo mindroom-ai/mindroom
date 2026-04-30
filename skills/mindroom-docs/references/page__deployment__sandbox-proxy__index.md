@@ -243,9 +243,11 @@ To make that work, shell background-handle requests stay owned by the long-lived
 
 For agent-routed worker requests with a resolved workspace, MindRoom sets `HOME` and `MINDROOM_AGENT_WORKSPACE` to that workspace before running shell or python tools.
 It also sets `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` under that workspace.
-Worker cache variables such as `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, and `PYTHONPYCACHEPREFIX` stay under the worker cache directory when a worker root exists.
+Workspace identity variables and worker cache variables are owned by MindRoom for the request.
+`HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` stay under the workspace.
+`XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, and `PYTHONPYCACHEPREFIX` stay under the worker cache directory when a worker root exists.
 `VIRTUAL_ENV` is preserved from the active worker environment and is not pointed at the agent workspace.
-MindRoom reasserts these worker-owned cache and venv variables after request env passthrough and after `.mindroom/worker-env.sh`, so hooks can read them but cannot redirect them.
+MindRoom reasserts these owned variables after request env passthrough and after `.mindroom/worker-env.sh`, so hooks can read them but cannot redirect them.
 The practical contract is that `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and file/coding relative paths all refer to the same workspace.
 For example, after `get_attachment("att_...", mindroom_output_path="incoming/file.txt")`, worker-routed shell can read both `incoming/file.txt` and `~/incoming/file.txt`.
 
@@ -275,7 +277,7 @@ The runner sources this script with `bash` after applying the workspace home con
 `.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.).
 To prevent the runner from leaking its own control-plane credentials to tools, the overlay drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`.
 Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export.
-Everything else passes through, including service tokens and provider credentials you intentionally export from the hook.
+After MindRoom-owned env names are reasserted, other exported values pass through, including service tokens and provider credentials you intentionally export from the hook.
 If you don't want a value to reach tools, don't export it.
 
 **Limits and failure handling:**
