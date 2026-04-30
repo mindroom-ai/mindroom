@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping, MutableMapping
@@ -74,6 +75,7 @@ __all__ = [
     "replace_turn_controller_deps",
     "replace_turn_policy_deps",
     "replace_turn_store_deps",
+    "requires_linux",
     "resolve_response_thread_root_for_test",
     "runtime_paths_for",
     "sync_bot_runtime_state",
@@ -87,6 +89,23 @@ _VISIBLE_MESSAGE_IDS = count(1)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
 RuntimeBot = AgentBot | TeamBot
+TestFunction = Callable[..., object]
+
+
+def requires_linux(
+    *,
+    reason: str = "requires Linux",
+    timeout: float | None = None,
+) -> Callable[[TestFunction], TestFunction]:
+    """Return a decorator for tests that only run on Linux."""
+
+    def decorator(test_func: TestFunction) -> TestFunction:
+        marked = pytest.mark.skipif(sys.platform != "linux", reason=reason)(test_func)
+        if timeout is not None:
+            marked = pytest.mark.timeout(timeout)(marked)
+        return marked
+
+    return decorator
 
 
 async def drain_coalescing(*bots: RuntimeBot) -> None:

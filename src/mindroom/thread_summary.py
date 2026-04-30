@@ -336,6 +336,7 @@ async def _generate_summary(
         instructions=list(_SUMMARY_INSTRUCTIONS),
         model=model,
         output_schema=_ThreadSummary,
+        telemetry=False,
     )
     response = await cached_agent_run(
         agent=agent,

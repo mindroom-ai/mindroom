@@ -1135,6 +1135,10 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     if raw_path_error is not None:
         return SandboxRunnerSaveAttachmentResponse(ok=False, error=raw_path_error, failure_kind="tool")
 
+    decoded_bytes = _decode_attachment_save_bytes(payload)
+    if isinstance(decoded_bytes, str):
+        return SandboxRunnerSaveAttachmentResponse(ok=False, error=decoded_bytes, failure_kind="tool")
+
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None
     if payload.worker_key is not None:
         try:
@@ -1174,10 +1178,6 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     path_error = validate_output_path(policy, output_path)
     if path_error is not None:
         return SandboxRunnerSaveAttachmentResponse(ok=False, error=path_error, failure_kind="tool")
-
-    decoded_bytes = _decode_attachment_save_bytes(payload)
-    if isinstance(decoded_bytes, str):
-        return SandboxRunnerSaveAttachmentResponse(ok=False, error=decoded_bytes, failure_kind="tool")
 
     write_result = write_bytes_to_output_path(policy, output_path, decoded_bytes, file_mode=0o600)
     if isinstance(write_result, str):

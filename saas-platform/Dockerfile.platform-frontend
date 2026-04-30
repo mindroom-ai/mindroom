@@ -4,6 +4,9 @@ FROM oven/bun:1 AS base
 
 # Dependencies stage
 FROM base AS deps
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    TURBO_TELEMETRY_DISABLED=1 \
+    DO_NOT_TRACK=1
 WORKDIR /app
 COPY saas-platform/platform-frontend/package.json saas-platform/platform-frontend/bun.lock ./platform-frontend/
 # Use cache mount for bun cache to speed up builds
@@ -20,6 +23,9 @@ RUN cd platform-frontend && bun run build
 
 # Production stage - optimized for Next.js standalone
 FROM public.ecr.aws/docker/library/node:20-alpine AS final
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    TURBO_TELEMETRY_DISABLED=1 \
+    DO_NOT_TRACK=1
 WORKDIR /app
 
 # Add non-root user for security

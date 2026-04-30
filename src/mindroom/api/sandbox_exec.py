@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from mindroom import constants
 from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -225,6 +226,7 @@ def subprocess_passthrough_env() -> dict[str, str]:
 def generic_subprocess_env() -> dict[str, str]:
     """Build the baseline subprocess env for non-worker execution."""
     env = subprocess_passthrough_env()
+    env.update(vendor_telemetry_env_values())
     for key in ("HOME", "PATH", "PYTHONPATH", "VIRTUAL_ENV"):
         value = os.environ.get(key)
         if value:
@@ -279,6 +281,7 @@ def subprocess_env_for_request(
 
     env = dict(base_env)
     env.update(execution_env)
+    env.update(vendor_telemetry_env_values())
     return env
 
 

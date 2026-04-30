@@ -52,6 +52,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.models import WorkerSpec
+from tests.conftest import requires_linux
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -60,10 +61,8 @@ if TYPE_CHECKING:
 
 SANDBOX_TOKEN = "secret-token"  # noqa: S105
 SANDBOX_HEADERS = {"x-mindroom-sandbox-token": SANDBOX_TOKEN}
-REQUIRES_LINUX_LOCAL_WORKER = pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="local worker venv bootstrap is validated on Linux",
-)
+LINUX_LOCAL_WORKER_REASON = "local worker venv bootstrap is validated on Linux"
+LINUX_LOCAL_WORKER_TIMEOUT_SECONDS = 180
 
 
 def _fake_local_worker_venv_create(_self: object, venv_dir: Path) -> None:
@@ -2130,7 +2129,7 @@ def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
     assert "visible state roots" in response.json()["detail"]
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_worker_request_does_not_inject_base_dir_into_unrelated_tools(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2182,7 +2181,7 @@ def test_sandbox_runner_worker_request_rejects_invalid_base_dir_type_for_unknown
     assert "base_dir" in response.json()["detail"]
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2381,7 +2380,7 @@ def test_sandbox_runner_forwards_worker_context_to_tool_rebuild(
     assert worker_target.routing_agent_name == "general"
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2447,7 +2446,7 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
     assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2483,7 +2482,7 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
     assert not (worker_root / worker_dir_name(worker_key) / "workspace" / "note.txt").exists()
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_unset(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2677,7 +2676,7 @@ def test_prepare_worker_request_requires_explicit_private_visibility_for_user_ag
         )
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_storage(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2836,7 +2835,7 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
     assert (private_base_dir / "note.txt").read_text(encoding="utf-8") == "hello from private worker"
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_nested_worker_prefix(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2875,7 +2874,7 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_nested_work
     assert not (worker_root / "workspace" / "note.txt").exists()
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2906,7 +2905,7 @@ def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
     assert str(expected_prefix) in data["result"]
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2954,7 +2953,7 @@ def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
     assert str(expected_prefix) in data["result"]
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_worker_shell_uses_worker_home_and_venv(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2986,7 +2985,7 @@ def test_sandbox_runner_worker_shell_uses_worker_home_and_venv(
     assert data["result"] == expected_result
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_lists_known_workers(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3020,7 +3019,7 @@ def test_sandbox_runner_lists_known_workers(
     assert worker["debug_metadata"]["state_root"] == str((worker_root / worker_dir_name("worker-a")).resolve())
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_cleanup_marks_idle_workers_without_deleting_state(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3614,7 +3613,7 @@ def test_workspace_env_hook_skips_non_execution_tools_for_routed_agent(tmp_path:
     assert failure is None
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_workspace_env_hook_overlays_shell_execution(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3654,7 +3653,7 @@ def test_workspace_env_hook_overlays_shell_execution(
     assert path_value.startswith(f"{workspace.resolve()}/.local/bin:")
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_workspace_env_hook_edits_take_effect_on_next_call(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3707,7 +3706,7 @@ def test_workspace_env_hook_edits_take_effect_on_next_call(
     assert second.json()["result"] == "second"
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_workspace_env_hook_keeps_user_credentials_and_filters_runner_control(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3768,7 +3767,7 @@ def test_workspace_env_hook_keeps_user_credentials_and_filters_runner_control(
     assert sandbox_value == ""
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_workspace_env_hook_failure_returns_tool_failure(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3805,7 +3804,7 @@ def test_workspace_env_hook_failure_returns_tool_failure(
     assert "exited with code 5" in payload["error"]
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_workspace_env_hook_overlays_worker_routed_python_default_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3853,7 +3852,7 @@ def test_workspace_env_hook_overlays_worker_routed_python_default_mode(
     assert "visible-to-python" in str(payload["result"])
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_workspace_env_hook_skips_worker_routed_coding_default_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3893,7 +3892,7 @@ def test_workspace_env_hook_skips_worker_routed_coding_default_mode(
     assert payload["result"] == "note.txt:1:needle"
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_workspace_env_hook_failure_does_not_block_worker_routed_file_default_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3929,7 +3928,7 @@ def test_workspace_env_hook_failure_does_not_block_worker_routed_file_default_mo
     assert (workspace / "note.txt").read_text(encoding="utf-8") == "should not be written"
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_workspace_env_hook_overlays_python_subprocess(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3973,7 +3972,7 @@ def test_workspace_env_hook_overlays_python_subprocess(
     assert "https://wheels.example/simple" in str(payload["result"])
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_workspace_env_hook_unkeyed_proxy_uses_init_override_base_dir(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -4003,7 +4002,7 @@ def test_workspace_env_hook_unkeyed_proxy_uses_init_override_base_dir(
     assert payload["result"] == "visible"
 
 
-@REQUIRES_LINUX_LOCAL_WORKER
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_workspace_env_hook_rejects_symlink_escape(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

@@ -30,6 +30,7 @@ from mindroom.tool_system.metadata import (
     ToolStatus,
     register_tool_with_metadata,
 )
+from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
 _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
     {
@@ -143,6 +144,7 @@ def _shell_subprocess_env(
         env.pop("PATH", None)
     else:
         env["PATH"] = path_value
+    env.update(vendor_telemetry_env_values())
     return env
 
 

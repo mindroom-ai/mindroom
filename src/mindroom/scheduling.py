@@ -692,6 +692,7 @@ Examples of event/condition phrasing to include in the message (do not include t
         role="Parse scheduling requests into structured workflows",
         model=model,
         output_schema=ScheduledWorkflow,
+        telemetry=False,
     )
 
     try:

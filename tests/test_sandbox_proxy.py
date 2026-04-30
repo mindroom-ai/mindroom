@@ -26,6 +26,7 @@ from agno.models.response import ModelResponse
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 
+import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
@@ -33,6 +34,7 @@ import mindroom.tools.shell as shell_tool_module
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, load_config
 from mindroom.constants import (
+    VENDOR_TELEMETRY_ENV_VALUES,
     RuntimePaths,
     resolve_runtime_paths,
     shell_execution_runtime_env_values,
@@ -67,7 +69,7 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
-from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock
+from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock, requires_linux
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -436,6 +438,7 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@requires_linux(reason="local worker venv bootstrap is validated on Linux", timeout=180)
 async def test_sandbox_runner_save_attachment_writes_worker_workspace(tmp_path: Path) -> None:
     """The runner save endpoint should validate and atomically write bytes under the worker workspace."""
     runtime_paths = resolve_runtime_paths(
@@ -1410,6 +1413,30 @@ def test_shell_subprocess_env_prefers_explicit_base_process_env(monkeypatch: pyt
 
     assert env["PATH"] == "/request/bin"
     assert env["HOME"] == "/request-home"
+
+
+def test_shell_subprocess_env_forces_vendor_telemetry_over_runtime_env() -> None:
+    """Shell subprocesses should not let request-scoped env re-enable vendor telemetry."""
+    runtime_env = dict.fromkeys(VENDOR_TELEMETRY_ENV_VALUES, "enabled")
+
+    env = shell_tool_module._shell_subprocess_env(runtime_env)
+
+    for name, value in VENDOR_TELEMETRY_ENV_VALUES.items():
+        assert env[name] == value
+
+
+def test_subprocess_env_for_request_forces_vendor_telemetry_over_execution_env() -> None:
+    """Sandbox subprocess env should not let execution overlays re-enable vendor telemetry."""
+    base_env = dict.fromkeys(VENDOR_TELEMETRY_ENV_VALUES, "base-enabled")
+    execution_env = dict.fromkeys(VENDOR_TELEMETRY_ENV_VALUES, "request-enabled")
+    execution_env["MINDROOM_KEEP"] = "from-request"
+
+    env = sandbox_exec_module.subprocess_env_for_request(base_env, execution_env)
+
+    assert env is not None
+    assert env["MINDROOM_KEEP"] == "from-request"
+    for name, value in VENDOR_TELEMETRY_ENV_VALUES.items():
+        assert env[name] == value
 
 
 def test_execution_env_payload_denies_provider_env_by_default_in_isolated_runtime(

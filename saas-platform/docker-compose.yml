@@ -17,6 +17,9 @@ services:
     env_file:
       - .env
     environment:
+      - DO_NOT_TRACK=1
+      - NEXT_TELEMETRY_DISABLED=1
+      - TURBO_TELEMETRY_DISABLED=1
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
       - PLATFORM_DOMAIN=${PLATFORM_DOMAIN}

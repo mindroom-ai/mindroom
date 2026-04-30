@@ -537,6 +537,7 @@ async def _extract_memory_summary(
         name="MemoryAutoFlushExtractor",
         role="Extract durable memory statements for long-term memory storage.",
         model=model,
+        telemetry=False,
     )
     response = await extractor_agent.arun(prompt, session_id=f"memory_auto_flush_extract:{agent_name}:{session_id}")
     content = response.content
