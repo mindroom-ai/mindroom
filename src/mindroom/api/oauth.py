@@ -19,7 +19,7 @@ from mindroom.api.credentials import (
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
-from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
 from mindroom.oauth import (
     OAuthClaimValidationError,
     OAuthProvider,
@@ -374,12 +374,19 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
                 target.agent_name,
                 execution_identity=target.execution_identity,
             )
+        credentials_manager = (
+            target.base_manager if target is not None else get_runtime_credentials_manager(runtime_paths)
+        )
+        existing_credentials = load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        token_data = {**(existing_credentials or {}), **safe_result.token_data}
         save_scoped_credentials(
             provider.credential_service,
-            safe_result.token_data,
-            credentials_manager=(
-                target.base_manager if target is not None else get_runtime_credentials_manager(runtime_paths)
-            ),
+            token_data,
+            credentials_manager=credentials_manager,
             worker_target=worker_target,
         )
     except OAuthClaimValidationError as exc:

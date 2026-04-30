@@ -12,6 +12,7 @@ from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
+from mindroom.oauth.google_drive import GOOGLE_DRIVE_OAUTH_SCOPES
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -196,6 +197,38 @@ def test_google_drive_rejects_stored_token_missing_required_scopes(tmp_path: Pat
     result = json.loads(tool.search_files(query="name contains 'plan'", max_results=1))
 
     assert "Google Drive is not connected for this agent" in result["error"]
+
+
+def test_google_drive_stored_token_without_client_config_connects_on_invocation(tmp_path: Path) -> None:
+    runtime_paths = constants.resolve_runtime_paths(
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google_drive_oauth",
+        {
+            "token": "access-token",
+            "refresh_token": "refresh-token",
+            "scopes": list(GOOGLE_DRIVE_OAUTH_SCOPES),
+            "_source": "oauth",
+        },
+    )
+
+    tool = get_tool_by_name(
+        "google_drive",
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        disable_sandbox_proxy=True,
+    )
+    assert isinstance(tool, GoogleDriveTools)
+
+    result = json.loads(tool.search_files(query="name contains 'plan'", max_results=1))
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "google_drive"
+    assert result["connect_url"].startswith("https://mindroom.example.test/api/oauth/google_drive/authorize")
 
 
 def test_google_drive_saved_numeric_config_is_coerced_before_tool_init(tmp_path: Path) -> None:

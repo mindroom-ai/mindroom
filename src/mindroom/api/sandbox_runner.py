@@ -943,23 +943,22 @@ async def _execute_request_inprocess(
             execution_identity,
         ),
     ):
-        toolkit, entrypoint = _resolve_entrypoint(
-            runtime_paths=effective_runtime_paths,
-            config=config,
-            tool_name=request.tool_name,
-            function_name=request.function_name,
-            execution_identity=execution_identity,
-            credential_overrides=request.credential_overrides or None,
-            tool_config_overrides=request.tool_config_overrides or None,
-            tool_init_overrides=request.tool_init_overrides or None,
-            runtime_overrides=runtime_overrides,
-            worker_scope=request.worker_scope,
-            routing_agent_name=request.routing_agent_name,
-            private_agent_names=_request_private_agent_names(request),
-            tool_output_workspace_root=tool_output_workspace_root,
-        )
-
         try:
+            toolkit, entrypoint = _resolve_entrypoint(
+                runtime_paths=effective_runtime_paths,
+                config=config,
+                tool_name=request.tool_name,
+                function_name=request.function_name,
+                execution_identity=execution_identity,
+                credential_overrides=request.credential_overrides or None,
+                tool_config_overrides=request.tool_config_overrides or None,
+                tool_init_overrides=request.tool_init_overrides or None,
+                runtime_overrides=runtime_overrides,
+                worker_scope=request.worker_scope,
+                routing_agent_name=request.routing_agent_name,
+                private_agent_names=_request_private_agent_names(request),
+                tool_output_workspace_root=tool_output_workspace_root,
+            )
             if toolkit.requires_connect:
                 await _maybe_await(toolkit.connect())
                 try:

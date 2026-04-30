@@ -663,6 +663,47 @@ async def test_execute_request_inprocess_serializes_oauth_connection_required(
 
 
 @pytest.mark.asyncio
+async def test_execute_request_inprocess_serializes_oauth_connection_required_from_tool_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OAuth connection prompts from toolkit construction should survive the sandbox boundary."""
+    runtime_paths = resolve_runtime_paths(
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    def _raising_resolve_entrypoint(**_kwargs: object) -> object:
+        message = "Google Drive is not connected for this agent."
+        raise OAuthConnectionRequired(
+            message,
+            provider_id="google_drive",
+            connect_url="/api/oauth/google_drive/connect?agent_name=general",
+        )
+
+    monkeypatch.setattr(sandbox_runner_module, "_resolve_entrypoint", _raising_resolve_entrypoint)
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="google_drive",
+            function_name="search_files",
+            args=[],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+    )
+
+    assert response.ok is True
+    assert response.result == {
+        "error": "Google Drive is not connected for this agent.",
+        "oauth_connection_required": True,
+        "provider": "google_drive",
+        "connect_url": "/api/oauth/google_drive/connect?agent_name=general",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("raw_output_path", [None, "", "   \t\n"])
 async def test_execute_request_inprocess_ignores_empty_tool_output_path(
     monkeypatch: pytest.MonkeyPatch,

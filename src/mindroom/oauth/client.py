@@ -112,14 +112,19 @@ class ScopedOAuthClientMixin:
             expiry = expiry.replace(tzinfo=UTC)
         return expiry.timestamp()
 
-    def _credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
+    def _credentials_from_token_data(self, token_data: dict[str, Any]) -> Any | None:  # noqa: ANN401
         """Create a Google Credentials object from stored token data."""
         ensure_tool_deps(_GOOGLE_OAUTH_DEPS, self._oauth_tool_name, self._runtime_paths)
         from google.oauth2.credentials import Credentials  # noqa: PLC0415
 
         client_config = self._oauth_provider.client_config(self._runtime_paths)
         if client_config is None:
-            raise self._connection_required()
+            self._oauth_logger.warning(
+                "oauth_client_config_missing_for_stored_credentials",
+                tool_name=self._oauth_tool_name,
+                provider_id=self._oauth_provider.id,
+            )
+            return None
         scopes = token_data.get("scopes")
         if not isinstance(scopes, list):
             scopes = list(self._oauth_provider.scopes)
@@ -147,10 +152,10 @@ class ScopedOAuthClientMixin:
             return None
         try:
             creds = self._credentials_from_token_data(token_data)
-        except OAuthConnectionRequired:
-            raise
         except Exception:
             self._oauth_logger.exception("oauth_credentials_load_failed", tool_name=self._oauth_tool_name)
+            return None
+        if creds is None:
             return None
         self._oauth_logger.info("oauth_credentials_loaded", tool_name=self._oauth_tool_name)
         return creds
@@ -182,6 +187,8 @@ class ScopedOAuthClientMixin:
             from google.auth.transport.requests import Request  # noqa: PLC0415
 
             self.creds = self._credentials_from_token_data(token_data)
+            if self.creds is None:
+                self._raise_connection_required()
             if self.creds.expired and self.creds.refresh_token:
                 self.creds.refresh(Request())
                 refreshed = dict(token_data)

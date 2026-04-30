@@ -574,6 +574,8 @@ def test_safe_token_result_drops_raw_id_token() -> None:
             token_data={
                 "token": "access-token",
                 "_id_token": "header.payload.signature",
+                "id_token": "standard.header.payload",
+                "_oauth_claims": {"email": "unverified@example.test"},
             },
             claims={"email": "alice@example.com", "sub": "google-subject"},
             claims_verified=True,
@@ -581,6 +583,7 @@ def test_safe_token_result_drops_raw_id_token() -> None:
     )
 
     assert "_id_token" not in safe_result.token_data
+    assert "id_token" not in safe_result.token_data
     assert safe_result.token_data["_oauth_claims"] == {
         "email": "alice@example.com",
         "sub": "google-subject",
@@ -732,7 +735,7 @@ def test_dashboard_private_oauth_rejects_unbound_standalone_requester(tmp_path: 
     assert "Matrix requester identity" in response.json()["detail"]
 
 
-def test_callback_replaces_old_refresh_token_when_provider_omits_new_one(tmp_path: Path) -> None:
+def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
         {
@@ -769,7 +772,47 @@ def test_callback_replaces_old_refresh_token_when_provider_omits_new_one(tmp_pat
     stored_credentials = manager.for_worker(owner_worker_key).load_credentials(provider.credential_service)
     assert stored_credentials is not None
     assert stored_credentials["token"] == "test_drive-access-token"
-    assert "refresh_token" not in stored_credentials
+    assert stored_credentials["refresh_token"] == "old-refresh-token"
+
+
+def test_callback_replaces_old_refresh_token_when_provider_returns_new_one(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(include_refresh_token=True)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
+    manager.for_worker(owner_worker_key).save_credentials(
+        provider.credential_service,
+        {
+            "token": "old-access-token",
+            "refresh_token": "old-refresh-token",
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    stored_credentials = manager.for_worker(owner_worker_key).load_credentials(provider.credential_service)
+    assert stored_credentials is not None
+    assert stored_credentials["token"] == "test_drive-access-token"
+    assert stored_credentials["refresh_token"] == "test_drive-refresh-token"
 
 
 def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_path: Path) -> None:
