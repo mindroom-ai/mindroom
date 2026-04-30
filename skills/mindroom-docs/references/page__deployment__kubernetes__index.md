@@ -166,11 +166,11 @@ When `workerBackend: kubernetes` is enabled, the chart creates:
 
 - A worker-manager ServiceAccount for the primary runtime.
 - A Role and RoleBinding that allow managing worker Deployments and Services in the instance namespace.
-- NetworkPolicy rules that allow the primary runtime to reach the internal worker port and allow worker traffic within the instance namespace.
+- NetworkPolicy rules that allow the primary runtime to reach the internal worker port while denying worker-to-worker runner ingress.
 
 ### Operations
 
-The authenticated dashboard API exposes `/api/workers` to list active or idle workers and `/api/workers/cleanup` to trigger cleanup manually. Dedicated workers are internal-only cluster Services and are authenticated with the shared `sandbox_proxy_token`. See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the execution model, credential leases, and non-Kubernetes deployment modes.
+The authenticated dashboard API exposes `/api/workers` to list active or idle workers and `/api/workers/cleanup` to trigger cleanup manually. Dedicated workers are internal-only cluster Services and are authenticated with per-worker runner tokens derived from the primary runtime's `sandbox_proxy_token`. See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the execution model, credential leases, and non-Kubernetes deployment modes.
 
 ## Secrets Management
 

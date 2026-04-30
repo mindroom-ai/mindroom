@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import importlib
 import json
 import os
@@ -60,6 +61,7 @@ _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+_WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +155,15 @@ def worker_id_for_key(worker_key: str, *, prefix: str) -> str:
 def service_host(service_name: str, namespace: str, port: int) -> str:
     """Return the cluster-local HTTP root for one worker Service."""
     return f"http://{service_name}.{namespace}.svc.cluster.local:{port}"
+
+
+def worker_auth_token(shared_token: str | None, worker_key: str) -> str | None:
+    """Derive the bearer token accepted by one dedicated worker runner."""
+    if shared_token is None:
+        return None
+    key = shared_token.encode("utf-8")
+    payload = _WORKER_TOKEN_PURPOSE + b"\0" + worker_key.encode("utf-8")
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
 def parse_annotation_float(annotations: dict[str, str], key: str, default: float) -> float:
@@ -534,6 +545,8 @@ class KubernetesResourceManager:
         }
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
+            "automountServiceAccountToken": False,
+            "enableServiceLinks": self.config.enable_service_links,
             "securityContext": {
                 "runAsUser": 1000,
                 "runAsGroup": 1000,
@@ -638,23 +651,11 @@ class KubernetesResourceManager:
             {"name": _DEDICATED_WORKER_ROOT_ENV, "value": dedicated_root},
             {"name": "HOME", "value": dedicated_root},
         ]
-        if self.config.token_secret_name is not None:
-            env.append(
-                {
-                    "name": _TOKEN_ENV_NAME,
-                    "valueFrom": {
-                        "secretKeyRef": {
-                            "name": self.config.token_secret_name,
-                            "key": self.config.token_secret_key,
-                        },
-                    },
-                },
-            )
-        elif self.auth_token is not None:
-            env.append({"name": _TOKEN_ENV_NAME, "value": self.auth_token})
-        else:
+        worker_token = worker_auth_token(self.auth_token, worker_key)
+        if worker_token is None:
             msg = "A worker auth token is required for Kubernetes workers."
             raise WorkerBackendError(msg)
+        env.append({"name": _TOKEN_ENV_NAME, "value": worker_token})
 
         for name, value in sorted(self.config.extra_env.items()):
             if name in constants.VENDOR_TELEMETRY_ENV_VALUES:

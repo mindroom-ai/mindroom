@@ -152,6 +152,8 @@ spec:
               value: {{ .Values.workers.kubernetes.readyTimeoutSeconds | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_NAME_PREFIX
               value: {{ .Values.workers.kubernetes.namePrefix | quote }}
+            - name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
+              value: {{ .Values.workers.kubernetes.enableServiceLinks | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
               value: {{ toJson .Values.workers.kubernetes.extraLabels | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON
@@ -164,12 +166,6 @@ spec:
               value: {{ .Values.workers.kubernetes.resources.requests.cpu | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_CPU_LIMIT
               value: {{ .Values.workers.kubernetes.resources.limits.cpu | quote }}
-            {{- if $proxyTokenSecretName }}
-            - name: MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_NAME
-              value: {{ $proxyTokenSecretName | quote }}
-            - name: MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_KEY
-              value: {{ .Values.workers.sandbox.proxyToken.key | quote }}
-            {{- end }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
               value: {{ .Values.workers.kubernetes.nodeName | quote }}

@@ -141,8 +141,7 @@ workers:
   The chart can create the worker-manager RBAC and a worker NetworkPolicy for the same namespace.
 - If workers run in a different namespace, provide storage, service accounts, and network policy behavior that are valid for that namespace.
   Kubernetes owner references are only set by default for same-namespace workers.
-  When using an existing sandbox proxy token secret, create it in both the runtime namespace and the worker namespace.
-  When using `workers.sandbox.proxyToken.value`, the chart creates both copies.
+  The sandbox proxy token secret is only needed by the primary runtime; dedicated worker pods receive per-worker derived runner tokens.
 - Mount arbitrary platform-specific files, projected secrets, ConfigMaps, init containers, and sidecars through `extraVolumes`, `extraVolumeMounts`, `initContainers`, and `extraContainers`.
 - Use `nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`, and `podDisruptionBudget` for cluster-specific scheduling and availability policy.
 - Set `selectorLabels` when adopting an existing Deployment with an immutable selector.

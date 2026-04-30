@@ -9,7 +9,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/component: worker
+      mindroom.ai/component: worker
       app.kubernetes.io/managed-by: mindroom
       app.kubernetes.io/name: mindroom-worker
       {{- with .Values.workers.kubernetes.extraLabels }}

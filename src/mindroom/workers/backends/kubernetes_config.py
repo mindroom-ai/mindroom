@@ -42,8 +42,6 @@ _STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX
 _CONFIG_MAP_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME"
 _CONFIG_KEY_ENV = "MINDROOM_KUBERNETES_WORKER_CONFIG_KEY"
 _CONFIG_PATH_ENV = "MINDROOM_KUBERNETES_WORKER_CONFIG_PATH"
-_TOKEN_SECRET_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_NAME"  # noqa: S105
-_TOKEN_SECRET_KEY_ENV = "MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_KEY"  # noqa: S105
 _IDLE_TIMEOUT_ENV = "MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS"
 _READY_TIMEOUT_ENV = "MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS"
 _NAME_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX"
@@ -57,6 +55,7 @@ _MEMORY_REQUEST_ENV = "MINDROOM_KUBERNETES_WORKER_MEMORY_REQUEST"
 _MEMORY_LIMIT_ENV = "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT"
 _CPU_REQUEST_ENV = "MINDROOM_KUBERNETES_WORKER_CPU_REQUEST"
 _CPU_LIMIT_ENV = "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT"
+_ENABLE_SERVICE_LINKS_ENV = "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 
 
@@ -125,8 +124,6 @@ class _KubernetesWorkerBackendConfig:
     config_map_name: str | None
     config_key: str
     config_path: str
-    token_secret_name: str | None
-    token_secret_key: str
     idle_timeout_seconds: float
     ready_timeout_seconds: float
     name_prefix: str
@@ -138,6 +135,7 @@ class _KubernetesWorkerBackendConfig:
     owner_deployment_name: str | None
     resource_requests: dict[str, str]
     resource_limits: dict[str, str]
+    enable_service_links: bool
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _KubernetesWorkerBackendConfig:
@@ -155,7 +153,6 @@ class _KubernetesWorkerBackendConfig:
             raise WorkerBackendError(msg)
 
         config_map_name = _read_env(env, _CONFIG_MAP_NAME_ENV) or None
-        token_secret_name = _read_env(env, _TOKEN_SECRET_NAME_ENV) or None
         resource_requests = {
             "memory": _read_env(env, _MEMORY_REQUEST_ENV, _DEFAULT_MEMORY_REQUEST) or _DEFAULT_MEMORY_REQUEST,
             "cpu": _read_env(env, _CPU_REQUEST_ENV, _DEFAULT_CPU_REQUEST) or _DEFAULT_CPU_REQUEST,
@@ -180,8 +177,6 @@ class _KubernetesWorkerBackendConfig:
             config_map_name=config_map_name,
             config_key=_read_env(env, _CONFIG_KEY_ENV, _DEFAULT_CONFIG_KEY) or _DEFAULT_CONFIG_KEY,
             config_path=_read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
-            token_secret_name=token_secret_name,
-            token_secret_key=_read_env(env, _TOKEN_SECRET_KEY_ENV, "sandbox_proxy_token") or "sandbox_proxy_token",
             idle_timeout_seconds=_read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
             ready_timeout_seconds=_read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
             name_prefix=_read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
@@ -193,6 +188,7 @@ class _KubernetesWorkerBackendConfig:
             owner_deployment_name=_read_env(env, _OWNER_DEPLOYMENT_NAME_ENV) or None,
             resource_requests=resource_requests,
             resource_limits=resource_limits,
+            enable_service_links=_read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
         )
 
 
@@ -222,8 +218,6 @@ def kubernetes_backend_config_signature(
         config.config_map_name or "",
         config.config_key,
         config.config_path,
-        config.token_secret_name or "",
-        config.token_secret_key,
         str(config.idle_timeout_seconds),
         str(config.ready_timeout_seconds),
         config.name_prefix,
@@ -235,6 +229,7 @@ def kubernetes_backend_config_signature(
         config.owner_deployment_name or "",
         resource_requests_json,
         resource_limits_json,
+        str(config.enable_service_links),
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )

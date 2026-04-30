@@ -609,7 +609,7 @@ class KubernetesWorkerBackend:
             worker_id=worker_id,
             worker_key=worker_key,
             endpoint=f"{endpoint_root}/api/sandbox-runner/execute",
-            auth_token=self.auth_token,
+            auth_token=resources.worker_auth_token(self.auth_token, worker_key),
             status=status,
             backend_name=self.backend_name,
             last_used_at=last_used_at,

@@ -237,6 +237,7 @@ workers:
     idleTimeoutSeconds: 1800
     namePrefix: mindroom-worker
     storageSubpathPrefix: workers
+    enableServiceLinks: false
     configMapName: ""
     configKey: ""
     configPath: ""
