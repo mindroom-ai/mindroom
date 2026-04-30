@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
-  ArrowRight,
   Settings,
   CheckCircle2,
   Circle,
@@ -52,11 +51,7 @@ import {
 import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
 import { FilterSelector } from "@/components/shared/FilterSelector";
 
-const SHARED_ONLY_PROVIDER_IDS = new Set([
-  "google",
-  "spotify",
-  "homeassistant",
-]);
+const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
 
 export function Integrations() {
   const { agents, agentPoliciesByAgent } = useConfigStore();
@@ -704,20 +699,7 @@ export function Integrations() {
 
       <CardContent>
         <div className="space-y-3">
-          <div className="flex gap-2">
-            {getActionButton(integration)}
-            {integration.id === "google" && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => handleIntegrationAction(integration)}
-                className="flex items-center gap-1"
-              >
-                <ArrowRight className="h-3 w-3" />
-                Details
-              </Button>
-            )}
-          </div>
+          <div className="flex gap-2">{getActionButton(integration)}</div>
         </div>
       </CardContent>
     </Card>

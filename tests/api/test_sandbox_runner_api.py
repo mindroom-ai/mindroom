@@ -34,6 +34,7 @@ from mindroom.constants import (
     serialize_runtime_paths,
 )
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -611,6 +612,54 @@ async def test_execute_request_inprocess_marks_tool_failures(
     assert response.ok is False
     assert response.error == "Sandbox tool execution failed: FileNotFoundError: missing.txt"
     assert response.failure_kind == "tool"
+
+
+@pytest.mark.asyncio
+async def test_execute_request_inprocess_serializes_oauth_connection_required(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OAuth connection prompts should survive the sandbox response boundary."""
+    runtime_paths = resolve_runtime_paths(
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    class _FakeToolkit:
+        requires_connect = False
+
+    def _raising_entrypoint(*_args: object, **_kwargs: object) -> object:
+        message = "Google Drive is not connected for this agent."
+        raise OAuthConnectionRequired(
+            message,
+            provider_id="google_drive",
+            connect_url="/api/oauth/google_drive/connect?agent_name=general",
+        )
+
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_resolve_entrypoint",
+        lambda **_kwargs: (_FakeToolkit(), _raising_entrypoint),
+    )
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="google_drive",
+            function_name="search_files",
+            args=[],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+    )
+
+    assert response.ok is True
+    assert response.result == {
+        "error": "Google Drive is not connected for this agent.",
+        "oauth_connection_required": True,
+        "provider": "google_drive",
+        "connect_url": "/api/oauth/google_drive/connect?agent_name=general",
+    }
 
 
 @pytest.mark.asyncio

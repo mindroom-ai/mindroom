@@ -71,8 +71,6 @@ def _google_token_parser(
         "_source": "oauth",
         "_oauth_provider": provider.id,
     }
-    if isinstance(id_token, str) and id_token:
-        token_data["_id_token"] = id_token
     if isinstance(refresh_token, str) and refresh_token:
         token_data["refresh_token"] = refresh_token
     token_type = token_response.get("token_type")

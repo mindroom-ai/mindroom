@@ -458,6 +458,7 @@ class OAuthProvider:
         """Return token result with safe claim summary persisted as internal metadata."""
         result = _token_result_with_core_metadata(self, result)
         token_data = dict(result.token_data)
+        token_data.pop("_id_token", None)
         if result.claims:
             token_data["_oauth_claims"] = _safe_claim_summary(result.claims)
         return OAuthTokenResult(

@@ -31,6 +31,7 @@ from mindroom.attachments import _normalize_attachment_id
 from mindroom.config.main import Config, _normalized_config_data, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -967,6 +968,14 @@ async def _execute_request_inprocess(
                     await _maybe_await(toolkit.close())
             else:
                 result = await _maybe_await(entrypoint(*request.args, **kwargs))
+        except OAuthConnectionRequired as exc:
+            logger.info(
+                "sandbox_tool_oauth_connection_required",
+                tool_name=request.tool_name,
+                function_name=request.function_name,
+                provider_id=exc.provider_id,
+            )
+            return SandboxRunnerExecuteResponse(ok=True, result=_oauth_connection_required_result(exc))
         except Exception as exc:
             logger.warning(
                 "sandbox_tool_execution_failed",
@@ -981,6 +990,16 @@ async def _execute_request_inprocess(
             )
 
     return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
+
+
+def _oauth_connection_required_result(exc: OAuthConnectionRequired) -> dict[str, object]:
+    """Serialize OAuthConnectionRequired as the same structured tool result used in-process."""
+    return {
+        "error": str(exc),
+        "oauth_connection_required": True,
+        "provider": exc.provider_id,
+        "connect_url": exc.connect_url,
+    }
 
 
 def _subprocess_failure_response(

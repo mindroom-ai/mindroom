@@ -557,6 +557,36 @@ def test_custom_token_exchanger_metadata_is_stamped_by_core(tmp_path: Path) -> N
     assert safe_result.token_data["scopes"] == ["scope.read"]
 
 
+def test_safe_token_result_drops_raw_id_token() -> None:
+    provider = OAuthProvider(
+        id="custom_mail",
+        display_name="Custom Mail",
+        authorization_url="https://auth.example.test/custom/authorize",
+        token_url="https://auth.example.test/custom/token",
+        scopes=("mail.read",),
+        credential_service="custom_mail_oauth",
+        client_id_env="TEST_OAUTH_CLIENT_ID",
+        client_secret_env="TEST_OAUTH_CLIENT_SECRET",
+    )
+
+    safe_result = provider.token_result_with_safe_claims(
+        OAuthTokenResult(
+            token_data={
+                "token": "access-token",
+                "_id_token": "header.payload.signature",
+            },
+            claims={"email": "alice@example.com", "sub": "google-subject"},
+            claims_verified=True,
+        ),
+    )
+
+    assert "_id_token" not in safe_result.token_data
+    assert safe_result.token_data["_oauth_claims"] == {
+        "email": "alice@example.com",
+        "sub": "google-subject",
+    }
+
+
 def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     provider = google_drive_oauth_provider()

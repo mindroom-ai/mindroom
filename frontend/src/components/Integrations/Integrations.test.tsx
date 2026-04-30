@@ -65,7 +65,6 @@ const scopedMockTools = [
 let mockStatusAuthoritative = true;
 const {
   mockUseTools,
-  mockGoogleOnAction,
   mockGoogleDriveOnAction,
   mockGoogleDriveOnDisconnect,
   mockGoogleGmailOnAction,
@@ -74,14 +73,12 @@ const {
   mockSpotifyOnDisconnect,
   mockPlexOnAction,
   mockPlexOnDisconnect,
-  mockGoogleLoadStatus,
   mockGoogleDriveLoadStatus,
   mockGoogleGmailLoadStatus,
   mockSpotifyLoadStatus,
   mockPlexLoadStatus,
 } = vi.hoisted(() => ({
   mockUseTools: vi.fn(),
-  mockGoogleOnAction: vi.fn(),
   mockGoogleDriveOnAction: vi.fn(),
   mockGoogleDriveOnDisconnect: vi.fn(),
   mockGoogleGmailOnAction: vi.fn(),
@@ -90,9 +87,6 @@ const {
   mockSpotifyOnDisconnect: vi.fn(),
   mockPlexOnAction: vi.fn(),
   mockPlexOnDisconnect: vi.fn(),
-  mockGoogleLoadStatus: vi
-    .fn()
-    .mockResolvedValue({ status: "available", connected: false }),
   mockGoogleDriveLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
@@ -185,23 +179,6 @@ vi.mock("./EnhancedConfigDialog", () => ({
 // Mock integration providers
 vi.mock("./integrations/index", () => ({
   integrationProviders: {
-    google: {
-      getConfig: () => ({
-        integration: {
-          id: "google",
-          name: "Google Services",
-          description: "Gmail, Calendar, and Drive integration",
-          category: "email",
-          icon: <span>Google Icon</span>,
-          status: "available",
-          setup_type: "special",
-          connected: false,
-        },
-        onAction: mockGoogleOnAction,
-        ConfigComponent: () => <div>Google Config Component</div>,
-      }),
-      loadStatus: mockGoogleLoadStatus,
-    },
     google_drive: {
       getConfig: () => ({
         integration: {
@@ -273,23 +250,6 @@ vi.mock("./integrations/index", () => ({
     },
   },
   getAllIntegrations: () => [
-    {
-      getConfig: () => ({
-        integration: {
-          id: "google",
-          name: "Google Services",
-          description: "Gmail, Calendar, and Drive integration",
-          category: "email",
-          icon: <span>Google Icon</span>,
-          status: "available",
-          setup_type: "special",
-          connected: false,
-        },
-        onAction: mockGoogleOnAction,
-        ConfigComponent: () => <div>Google Config Component</div>,
-      }),
-      loadStatus: mockGoogleLoadStatus,
-    },
     {
       getConfig: () => ({
         integration: {
@@ -367,7 +327,6 @@ describe("Integrations", () => {
     vi.clearAllMocks();
     mockToast.mockReset();
     mockStatusAuthoritative = true;
-    mockGoogleOnAction.mockResolvedValue(undefined);
     mockGoogleDriveOnAction.mockResolvedValue(undefined);
     mockGoogleDriveOnDisconnect.mockResolvedValue(undefined);
     mockGoogleGmailOnAction.mockResolvedValue(undefined);
@@ -376,10 +335,6 @@ describe("Integrations", () => {
     mockSpotifyOnDisconnect.mockResolvedValue(undefined);
     mockPlexOnAction.mockResolvedValue(undefined);
     mockPlexOnDisconnect.mockResolvedValue(undefined);
-    mockGoogleLoadStatus.mockResolvedValue({
-      status: "available",
-      connected: false,
-    });
     mockGoogleDriveLoadStatus.mockResolvedValue({
       status: "available",
       connected: false,
@@ -432,9 +387,11 @@ describe("Integrations", () => {
 
     await waitFor(() => {
       // Provider integrations
-      expect(screen.getByText("Google Services")).toBeInTheDocument();
+      expect(screen.getByText("Google Drive")).toBeInTheDocument();
       expect(
-        screen.getByText("Gmail, Calendar, and Drive integration"),
+        screen.getByText(
+          "Search and read files from your connected Google Drive",
+        ),
       ).toBeInTheDocument();
       expect(screen.getByText("Spotify")).toBeInTheDocument();
       expect(screen.getByText("Music streaming service")).toBeInTheDocument();
@@ -453,9 +410,9 @@ describe("Integrations", () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      // Available integrations (Google, Spotify, and Weather)
+      // Available integrations (Google Drive, Spotify, and Weather)
       const availableBadges = screen.getAllByText("Available");
-      expect(availableBadges.length).toBeGreaterThanOrEqual(2); // At least Google and Spotify
+      expect(availableBadges.length).toBeGreaterThanOrEqual(2); // At least Google Drive and Spotify
 
       // Connected integration
       expect(screen.getByText("Connected")).toBeInTheDocument(); // Plex
@@ -466,7 +423,7 @@ describe("Integrations", () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      expect(screen.getByText("Google Services")).toBeInTheDocument();
+      expect(screen.getByText("Google Drive")).toBeInTheDocument();
     });
 
     const searchInput = screen.getByPlaceholderText("Search tools...");
@@ -474,7 +431,7 @@ describe("Integrations", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Spotify")).toBeInTheDocument();
-      expect(screen.queryByText("Google Services")).not.toBeInTheDocument();
+      expect(screen.queryByText("Google Drive")).not.toBeInTheDocument();
       expect(screen.queryByText("Plex")).not.toBeInTheDocument();
     });
   });
@@ -491,7 +448,7 @@ describe("Integrations", () => {
     fireEvent.click(availableButton);
 
     await waitFor(() => {
-      expect(screen.getByText("Google Services")).toBeInTheDocument(); // Available
+      expect(screen.getByText("Google Drive")).toBeInTheDocument(); // Available
     });
   });
 
@@ -541,7 +498,7 @@ describe("Integrations", () => {
 
     // Wait for initial render
     await waitFor(() => {
-      expect(screen.getByText("Google Services")).toBeInTheDocument();
+      expect(screen.getByText("Google Drive")).toBeInTheDocument();
       expect(screen.getByText("Spotify")).toBeInTheDocument();
     });
 
@@ -560,7 +517,7 @@ describe("Integrations", () => {
     // But the elements might still be in the DOM, just hidden
     // So let's check for visibility instead
     const googleElement = screen.queryByText(
-      "Gmail, Calendar, and Drive integration",
+      "Search and read files from your connected Google Drive",
     );
     if (googleElement) {
       // Check if it's hidden (parent tab panel might be hidden)
@@ -575,10 +532,6 @@ describe("Integrations", () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      // Special setup type
-      const setupButtons = screen.getAllByRole("button", { name: /Setup/ });
-      expect(setupButtons.length).toBeGreaterThan(0);
-
       // OAuth type
       const connectButtons = screen.getAllByRole("button", { name: /Connect/ });
       expect(connectButtons.length).toBeGreaterThan(0);
@@ -608,27 +561,6 @@ describe("Integrations", () => {
       await waitFor(() => {
         // Should show the Enhanced Config Dialog
         expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
-      });
-    }
-  });
-
-  it("should open dialog for integrations with ConfigComponent", async () => {
-    render(<Integrations />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Google Services")).toBeInTheDocument();
-    });
-
-    // Find and click the Google Setup button
-    const googleCard = screen.getByText("Google Services").closest(".h-full");
-    const setupButton = googleCard?.querySelector("button");
-
-    if (setupButton) {
-      fireEvent.click(setupButton);
-
-      await waitFor(() => {
-        expect(screen.getByText("Google Services Setup")).toBeInTheDocument();
-        expect(screen.getByText("Google Config Component")).toBeInTheDocument();
       });
     }
   });
@@ -901,7 +833,7 @@ describe("Integrations", () => {
     expect(
       screen.getByText("worker_scope=shared", { selector: "code" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Google Services")).not.toBeInTheDocument();
+    expect(screen.getByText("Google Drive")).toBeInTheDocument();
     expect(screen.queryByText("Spotify")).not.toBeInTheDocument();
     expect(screen.queryByText("Weather")).toBeInTheDocument();
     expect(
@@ -966,7 +898,7 @@ describe("Integrations", () => {
       ).toBeInTheDocument();
     });
 
-    expect(screen.queryByText("Google Services")).not.toBeInTheDocument();
+    expect(screen.getByText("Google Drive")).toBeInTheDocument();
     expect(screen.queryByText("Spotify")).not.toBeInTheDocument();
     expect(screen.queryByText("Weather")).not.toBeInTheDocument();
     expect(screen.getByText("Private Mail")).toBeInTheDocument();
