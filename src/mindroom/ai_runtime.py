@@ -45,10 +45,13 @@ type ModelRunInput = str | Sequence[Message]
 _QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
 QUEUED_MESSAGE_NOTICE_TEXT = (
-    "[SYSTEM NOTICE] A new message from the user has arrived in this thread while you were working. "
-    "You should wrap up your current work and produce a final text response now. "
-    "Avoid further tool calls unless strictly necessary. "
-    "The new message will be handled in your next turn."
+    "[SYSTEM NOTICE - NEWER USER MESSAGE WAITING] The user posted another message in this thread "
+    "while you were mid-turn. Treat that message as the start of the next turn, not part of this "
+    "one. Finish now with a final text response based on what you have already done — do not "
+    "address the newer message; the next turn will, and may continue, adjust, or redirect this "
+    "work. Do not start new tool calls. Only complete a tool call already in flight this turn if "
+    "stopping would leave broken or unsafe state. Write your final text as a normal response to "
+    "the original request; do not mention this notice or the queued message."
 )
 
 
