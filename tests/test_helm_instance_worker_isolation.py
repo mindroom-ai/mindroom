@@ -89,6 +89,18 @@ def test_instance_chart_disables_service_links_for_dynamic_worker_pods_by_defaul
     assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
 
 
+def test_instance_chart_worker_manager_can_manage_per_worker_auth_secrets() -> None:
+    """The control plane needs Secret CRUD for derived per-worker runner tokens."""
+    docs = _render_instance_chart()
+    role = _resource(docs, "Role", "mindroom-worker-manager-demo")
+
+    assert {
+        "apiGroups": [""],
+        "resources": ["secrets"],
+        "verbs": ["get", "create", "patch", "delete"],
+    } in role["rules"]
+
+
 def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> None:
     """The runtime chart worker NetworkPolicy selector should match generated worker pod labels."""
     docs = _render_runtime_chart()
@@ -109,6 +121,18 @@ def test_runtime_chart_disables_service_links_for_dynamic_worker_pods_by_default
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
     assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
+
+
+def test_runtime_chart_worker_manager_can_manage_per_worker_auth_secrets() -> None:
+    """Runtime-chart RBAC should include Secret CRUD for derived per-worker runner tokens."""
+    docs = _render_runtime_chart()
+    role = _resource(docs, "Role", "mindroom-runtime-worker-manager")
+
+    assert {
+        "apiGroups": [""],
+        "resources": ["secrets"],
+        "verbs": ["create", "delete", "get", "patch"],
+    } in role["rules"]
 
 
 def test_runtime_chart_does_not_copy_shared_proxy_token_to_worker_namespace() -> None:

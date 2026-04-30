@@ -120,7 +120,7 @@ The sidecar gets:
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 
-In dedicated-worker mode the primary MindRoom runtime creates worker Deployments and Services on demand.
+In dedicated-worker mode the primary MindRoom runtime creates worker Deployments, Services, and per-worker auth Secrets on demand.
 Each worker pod runs the sandbox-runner app and is addressed through an internal cluster Service.
 Each dedicated worker needs access to its agent's storage directory.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
@@ -144,6 +144,7 @@ Important notes for this mode:
 - If you must keep `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
 - `kubernetesWorkerImage` and `kubernetesWorkerImagePullPolicy` default to the main MindRoom image settings when left empty.
 - The chart creates the worker-manager ServiceAccount, Role, RoleBinding, and worker-specific NetworkPolicy rules automatically when this backend is enabled.
+  The worker-manager Role can manage per-worker auth Secrets but does not copy the shared control-plane token into worker namespaces.
 - The primary runtime does not need `MINDROOM_SANDBOX_PROXY_URL` in this mode because worker endpoints come from the Kubernetes worker handles.
 - Dynamic worker pods default to `enableServiceLinks: false` so Kubernetes does not inject sibling Service names into the runner environment.
 - Runner ingress defaults to allowing the MindRoom control-plane pod to reach worker runner ports, while worker-to-worker ingress is denied by NetworkPolicy.
@@ -322,7 +323,8 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 ## Security considerations
 
 - The worker runtime never gets the primary runtime API key files, Matrix client state, or orchestrator authority.
-- The sandbox token authenticates proxy traffic, so use a strong random value. Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
+- The sandbox token authenticates proxy traffic, so use a strong random value.
+  Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
 - The worker container `securityContext` drops all capabilities and disables privilege escalation.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.

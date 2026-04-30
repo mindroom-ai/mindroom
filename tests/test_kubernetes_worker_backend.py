@@ -32,7 +32,11 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
-from mindroom.workers.backends.kubernetes_resources import ANNOTATION_STARTUP_MANIFEST_HASH, worker_auth_token
+from mindroom.workers.backends.kubernetes_resources import (
+    ANNOTATION_RUNNER_TOKEN_HASH,
+    ANNOTATION_STARTUP_MANIFEST_HASH,
+    worker_auth_token,
+)
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 
@@ -231,8 +235,12 @@ class _FakeAppsApi:
 class _FakeCoreApi:
     def __init__(self) -> None:
         self.services: dict[str, object] = {}
+        self.secrets: dict[str, object] = {}
         self.pods: dict[str, object] = {}
         self.created_bodies: list[dict[str, object]] = []
+        self.created_secret_bodies: list[dict[str, object]] = []
+        self.patched_secret_bodies: list[tuple[str, dict[str, object]]] = []
+        self.deleted_secret_names: list[str] = []
 
     def read_namespaced_service(self, name: str, namespace: str) -> object:
         _ = namespace
@@ -257,6 +265,32 @@ class _FakeCoreApi:
     def delete_namespaced_service(self, name: str, namespace: str) -> None:
         _ = namespace
         self.services.pop(name, None)
+
+    def read_namespaced_secret(self, name: str, namespace: str) -> object:
+        _ = namespace
+        secret = self.secrets.get(name)
+        if secret is None:
+            raise _FakeApiError(404)
+        return secret
+
+    def create_namespaced_secret(self, namespace: str, body: dict[str, object]) -> object:
+        _ = namespace
+        self.created_secret_bodies.append(body)
+        secret = _to_namespace(body)
+        self.secrets[secret.metadata.name] = secret
+        return secret
+
+    def patch_namespaced_secret(self, name: str, namespace: str, body: dict[str, object]) -> object:
+        _ = namespace
+        self.patched_secret_bodies.append((name, body))
+        secret = _to_namespace(body)
+        self.secrets[name] = secret
+        return secret
+
+    def delete_namespaced_secret(self, name: str, namespace: str) -> None:
+        _ = namespace
+        self.deleted_secret_names.append(name)
+        self.secrets.pop(name, None)
 
     def read_namespaced_pod(self, name: str, namespace: str) -> object:
         _ = namespace
@@ -385,8 +419,8 @@ def _install_real_elapsed_wait_for_ready(
     backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
 
 
-def test_kubernetes_backend_ensures_worker_service_and_deployment(tmp_path: Path) -> None:  # noqa: PLR0915
-    """Ensuring one worker should create a service/deployment pair on shared storage."""
+def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tmp_path: Path) -> None:  # noqa: PLR0915
+    """Ensuring one worker should create runtime resources on shared storage."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
@@ -410,11 +444,15 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment(tmp_path: Path
     assert handle.status == "ready"
 
     assert len(core_api.created_bodies) == 1
+    assert len(core_api.created_secret_bodies) == 1
     assert len(apps_api.created_bodies) == 1
+    auth_secret = core_api.created_secret_bodies[0]
     deployment = apps_api.created_bodies[0]
     container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_by_name = {env["name"]: env for env in container["env"]}
     env_values = {env["name"]: env.get("value") for env in container["env"]}
     env_names = set(env_values)
+    token_env = env_by_name["MINDROOM_SANDBOX_PROXY_TOKEN"]
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY" in env_names
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
@@ -424,7 +462,20 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment(tmp_path: Path
     assert "VIRTUAL_ENV" in env_names
     assert "PATH" in env_names
     assert "MINDROOM_SHARED_CREDENTIALS_PATH" in env_names
-    assert env_values["MINDROOM_SANDBOX_PROXY_TOKEN"] == handle.auth_token
+    assert token_env == {
+        "name": "MINDROOM_SANDBOX_PROXY_TOKEN",
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": handle.worker_id,
+                "key": "MINDROOM_SANDBOX_PROXY_TOKEN",
+            },
+        },
+    }
+    assert auth_secret["metadata"]["name"] == handle.worker_id
+    assert auth_secret["stringData"] == {"MINDROOM_SANDBOX_PROXY_TOKEN": handle.auth_token}
+    assert handle.auth_token not in json.dumps(deployment)
+    assert deployment["spec"]["template"]["metadata"]["annotations"][ANNOTATION_RUNNER_TOKEN_HASH]
+    assert deployment["spec"]["template"]["metadata"]["annotations"][ANNOTATION_RUNNER_TOKEN_HASH] != handle.auth_token
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
     manifest_path = env_values["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"]
@@ -469,12 +520,17 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment(tmp_path: Path
             "blockOwnerDeletion": False,
         },
     ]
-    assert deployment["spec"]["template"]["metadata"]["annotations"] == {
-        ANNOTATION_STARTUP_MANIFEST_HASH: startup_manifest_sha256(
-            committed_runtime,
-            tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
-        ),
-    }
+    assert auth_secret["metadata"]["ownerReferences"] == core_api.created_bodies[0]["metadata"]["ownerReferences"]
+    template_annotations = deployment["spec"]["template"]["metadata"]["annotations"]
+    assert set(template_annotations) == {ANNOTATION_RUNNER_TOKEN_HASH, ANNOTATION_STARTUP_MANIFEST_HASH}
+    assert template_annotations[ANNOTATION_RUNNER_TOKEN_HASH] == kubernetes_resources_module.worker_auth_token_hash(
+        _TEST_AUTH_TOKEN,
+        worker_key,
+    )
+    assert template_annotations[ANNOTATION_STARTUP_MANIFEST_HASH] == startup_manifest_sha256(
+        committed_runtime,
+        tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
+    )
     assert deployment["spec"]["template"]["spec"]["securityContext"] == {
         "runAsUser": 1000,
         "runAsGroup": 1000,
@@ -1292,6 +1348,7 @@ def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
     assert cleaned[0].status == "idle"
     assert deployment.spec.replicas == 0
     assert handle.worker_id not in core_api.services
+    assert handle.worker_id not in core_api.secrets
 
 
 def test_kubernetes_backend_cleanup_is_idempotent_for_already_idle_workers() -> None:
@@ -1321,6 +1378,7 @@ def test_kubernetes_backend_evict_without_preserving_state_deletes_runtime_resou
     assert evicted is None
     assert handle.worker_id not in apps_api.deployments
     assert handle.worker_id not in core_api.services
+    assert handle.worker_id not in core_api.secrets
 
 
 def test_kubernetes_backend_preserving_evict_deletes_service_but_keeps_deployment() -> None:
@@ -1335,6 +1393,7 @@ def test_kubernetes_backend_preserving_evict_deletes_service_but_keeps_deploymen
     assert handle.worker_id in apps_api.deployments
     assert apps_api.deployments[handle.worker_id].spec.replicas == 0
     assert handle.worker_id not in core_api.services
+    assert handle.worker_id not in core_api.secrets
 
 
 def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
@@ -1453,6 +1512,7 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     assert handle.status == "failed"
     assert handle.failure_reason == error_message
     assert worker_id not in _core_api.services
+    assert worker_id not in _core_api.secrets
 
 
 def test_kubernetes_backend_progress_respects_real_elapsed_time(
@@ -1874,6 +1934,7 @@ def test_kubernetes_backend_existing_starting_worker_failures_record_failure(
     assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == error_message
     assert deployment.spec.replicas == 0
     assert handle.worker_id not in core_api.services
+    assert handle.worker_id not in core_api.secrets
     assert events[-1].phase == "failed"
 
 

@@ -385,6 +385,7 @@ class KubernetesWorkerBackend:
                     )
                 deployment_apply: resources.DeploymentApplyResult | None = None
                 try:
+                    self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
                     deployment_apply = self._resources.apply_deployment(
                         worker_key=worker_key,
                         worker_id=worker_id,
@@ -506,6 +507,7 @@ class KubernetesWorkerBackend:
         if not preserve_state:
             self._resources.delete_deployment(worker_id)
             self._resources.delete_service(worker_id)
+            self._resources.delete_secret(worker_id)
             return None
 
         annotations = dict(deployment.metadata.annotations or {})
@@ -513,6 +515,7 @@ class KubernetesWorkerBackend:
         annotations[resources.ANNOTATION_WORKER_STATUS] = "idle"
         self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
         self._resources.delete_service(worker_id)
+        self._resources.delete_secret(worker_id)
         deployment.spec.replicas = 0
         deployment.metadata.annotations = annotations
         return self._handle_from_deployment(deployment, now=timestamp)
@@ -529,6 +532,7 @@ class KubernetesWorkerBackend:
             annotations[resources.ANNOTATION_WORKER_STATUS] = "idle"
             self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
             self._resources.delete_service(handle.worker_id)
+            self._resources.delete_secret(handle.worker_id)
             deployment.spec.replicas = 0
             deployment.metadata.annotations = annotations
             cleaned.append(self._handle_from_deployment(deployment, now=timestamp))
@@ -561,6 +565,7 @@ class KubernetesWorkerBackend:
         )
         self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
         self._resources.delete_service(worker_id)
+        self._resources.delete_secret(worker_id)
         deployment.spec.replicas = 0
         deployment.metadata.annotations = annotations
         return self._handle_from_deployment(deployment, now=timestamp)
