@@ -379,6 +379,31 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     }
 
 
+def _is_startup_manifest_env_name(name: str) -> bool:
+    return not _OAUTH_CLIENT_SECRET_ENV_PATTERN.fullmatch(name)
+
+
+def _serialize_startup_manifest_runtime_paths(
+    runtime_paths: RuntimePaths,
+    *,
+    public_runtime: bool,
+) -> dict[str, object]:
+    serialized = (
+        serialize_public_runtime_paths(runtime_paths) if public_runtime else serialize_runtime_paths(runtime_paths)
+    )
+    serialized["process_env"] = {
+        key: value
+        for key, value in cast("dict[str, str]", serialized["process_env"]).items()
+        if _is_startup_manifest_env_name(key)
+    }
+    serialized["env_file_values"] = {
+        key: value
+        for key, value in cast("dict[str, str]", serialized["env_file_values"]).items()
+        if _is_startup_manifest_env_name(key)
+    }
+    return serialized
+
+
 def _is_public_runtime_startup_env_name(name: str) -> bool:
     if name in _RUNTIME_STARTUP_EXCLUDED_NAMES:
         return False
@@ -438,11 +463,11 @@ def serialize_startup_manifest(
     public_runtime: bool = False,
 ) -> dict[str, object]:
     """Return one JSON-compatible startup manifest for sandbox runners."""
-    serialized_runtime = (
-        serialize_public_runtime_paths(runtime_paths) if public_runtime else serialize_runtime_paths(runtime_paths)
-    )
     return {
-        "runtime_paths": serialized_runtime,
+        "runtime_paths": _serialize_startup_manifest_runtime_paths(
+            runtime_paths,
+            public_runtime=public_runtime,
+        ),
         "tool_validation_snapshot": dict(tool_validation_snapshot or {}),
     }
 
