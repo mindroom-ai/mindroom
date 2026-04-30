@@ -188,19 +188,52 @@ def test_google_wrapper_service_account_fallback_wins_over_valid_cached_oauth(
     class ValidOAuthCreds:
         valid = True
 
+    class ValidServiceAccountCreds:
+        valid = True
+
     tool = object.__new__(GoogleDriveTools)
     tool._runtime_paths = runtime_paths
     tool._provided_creds = False
     tool._defer_to_original_auth = True
+    tool._original_auth_completed = False
     tool.service_account_path = str(tmp_path / "service-account.json")
     tool.creds = ValidOAuthCreds()
     calls: list[str] = []
 
     def original_auth() -> None:
         calls.append("original")
-        tool.creds = object()
+        tool.creds = ValidServiceAccountCreds()
 
     tool._original_auth = original_auth
 
     assert tool._ensure_structured_auth() is None
     assert calls == ["original"]
+    assert tool._ensure_structured_auth() is None
+    assert calls == ["original"]
+
+
+def test_google_wrapper_valid_provided_creds_skip_service_account_fallback(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Explicit valid credentials should keep Agno's no-auth constructor contract."""
+
+    class ValidProvidedCreds:
+        valid = True
+
+    tool = object.__new__(GoogleDriveTools)
+    tool._runtime_paths = runtime_paths
+    tool._provided_creds = True
+    tool._defer_to_original_auth = True
+    tool._original_auth_completed = False
+    tool.service_account_path = str(tmp_path / "service-account.json")
+    tool.creds = ValidProvidedCreds()
+    calls: list[str] = []
+
+    def original_auth() -> None:
+        calls.append("original")
+
+    tool._original_auth = original_auth
+
+    assert tool._ensure_structured_auth() is None
+    assert calls == []

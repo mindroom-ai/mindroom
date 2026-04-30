@@ -50,6 +50,7 @@ class ScopedOAuthClientMixin:
     _worker_target: ResolvedWorkerTarget | None
     _provided_creds: bool
     _defer_to_original_auth: bool
+    _original_auth_completed: bool
     _original_auth: Callable[[], None]
     creds: Any | None
 
@@ -71,6 +72,7 @@ class ScopedOAuthClientMixin:
         self._oauth_logger = logger
         self.functions = {}
         self._defer_to_original_auth = defer_to_original_auth
+        self._original_auth_completed = False
         if provided_creds is not None:
             return provided_creds
         if defer_to_original_auth:
@@ -148,10 +150,10 @@ class ScopedOAuthClientMixin:
         )
 
     def _ensure_structured_auth(self) -> str | None:
+        if self._should_skip_auth():
+            return None
         if self._should_fallback_to_original_auth():
             self._auth()
-            return None
-        if self.creds and self.creds.valid:
             return None
         try:
             self._auth()
@@ -225,20 +227,30 @@ class ScopedOAuthClientMixin:
 
     def _should_fallback_to_original_auth(self) -> bool:
         """Return whether the tool should defer to its original auth flow."""
-        return getattr(self, "_defer_to_original_auth", False)
+        return self._defer_to_original_auth
 
     def _should_skip_auth(self) -> bool:
         """Return whether tool auth can return early with already-valid provided credentials."""
         return bool(self._provided_creds and self.creds and self.creds.valid)
 
+    def _auth_with_original_fallback(self) -> None:
+        """Authenticate through the wrapped tool's original auth flow."""
+        if self._original_auth_completed and self.creds and self.creds.valid:
+            return
+        self.creds = None
+        self._original_auth()
+        self._original_auth_completed = True
+
     def _auth(self) -> None:
         """Authenticate using MindRoom-scoped OAuth credentials."""
-        if self._should_fallback_to_original_auth():
-            self.creds = None
-            self._original_auth()
+        if self._should_skip_auth():
             return
 
-        if self._should_skip_auth():
+        if self._should_fallback_to_original_auth():
+            self._auth_with_original_fallback()
+            return
+
+        if self.creds and self.creds.valid:
             return
 
         token_data = self._load_token_data()
