@@ -3499,22 +3499,23 @@ def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
 
     def fake_subprocess_run(
         _command: list[str],
-        *,
-        input: str,
-        capture_output: bool,
-        text: bool,
-        timeout: float,
-        check: bool,
-        env: dict[str, str] | None,
-        cwd: str | None,
+        **kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
-        captured_envelope["payload"] = sandbox_protocol_module.parse_subprocess_envelope(input)
+        input_payload = kwargs["input"]
+        assert isinstance(input_payload, str)
+        captured_envelope["payload"] = sandbox_protocol_module.parse_subprocess_envelope(input_payload)
+        env = kwargs["env"]
+        assert env is None or isinstance(env, dict)
         captured_envelope["env"] = env
+        cwd = kwargs["cwd"]
+        assert cwd is None or isinstance(cwd, str)
         captured_envelope["cwd"] = cwd
-        assert capture_output is True
-        assert text is True
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, int | float)
         assert timeout >= 1.0
-        assert check is False
+        assert kwargs["check"] is False
         response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
         return subprocess.CompletedProcess(
             args=_command,
