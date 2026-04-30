@@ -61,4 +61,4 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, AgnoGoogleCalendarTools):
 
     def _should_fallback_to_original_auth(self) -> bool:
         """Prefer the upstream auth path when a service account is configured."""
-        return bool(self.service_account_path)
+        return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))

@@ -185,6 +185,19 @@ def _default_token_parser(
     return OAuthTokenResult(token_data=token_data, claims=claims, claims_verified=False)
 
 
+def _token_result_with_core_metadata(provider: OAuthProvider, result: OAuthTokenResult) -> OAuthTokenResult:
+    token_data = dict(result.token_data)
+    token_data["_source"] = "oauth"
+    token_data["_oauth_provider"] = provider.id
+    if not isinstance(token_data.get("scopes"), list):
+        token_data["scopes"] = list(provider.scopes)
+    return OAuthTokenResult(
+        token_data=token_data,
+        claims=dict(result.claims),
+        claims_verified=result.claims_verified,
+    )
+
+
 def _safe_claim_summary(claims: Mapping[str, Any]) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     for key in ("sub", "email", "hd"):
@@ -334,8 +347,8 @@ class OAuthProvider:
         if self.token_exchanger is not None:
             result = self.token_exchanger(self, code, client_config, runtime_paths)
             if isinstance(result, OAuthTokenResult):
-                return result
-            return await cast("Awaitable[OAuthTokenResult]", result)
+                return _token_result_with_core_metadata(self, result)
+            return _token_result_with_core_metadata(self, await cast("Awaitable[OAuthTokenResult]", result))
 
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
@@ -358,7 +371,7 @@ class OAuthProvider:
             msg = "OAuth token exchange failed"
             raise OAuthProviderError(msg)
         parser = self.token_parser or _default_token_parser
-        return parser(self, token_response, client_config, runtime_paths)
+        return _token_result_with_core_metadata(self, parser(self, token_response, client_config, runtime_paths))
 
     async def refresh_token_data(
         self,
@@ -386,7 +399,10 @@ class OAuthProvider:
         if not isinstance(response_data, Mapping):
             return None
         merged_response = {**dict(token_data), **response_data}
-        parsed = (self.token_parser or _default_token_parser)(self, merged_response, client_config, runtime_paths)
+        parsed = _token_result_with_core_metadata(
+            self,
+            (self.token_parser or _default_token_parser)(self, merged_response, client_config, runtime_paths),
+        )
         refreshed = dict(token_data)
         refreshed.update(parsed.token_data)
         if "refresh_token" not in parsed.token_data:
@@ -440,6 +456,7 @@ class OAuthProvider:
 
     def token_result_with_safe_claims(self, result: OAuthTokenResult) -> OAuthTokenResult:
         """Return token result with safe claim summary persisted as internal metadata."""
+        result = _token_result_with_core_metadata(self, result)
         token_data = dict(result.token_data)
         if result.claims:
             token_data["_oauth_claims"] = _safe_claim_summary(result.claims)

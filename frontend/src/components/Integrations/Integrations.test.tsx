@@ -843,9 +843,7 @@ describe("Integrations", () => {
     });
 
     expect(
-      screen.getByText(
-        /google services, home assistant, spotify, gmail, google calendar, and google sheets/i,
-      ),
+      screen.getByText(/home assistant and spotify remain shared-only/i),
     ).toBeInTheDocument();
     expect(
       screen.getByText("worker_scope=shared", { selector: "code" }),

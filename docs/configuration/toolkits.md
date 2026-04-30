@@ -102,7 +102,7 @@ If an agent with an isolating `worker_scope` (or `private.per`) has a toolkit co
 
 The following integrations are shared-only and cannot appear in toolkits assigned to agents with `user` or `user_agent` scope:
 
-`google`, `spotify`, `homeassistant`, `gmail`, `google_calendar`, `google_sheets`
+`spotify`, `homeassistant`
 
 ## Conflict Detection
 

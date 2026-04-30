@@ -18,13 +18,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _runtime_paths(tmp_path: Path) -> constants.RuntimePaths:
+def _runtime_paths(tmp_path: Path, extra_env: dict[str, str] | None = None) -> constants.RuntimePaths:
     return constants.resolve_runtime_paths(
         storage_path=tmp_path / "mindroom_data",
         process_env={
             "MINDROOM_PUBLIC_URL": "https://mindroom.example.test",
             "GOOGLE_SHEETS_CLIENT_ID": "client-id",
             "GOOGLE_SHEETS_CLIENT_SECRET": "client-secret",
+            **(extra_env or {}),
         },
     )
 
@@ -76,3 +77,16 @@ def test_google_sheets_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
     assert token_data is not None
     assert token_data["token"] == "access-token"  # noqa: S105
     assert "spreadsheet_id" not in token_data
+
+
+def test_google_sheets_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:
+    tool = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(
+            tmp_path,
+            {"GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "service-account.json")},
+        ),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+    )
+
+    assert tool._should_fallback_to_original_auth() is True

@@ -24,6 +24,9 @@ def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
         "token_uri": "https://oauth2.googleapis.com/token",
         "client_secret": "test_client_secret",
         "scopes": [
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/gmail.modify",
             "https://www.googleapis.com/auth/gmail.compose",
@@ -73,6 +76,9 @@ class TestGmailTools:
                 client_id="test_client_id",
                 client_secret="test_client_secret",  # noqa: S106
                 scopes=[
+                    "openid",
+                    "https://www.googleapis.com/auth/userinfo.email",
+                    "https://www.googleapis.com/auth/userinfo.profile",
                     "https://www.googleapis.com/auth/gmail.readonly",
                     "https://www.googleapis.com/auth/gmail.modify",
                     "https://www.googleapis.com/auth/gmail.compose",
@@ -100,6 +106,27 @@ class TestGmailTools:
 
             mock_logger.warning.assert_not_called()
             mock_parent_init.assert_called_once_with(creds=None)
+
+    def test_service_account_env_uses_upstream_auth(self, tmp_path: Path) -> None:
+        """Test env-only service account deployments bypass MindRoom OAuth."""
+        runtime_paths = resolve_runtime_paths(
+            storage_path=tmp_path / "mindroom_data",
+            process_env={
+                "GOOGLE_GMAIL_CLIENT_ID": "test_client_id",
+                "GOOGLE_GMAIL_CLIENT_SECRET": "test_client_secret",
+                "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "service-account.json"),
+            },
+        )
+
+        with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
+            mock_parent_init.return_value = None
+            gmail_tools = GmailTools(
+                runtime_paths=runtime_paths,
+                credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            )
+            gmail_tools.service_account_path = None
+
+        assert gmail_tools._should_fallback_to_original_auth() is True
 
     @patch("mindroom.custom_tools.gmail.logger")
     @patch("google.oauth2.credentials.Credentials")

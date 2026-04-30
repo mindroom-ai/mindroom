@@ -187,7 +187,9 @@ def _verify_worker_binding_authorized(
         agent_name or "oauth",
         runtime_paths=runtime_paths,
     )
-    if worker_scope in ("user", "user_agent") and (not requester_id or requester_id != dashboard_identity.requester_id):
+    if worker_scope in ("user", "user_agent") and not requester_id:
+        raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
+    if requester_id and requester_id != dashboard_identity.requester_id:
         raise HTTPException(status_code=403, detail="OAuth connect link does not belong to the current user")
 
     if tenant_id and tenant_id != dashboard_identity.tenant_id:

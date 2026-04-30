@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlencode, urlparse
 
 from mindroom.oauth.providers import OAuthProviderError
-from mindroom.oauth.state import consume_signed_oauth_state, issue_signed_oauth_state, read_signed_oauth_state
+from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -61,7 +61,7 @@ def issue_oauth_connect_token(
     runtime_paths: RuntimePaths,
     worker_target: ResolvedWorkerTarget,
 ) -> str | None:
-    """Create a signed token that binds an OAuth link to one worker target."""
+    """Create an opaque token that binds an OAuth link to one worker target."""
     if not worker_target.worker_key:
         return None
 
@@ -78,7 +78,7 @@ def issue_oauth_connect_token(
         account_id=worker_target.account_id,
         created_at=0,
     )
-    return issue_signed_oauth_state(
+    return issue_opaque_oauth_state(
         runtime_paths,
         kind=_OAUTH_CONNECT_TOKEN_KIND,
         ttl_seconds=_OAUTH_CONNECT_TOKEN_TTL_SECONDS,
@@ -108,7 +108,7 @@ def _connect_target_from_payload(provider: OAuthProvider, payload: dict[str, obj
 
 def lookup_oauth_connect_token(provider: OAuthProvider, runtime_paths: RuntimePaths, token: str) -> OAuthConnectTarget:
     """Return one conversation-issued OAuth target token without consuming it."""
-    data = read_signed_oauth_state(runtime_paths, kind=_OAUTH_CONNECT_TOKEN_KIND, token=token)
+    data = read_opaque_oauth_state(runtime_paths, kind=_OAUTH_CONNECT_TOKEN_KIND, token=token)
     return _connect_target_from_payload(provider, data)
 
 
@@ -120,7 +120,7 @@ def consume_oauth_connect_token(
     expected_target: OAuthConnectTarget | None = None,
 ) -> OAuthConnectTarget:
     """Consume one conversation-issued OAuth target token for a provider authorize request."""
-    data = consume_signed_oauth_state(runtime_paths, kind=_OAUTH_CONNECT_TOKEN_KIND, token=token)
+    data = consume_opaque_oauth_state(runtime_paths, kind=_OAUTH_CONNECT_TOKEN_KIND, token=token)
     connect_target = _connect_target_from_payload(provider, data)
     if expected_target is not None and connect_target != expected_target:
         msg = "OAuth connect link target changed"
@@ -176,6 +176,8 @@ def oauth_credentials_usable(
     """Return whether stored OAuth credentials can currently authenticate provider calls."""
     if not credentials or provider.client_config(runtime_paths) is None:
         return False
+    if not oauth_credentials_have_required_scopes(provider, credentials):
+        return False
 
     refresh_token = credentials.get("refresh_token")
     if isinstance(refresh_token, str) and refresh_token:
@@ -189,6 +191,18 @@ def oauth_credentials_usable(
     if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
         return False
     return float(expires_at) > (now if now is not None else time.time()) + _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS
+
+
+def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials: dict[str, object]) -> bool:
+    """Return whether stored credentials include every provider-required scope."""
+    granted_scopes: set[str] = set()
+    raw_scopes = credentials.get("scopes")
+    if isinstance(raw_scopes, list):
+        granted_scopes.update(scope for scope in raw_scopes if isinstance(scope, str) and scope)
+    raw_scope = credentials.get("scope")
+    if isinstance(raw_scope, str):
+        granted_scopes.update(scope for scope in raw_scope.split() if scope)
+    return set(provider.scopes).issubset(granted_scopes)
 
 
 def build_oauth_authorize_url(

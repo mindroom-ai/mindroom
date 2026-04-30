@@ -263,6 +263,10 @@ def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -
     assert params["client_id"] == ["client-id"]
     assert params["scope"] == ["scope.read"]
     assert params["state"][0] != "general"
+    assert "." not in params["state"][0]
+    state_store = runtime_paths.storage_root / "oauth_state.json"
+    assert state_store.exists()
+    assert params["state"][0] in state_store.read_text(encoding="utf-8")
 
 
 def test_provider_exchange_and_refresh_use_oauth_client(
@@ -331,14 +335,52 @@ def test_provider_exchange_and_refresh_use_oauth_client(
         "grant_type": "authorization_code",
     }
     assert result.token_data["token"] == "access-token"
+    assert result.token_data["_source"] == "oauth"
+    assert result.token_data["_oauth_provider"] == provider.id
     assert result.token_data["refresh_token"] == "refresh-token"
     assert result.token_data["expires_at"] == 1234.0
     assert seen["refresh"]["url"] == provider.token_url
     assert seen["refresh"]["refresh_token"] == "refresh-token"
     assert refreshed is not None
     assert refreshed["token"] == "refreshed-token"
+    assert refreshed["_source"] == "oauth"
+    assert refreshed["_oauth_provider"] == provider.id
     assert refreshed["refresh_token"] == "refresh-token"
     assert refreshed["expires_at"] == 2234.0
+
+
+def test_custom_token_exchanger_metadata_is_stamped_by_core(tmp_path: Path) -> None:
+    async def _exchange(
+        provider: OAuthProvider,
+        code: str,
+        _client_config: object,
+        _runtime_paths: object,
+    ) -> OAuthTokenResult:
+        assert code == "test-code"
+        return OAuthTokenResult(token_data={"token": f"{provider.id}-access-token"})
+
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = OAuthProvider(
+        id="custom_drive",
+        display_name="Custom Drive",
+        authorization_url="https://auth.example.test/custom/authorize",
+        token_url="https://auth.example.test/custom/token",
+        scopes=("scope.read",),
+        credential_service="custom_drive_oauth",
+        client_id_env="TEST_OAUTH_CLIENT_ID",
+        client_secret_env="TEST_OAUTH_CLIENT_SECRET",
+        token_exchanger=_exchange,
+    )
+
+    result = asyncio.run(provider.exchange_code("test-code", runtime_paths))
+    safe_result = provider.token_result_with_safe_claims(result)
+
+    assert safe_result.token_data["_source"] == "oauth"
+    assert safe_result.token_data["_oauth_provider"] == provider.id
+    assert safe_result.token_data["scopes"] == ["scope.read"]
 
 
 def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp_path: Path) -> None:
@@ -583,15 +625,6 @@ def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Pat
         {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    rightful_runtime_paths = _runtime_paths(
-        tmp_path / "right-user",
-        {
-            "TEST_OAUTH_CLIENT_ID": "client-id",
-            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
-            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
-        },
-    )
-    rightful_api_app = _make_test_app(rightful_runtime_paths, _config_payload(worker_scope="user_agent"))
     provider = _fake_provider()
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -614,36 +647,46 @@ def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Pat
                 follow_redirects=False,
             )
 
-        with TestClient(rightful_api_app) as client:
-            _login(client)
-            rightful_authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?connect_token={connect_token}",
-                follow_redirects=False,
-            )
-            state = _state_from_auth_url(rightful_authorize_response.headers["location"])
-            callback_response = client.get(
-                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
-                follow_redirects=False,
-            )
-
     assert authorize_response.status_code == 403
-    assert rightful_authorize_response.status_code == 307
-    assert callback_response.status_code == 307
     wrong_manager = get_runtime_credentials_manager(runtime_paths)
     wrong_matrix_credentials = wrong_manager.for_worker(
         _worker_key_for_matrix_user("@alice:example.org"),
     ).load_credentials(
         provider.credential_service,
     )
-    rightful_manager = get_runtime_credentials_manager(rightful_runtime_paths)
-    matrix_credentials = rightful_manager.for_worker(
-        _worker_key_for_matrix_user("@alice:example.org"),
-    ).load_credentials(
-        provider.credential_service,
-    )
     assert wrong_matrix_credentials is None
-    assert matrix_credentials is not None
-    assert matrix_credentials["token"] == "test_drive-access-token"
+
+
+def test_shared_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
+    provider = _fake_provider()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
+    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?connect_token={connect_token}",
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 403
+    assert "current user" in authorize_response.json()["detail"]
 
 
 def test_agent_connect_token_rejects_unprovable_tenant_binding(tmp_path: Path) -> None:
@@ -820,6 +863,7 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
         {
             "token": "stored-token",
             "refresh_token": "stored-refresh-token",
+            "scopes": list(provider.scopes),
             "_source": "oauth",
             "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
         },
@@ -895,6 +939,40 @@ def test_status_rejects_expired_access_token_without_refresh(tmp_path: Path) -> 
         {
             "token": "expired-access-token",
             "expires_at": 1.0,
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["has_client_config"] is True
+    assert status_response.json()["connected"] is False
+
+
+def test_status_rejects_refresh_token_without_required_scopes(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).save_credentials(
+        provider.credential_service,
+        {
+            "token": "stored-token",
+            "refresh_token": "stored-refresh-token",
+            "scopes": ["different.scope"],
             "_source": "oauth",
             "_oauth_provider": provider.id,
         },

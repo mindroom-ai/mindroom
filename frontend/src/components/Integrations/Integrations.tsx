@@ -185,7 +185,7 @@ export function Integrations() {
         agentName: effectiveScopeAgentName,
         executionScope: selectedExecutionScope,
       };
-      const providerIds = Object.keys(integrationProviders);
+      const providerIds = new Set(Object.keys(integrationProviders));
       const backendToolsByName = new Map<string, ToolInfo>(
         backendTools.map((tool) => [tool.name, tool]),
       );
@@ -193,7 +193,11 @@ export function Integrations() {
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
         const config = provider.getConfig(scope);
-        const providerTool = backendToolsByName.get(config.integration.id);
+        const providerTool =
+          backendToolsByName.get(config.integration.id) ??
+          backendTools.find(
+            (tool) => tool.auth_provider === config.integration.id,
+          );
         if (
           hidesSharedOnlyIntegrations &&
           SHARED_ONLY_PROVIDER_IDS.has(config.integration.id)
@@ -226,7 +230,11 @@ export function Integrations() {
       // Load backend tools and map them to integrations
       // (excluding those already handled by providers)
       const backendIntegrations = backendTools
-        .filter((tool) => !providerIds.includes(tool.name))
+        .filter(
+          (tool) =>
+            !providerIds.has(tool.name) &&
+            !(tool.auth_provider && providerIds.has(tool.auth_provider)),
+        )
         .filter(
           (tool) =>
             !hidesSharedOnlyIntegrations ||
@@ -602,6 +610,17 @@ export function Integrations() {
       }
     }
 
+    if (
+      integration.setup_type === "oauth" &&
+      integration.oauth_client_configured === false
+    ) {
+      return (
+        <Button disabled variant="outline" size="sm">
+          Needs client config
+        </Button>
+      );
+    }
+
     // For other connected tools, show Edit/Disconnect
     if (integration.status === "connected") {
       return (
@@ -892,11 +911,10 @@ export function Integrations() {
                 only supported for shared deployment credentials.
               </AlertDescription>
               <AlertDescription className="mt-2">
-                Google Services, Home Assistant, Spotify, Gmail, Google
-                Calendar, and Google Sheets remain shared-only unless the agent
+                Home Assistant and Spotify remain shared-only unless the agent
                 has an effective shared runtime scope (
-                <code>worker_scope=shared</code>). Scoped OAuth integrations
-                such as Google Drive can be connected for this selected agent.
+                <code>worker_scope=shared</code>). OAuth-backed Google
+                integrations can be connected for this selected agent.
               </AlertDescription>
             </Alert>
           )}

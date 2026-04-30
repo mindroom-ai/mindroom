@@ -25,7 +25,7 @@ from mindroom.credentials import (
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import OAUTH_CREDENTIAL_FIELDS
-from mindroom.oauth.state import consume_signed_oauth_state, issue_signed_oauth_state, read_signed_oauth_state
+from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -175,11 +175,11 @@ def issue_pending_oauth_state(
     *,
     payload: dict[str, str] | None = None,
 ) -> str:
-    """Create a signed OAuth state bound to the current user and target."""
+    """Create an opaque OAuth state bound to the current user and target."""
     user_id = _require_auth_user_id(request)
     execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    return issue_signed_oauth_state(
+    return issue_opaque_oauth_state(
         runtime_paths,
         kind=_PENDING_OAUTH_STATE_KIND,
         ttl_seconds=_PENDING_OAUTH_STATE_TTL_SECONDS,
@@ -199,7 +199,7 @@ def _consume_pending_oauth_request(request: Request, service: str, state: str) -
     user_id = _require_auth_user_id(request)
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
     try:
-        data = read_signed_oauth_state(runtime_paths, kind=_PENDING_OAUTH_STATE_KIND, token=state)
+        data = read_opaque_oauth_state(runtime_paths, kind=_PENDING_OAUTH_STATE_KIND, token=state)
     except OAuthProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if data.get("service") != service:
@@ -207,7 +207,7 @@ def _consume_pending_oauth_request(request: Request, service: str, state: str) -
     if data.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="OAuth state does not belong to the current user")
     try:
-        consume_signed_oauth_state(runtime_paths, kind=_PENDING_OAUTH_STATE_KIND, token=state)
+        consume_opaque_oauth_state(runtime_paths, kind=_PENDING_OAUTH_STATE_KIND, token=state)
     except OAuthProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     execution_scope_raw = data.get("execution_scope_override")

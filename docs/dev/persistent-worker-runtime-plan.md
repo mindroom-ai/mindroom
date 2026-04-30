@@ -294,11 +294,11 @@ The target credentials model is:
 - Credential leases are created on the target worker and are short-lived and single-use by default.
 - Leased credentials never become part of the model prompt or normal tool arguments.
 
-OAuth-heavy dashboard integrations are an explicit exception to isolated worker scopes.
-Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools are intentionally unsupported for `user` and `user_agent`.
-They only support unscoped agents and agents with `worker_scope=shared`.
+OAuth-heavy dashboard integrations used to be an explicit exception to isolated worker scopes.
+Spotify and Home Assistant remain shared-only.
+The Google-backed `gmail`, `google_calendar`, and `google_sheets` tools now use scoped per-provider OAuth credentials.
 The credential-backed `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` tools also stay local even for `worker_scope=shared` rather than being routed through the sandbox runner.
-This keeps the generic worker-routing model clean while the dashboard OAuth connect and callback model remains shared-scope only.
+This keeps the generic worker-routing model clean while Google OAuth moves onto the scoped provider model.
 Dashboard credential management follows the same product boundary more generally.
 The dashboard may only read, write, test, or disconnect credentials for unscoped agents and agents with `worker_scope=shared`.
 Isolated worker scopes remain runtime-owned state rather than dashboard-managed state.
@@ -522,7 +522,7 @@ Phase 2 remaining work is:
 - Ensure `shared`, `user_agent`, and unscoped dedicated execution only expose the addressed agent root plus the worker runtime root.
 - Treat `user` as a deliberate multi-agent workstation mode if it remains supported for filesystem-capable worker tools.
 - Add explicit concurrent-writer handling for sensitive agent-owned artifacts.
-- Keep Google Services, Spotify, Home Assistant, and the Google-backed tools shared-only until there is a dedicated scoped OAuth binding model.
+- Keep Spotify and Home Assistant shared-only until there is a dedicated scoped credential binding model for them.
 - Keep dashboard credential management limited to unscoped and `shared` agents until there is a trusted identity-linking model between dashboard users and runtime worker requesters.
 
 ### Phase 3: Backend Contract, Policy, And Observability

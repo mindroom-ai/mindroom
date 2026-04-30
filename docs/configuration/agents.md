@@ -314,9 +314,9 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 The shared-only integrations require `worker_scope` unset or `shared`.
-That list includes `google`, `spotify`, `gmail`, `google_calendar`, `google_sheets`, `homeassistant`, and all configured `mcp_<server_id>` tools.
-Of those, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` also always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
-`google` and `spotify` can still be proxied through the sandbox.
+That list includes `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
+Of those, `homeassistant` also always stays local regardless of `worker_tools` (it is never proxied to the sandbox).
+`spotify` can still be proxied through the sandbox.
 
 The supported `worker_scope` values are:
 

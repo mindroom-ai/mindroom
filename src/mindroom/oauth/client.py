@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider
-from mindroom.oauth.service import oauth_connect_url
+from mindroom.oauth.service import oauth_connect_url, oauth_credentials_have_required_scopes
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
@@ -154,7 +154,7 @@ class ScopedOAuthClientMixin:
 
     def _should_skip_auth(self) -> bool:
         """Return whether tool auth can return early with already-valid provided credentials."""
-        return bool(self._provided_creds and self.creds and self.creds.valid)
+        return bool(self.creds and self.creds.valid)
 
     def _auth(self) -> None:
         """Authenticate using MindRoom-scoped OAuth credentials."""
@@ -167,7 +167,7 @@ class ScopedOAuthClientMixin:
             return
 
         token_data = self._load_token_data()
-        if not token_data:
+        if not token_data or not oauth_credentials_have_required_scopes(self._oauth_provider, token_data):
             raise self._connection_required()
 
         try:

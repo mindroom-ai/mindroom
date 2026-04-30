@@ -59,13 +59,18 @@ class GenericOAuthIntegrationProvider implements IntegrationProvider {
   }
 
   async loadStatus(scope?: IntegrationScope): Promise<Partial<Integration>> {
-    const connected = await this.checkConnection(
+    const status = await this.checkConnection(
       scope?.agentName ?? null,
       scope?.executionScope,
     );
     return {
-      status: connected ? "connected" : "available",
-      connected,
+      status: status.connected
+        ? "connected"
+        : status.hasClientConfig
+          ? "available"
+          : "not_connected",
+      connected: status.connected,
+      oauth_client_configured: status.hasClientConfig,
     };
   }
 
@@ -117,7 +122,7 @@ class GenericOAuthIntegrationProvider implements IntegrationProvider {
   private async checkConnection(
     agentName?: string | null,
     executionScope?: WorkerScope | null,
-  ): Promise<boolean> {
+  ): Promise<{ connected: boolean; hasClientConfig: boolean }> {
     try {
       const response = await fetch(
         withAgentExecutionScope(
@@ -127,13 +132,16 @@ class GenericOAuthIntegrationProvider implements IntegrationProvider {
         ),
       );
       if (!response.ok) {
-        return false;
+        return { connected: false, hasClientConfig: false };
       }
       const data = await response.json();
-      return data.connected === true;
+      return {
+        connected: data.connected === true,
+        hasClientConfig: data.has_client_config === true,
+      };
     } catch (error) {
       console.error(`Failed to load ${this.providerId} status:`, error);
-      return false;
+      return { connected: false, hasClientConfig: false };
     }
   }
 
