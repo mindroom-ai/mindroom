@@ -440,7 +440,7 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ## [`google_sheets`]
 
-`google_sheets` is the Google Sheets toolkit for spreadsheet access through MindRoom's shared Google OAuth credentials.
+`google_sheets` is the Google Sheets toolkit for spreadsheet access through the Google Sheets OAuth provider.
 
 ### What It Does
 

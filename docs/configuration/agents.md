@@ -361,8 +361,10 @@ They materialize one canonical state root per requester-scoped private instance 
 Workers mount those canonical private-instance roots.
 They do not own them.
 
-The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`.
-Agents using `user` or `user_agent` manage credentials through their worker runtime instead.
+The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
+OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception.
+For those providers, the dashboard can connect scoped `user` and `user_agent` credentials that land in the same worker credential target used at runtime.
+Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md).
 

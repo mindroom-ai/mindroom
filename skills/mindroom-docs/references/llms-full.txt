@@ -1524,7 +1524,7 @@ For per-workspace env that an agent can edit (PATH, package indexes, npm cache l
 
 Agents without `private` store all their data in one canonical directory: `agents/<name>/` (context files, workspace, memory, sessions, learning). Changing `worker_scope` changes how tool runtimes are isolated. It does **not** change where that non-private agent's data lives. All runtimes for the same non-private agent read and write the same storage directory. If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access. Agents that use `private` are different. They materialize one canonical state root per requester-scoped private instance under `private_instances/<scope-key>/<agent>/`. Workers mount those canonical private-instance roots. They do not own them.
 
-The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` manage credentials through their worker runtime instead.
+The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`. OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception. For those providers, the dashboard can connect scoped `user` and `user_agent` credentials that land in the same worker credential target used at runtime. Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md).
 
@@ -3235,7 +3235,7 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ## \[`google_sheets`\]
 
-`google_sheets` is the Google Sheets toolkit for spreadsheet access through MindRoom's shared Google OAuth credentials.
+`google_sheets` is the Google Sheets toolkit for spreadsheet access through the Google Sheets OAuth provider.
 
 ### What It Does
 
@@ -5697,7 +5697,7 @@ This page documents the built-in tools in the `messaging-and-social` group. Use 
 
 ## Tools On This Page
 
-- \[`gmail`\] - Gmail mailbox access and message composition through the shared Google OAuth integration.
+- \[`gmail`\] - Gmail mailbox access and message composition through the Google Gmail OAuth provider.
 - \[`slack`\] - Slack channel messaging, threaded replies, channel listing, and history reads.
 - \[`discord`\] - Discord bot messaging, channel inspection, history reads, and message deletion.
 - \[`telegram`\] - Telegram bot delivery to one configured chat.
@@ -5720,7 +5720,7 @@ This page documents the built-in tools in the `messaging-and-social` group. Use 
 
 ### What It Does
 
-MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail credentials are loaded from MindRoom's scoped OAuth credential store instead of a local `token.json` file. The wrapper refreshes stored Google tokens when needed and falls back to the upstream auth flow only when no stored credentials are available. The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`. Draft and send operations accept local file-system paths for attachments.
+MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail credentials are loaded from MindRoom's scoped OAuth credential store instead of a local `token.json` file. The wrapper refreshes stored Google tokens when needed and raises `OAuthConnectionRequired` with a connect URL when no usable stored OAuth credentials are available. It only bypasses MindRoom OAuth when configured for Google service-account auth. The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`. Draft and send operations accept local file-system paths for attachments.
 
 ### Configuration
 

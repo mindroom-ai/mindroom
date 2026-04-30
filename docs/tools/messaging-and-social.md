@@ -13,7 +13,7 @@ Use these tools when you need outbound communication, mailbox access, team-chat 
 
 ## Tools On This Page
 
-- [`gmail`] - Gmail mailbox access and message composition through the shared Google OAuth integration.
+- [`gmail`] - Gmail mailbox access and message composition through the Google Gmail OAuth provider.
 - [`slack`] - Slack channel messaging, threaded replies, channel listing, and history reads.
 - [`discord`] - Discord bot messaging, channel inspection, history reads, and message deletion.
 - [`telegram`] - Telegram bot delivery to one configured chat.
@@ -45,7 +45,8 @@ Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gma
 ### What It Does
 
 MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail credentials are loaded from MindRoom's scoped OAuth credential store instead of a local `token.json` file.
-The wrapper refreshes stored Google tokens when needed and falls back to the upstream auth flow only when no stored credentials are available.
+The wrapper refreshes stored Google tokens when needed and raises `OAuthConnectionRequired` with a connect URL when no usable stored OAuth credentials are available.
+It only bypasses MindRoom OAuth when configured for Google service-account auth.
 The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`.
 Draft and send operations accept local file-system paths for attachments.
 
