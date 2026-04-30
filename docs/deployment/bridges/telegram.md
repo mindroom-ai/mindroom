@@ -78,9 +78,8 @@ docker compose ps synapse
 docker compose up -d telegram-bridge
 ```
 
-> **Note:** `docker compose restart synapse` will NOT work here because the
-> `registration.yaml` volume mount is new in `compose.yaml`. A restart reuses the
-> existing container; `up -d` recreates it with the updated mounts.
+> **Note:** `docker compose restart synapse` will NOT work here because the `registration.yaml` volume mount is new in `compose.yaml`.
+> A restart reuses the existing container; `up -d` recreates it with the updated mounts.
 
 ### 3. Verify
 
@@ -125,11 +124,9 @@ Once linked:
 
 Repeat for any other Matrix rooms you want accessible from Telegram.
 
-> **Why can't I just invite the bot directly?** The bridge bot
-> (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge
-> but isn't a Telegram chat. To use Telegram as your client, there must be
-> a Telegram group for the Telegram app to display. The bridge connects
-> that group to the Matrix room bidirectionally.
+> **Why can't I just invite the bot directly?** The bridge bot (`@telegrambot`) is Matrix-side infrastructure -- it manages the bridge but isn't a Telegram chat.
+> To use Telegram as your client, there must be a Telegram group for the Telegram app to display.
+> The bridge connects that group to the Matrix room bidirectionally.
 
 ### Accessing Telegram chats from Matrix
 

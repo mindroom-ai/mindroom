@@ -13,8 +13,7 @@ Provides APIs for:
 
 ## Architecture
 
-Modular FastAPI application with a thin entrypoint (`main.py`) that includes
-routers defined under `backend/`:
+Modular FastAPI application with a thin entrypoint (`main.py`) that includes routers defined under `backend/`:
 
 - `backend/config.py` – env, clients, and settings
 - `backend/deps.py` – shared auth dependencies

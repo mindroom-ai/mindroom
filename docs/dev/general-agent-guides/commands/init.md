@@ -12,8 +12,7 @@
 ## Working Agreements
 - Expect speech-to-text typos; clarify rather than guess.
 - Look for existing helpers before writing new ones.
-- Sync deps with the project tool (e.g., `uv`, `pip`, `pnpm`, `cargo`) and
-  activate the venv.
+- Sync deps with the project tool (e.g., `uv`, `pip`, `pnpm`, `cargo`) and activate the venv.
 - Follow the coding playbook (simplicity, tidy imports, remove unused code).
 
 ## Next

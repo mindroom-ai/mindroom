@@ -45,8 +45,7 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 Use kind to spin up a throwaway local K8s cluster and install the platform chart for smoke testing and development.
 
 - Prereqs: `kind`, `kubectl`, `helm`, and Docker.
-- With Nix: use the root dev shell (`nix-shell`) which now includes `kind`,
-  or the focused one at `nix-shell cluster/k8s/kind/shell.nix`.
+- With Nix: use the root dev shell (`nix-shell`) which now includes `kind`, or the focused one at `nix-shell cluster/k8s/kind/shell.nix`.
 - Quickstart:
   - `just cluster-kind-up`
   - `just cluster-kind-build-load` (builds platform + MindRoom images and loads them into kind)

@@ -434,9 +434,7 @@ mindroom connect \
 
 Start local Synapse and the MindRoom Cinny client container for development.
 
-By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and
-`MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so
-`mindroom run` works without inline env exports.
+By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
