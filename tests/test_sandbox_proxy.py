@@ -69,7 +69,7 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
-from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock
+from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock, requires_linux
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -438,6 +438,7 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@requires_linux(reason="local worker venv bootstrap is validated on Linux", timeout=180)
 async def test_sandbox_runner_save_attachment_writes_worker_workspace(tmp_path: Path) -> None:
     """The runner save endpoint should validate and atomically write bytes under the worker workspace."""
     runtime_paths = resolve_runtime_paths(
