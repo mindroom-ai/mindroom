@@ -715,8 +715,20 @@ def _apply_workspace_home_contract(
     if workspace is None:
         return
 
-    contract_env = _workspace_home_contract_env(workspace=workspace, prepared=prepared)
+    _apply_workspace_home_contract_for_workspace(workspace, prepared=prepared, execution_env=execution_env)
+
+
+def _apply_workspace_home_contract_for_workspace(
+    workspace: Path,
+    *,
+    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+    execution_env: dict[str, str],
+) -> Path:
+    """Overlay the workspace-home env contract and return the resolved workspace."""
+    resolved_workspace = workspace.expanduser().resolve()
+    contract_env = _workspace_home_contract_env(workspace=resolved_workspace, prepared=prepared)
     execution_env.update(contract_env)
+    return resolved_workspace
 
 
 def _workspace_env_hook_workspace_for_request(
@@ -968,13 +980,18 @@ def _execute_request_subprocess_sync(
     python_executable, subprocess_env, cwd = sandbox_exec.resolve_subprocess_worker_context(
         prepared.paths if prepared is not None else None,
     )
-    _apply_workspace_home_contract(
+    workspace_home = _request_workspace_home_root(
         request,
         prepared,
-        execution_env,
         runtime_paths=runtime_paths,
         config=config,
     )
+    if workspace_home is not None:
+        workspace_home = _apply_workspace_home_contract_for_workspace(
+            workspace_home,
+            prepared=prepared,
+            execution_env=execution_env,
+        )
     overlay, overlay_failure = _workspace_env_overlay_for_request(
         request,
         prepared,
@@ -992,6 +1009,8 @@ def _execute_request_subprocess_sync(
     execution_env.update(worker_owned_env)
     trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, worker_owned_env)
     subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, execution_env)
+    if workspace_home is not None and request.tool_name == "python":
+        cwd = str(workspace_home)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
         execution_env,

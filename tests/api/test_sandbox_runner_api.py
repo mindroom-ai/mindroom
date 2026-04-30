@@ -3769,6 +3769,75 @@ async def test_subprocess_child_preserves_parent_sourced_workspace_home_env(
     }
 
 
+def test_worker_routed_python_subprocess_cwd_is_agent_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Bare Python relative paths should resolve against the same workspace as HOME."""
+    config_path = tmp_path / "config.yaml"
+    _write_general_agent_config(config_path)
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    workspace = storage_root / "agents" / "general" / "workspace"
+    worker_key = "v1:tenant-123:shared:general"
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    prepared = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker-1",
+            worker_key=worker_key,
+            endpoint="/api/sandbox-runner/execute",
+            auth_token=SANDBOX_TOKEN,
+            status="ready",
+            backend_name="local",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=worker_paths,
+        runtime_overrides={"base_dir": workspace},
+    )
+    captured: dict[str, object] = {}
+
+    def fake_subprocess_run(
+        _command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        captured["cwd"] = kwargs["cwd"]
+        input_payload = kwargs["input"]
+        assert isinstance(input_payload, str)
+        captured["payload"] = sandbox_protocol_module.parse_subprocess_envelope(input_payload)
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
+        return subprocess.CompletedProcess(
+            args=_command,
+            returncode=0,
+            stdout="",
+            stderr=sandbox_protocol_module.response_marker_payload(response.model_dump_json()),
+        )
+
+    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_subprocess_run)
+
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="python",
+        function_name="run_python_code",
+        worker_key=worker_key,
+        routing_agent_name="general",
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        request,
+        runtime_paths,
+        config,
+        prepared_worker=prepared,
+    )
+
+    assert response.ok is True
+    assert captured["cwd"] == str(workspace.resolve())
+    envelope = captured["payload"]
+    assert isinstance(envelope, sandbox_protocol_module.SandboxSubprocessEnvelope)
+    assert envelope.request["execution_env"]["HOME"] == str(workspace.resolve())
+    assert envelope.request["execution_env"]["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
+
+
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_worker_routed_shell_uses_agent_workspace_as_home(
     runner_client: TestClient,
