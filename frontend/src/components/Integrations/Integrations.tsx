@@ -748,36 +748,47 @@ export function Integrations() {
     );
   };
 
-  const IntegrationCard = ({ integration }: { integration: Integration }) => (
-    <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            {integration.icon}
-            <CardTitle className="text-lg">{integration.name}</CardTitle>
-          </div>
-          {integration.status === "connected" ? (
-            <Badge className="bg-gradient-to-r from-green-500 to-emerald-500 text-white border-0">
-              <CheckCircle2 className="h-3 w-3 mr-1" />
-              Connected
-            </Badge>
-          ) : (
-            <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 backdrop-blur-md border-amber-500/20">
-              <Circle className="h-3 w-3 mr-1" />
-              Available
-            </Badge>
-          )}
-        </div>
-        <CardDescription>{integration.description}</CardDescription>
-      </CardHeader>
+  const IntegrationCard = ({ integration }: { integration: Integration }) => {
+    const isConnected = integration.status === "connected";
+    const statusLabel =
+      integration.status === "not_connected" ? "Needs setup" : "Available";
 
-      <CardContent>
-        <div className="space-y-3">
-          <div className="flex gap-2">{getActionButton(integration)}</div>
-        </div>
-      </CardContent>
-    </Card>
-  );
+    return (
+      <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {integration.icon}
+              <CardTitle className="text-lg">{integration.name}</CardTitle>
+            </div>
+            {isConnected ? (
+              <Badge className="bg-gradient-to-r from-green-500 to-emerald-500 text-white border-0">
+                <CheckCircle2 className="h-3 w-3 mr-1" />
+                Connected
+              </Badge>
+            ) : (
+              <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 backdrop-blur-md border-amber-500/20">
+                <Circle className="h-3 w-3 mr-1" />
+                {statusLabel}
+              </Badge>
+            )}
+          </div>
+          <CardDescription>{integration.description}</CardDescription>
+          {integration.helper_text && (
+            <p className="text-xs text-muted-foreground">
+              {integration.helper_text}
+            </p>
+          )}
+        </CardHeader>
+
+        <CardContent>
+          <div className="space-y-3">
+            <div className="flex gap-2">{getActionButton(integration)}</div>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  };
 
   // Filter integrations
   const integrations =

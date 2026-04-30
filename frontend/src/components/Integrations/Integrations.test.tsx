@@ -450,6 +450,23 @@ describe("Integrations", () => {
     });
   });
 
+  it("shows OAuth status helper text when status loading fails", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      helper_text: "Failed to load Google Drive OAuth status.",
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Failed to load Google Drive OAuth status."),
+      ).toBeInTheDocument();
+      expect(screen.getByText("Needs setup")).toBeInTheDocument();
+    });
+  });
+
   it("should filter integrations by search term", async () => {
     render(<Integrations />);
 
