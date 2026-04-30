@@ -4,7 +4,8 @@ Use these tools to transcribe audio, generate images and videos, synthesize spee
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `ai-and-generation` group. Use these tools when you need OpenAI- or Google-style multimodal generation, provider-specific media APIs, or text-to-speech and audio workflows.
+This page documents the built-in tools in the `ai-and-generation` group.
+Use these tools when you need OpenAI- or Google-style multimodal generation, provider-specific media APIs, or text-to-speech and audio workflows.
 
 ## Tools On This Page
 
@@ -22,7 +23,14 @@ This page documents the built-in tools in the `ai-and-generation` group. Use the
 
 ## Common Setup Notes
 
-Every tool on this page is `status=requires_config` in the live registry and is meant to be configured with provider credentials. These tools do not use an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so setup is done through stored tool credentials or provider SDK environment variables rather than a dedicated dashboard OAuth flow. Password fields such as `api_key` should be stored through the dashboard or credential store instead of inline YAML. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set. Most generation calls on this page return `ToolResult` media attachments rather than only raw text, so they are best suited to agents that can pass generated images, videos, or audio back to the user. `openai` and `dalle` both use the OpenAI Python SDK and the same `OPENAI_API_KEY`, but they expose different tool surfaces. `gemini` uses `GOOGLE_API_KEY` in Gemini API mode, and MindRoom also maps provider name `gemini` to shared Google credentials in its provider credential helpers. The current upstream SDK implementations also honor provider env vars such as `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, `REPLICATE_API_KEY`, `FAL_API_KEY`, `CARTESIA_API_KEY`, `ELEVEN_LABS_API_KEY`, `DESI_VOCAL_API_KEY`, `LUMAAI_API_KEY`, and `MODELS_LAB_API_KEY`.
+Every tool on this page is `status=requires_config` in the live registry and is meant to be configured with provider credentials.
+These tools do not use an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so setup is done through stored tool credentials or provider SDK environment variables rather than a dedicated dashboard OAuth flow.
+Password fields such as `api_key` should be stored through the dashboard or credential store instead of inline YAML.
+Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+Most generation calls on this page return `ToolResult` media attachments rather than only raw text, so they are best suited to agents that can pass generated images, videos, or audio back to the user.
+`openai` and `dalle` both use the OpenAI Python SDK and the same `OPENAI_API_KEY`, but they expose different tool surfaces.
+`gemini` uses `GOOGLE_API_KEY` in Gemini API mode, and MindRoom also maps provider name `gemini` to shared Google credentials in its provider credential helpers.
+The current upstream SDK implementations also honor provider env vars such as `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, `REPLICATE_API_KEY`, `FAL_API_KEY`, `CARTESIA_API_KEY`, `ELEVEN_LABS_API_KEY`, `DESI_VOCAL_API_KEY`, `LUMAAI_API_KEY`, and `MODELS_LAB_API_KEY`.
 
 ## \[`openai`\]
 
@@ -30,7 +38,11 @@ Every tool on this page is `status=requires_config` in the live registry and is 
 
 ### What It Does
 
-`openai` exposes `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`. `transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `whisper-1`. `generate_image()` uses the configured `image_model`, defaults to `dall-e-3`, and returns attached image bytes rather than only a remote URL. The current implementation handles both `gpt-image-*` style models and older DALL-E response formats internally. `generate_speech()` uses the configured OpenAI TTS model, voice, and output format and returns an attached audio artifact.
+`openai` exposes `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
+`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `whisper-1`.
+`generate_image()` uses the configured `image_model`, defaults to `dall-e-3`, and returns attached image bytes rather than only a remote URL.
+The current implementation handles both `gpt-image-*` style models and older DALL-E response formats internally.
+`generate_speech()` uses the configured OpenAI TTS model, voice, and output format and returns an attached audio artifact.
 
 ### Configuration
 
@@ -80,7 +92,11 @@ generate_speech("Status update complete.")
 
 ### What It Does
 
-`gemini` exposes `generate_image(prompt)` and `generate_video(prompt)`. `generate_image()` uses the configured `image_generation_model`, which defaults to `imagen-3.0-generate-002`, and returns attached image bytes. `generate_video()` uses the configured `video_generation_model`, which defaults to `veo-2.0-generate-001`, polls until the long-running operation completes, and returns attached video artifacts. The current implementation requires Vertex AI mode for video generation and returns an error if `vertexai` is not enabled. In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
+`gemini` exposes `generate_image(prompt)` and `generate_video(prompt)`.
+`generate_image()` uses the configured `image_generation_model`, which defaults to `imagen-3.0-generate-002`, and returns attached image bytes.
+`generate_video()` uses the configured `video_generation_model`, which defaults to `veo-2.0-generate-001`, polls until the long-running operation completes, and returns attached video artifacts.
+The current implementation requires Vertex AI mode for video generation and returns an error if `vertexai` is not enabled.
+In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 
 ### Configuration
 
@@ -127,7 +143,11 @@ generate_video("A slow cinematic flythrough of a neon data center.")
 
 ### What It Does
 
-`groq` exposes `transcribe_audio(audio_source)`, `translate_audio(audio_source)`, and `generate_speech(text_input)`. `transcribe_audio()` and `translate_audio()` accept either a local file path or a public URL. `translate_audio()` translates the source audio to English using the configured translation model. `generate_speech()` uses the configured Groq TTS model and voice and returns an attached WAV artifact. All three functions use the Groq SDK directly and require a Groq API key.
+`groq` exposes `transcribe_audio(audio_source)`, `translate_audio(audio_source)`, and `generate_speech(text_input)`.
+`transcribe_audio()` and `translate_audio()` accept either a local file path or a public URL.
+`translate_audio()` translates the source audio to English using the configured translation model.
+`generate_speech()` uses the configured Groq TTS model and voice and returns an attached WAV artifact.
+All three functions use the Groq SDK directly and require a Groq API key.
 
 ### Configuration
 
@@ -173,7 +193,10 @@ generate_speech("Your transcript is ready.")
 
 ### What It Does
 
-`replicate` exposes one call, `generate_media(prompt)`. It runs the configured Replicate model with `input={"prompt": prompt}` and expects one `FileOutput` or an iterable of `FileOutput` objects. The current implementation infers whether each output is an image or a video from the returned file URL extension. Generated artifacts are attached by remote URL rather than downloaded into MindRoom-managed bytes.
+`replicate` exposes one call, `generate_media(prompt)`.
+It runs the configured Replicate model with `input={"prompt": prompt}` and expects one `FileOutput` or an iterable of `FileOutput` objects.
+The current implementation infers whether each output is an image or a video from the returned file URL extension.
+Generated artifacts are attached by remote URL rather than downloaded into MindRoom-managed bytes.
 
 ### Configuration
 
@@ -210,7 +233,10 @@ generate_media("A short looping animation of code flowing across a terminal.")
 
 ### What It Does
 
-`fal` exposes `generate_media(prompt)` and, when enabled, `image_to_image(prompt, image_url=None)`. `generate_media()` calls `fal_client.subscribe()` with the configured `model` and a single `prompt` argument and returns the first `image` or `video` URL from the provider result. `image_to_image()` is a separate fixed workflow that always uses `fal-ai/flux/dev/image-to-image` rather than the configured `model`. The current implementation streams queue log messages to the MindRoom process logs while the job is running.
+`fal` exposes `generate_media(prompt)` and, when enabled, `image_to_image(prompt, image_url=None)`.
+`generate_media()` calls `fal_client.subscribe()` with the configured `model` and a single `prompt` argument and returns the first `image` or `video` URL from the provider result.
+`image_to_image()` is a separate fixed workflow that always uses `fal-ai/flux/dev/image-to-image` rather than the configured `model`.
+The current implementation streams queue log messages to the MindRoom process logs while the job is running.
 
 ### Configuration
 
@@ -253,7 +279,8 @@ image_to_image(
 
 ### What It Does
 
-`dalle` exposes one call, `create_image(prompt)`. It uses the OpenAI image API directly with the configured `model`, `n`, `size`, `quality`, and `style`. Unlike \[`openai`\], this wrapper is image-only and exposes DALL-E-specific request options directly in the tool config. Generated images are returned as provider-hosted URLs with optional revised prompts when the API supplies them.
+`dalle` exposes one call, `create_image(prompt)`.
+It uses the OpenAI image API directly with the configured `model`, `n`, `size`, `quality`, and `style`. Unlike \[`openai`\], this wrapper is image-only and exposes DALL-E-specific request options directly in the tool config. Generated images are returned as provider-hosted URLs with optional revised prompts when the API supplies them.
 
 ### Configuration
 
@@ -297,7 +324,11 @@ create_image("A cover illustration for a Matrix automation handbook.")
 
 ### What It Does
 
-`cartesia` exposes `list_voices()`, `localize_voice(name, description, language, original_speaker_gender, voice_id=None)`, and `text_to_speech(transcript, voice_id=None)`. `list_voices()` returns a filtered JSON list of voice IDs, names, descriptions, and languages. `localize_voice()` creates a localized derivative of an existing voice, using `default_voice_id` unless you pass a different `voice_id`. `text_to_speech()` uses the configured `model_id` and voice ID and returns attached MP3 audio bytes. The current implementation hardcodes MP3 output at 44.1 kHz and 128 kbps.
+`cartesia` exposes `list_voices()`, `localize_voice(name, description, language, original_speaker_gender, voice_id=None)`, and `text_to_speech(transcript, voice_id=None)`.
+`list_voices()` returns a filtered JSON list of voice IDs, names, descriptions, and languages.
+`localize_voice()` creates a localized derivative of an existing voice, using `default_voice_id` unless you pass a different `voice_id`.
+`text_to_speech()` uses the configured `model_id` and voice ID and returns attached MP3 audio bytes.
+The current implementation hardcodes MP3 output at 44.1 kHz and 128 kbps.
 
 ### Configuration
 
@@ -345,7 +376,11 @@ text_to_speech("Deployment complete.")
 
 ### What It Does
 
-`eleven_labs` exposes `get_voices()`, `generate_sound_effect(prompt, duration_seconds=None)`, and `text_to_speech(prompt)`. `get_voices()` returns voice IDs, names, and descriptions from the ElevenLabs account. `generate_sound_effect()` turns a text description into an attached audio artifact. `text_to_speech()` uses the configured `voice_id`, `model_id`, and `output_format` and returns attached audio bytes. If `target_directory` is set, the current implementation also saves generated audio files to disk in that directory.
+`eleven_labs` exposes `get_voices()`, `generate_sound_effect(prompt, duration_seconds=None)`, and `text_to_speech(prompt)`.
+`get_voices()` returns voice IDs, names, and descriptions from the ElevenLabs account.
+`generate_sound_effect()` turns a text description into an attached audio artifact.
+`text_to_speech()` uses the configured `voice_id`, `model_id`, and `output_format` and returns attached audio bytes.
+If `target_directory` is set, the current implementation also saves generated audio files to disk in that directory.
 
 ### Configuration
 
@@ -391,7 +426,10 @@ text_to_speech("The build succeeded.")
 
 ### What It Does
 
-`desi_vocal` exposes `get_voices()` and `text_to_speech(prompt, voice_id=None)`. `get_voices()` returns a provider voice list with ID, name, gender, voice type, supported languages, and preview URL. `text_to_speech()` posts the prompt to DesiVocal's generation API and returns the resulting audio as a remote URL attachment. The default `voice_id` can be overridden per call.
+`desi_vocal` exposes `get_voices()` and `text_to_speech(prompt, voice_id=None)`.
+`get_voices()` returns a provider voice list with ID, name, gender, voice type, supported languages, and preview URL.
+`text_to_speech()` posts the prompt to DesiVocal's generation API and returns the resulting audio as a remote URL attachment.
+The default `voice_id` can be overridden per call.
 
 ### Configuration
 
@@ -430,7 +468,11 @@ text_to_speech("नमस्ते, आपकी रिपोर्ट तैय
 
 ### What It Does
 
-`lumalabs` exposes `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`. Both calls create a Luma generation job and poll until it completes or times out. `generate_video()` optionally accepts provider-style keyframes, while `image_to_video()` builds the required keyframe structure from one or two image URLs. Completed jobs return remote video URL attachments. If `wait_for_completion` is false, the current implementation returns `Async generation unsupported`.
+`lumalabs` exposes `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
+Both calls create a Luma generation job and poll until it completes or times out.
+`generate_video()` optionally accepts provider-style keyframes, while `image_to_video()` builds the required keyframe structure from one or two image URLs.
+Completed jobs return remote video URL attachments.
+If `wait_for_completion` is false, the current implementation returns `Async generation unsupported`.
 
 ### Configuration
 
@@ -476,7 +518,11 @@ image_to_video(
 
 ### What It Does
 
-`modelslabs` exposes one call, `generate_media(prompt)`. The current wrapper chooses one of several provider endpoints based on `file_type` and sends a fixed payload template for that media class. For MP4 and GIF generation, it currently uses the provider's text-to-video endpoint and returns future-link URLs with an ETA. For MP3 and WAV generation, it uses provider voice endpoints and returns audio URLs. If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint until the media is ready or the timeout is reached.
+`modelslabs` exposes one call, `generate_media(prompt)`.
+The current wrapper chooses one of several provider endpoints based on `file_type` and sends a fixed payload template for that media class.
+For MP4 and GIF generation, it currently uses the provider's text-to-video endpoint and returns future-link URLs with an ETA.
+For MP3 and WAV generation, it uses provider voice endpoints and returns audio URLs.
+If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint until the media is ready or the timeout is reached.
 
 ### Configuration
 

@@ -160,17 +160,35 @@ agents:
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
-Per-agent fields with a `null` default inherit from the `defaults` section at runtime. Per-agent values override them. `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent. Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool. `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent. The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
+Per-agent fields with a `null` default inherit from the `defaults` section at runtime.
+Per-agent values override them.
+`memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
+Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
+`show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
+The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
-Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes. Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics. Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership. Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
+Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
+Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
+Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
+Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
 
-MindRoom compacts in one visible lifecycle. If the current reply needs compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result. After a successful visible reply, MindRoom re-checks the updated persisted session and immediately compacts if the next reply would cross the compaction threshold. It always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`. That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run. Compaction rewrites the persisted Agno session in SQLite. Older compacted runs are removed from `session.runs` and replaced by the merged `session.summary`, so raw pre-compaction runs are not retained for later audit or debugging.
+MindRoom compacts in one visible lifecycle.
+If the current reply needs compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
+After a successful visible reply, MindRoom re-checks the updated persisted session and immediately compacts if the next reply would cross the compaction threshold.
+It always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
+That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.
+Compaction rewrites the persisted Agno session in SQLite.
+Older compacted runs are removed from `session.runs` and replaced by the merged `session.summary`, so raw pre-compaction runs are not retained for later audit or debugging.
 
-Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted. `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`). When the effective memory backend is `file`, the agent's canonical file memory root is that same workspace directory. Absolute paths and `..` traversal are rejected.
+Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
+`context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`).
+When the effective memory backend is `file`, the agent's canonical file memory root is that same workspace directory.
+Absolute paths and `..` traversal are rejected.
 
 ## Per-Agent Tool Configuration
 
-Tools can be plain strings or single-key dicts with inline config overrides. This lets you customize tool behavior per agent without affecting other agents that use the same tool.
+Tools can be plain strings or single-key dicts with inline config overrides.
+This lets you customize tool behavior per agent without affecting other agents that use the same tool.
 
 ```
 agents:
@@ -202,7 +220,8 @@ Within the authored layers (`defaults.tools` and `agents.<name>.tools`), each fi
 - Concrete value: override the next lower layer with that value.
 - `__MINDROOM_INHERIT__`: clear an inherited authored override and fall back to the next lower layer.
 
-When the same tool appears in both `defaults.tools` and `agents.<name>.tools`, MindRoom merges them field-by-field. Per-agent values win for overlapping keys, non-overlapping keys are kept from both, and `__MINDROOM_INHERIT__` removes the inherited authored value instead of passing the literal string to the tool.
+When the same tool appears in both `defaults.tools` and `agents.<name>.tools`, MindRoom merges them field-by-field.
+Per-agent values win for overlapping keys, non-overlapping keys are kept from both, and `__MINDROOM_INHERIT__` removes the inherited authored value instead of passing the literal string to the tool.
 
 ### Defaults with Overrides
 
@@ -253,7 +272,8 @@ agents:
           master_space_id: __MINDROOM_INHERIT__
 ```
 
-`ops` still uses the `clickup` tool, but `master_space_id` no longer inherits `"space-default"`. MindRoom falls back to the next lower layer, which is usually the stored tool config from the dashboard or credential store.
+`ops` still uses the `clickup` tool, but `master_space_id` no longer inherits `"space-default"`.
+MindRoom falls back to the next lower layer, which is usually the stored tool config from the dashboard or credential store.
 
 ### `include_default_tools` vs `__MINDROOM_INHERIT__`
 
@@ -280,11 +300,18 @@ tools: [shell, file, duckduckgo]   # still valid
 
 ### Config Manager
 
-The `!config` chat command and the `config_manager` tool preserve inline overrides when updating tool lists. Adding or removing tools via chat does not discard existing per-agent overrides on other tools.
+The `!config` chat command and the `config_manager` tool preserve inline overrides when updating tool lists.
+Adding or removing tools via chat does not discard existing per-agent overrides on other tools.
 
 ## Worker Routing
 
-`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process. When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default. `worker_scope` controls how those sandbox runtimes are reused between calls. The shared-only integrations require `worker_scope` unset or `shared`. That list includes `google`, `spotify`, `gmail`, `google_calendar`, `google_sheets`, `homeassistant`, and all configured `mcp_<server_id>` tools. Of those, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` also always stay local regardless of `worker_tools` (they are never proxied to the sandbox). `google` and `spotify` can still be proxied through the sandbox.
+`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
+When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
+`worker_scope` controls how those sandbox runtimes are reused between calls.
+The shared-only integrations require `worker_scope` unset or `shared`.
+That list includes `google`, `spotify`, `gmail`, `google_calendar`, `google_sheets`, `homeassistant`, and all configured `mcp_<server_id>` tools.
+Of those, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` also always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
+`google` and `spotify` can still be proxied through the sandbox.
 
 The supported `worker_scope` values are:
 
@@ -292,11 +319,15 @@ The supported `worker_scope` values are:
 - `user`: one runtime per user, shared across that user's agents.
 - `user_agent`: one runtime per user+agent pair.
 
-Leave `worker_scope` unset for unscoped execution — calls still run in the sandbox, but each call gets a fresh runtime instead of a persistent one. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
+Leave `worker_scope` unset for unscoped execution — calls still run in the sandbox, but each call gets a fresh runtime instead of a persistent one.
+`worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
 
 ### Filesystem Isolation
 
-`worker_scope` controls runtime reuse, not filesystem security. When the effective memory backend is `file`, tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) at the agent's canonical workspace root. Without file-backed workspace state, those tools keep their normal defaults such as the current directory. Even when set, `base_dir` is a convenience, not a hard boundary.
+`worker_scope` controls runtime reuse, not filesystem security.
+When the effective memory backend is `file`, tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) at the agent's canonical workspace root.
+Without file-backed workspace state, those tools keep their normal defaults such as the current directory.
+Even when set, `base_dir` is a convenience, not a hard boundary.
 
 Isolation depends on the worker backend:
 
@@ -306,21 +337,37 @@ Isolation depends on the worker backend:
 
 Use `user_agent` if you need per-agent filesystem isolation.
 
-For per-workspace env that an agent can edit (PATH, npm/pip cache locations, etc.), drop a `.mindroom/worker-env.sh` script in the agent workspace; MindRoom sources it before each worker-routed `shell` or `python` request. With `worker_scope: user`, the same runtime can move between several agent workspaces, and the hook is discovered from the current request's workspace — different agents get different overlays automatically. See [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
+For per-workspace env that an agent can edit (PATH, npm/pip cache locations, etc.), drop a `.mindroom/worker-env.sh` script in the agent workspace; MindRoom sources it before each worker-routed `shell` or `python` request.
+With `worker_scope: user`, the same runtime can move between several agent workspaces, and the hook is discovered from the current request's workspace — different agents get different overlays automatically. See [Workspace env hook](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
 
 ### Where Agent Data Lives
 
-Agents without `private` store all their data in one canonical directory: `agents/<name>/` (context files, workspace, memory, sessions, learning). Changing `worker_scope` changes how tool runtimes are isolated. It does **not** change where that non-private agent's data lives. All runtimes for the same non-private agent read and write the same storage directory. If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access. Agents that use `private` are different. They materialize one canonical state root per requester-scoped private instance under `private_instances/<scope-key>/<agent>/`. Workers mount those canonical private-instance roots. They do not own them.
+Agents without `private` store all their data in one canonical directory: `agents/<name>/` (context files, workspace, memory, sessions, learning).
+Changing `worker_scope` changes how tool runtimes are isolated.
+It does **not** change where that non-private agent's data lives.
+All runtimes for the same non-private agent read and write the same storage directory.
+If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access.
+Agents that use `private` are different.
+They materialize one canonical state root per requester-scoped private instance under `private_instances/<scope-key>/<agent>/`.
+Workers mount those canonical private-instance roots.
+They do not own them.
 
-The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` manage credentials through their worker runtime instead.
+The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`.
+Agents using `user` or `user_agent` manage credentials through their worker runtime instead.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md).
 
 ## Private Instances
 
-Use `private` when one shared agent definition should behave like a template that materializes a separate requester-local instance at runtime. The YAML definition stays shared. The private root, copied files, file-memory workspace, and private knowledge path do not. Private agents cannot participate in teams yet. That restriction also applies transitively: a shared team member that reaches a private agent through `delegate_to` is rejected.
+Use `private` when one shared agent definition should behave like a template that materializes a separate requester-local instance at runtime.
+The YAML definition stays shared.
+The private root, copied files, file-memory workspace, and private knowledge path do not.
+Private agents cannot participate in teams yet.
+That restriction also applies transitively: a shared team member that reaches a private agent through `delegate_to` is rejected.
 
-`private.per` is not a second spelling of `worker_scope`. `private.per` chooses who gets a separate private instance of the agent's state. MindRoom then uses that same requester partition for worker execution, but that is an internal consequence of private execution, not the public meaning of `worker_scope`.
+`private.per` is not a second spelling of `worker_scope`.
+`private.per` chooses who gets a separate private instance of the agent's state.
+MindRoom then uses that same requester partition for worker execution, but that is an internal consequence of private execution, not the public meaning of `worker_scope`.
 
 ```
 knowledge_bases:
@@ -368,7 +415,11 @@ mind_template/
 └── memory/
 ```
 
-In the example above, each requester gets their own effective `mind_data/` root under a canonical private-instance state root in shared storage. That private root is not created next to `config.yaml`. It is not stored under `workers/<worker>/`. Workers mount the same canonical private-instance root when they execute that requester scope. For a `mind` agent with `private.per: user`, different users get different private `mind_data/` trees even though the agent definition is shared.
+In the example above, each requester gets their own effective `mind_data/` root under a canonical private-instance state root in shared storage.
+That private root is not created next to `config.yaml`.
+It is not stored under `workers/<worker>/`.
+Workers mount the same canonical private-instance root when they execute that requester scope.
+For a `mind` agent with `private.per: user`, different users get different private `mind_data/` trees even though the agent definition is shared.
 
 ### Private Fields
 
@@ -419,11 +470,21 @@ In the example above, each requester gets their own effective `mind_data/` root 
 
 ## Thread Mode Resolution
 
-Thread mode is resolved per message using the current room ID. For an agent, MindRoom checks `room_thread_modes` in this order. First, it checks an exact room ID key. Second, it checks the managed room key/alias associated with that room ID. Third, it resolves each configured `room_thread_modes` key to a room ID and matches that against the current room. If none match, it falls back to `thread_mode`.
+Thread mode is resolved per message using the current room ID.
+For an agent, MindRoom checks `room_thread_modes` in this order.
+First, it checks an exact room ID key.
+Second, it checks the managed room key/alias associated with that room ID.
+Third, it resolves each configured `room_thread_modes` key to a room ID and matches that against the current room.
+If none match, it falls back to `thread_mode`.
 
-For a team, MindRoom resolves mode per member agent for that room. If all member agents resolve to the same mode, the team uses that mode. If member modes differ, the team defaults to `thread`.
+For a team, MindRoom resolves mode per member agent for that room.
+If all member agents resolve to the same mode, the team uses that mode.
+If member modes differ, the team defaults to `thread`.
 
-For the router, MindRoom resolves mode using agents relevant to the active room. This includes agents directly configured for the room and agents included via `teams.<name>.rooms`. If all relevant agents resolve to the same mode, the router uses that mode. If modes are mixed, the router defaults to `thread`.
+For the router, MindRoom resolves mode using agents relevant to the active room.
+This includes agents directly configured for the room and agents included via `teams.<name>.rooms`.
+If all relevant agents resolve to the same mode, the router uses that mode.
+If modes are mixed, the router defaults to `thread`.
 
 ## File-Based Context Loading
 
@@ -436,7 +497,8 @@ You can inject file content directly into an agent's role context without using 
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
 
-MindRoom loads the files when it builds an agent instance. The normal Matrix and OpenAI-compatible reply paths build fresh agent instances per reply/request, so editing a context file affects the next reply without restarting the process.
+MindRoom loads the files when it builds an agent instance.
+The normal Matrix and OpenAI-compatible reply paths build fresh agent instances per reply/request, so editing a context file affects the next reply without restarting the process.
 
 ## Agent Delegation
 
@@ -477,7 +539,8 @@ agents:
 
 ## Naming Rules
 
-Agent and team YAML keys must contain only alphanumeric characters and underscores (matching `^[a-zA-Z0-9_]+$`). Agent and team names must be distinct — the same key cannot appear in both `agents:` and `teams:`.
+Agent and team YAML keys must contain only alphanumeric characters and underscores (matching `^[a-zA-Z0-9_]+$`).
+Agent and team names must be distinct — the same key cannot appear in both `agents:` and `teams:`.
 
 ## Rich Prompt Agents
 

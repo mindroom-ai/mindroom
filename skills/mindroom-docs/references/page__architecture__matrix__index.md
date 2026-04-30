@@ -44,7 +44,10 @@ Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_roo
 
 MindRoom emits thread replies following [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md), using `m.relates_to` with `rel_type: m.thread`.
 
-Explicit `m.thread` metadata remains the primary source of thread conversation context. For clients or bridges that send plain replies without thread metadata (`m.in_reply_to` but no `rel_type: m.thread`), MindRoom applies a transitive compatibility rule. If a reply chain eventually reaches explicit thread `T` or a proven thread root, MindRoom treats the new reply as part of `T`. Replies that never reach threaded context stay room-level.
+Explicit `m.thread` metadata remains the primary source of thread conversation context.
+For clients or bridges that send plain replies without thread metadata (`m.in_reply_to` but no `rel_type: m.thread`), MindRoom applies a transitive compatibility rule.
+If a reply chain eventually reaches explicit thread `T` or a proven thread root, MindRoom treats the new reply as part of `T`.
+Replies that never reach threaded context stay room-level.
 
 ### Resolution Rules
 
@@ -129,11 +132,16 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 
 ## Response Tracking
 
-MindRoom prevents duplicate responses using a `ResponseTracker` that records which events have already been processed. When a sync reconnection or retry delivers the same event twice, the tracker suppresses the duplicate so only one agent response is sent per triggering message. Tracking state is persisted under `mindroom_data/tracking/` and survives restarts.
+MindRoom prevents duplicate responses using a `ResponseTracker` that records which events have already been processed.
+When a sync reconnection or retry delivers the same event twice, the tracker suppresses the duplicate so only one agent response is sent per triggering message.
+Tracking state is persisted under `mindroom_data/tracking/` and survives restarts.
 
 ## Room Cleanup
 
-On startup, MindRoom detects orphaned bot memberships left over from a previous configuration. When an agent is removed from `config.yaml`, its Matrix bot account may still be a member of rooms it previously joined. The cleanup process leaves those rooms safely without ejecting currently configured entities from their required rooms. This runs automatically — no manual intervention is needed.
+On startup, MindRoom detects orphaned bot memberships left over from a previous configuration.
+When an agent is removed from `config.yaml`, its Matrix bot account may still be a member of rooms it previously joined.
+The cleanup process leaves those rooms safely without ejecting currently configured entities from their required rooms.
+This runs automatically — no manual intervention is needed.
 
 ## Identity Management
 
@@ -162,7 +170,8 @@ matrix_space:
   name: MindRoom       # Display name for the Space
 ```
 
-When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets. The Space name is reconciled on each startup to match the configured value.
+When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
+The Space name is reconciled on each startup to match the configured value.
 
 ## Configuration
 

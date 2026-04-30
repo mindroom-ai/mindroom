@@ -73,7 +73,8 @@ Key environment variables (set in `.env` or pass directly):
 | `MINDROOM_PORT`         | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765`                                          |
 | `MINDROOM_API_KEY`      | API key for dashboard auth (standalone)                                                                                                                           | - (open access)                                 |
 
-To change the API server port or bind address, pass `--api-port` or `--api-host` to the `mindroom run` command. For example, add `command: ["mindroom", "run", "--api-port", "9000"]` to the Docker Compose service.
+To change the API server port or bind address, pass `--api-port` or `--api-host` to the `mindroom run` command.
+For example, add `command: ["mindroom", "run", "--api-port", "9000"]` to the Docker Compose service.
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
 

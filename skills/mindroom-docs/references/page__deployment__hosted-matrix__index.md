@@ -27,7 +27,8 @@ This guide covers the simplest production-like setup:
 uvx mindroom config init --profile public
 ```
 
-This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults. Use `uvx mindroom config init --profile public-codex` if you want the starter config to use `provider: codex`.
+This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults.
+Use `uvx mindroom config init --profile public-codex` if you want the starter config to use `provider: codex`.
 
 ## 2. Add AI Provider Key
 
@@ -38,7 +39,8 @@ OPENAI_API_KEY=...
 # or OPENROUTER_API_KEY=...
 ```
 
-For Codex CLI subscription auth, run `codex login` instead of adding an API key. MindRoom reads `~/.codex/auth.json` by default.
+For Codex CLI subscription auth, run `codex login` instead of adding an API key.
+MindRoom reads `~/.codex/auth.json` by default.
 
 ## 3. Pair This Install
 
@@ -79,9 +81,11 @@ MindRoom then:
 - `MINDROOM_LOCAL_CLIENT_SECRET`
 - `MINDROOM_NAMESPACE`
 
-`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` are **not Matrix user access tokens**. `MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
+`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` are **not Matrix user access tokens**.
+`MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
 
-They can only call provisioning-service endpoints that accept local client credentials (for example agent registration flows). Revoke them from `Settings -> Local MindRoom` in the chat UI.
+They can only call provisioning-service endpoints that accept local client credentials (for example agent registration flows).
+Revoke them from `Settings -> Local MindRoom` in the chat UI.
 
 ## Trust Model (Hosted Server vs Message Privacy)
 

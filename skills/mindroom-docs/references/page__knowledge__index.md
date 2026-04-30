@@ -1,6 +1,7 @@
 # Knowledge Bases
 
-Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation). Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
+Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation).
+Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
 
 ## How It Works
 
@@ -46,7 +47,12 @@ agents:
     knowledge_bases: [docs]
 ```
 
-Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom watch shared local bases with `watch: true`. Chat uses the last successfully published index and continues without blocking when a base is missing, stale, or failed. When a watched file changes, MindRoom marks the published index stale, refreshes in the background, and atomically publishes the replacement when it succeeds. When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation. Knowledge base IDs are the keys under `knowledge_bases`. Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
+Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom watch shared local bases with `watch: true`.
+Chat uses the last successfully published index and continues without blocking when a base is missing, stale, or failed.
+When a watched file changes, MindRoom marks the published index stale, refreshes in the background, and atomically publishes the replacement when it succeeds.
+When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation.
+Knowledge base IDs are the keys under `knowledge_bases`.
+Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, or names containing `/` or `\`.
 
 ## Configuration
 
@@ -69,7 +75,8 @@ knowledge_bases:
 | `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                                                                                                                                         |
 | `git`           | object | `null`             | Optional Git repository sync settings                                                                                                                                                                                                                       |
 
-Use smaller `chunk_size` values when your embedding server has lower token or batch limits. If chunking is too large, indexing retries will fail with embedder 500 errors.
+Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
+If chunking is too large, indexing retries will fail with embedder 500 errors.
 
 ### Private Agent Knowledge
 
@@ -96,7 +103,19 @@ agents:
     knowledge_bases: [company_docs]
 ```
 
-With this configuration, each requester's private knowledge path becomes `<their private root>/memory`. The template source is explicit, so you can see and edit the files being copied into each requester's private root. `private.template_dir` only copies files. PrivateAgentKnowledge is enabled only when you explicitly configure `private.knowledge.path`. `private.knowledge.path` must be relative to the private root and cannot be absolute or escape with `..`. `private.knowledge.path` can point to any folder inside the private root, including `.` for the private root itself. MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime. For isolating scopes such as `user` and `user_agent`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root. Git-backed knowledge syncs during scheduled or explicit refreshes. Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine PrivateAgentKnowledge with shared company knowledge. PrivateAgentKnowledge applies to the normal agent runtime path, not the OpenAI-compatible `/v1` API. If you enable `private.knowledge.git`, use a dedicated subtree such as `kb_repo`. Do not point Git-backed private knowledge at `.` or `memory/`, and do not use a Git checkout path that your template or private file memory also writes into.
+With this configuration, each requester's private knowledge path becomes `<their private root>/memory`.
+The template source is explicit, so you can see and edit the files being copied into each requester's private root.
+`private.template_dir` only copies files.
+PrivateAgentKnowledge is enabled only when you explicitly configure `private.knowledge.path`.
+`private.knowledge.path` must be relative to the private root and cannot be absolute or escape with `..`.
+`private.knowledge.path` can point to any folder inside the private root, including `.` for the private root itself.
+MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime.
+For isolating scopes such as `user` and `user_agent`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root.
+Git-backed knowledge syncs during scheduled or explicit refreshes.
+Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine PrivateAgentKnowledge with shared company knowledge.
+PrivateAgentKnowledge applies to the normal agent runtime path, not the OpenAI-compatible `/v1` API.
+If you enable `private.knowledge.git`, use a dedicated subtree such as `kb_repo`.
+Do not point Git-backed private knowledge at `.` or `memory/`, and do not use a Git checkout path that your template or private file memory also writes into.
 
 | Field                             | Type   | Default | Description                                                                                                                                                             |
 | --------------------------------- | ------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -107,7 +126,8 @@ With this configuration, each requester's private knowledge path becomes `<their
 | `private.knowledge.chunk_overlap` | int    | `0`     | Overlap characters between adjacent chunks. Must be smaller than `chunk_size`                                                                                           |
 | `private.knowledge.git`           | object | `null`  | Optional Git sync configuration for PrivateAgentKnowledge. Git-backed private knowledge must use a dedicated subtree outside requester-writable memory/template content |
 
-Use `private.knowledge` when the data itself should be private to that requester's private instance. Use top-level `knowledge_bases` when the same documents should stay shared across agents or users.
+Use `private.knowledge` when the data itself should be private to that requester's private instance.
+Use top-level `knowledge_bases` when the same documents should stay shared across agents or users.
 
 ### Multiple Knowledge Bases
 
@@ -152,7 +172,10 @@ When an agent has multiple knowledge bases, results are interleaved fairly so no
 
 ## Git-Backed Knowledge Bases
 
-Knowledge bases can sync from a Git repository. MindRoom starts a background refresh for configured shared Git knowledge bases when runtime support starts. After that, it schedules another background refresh every `poll_interval_seconds`. Reads keep using the last published index while a refresh is running.
+Knowledge bases can sync from a Git repository.
+MindRoom starts a background refresh for configured shared Git knowledge bases when runtime support starts.
+After that, it schedules another background refresh every `poll_interval_seconds`.
+Reads keep using the last published index while a refresh is running.
 
 ```
 knowledge_bases:
@@ -185,7 +208,8 @@ knowledge_bases:
 | `include_patterns`      | list   | `[]`       | Root-anchored glob patterns to include                                                                         |
 | `exclude_patterns`      | list   | `[]`       | Root-anchored glob patterns to exclude                                                                         |
 
-When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows. Bundled container images already include it.
+When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows.
+Bundled container images already include it.
 
 ### Sync Behavior
 
@@ -219,7 +243,8 @@ knowledge_bases:
 - If `include_patterns` is set, a file must match at least one pattern
 - `exclude_patterns` are applied last and remove matching files
 
-Multiple knowledge bases may point at the same root when they use the same source ownership settings. This is the preferred way to expose separate views of a large repository without cloning it more than once.
+Multiple knowledge bases may point at the same root when they use the same source ownership settings.
+This is the preferred way to expose separate views of a large repository without cloning it more than once.
 
 ```
 knowledge_bases:
@@ -290,7 +315,10 @@ memory:
 
 ## Storage
 
-Knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`. Each successful refresh publishes a generation-specific ChromaDB collection whose name begins with `mindroom_knowledge_<sanitized_base_id>_<hash>`. The base ID is sanitized to alphanumerics, hyphens, and underscores only, and the hash is a digest of the resolved knowledge path. For PrivateAgentKnowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
+Knowledge data is stored under `<storage_path>/knowledge_db/<sanitized_base_id>_<hash>/`.
+Each successful refresh publishes a generation-specific ChromaDB collection whose name begins with `mindroom_knowledge_<sanitized_base_id>_<hash>`.
+The base ID is sanitized to alphanumerics, hyphens, and underscores only, and the hash is a digest of the resolved knowledge path.
+For PrivateAgentKnowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
@@ -312,4 +340,7 @@ See the [Dashboard API reference](https://docs.mindroom.chat/dashboard/#knowledg
 
 ## Hot Reload
 
-Knowledge base configuration supports hot reload. Changing `config.yaml` does not initialize every configured knowledge base. Agents keep using last successfully published indexes until a refresh for their resolved binding succeeds. Changed settings make existing published indexes stale or unavailable depending on query compatibility, and scheduled refresh rebuilds the affected binding in the background.
+Knowledge base configuration supports hot reload.
+Changing `config.yaml` does not initialize every configured knowledge base.
+Agents keep using last successfully published indexes until a refresh for their resolved binding succeeds.
+Changed settings make existing published indexes stale or unavailable depending on query compatibility, and scheduled refresh rebuilds the affected binding in the background.

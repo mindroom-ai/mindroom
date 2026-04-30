@@ -4,7 +4,8 @@ Use these tools to query source-specific knowledge bases such as ArXiv, Wikipedi
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `research-sources` group. Use these tools when you want paper-only search, encyclopedia summaries, biomedical literature lookup, or Hacker News story and user data.
+This page documents the built-in tools in the `research-sources` group.
+Use these tools when you want paper-only search, encyclopedia summaries, biomedical literature lookup, or Hacker News story and user data.
 
 ## Tools On This Page
 
@@ -15,7 +16,10 @@ This page documents the built-in tools in the `research-sources` group. Use thes
 
 ## Common Setup Notes
 
-All four tools are `setup_type: none`, so they work out of the box and do not require API keys or OAuth. `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so these tools have no dedicated dashboard auth flow. Missing optional Python dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set. MindRoom does not add Matrix runtime-context behavior or worker-routing overrides for these tools. Use [Web Search](https://docs.mindroom.chat/tools/web-search/index.md) instead when you need broader web discovery, news search, or provider-backed search APIs.
+All four tools are `setup_type: none`, so they work out of the box and do not require API keys or OAuth.
+`src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so these tools have no dedicated dashboard auth flow.
+Missing optional Python dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+MindRoom does not add Matrix runtime-context behavior or worker-routing overrides for these tools. Use [Web Search](https://docs.mindroom.chat/tools/web-search/index.md) instead when you need broader web discovery, news search, or provider-backed search APIs.
 
 ## \[`arxiv`\]
 
@@ -23,7 +27,9 @@ All four tools are `setup_type: none`, so they work out of the box and do not re
 
 ### What It Does
 
-By default `arxiv` exposes `search_arxiv_and_return_articles(query, num_articles=10)` and `read_arxiv_papers(id_list, pages_to_read=None)`. Search results are returned as JSON with title, short ID, entry URL, authors, categories, publish timestamp, PDF URL, links, summary, and comment. Reading papers downloads each PDF locally, parses it with `pypdf`, and returns the same metadata plus per-page extracted text.
+By default `arxiv` exposes `search_arxiv_and_return_articles(query, num_articles=10)` and `read_arxiv_papers(id_list, pages_to_read=None)`.
+Search results are returned as JSON with title, short ID, entry URL, authors, categories, publish timestamp, PDF URL, links, summary, and comment.
+Reading papers downloads each PDF locally, parses it with `pypdf`, and returns the same metadata plus per-page extracted text.
 
 ### Configuration
 
@@ -61,7 +67,9 @@ read_arxiv_papers(["2103.03404v1"], pages_to_read=3)
 
 ### What It Does
 
-In normal MindRoom usage `wikipedia` exposes `search_wikipedia(query)`, which returns one JSON document containing the queried title and `wikipedia.summary(query)` content. If an upstream `Knowledge` object is injected, the toolkit instead exposes `search_wikipedia_and_update_knowledge_base(topic)`, which inserts the topic into that knowledge base and returns relevant documents from it. This makes `wikipedia` a simple direct lookup tool by default, with an advanced knowledge-base update mode for custom integrations.
+In normal MindRoom usage `wikipedia` exposes `search_wikipedia(query)`, which returns one JSON document containing the queried title and `wikipedia.summary(query)` content.
+If an upstream `Knowledge` object is injected, the toolkit instead exposes `search_wikipedia_and_update_knowledge_base(topic)`, which inserts the topic into that knowledge base and returns relevant documents from it.
+This makes `wikipedia` a simple direct lookup tool by default, with an advanced knowledge-base update mode for custom integrations.
 
 ### Configuration
 
@@ -95,7 +103,10 @@ search_wikipedia("Matrix protocol")
 
 ### What It Does
 
-`pubmed` exposes `search_pubmed(query, max_results=10)`. It first looks up PubMed IDs through `esearch`, then fetches article XML through `efetch`, and finally returns a JSON list of formatted result strings. Default output includes title, publication year, and summary text. When `results_expanded` is enabled, each result also includes first author, journal, publication type, DOI, PubMed URL, full-text URL when available, keywords, and MeSH terms.
+`pubmed` exposes `search_pubmed(query, max_results=10)`.
+It first looks up PubMed IDs through `esearch`, then fetches article XML through `efetch`, and finally returns a JSON list of formatted result strings.
+Default output includes title, publication year, and summary text.
+When `results_expanded` is enabled, each result also includes first author, journal, publication type, DOI, PubMed URL, full-text URL when available, keywords, and MeSH terms.
 
 ### Configuration
 
@@ -135,7 +146,9 @@ search_pubmed("CRISPR therapy", max_results=5)
 
 ### What It Does
 
-By default `hackernews` exposes `get_top_hackernews_stories(num_stories=10)` and `get_user_details(username)`. Top-story lookups return the raw story objects from the Hacker News item endpoint, with an extra `username` field copied from `by`. User lookups return a smaller JSON object with karma, about text, and total submitted item count.
+By default `hackernews` exposes `get_top_hackernews_stories(num_stories=10)` and `get_user_details(username)`.
+Top-story lookups return the raw story objects from the Hacker News item endpoint, with an extra `username` field copied from `by`.
+User lookups return a smaller JSON object with karma, about text, and total submitted item count.
 
 ### Configuration
 

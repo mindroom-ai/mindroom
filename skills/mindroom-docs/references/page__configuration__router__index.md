@@ -78,11 +78,16 @@ The router creates and manages rooms:
 - Has admin privileges to manage room membership
 - Cleans up orphaned bots on startup
 
-By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory. In `multi_user` mode, the router can set join rules (`public`/`knock`) and optionally publish rooms to the server directory. That same reconciliation path also updates `m.room.power_levels` for managed rooms, so the router must be joined and able to edit room power levels when thread tags are enabled.
+By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory.
+In `multi_user` mode, the router can set join rules (`public`/`knock`) and optionally publish rooms to the server directory.
+That same reconciliation path also updates `m.room.power_levels` for managed rooms, so the router must be joined and able to edit room power levels when thread tags are enabled.
 
 ### Voice Message Processing
 
-Audio events are handled through the shared media pipeline on all bots. The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a multi-agent room. When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message. Set `voice.visible_router_echo: true` if you also want the router to post the normalized voice text as a display-only message when it is allowed to reply. See [Voice Messages](https://docs.mindroom.chat/voice/index.md) for the detailed dispatch behavior.
+Audio events are handled through the shared media pipeline on all bots.
+The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a multi-agent room.
+When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message.
+Set `voice.visible_router_echo: true` if you also want the router to post the normalized voice text as a display-only message when it is allowed to reply. See [Voice Messages](https://docs.mindroom.chat/voice/index.md) for the detailed dispatch behavior.
 
 ### Configuration Confirmations
 

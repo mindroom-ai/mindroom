@@ -4,7 +4,8 @@ Use these tools to manage AWS-backed automation, edit Airflow DAG files, run cod
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `automation-and-platforms` group. Use these tools when you need infrastructure automation, generic API access, remote execution environments, or platform-level integration brokers.
+This page documents the built-in tools in the `automation-and-platforms` group.
+Use these tools when you need infrastructure automation, generic API access, remote execution environments, or platform-level integration brokers.
 
 ## Tools On This Page
 
@@ -18,7 +19,17 @@ This page documents the built-in tools in the `automation-and-platforms` group. 
 
 ## Common Setup Notes
 
-All seven tools on this page default to the primary agent runtime instead of MindRoom's worker-routed execution set. `aws_lambda`, `airflow`, and `custom_api` are registered as `setup_type: none`, while `aws_ses`, `e2b`, `daytona`, and `composio` are marked `requires_config`. `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow. Password fields such as `api_key` and `password` must be stored through the dashboard or credential store instead of inline YAML. `aws_lambda` and `aws_ses` both rely on standard boto3 credential resolution, so normal AWS environment variables, shared config files, or instance-role credentials are the real authentication path. That matters especially for `aws_ses`, because the current registry marks it as `setup_type: api_key` even though the tool itself does not expose an API-key field. `e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`. `daytona` accepts stored credentials or environment fallback through `DAYTONA_API_KEY`, and `api_url` can also fall back to `DAYTONA_API_URL`. `composio` can fall back to cached Composio user data or `COMPOSIO_API_KEY` when `api_key` is not stored directly. Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `sandbox_env_vars`, `sandbox_labels`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+All seven tools on this page default to the primary agent runtime instead of MindRoom's worker-routed execution set.
+`aws_lambda`, `airflow`, and `custom_api` are registered as `setup_type: none`, while `aws_ses`, `e2b`, `daytona`, and `composio` are marked `requires_config`.
+`src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
+Password fields such as `api_key` and `password` must be stored through the dashboard or credential store instead of inline YAML.
+`aws_lambda` and `aws_ses` both rely on standard boto3 credential resolution, so normal AWS environment variables, shared config files, or instance-role credentials are the real authentication path.
+That matters especially for `aws_ses`, because the current registry marks it as `setup_type: api_key` even though the tool itself does not expose an API-key field.
+`e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
+`daytona` accepts stored credentials or environment fallback through `DAYTONA_API_KEY`, and `api_url` can also fall back to `DAYTONA_API_URL`.
+`composio` can fall back to cached Composio user data or `COMPOSIO_API_KEY` when `api_key` is not stored directly.
+Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `sandbox_env_vars`, `sandbox_labels`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
+Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## \[`aws_lambda`\]
 
@@ -26,7 +37,10 @@ All seven tools on this page default to the primary agent runtime instead of Min
 
 ### What It Does
 
-`aws_lambda` exposes `list_functions()` and `invoke_function(function_name, payload="{}")`. The toolkit constructs a boto3 Lambda client at init time with `region_name`. `invoke_function()` passes the payload through to boto3 as a string and returns the Lambda status code plus the decoded response payload. `list_functions()` currently makes one direct `list_functions()` call rather than using a paginator, so very large accounts may need a richer AWS-specific path than this thin wrapper.
+`aws_lambda` exposes `list_functions()` and `invoke_function(function_name, payload="{}")`.
+The toolkit constructs a boto3 Lambda client at init time with `region_name`.
+`invoke_function()` passes the payload through to boto3 as a string and returns the Lambda status code plus the decoded response payload.
+`list_functions()` currently makes one direct `list_functions()` call rather than using a paginator, so very large accounts may need a richer AWS-specific path than this thin wrapper.
 
 ### Configuration
 
@@ -64,7 +78,10 @@ invoke_function("daily-report", payload='{"date": "2026-03-31"}')
 
 ### What It Does
 
-`aws_ses` exposes `send_email(subject, body, receiver_email)`. The toolkit builds a boto3 SES client with `region_name` and then sends a plain-text message from `"{sender_name} <{sender_email}>"`. It validates that `subject` and `body` are non-empty before sending. The current wrapper does not add HTML email support, templates, attachments, or richer SES delivery controls on top of the basic send call.
+`aws_ses` exposes `send_email(subject, body, receiver_email)`.
+The toolkit builds a boto3 SES client with `region_name` and then sends a plain-text message from `"{sender_name} <{sender_email}>"`.
+It validates that `subject` and `body` are non-empty before sending.
+The current wrapper does not add HTML email support, templates, attachments, or richer SES delivery controls on top of the basic send call.
 
 ### Configuration
 
@@ -108,7 +125,11 @@ send_email(
 
 ### What It Does
 
-`airflow` exposes `save_dag_file(contents, dag_file)` and `read_dag_file(dag_file)`. If `dags_dir` is a string, the upstream toolkit resolves it relative to the current working directory at tool initialization time. `save_dag_file()` creates missing parent directories before writing the target DAG file. This tool manages DAG source files only. It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state, or call the Airflow REST API.
+`airflow` exposes `save_dag_file(contents, dag_file)` and `read_dag_file(dag_file)`.
+If `dags_dir` is a string, the upstream toolkit resolves it relative to the current working directory at tool initialization time.
+`save_dag_file()` creates missing parent directories before writing the target DAG file.
+This tool manages DAG source files only.
+It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state, or call the Airflow REST API.
 
 ### Configuration
 
@@ -146,7 +167,11 @@ save_dag_file("from airflow import DAG\n", "generated/new_job.py")
 
 ### What It Does
 
-`e2b` requires an API key from stored credentials or `E2B_API_KEY`. The toolkit creates one E2B sandbox at initialization time and reuses it for subsequent tool calls from that toolkit instance. It exposes `run_python_code()`, `upload_file()`, `download_png_result()`, `download_chart_data()`, `download_file_from_sandbox()`, `run_command()`, `stream_command()`, `run_background_command()`, `kill_background_command()`, `list_files()`, `read_file_content()`, `write_file_content()`, `watch_directory()`, `get_public_url()`, `run_server()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`. The media helpers operate on the most recent `run_python_code()` result, which is why chart and PNG download flows are companion actions instead of standalone reads. `timeout` is passed into `Sandbox.create(...)`, and `sandbox_options` is splatted directly into that constructor.
+`e2b` requires an API key from stored credentials or `E2B_API_KEY`.
+The toolkit creates one E2B sandbox at initialization time and reuses it for subsequent tool calls from that toolkit instance.
+It exposes `run_python_code()`, `upload_file()`, `download_png_result()`, `download_chart_data()`, `download_file_from_sandbox()`, `run_command()`, `stream_command()`, `run_background_command()`, `kill_background_command()`, `list_files()`, `read_file_content()`, `write_file_content()`, `watch_directory()`, `get_public_url()`, `run_server()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`.
+The media helpers operate on the most recent `run_python_code()` result, which is why chart and PNG download flows are companion actions instead of standalone reads.
+`timeout` is passed into `Sandbox.create(...)`, and `sandbox_options` is splatted directly into that constructor.
 
 ### Configuration
 
@@ -184,7 +209,13 @@ run_server("python -m http.server 8000", port=8000)
 
 ### What It Does
 
-`daytona` requires an API key from stored credentials or `DAYTONA_API_KEY`. `api_url` can also fall back to `DAYTONA_API_URL`. The toolkit exposes `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`. When `persistent` is true, the tool stores the active sandbox ID in `agent.session_state` and tries to reuse that sandbox on later calls. It also tracks a working directory in `agent.session_state`, and `run_shell_command()` treats `cd ...` specially so later relative-path commands and file operations stay in that directory. If no reusable sandbox exists, the toolkit creates one automatically unless `auto_create_sandbox` is disabled. The bundled default instructions describe a code-write, execute, and show-results workflow, but those instructions are only added to the agent prompt when `add_instructions: true`.
+`daytona` requires an API key from stored credentials or `DAYTONA_API_KEY`.
+`api_url` can also fall back to `DAYTONA_API_URL`.
+The toolkit exposes `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
+When `persistent` is true, the tool stores the active sandbox ID in `agent.session_state` and tries to reuse that sandbox on later calls.
+It also tracks a working directory in `agent.session_state`, and `run_shell_command()` treats `cd ...` specially so later relative-path commands and file operations stay in that directory.
+If no reusable sandbox exists, the toolkit creates one automatically unless `auto_create_sandbox` is disabled.
+The bundled default instructions describe a code-write, execute, and show-results workflow, but those instructions are only added to the agent prompt when `add_instructions: true`.
 
 ### Configuration
 
@@ -242,7 +273,11 @@ create_file("main.py", "print('ok')")
 
 ### What It Does
 
-The registered MindRoom tool instantiates `composio_agno.ComposioToolSet`. That upstream object does not expose a stable fixed method list like `aws_lambda` or `custom_api`. Instead, its main surface is `get_tools(actions=..., apps=..., tags=...)`, which wraps selected Composio actions into Agno `Toolkit` objects at runtime. The resulting callable tools therefore depend on your Composio workspace, connected accounts, and action selection rather than a static MindRoom-defined function list. MindRoom's current registry metadata on this branch documents the connection and workspace fields, but it does not expose separate per-agent app or action filter fields in `config.yaml`.
+The registered MindRoom tool instantiates `composio_agno.ComposioToolSet`.
+That upstream object does not expose a stable fixed method list like `aws_lambda` or `custom_api`.
+Instead, its main surface is `get_tools(actions=..., apps=..., tags=...)`, which wraps selected Composio actions into Agno `Toolkit` objects at runtime.
+The resulting callable tools therefore depend on your Composio workspace, connected accounts, and action selection rather than a static MindRoom-defined function list.
+MindRoom's current registry metadata on this branch documents the connection and workspace fields, but it does not expose separate per-agent app or action filter fields in `config.yaml`.
 
 ### Configuration
 
@@ -289,7 +324,13 @@ agents:
 
 ### What It Does
 
-`custom_api` exposes `make_request(endpoint, method="GET", params=None, data=None, headers=None, json_data=None)`. If `base_url` is set, the tool joins it with the passed endpoint. If `username` and `password` are configured, the request uses HTTP Basic Auth. If `api_key` is configured, the tool adds `Authorization: Bearer <api_key>` to the default headers. Per-call headers are merged on top of configured default headers. The response body is parsed as JSON when possible and otherwise returned as plain text inside a JSON envelope with `status_code`, response `headers`, and `data`. Non-2xx responses still return a structured result object, with an added `"error": "Request failed"` field.
+`custom_api` exposes `make_request(endpoint, method="GET", params=None, data=None, headers=None, json_data=None)`.
+If `base_url` is set, the tool joins it with the passed endpoint.
+If `username` and `password` are configured, the request uses HTTP Basic Auth.
+If `api_key` is configured, the tool adds `Authorization: Bearer <api_key>` to the default headers.
+Per-call headers are merged on top of configured default headers.
+The response body is parsed as JSON when possible and otherwise returned as plain text inside a JSON envelope with `status_code`, response `headers`, and `data`.
+Non-2xx responses still return a structured result object, with an added `"error": "Request failed"` field.
 
 ### Configuration
 

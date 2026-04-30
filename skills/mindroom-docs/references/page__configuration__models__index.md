@@ -102,7 +102,12 @@ models:
 
 ## Codex Subscription Models
 
-Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API. Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens. MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint. The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-plugin-style form `openai-codex/gpt-5.5`. If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`. For starter config generation, use `mindroom config init --profile public-codex` or `mindroom config init --provider codex`.
+Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API.
+Run `codex login` first so `~/.codex/auth.json` contains ChatGPT OAuth tokens.
+MindRoom refreshes the access token when needed and sends requests to the Codex Responses endpoint.
+The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-plugin-style form `openai-codex/gpt-5.5`.
+If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`.
+For starter config generation, use `mindroom config init --profile public-codex` or `mindroom config init --provider codex`.
 
 ```
 models:
@@ -115,11 +120,33 @@ models:
       reasoning_effort: medium
 ```
 
-Set Codex reasoning effort through `extra_kwargs.reasoning_effort`. Agno maps this to the Responses API `reasoning.effort` field. Supported effort values are `minimal`, `low`, `medium`, and `high`. The starter Codex profile uses `medium`. MindRoom sends a Codex prompt-cache key plus the Codex CLI session headers for each active agent session. By default, that key is derived from the current execution identity, so separate Matrix threads can run concurrently without sharing one global cache key. You can set `extra_kwargs.prompt_cache_key` to override that derived key for a model, but avoid a single low-cardinality value for many busy threads unless you intentionally want those requests routed together. Live testing against the Codex subscription endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key. Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected. Treat Codex prompt caching as best-effort rather than guaranteed.
+Set Codex reasoning effort through `extra_kwargs.reasoning_effort`.
+Agno maps this to the Responses API `reasoning.effort` field.
+Supported effort values are `minimal`, `low`, `medium`, and `high`.
+The starter Codex profile uses `medium`.
+MindRoom sends a Codex prompt-cache key plus the Codex CLI session headers for each active agent session.
+By default, that key is derived from the current execution identity, so separate Matrix threads can run concurrently without sharing one global cache key.
+You can set `extra_kwargs.prompt_cache_key` to override that derived key for a model, but avoid a single low-cardinality value for many busy threads unless you intentionally want those requests routed together.
+Live testing against the Codex subscription endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key.
+Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
+Treat Codex prompt caching as best-effort rather than guaranteed.
 
 ## Context Window
 
-When `context_window` is set, MindRoom uses it to budget persisted replay and destructive auto-compaction. MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`. That replay-fit step reduces or disables persisted replay for the current run when needed. Authoring `defaults.compaction`, or a non-empty per-agent/per-team `compaction` override, enables destructive compaction and lets you customize the thresholds, reserve, and summary model, or disable destructive auto-compaction entirely. A bare per-entity `compaction: {}` is only a no-op override that inherits authored defaults. `threshold_tokens` and `threshold_percent` use the active runtime model window for replay budgeting. Manual `compact_context` still uses that active runtime window for the final replay-fit step on the next run, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`. If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass. Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place. Otherwise MindRoom re-checks the updated session after a successful visible reply and compacts immediately if the next reply would cross the threshold. The budget uses a chars/4 approximation and reserves headroom for the current prompt and output. MindRoom does not mutate configured `num_history_runs` to fit the window. Instead, it computes the replay plan that actually fits the current call and uses compaction to keep future replay healthy. If needed, that replay plan can reduce raw replay, fall back to summary-only replay, or disable persisted replay entirely for the run.
+When `context_window` is set, MindRoom uses it to budget persisted replay and destructive auto-compaction.
+MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
+That replay-fit step reduces or disables persisted replay for the current run when needed.
+Authoring `defaults.compaction`, or a non-empty per-agent/per-team `compaction` override, enables destructive compaction and lets you customize the thresholds, reserve, and summary model, or disable destructive auto-compaction entirely.
+A bare per-entity `compaction: {}` is only a no-op override that inherits authored defaults.
+`threshold_tokens` and `threshold_percent` use the active runtime model window for replay budgeting.
+Manual `compact_context` still uses that active runtime window for the final replay-fit step on the next run, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
+If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
+Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
+Otherwise MindRoom re-checks the updated session after a successful visible reply and compacts immediately if the next reply would cross the threshold.
+The budget uses a chars/4 approximation and reserves headroom for the current prompt and output.
+MindRoom does not mutate configured `num_history_runs` to fit the window.
+Instead, it computes the replay plan that actually fits the current call and uses compaction to keep future replay healthy.
+If needed, that replay plan can reduce raw replay, fall back to summary-only replay, or disable persisted replay entirely for the run.
 
 ```
 models:

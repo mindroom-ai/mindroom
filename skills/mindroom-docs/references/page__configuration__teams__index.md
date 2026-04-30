@@ -94,7 +94,8 @@ teams:
 
 Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
 
-`num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings. When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
+`num_history_runs` and `num_history_messages` are mutually exclusive, just like the agent-level settings.
+When a named team sets these fields, the team scope uses the team-owned policy instead of inheriting one member's history policy.
 
 Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 
@@ -107,7 +108,9 @@ Startup thread prewarm is a background, best-effort cache warmup for rooms alrea
 
 ## Dynamic Team Formation
 
-When multiple agents are mentioned in a message (e.g., `@code @research analyze this`), MindRoom automatically forms an ad-hoc team. Dynamic teams form in these scenarios: In threads with multiple human participants, stale thread context does not auto-form a team. A fresh explicit `@mention` in the current message is required before agents respond.
+When multiple agents are mentioned in a message (e.g., `@code @research analyze this`), MindRoom automatically forms an ad-hoc team. Dynamic teams form in these scenarios:
+In threads with multiple human participants, stale thread context does not auto-form a team.
+A fresh explicit `@mention` in the current message is required before agents respond.
 
 1. **Multiple agents explicitly tagged** - e.g., `@code @research analyze this`
 1. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention

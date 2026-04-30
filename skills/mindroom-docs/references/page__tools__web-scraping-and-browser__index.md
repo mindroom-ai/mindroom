@@ -4,7 +4,8 @@ Use these tools to read pages, extract article text, crawl websites, and drive e
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `web-scraping-and-browser` group. Use these tools when you need lightweight text extraction, structured scraping APIs, or browser automation against live websites.
+This page documents the built-in tools in the `web-scraping-and-browser` group.
+Use these tools when you need lightweight text extraction, structured scraping APIs, or browser automation against live websites.
 
 ## Tools On This Page
 
@@ -26,7 +27,15 @@ This page documents the built-in tools in the `web-scraping-and-browser` group. 
 
 ## Common Setup Notes
 
-`crawl4ai`, `website`, `trafilatura`, `newspaper`, and `web_browser_tools` are the lowest-friction no-config options on this page. `firecrawl`, `browserbase`, `agentql`, `scrapegraph`, `apify`, `brightdata`, and `oxylabs` are all credentialed tools that normally need stored credentials or SDK environment variables before they are useful. `spider` also needs credentials in practice even though the current MindRoom metadata marks it as `setup_type: none`, because the installed `spider-client` raises when `SPIDER_API_KEY` is missing. `jina` is the middle ground here, because the installed `JinaReaderTools` only adds an `Authorization` header when `api_key` is present, so public `read_url()` usage works without a key while authenticated plans can still set one. `browser` is local Playwright automation, `browserbase` is a hosted browser API that you connect to over CDP, and `web_browser_tools` simply asks the host operating system to open a browser tab or window. `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow. Store password fields through the dashboard or credential store instead of inline YAML, and use environment variables such as `FIRECRAWL_API_KEY`, `SPIDER_API_KEY`, `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`, `AGENTQL_API_KEY`, `SGAI_API_KEY`, `APIFY_API_TOKEN`, `BRIGHT_DATA_API_KEY`, `OXYLABS_USERNAME`, `OXYLABS_PASSWORD`, and `JINA_API_KEY` when you prefer SDK-native auth. `crawl4ai`, `agentql`, `browserbase`, and `browser` also depend on a working browser runtime, and `web_browser_tools` only makes sense on a host that can open a real desktop browser. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+`crawl4ai`, `website`, `trafilatura`, `newspaper`, and `web_browser_tools` are the lowest-friction no-config options on this page.
+`firecrawl`, `browserbase`, `agentql`, `scrapegraph`, `apify`, `brightdata`, and `oxylabs` are all credentialed tools that normally need stored credentials or SDK environment variables before they are useful.
+`spider` also needs credentials in practice even though the current MindRoom metadata marks it as `setup_type: none`, because the installed `spider-client` raises when `SPIDER_API_KEY` is missing.
+`jina` is the middle ground here, because the installed `JinaReaderTools` only adds an `Authorization` header when `api_key` is present, so public `read_url()` usage works without a key while authenticated plans can still set one.
+`browser` is local Playwright automation, `browserbase` is a hosted browser API that you connect to over CDP, and `web_browser_tools` simply asks the host operating system to open a browser tab or window.
+`src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
+Store password fields through the dashboard or credential store instead of inline YAML, and use environment variables such as `FIRECRAWL_API_KEY`, `SPIDER_API_KEY`, `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`, `AGENTQL_API_KEY`, `SGAI_API_KEY`, `APIFY_API_TOKEN`, `BRIGHT_DATA_API_KEY`, `OXYLABS_USERNAME`, `OXYLABS_PASSWORD`, and `JINA_API_KEY` when you prefer SDK-native auth.
+`crawl4ai`, `agentql`, `browserbase`, and `browser` also depend on a working browser runtime, and `web_browser_tools` only makes sense on a host that can open a real desktop browser.
+Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## No-Config Scrapers
 
@@ -36,7 +45,12 @@ This page documents the built-in tools in the `web-scraping-and-browser` group. 
 
 #### What It Does
 
-`crawl4ai` exposes `crawl(url, search_query=None)`. It accepts either one URL string or a list of URLs and returns readable extracted content for each one. When you pass `search_query`, the tool enables BM25-based content filtering to keep the extracted text focused on that query. When `use_pruning` is enabled without a query, the tool uses Crawl4AI pruning to trim noisy page content. The current implementation bypasses Crawl4AI cache for fresher reads and truncates the result to `max_length` when needed. This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
+`crawl4ai` exposes `crawl(url, search_query=None)`.
+It accepts either one URL string or a list of URLs and returns readable extracted content for each one.
+When you pass `search_query`, the tool enables BM25-based content filtering to keep the extracted text focused on that query.
+When `use_pruning` is enabled without a query, the tool uses Crawl4AI pruning to trim noisy page content.
+The current implementation bypasses Crawl4AI cache for fresher reads and truncates the result to `max_length` when needed.
+This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
 
 #### Configuration
 
@@ -81,7 +95,10 @@ crawl("https://matrix.org/blog/", search_query="bridges and federation")
 
 #### What It Does
 
-With normal MindRoom YAML configuration, `website` exposes `read_url(url)` and returns JSON-serialized `Document` objects from Agno's `WebsiteReader`. If a `Knowledge` object is injected programmatically through the `knowledge` constructor argument, the tool exposes `add_website_to_knowledge(url)` instead of `read_url()`. That means the same registry entry can act either as a simple page reader or as a knowledge-base ingestion hook depending on how it is constructed. In normal hand-authored `config.yaml`, you should treat this as a quick page-reading tool.
+With normal MindRoom YAML configuration, `website` exposes `read_url(url)` and returns JSON-serialized `Document` objects from Agno's `WebsiteReader`.
+If a `Knowledge` object is injected programmatically through the `knowledge` constructor argument, the tool exposes `add_website_to_knowledge(url)` instead of `read_url()`.
+That means the same registry entry can act either as a simple page reader or as a knowledge-base ingestion hook depending on how it is constructed.
+In normal hand-authored `config.yaml`, you should treat this as a quick page-reading tool.
 
 #### Configuration
 
@@ -114,7 +131,12 @@ read_url("https://docs.mindroom.chat")
 
 #### What It Does
 
-`trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`. It fetches pages locally through Trafilatura and can return plain text, Markdown, JSON, XML, CSV, or HTML output depending on `output_format`. `extract_metadata_only()` returns metadata without full article text. `extract_batch()` loops over multiple URLs and returns one JSON payload with successes and failures. `crawl_website()` uses Trafilatura's focused spider support when that module is importable in the runtime. If the spider module is missing, the tool skips crawler registration instead of exposing a broken crawl function.
+`trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`.
+It fetches pages locally through Trafilatura and can return plain text, Markdown, JSON, XML, CSV, or HTML output depending on `output_format`.
+`extract_metadata_only()` returns metadata without full article text.
+`extract_batch()` loops over multiple URLs and returns one JSON payload with successes and failures.
+`crawl_website()` uses Trafilatura's focused spider support when that module is importable in the runtime.
+If the spider module is missing, the tool skips crawler registration instead of exposing a broken crawl function.
 
 #### Configuration
 
@@ -170,7 +192,11 @@ extract_metadata_only("https://matrix.org/blog/")
 
 #### What It Does
 
-`newspaper` exposes `read_article(url)`. It returns JSON with whichever article fields were extracted successfully, including title, authors, text, publish date, and optional summary. `article_length` truncates article text after extraction. The registry name is `newspaper`, but the underlying module and dependency still come from `newspaper4k`. That means old references to `newspaper4k` are stale for current MindRoom config.
+`newspaper` exposes `read_article(url)`.
+It returns JSON with whichever article fields were extracted successfully, including title, authors, text, publish date, and optional summary.
+`article_length` truncates article text after extraction.
+The registry name is `newspaper`, but the underlying module and dependency still come from `newspaper4k`.
+That means old references to `newspaper4k` are stale for current MindRoom config.
 
 #### Configuration
 
@@ -208,7 +234,12 @@ read_article("https://matrix.org/blog/")
 
 #### What It Does
 
-`jina` exposes `read_url(url)` and, when enabled, `search_query(query)`. `read_url()` prepends the target URL to `base_url`, which defaults to `https://r.jina.ai/`. `search_query()` posts the query to `search_url`, which defaults to `https://s.jina.ai/`. When `search_query_content` is false, the tool adds `X-Respond-With: no-content` to avoid returning full page text in search results. Returned content is truncated to `max_content_length`. The installed implementation only adds the `Authorization` header when an API key is present, so unauthenticated public-reader usage still works.
+`jina` exposes `read_url(url)` and, when enabled, `search_query(query)`.
+`read_url()` prepends the target URL to `base_url`, which defaults to `https://r.jina.ai/`.
+`search_query()` posts the query to `search_url`, which defaults to `https://s.jina.ai/`.
+When `search_query_content` is false, the tool adds `X-Respond-With: no-content` to avoid returning full page text in search results.
+Returned content is truncated to `max_content_length`.
+The installed implementation only adds the `Authorization` header when an API key is present, so unauthenticated public-reader usage still works.
 
 #### Configuration
 
@@ -254,7 +285,12 @@ search_query("latest Matrix bridge updates")
 
 #### What It Does
 
-`firecrawl` exposes `scrape_website()`, `crawl_website()`, `map_website()`, and `search_web()`. `formats` is applied to scrape, crawl, and search requests. `limit` acts as the default result cap for crawl and search operations. `poll_interval` controls how often crawl jobs are polled. `search_params` is passed through to Firecrawl search calls as raw provider-specific options. The upstream tool falls back to `FIRECRAWL_API_KEY` when `api_key` is not provided directly.
+`firecrawl` exposes `scrape_website()`, `crawl_website()`, `map_website()`, and `search_web()`.
+`formats` is applied to scrape, crawl, and search requests.
+`limit` acts as the default result cap for crawl and search operations.
+`poll_interval` controls how often crawl jobs are polled.
+`search_params` is passed through to Firecrawl search calls as raw provider-specific options.
+The upstream tool falls back to `FIRECRAWL_API_KEY` when `api_key` is not provided directly.
 
 #### Configuration
 
@@ -301,7 +337,11 @@ search_web("latest Matrix bridges")
 
 #### What It Does
 
-`spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`. The current wrapper calls Spider search with `fetch_page_content: false`, so search is primarily discovery rather than full-content extraction. `scrape()` and `crawl()` request Markdown-style output from Spider. `optional_params` is merged into Spider API requests as a raw provider options object. The installed `spider-client` constructor raises when no API key is available, even though the current MindRoom metadata says this tool is available without setup.
+`spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`.
+The current wrapper calls Spider search with `fetch_page_content: false`, so search is primarily discovery rather than full-content extraction.
+`scrape()` and `crawl()` request Markdown-style output from Spider.
+`optional_params` is merged into Spider API requests as a raw provider options object.
+The installed `spider-client` constructor raises when no API key is available, even though the current MindRoom metadata says this tool is available without setup.
 
 #### Configuration
 
@@ -343,7 +383,13 @@ scrape("https://matrix.org/blog/")
 
 #### What It Does
 
-`scrapegraph` exposes `smartscraper()`, `markdownify()`, `crawl()`, `agentic_crawler()`, `searchscraper()`, and `scrape()`. `smartscraper()` extracts structured data from one page based on a natural-language prompt. `markdownify()` returns a Markdown version of a page. `crawl()` applies a prompt plus JSON schema across a crawl. `agentic_crawler()` performs automated steps in the browser and can optionally run AI extraction over the resulting content. `searchscraper()` searches the web before extracting information. `render_heavy_js` only affects the low-level `scrape()` path.
+`scrapegraph` exposes `smartscraper()`, `markdownify()`, `crawl()`, `agentic_crawler()`, `searchscraper()`, and `scrape()`.
+`smartscraper()` extracts structured data from one page based on a natural-language prompt.
+`markdownify()` returns a Markdown version of a page.
+`crawl()` applies a prompt plus JSON schema across a crawl.
+`agentic_crawler()` performs automated steps in the browser and can optionally run AI extraction over the resulting content.
+`searchscraper()` searches the web before extracting information.
+`render_heavy_js` only affects the low-level `scrape()` path.
 
 #### Configuration
 
@@ -387,7 +433,11 @@ markdownify("https://matrix.org/blog/")
 
 #### What It Does
 
-`apify` does not expose one fixed method like the other tools on this page. Instead, it reads the configured Actor IDs and registers one tool function per Actor at startup. Each generated tool uses the Actor's input schema to build parameters and returns that Actor's dataset items as JSON. Without configured `actors`, there is no practical tool surface. This is best thought of as a hosted Actor adapter rather than a single scraper API.
+`apify` does not expose one fixed method like the other tools on this page.
+Instead, it reads the configured Actor IDs and registers one tool function per Actor at startup.
+Each generated tool uses the Actor's input schema to build parameters and returns that Actor's dataset items as JSON.
+Without configured `actors`, there is no practical tool surface.
+This is best thought of as a hosted Actor adapter rather than a single scraper API.
 
 #### Configuration
 
@@ -418,7 +468,12 @@ agents:
 
 #### What It Does
 
-`brightdata` exposes `scrape_as_markdown()`, `get_screenshot()`, `search_engine()`, and `web_data_feed()`. `scrape_as_markdown()` uses the configured web-unlocker zone and returns Markdown output. `get_screenshot()` returns a `ToolResult` with an image artifact instead of just raw text. `search_engine()` supports Google, Bing, and Yandex search through Bright Data's SERP infrastructure. `web_data_feed()` accesses Bright Data feed endpoints for supported source types. Zone selection is controlled by `serp_zone` and `web_unlocker_zone`, which can also be overridden by environment variables.
+`brightdata` exposes `scrape_as_markdown()`, `get_screenshot()`, `search_engine()`, and `web_data_feed()`.
+`scrape_as_markdown()` uses the configured web-unlocker zone and returns Markdown output.
+`get_screenshot()` returns a `ToolResult` with an image artifact instead of just raw text.
+`search_engine()` supports Google, Bing, and Yandex search through Bright Data's SERP infrastructure.
+`web_data_feed()` accesses Bright Data feed endpoints for supported source types.
+Zone selection is controlled by `serp_zone` and `web_unlocker_zone`, which can also be overridden by environment variables.
 
 #### Configuration
 
@@ -463,7 +518,12 @@ search_engine("Matrix hosting", engine="google", num_results=5)
 
 #### What It Does
 
-`oxylabs` exposes `search_google()`, `get_amazon_product()`, `search_amazon_products()`, and `scrape_website()`. It uses the Oxylabs realtime client for Google and Amazon scraping rather than a generic HTML fetch path. `search_google()` returns parsed organic results with title, URL, description, and position. The Amazon functions expose both product-detail and product-search workflows. `scrape_website()` is the generic fallback when you just want one URL scraped. This tool is credentialed with a username and password pair rather than one API key.
+`oxylabs` exposes `search_google()`, `get_amazon_product()`, `search_amazon_products()`, and `scrape_website()`.
+It uses the Oxylabs realtime client for Google and Amazon scraping rather than a generic HTML fetch path.
+`search_google()` returns parsed organic results with title, URL, description, and position.
+The Amazon functions expose both product-detail and product-search workflows.
+`scrape_website()` is the generic fallback when you just want one URL scraped.
+This tool is credentialed with a username and password pair rather than one API key.
 
 #### Configuration
 
@@ -500,7 +560,11 @@ search_amazon_products("ergonomic keyboard", domain_code="com")
 
 #### What It Does
 
-`agentql` exposes `scrape_website(url)` and, when enabled, `custom_scrape_website(url)`. `scrape_website()` uses a built-in query that extracts generic page text. `custom_scrape_website()` only becomes useful when `agentql_query` is non-empty. The installed upstream toolkit registers the custom scrape function automatically when `agentql_query` is set, even if `enable_custom_scrape_website` is false. The current upstream implementation launches Playwright with `headless=False`, which matters on headless-only runtimes.
+`agentql` exposes `scrape_website(url)` and, when enabled, `custom_scrape_website(url)`.
+`scrape_website()` uses a built-in query that extracts generic page text.
+`custom_scrape_website()` only becomes useful when `agentql_query` is non-empty.
+The installed upstream toolkit registers the custom scrape function automatically when `agentql_query` is set, even if `enable_custom_scrape_website` is false.
+The current upstream implementation launches Playwright with `headless=False`, which matters on headless-only runtimes.
 
 #### Configuration
 
@@ -543,7 +607,12 @@ custom_scrape_website("https://matrix.org/blog/")
 
 #### What It Does
 
-`browserbase` exposes `navigate_to()`, `screenshot()`, `get_page_content()`, and `close_session()`, plus async variants for async agent execution. The tool auto-creates a Browserbase session, stores its `connect_url`, and connects to it over Playwright CDP. `get_page_content()` returns visible cleaned text when `parse_html` is true and raw HTML when `parse_html` is false. Long page content is truncated to `max_content_length`. `base_url` configures the Browserbase API endpoint, not the website you want to visit. This is simpler than `browser` when you only need remote navigation, screenshots, and page reads.
+`browserbase` exposes `navigate_to()`, `screenshot()`, `get_page_content()`, and `close_session()`, plus async variants for async agent execution.
+The tool auto-creates a Browserbase session, stores its `connect_url`, and connects to it over Playwright CDP.
+`get_page_content()` returns visible cleaned text when `parse_html` is true and raw HTML when `parse_html` is false.
+Long page content is truncated to `max_content_length`.
+`base_url` configures the Browserbase API endpoint, not the website you want to visit.
+This is simpler than `browser` when you only need remote navigation, screenshots, and page reads.
 
 #### Configuration
 
@@ -588,7 +657,14 @@ get_page_content()
 
 #### What It Does
 
-`browser` exposes one callable, `browser(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, and `act`. It manages named browser profiles, with `mindroom` as the default profile name. It creates tabs, tracks the active tab, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls. `snapshot()` can return either `ai` or `aria` format. `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`. Only `target="host"` is supported on this branch, so sandbox or node targeting fields currently return an error. If `output_dir` is unset, screenshots and PDFs are written under `<storage>/browser`. The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
+`browser` exposes one callable, `browser(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, and `act`.
+It manages named browser profiles, with `mindroom` as the default profile name.
+It creates tabs, tracks the active tab, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
+`snapshot()` can return either `ai` or `aria` format.
+`act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
+Only `target="host"` is supported on this branch, so sandbox or node targeting fields currently return an error.
+If `output_dir` is unset, screenshots and PDFs are written under `<storage>/browser`.
+The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 
 #### Configuration
 
@@ -623,7 +699,10 @@ browser(action="screenshot", fullPage=True)
 
 #### What It Does
 
-`web_browser_tools` exposes `open_page(url, new_window=False)`. It uses Python's standard-library `webbrowser` module to open a tab or window on the host operating system. It does not return page content, DOM state, screenshots, or automation handles. This makes it useful for human handoff or local desktop workflows, but not for scraping.
+`web_browser_tools` exposes `open_page(url, new_window=False)`.
+It uses Python's standard-library `webbrowser` module to open a tab or window on the host operating system.
+It does not return page content, DOM state, screenshots, or automation handles.
+This makes it useful for human handoff or local desktop workflows, but not for scraping.
 
 #### Configuration
 

@@ -4,7 +4,8 @@ Use these tools and presets to coordinate other agents, change runtime configura
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `agent-orchestration` group. Use these tools when you need multi-agent coordination, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
+This page documents the built-in tools in the `agent-orchestration` group.
+Use these tools when you need multi-agent coordination, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
 
 ## Tools On This Page
 
@@ -25,7 +26,22 @@ All six entries on this page are MindRoom-native orchestration features rather t
 
 ### What It Does
 
-`subagents` exposes `agents_list()`, `sessions_spawn()`, `sessions_send()`, and `list_sessions()`. All four calls return JSON strings with a `status` field, a `tool` field, and operation-specific payload data. `agents_list()` returns the configured agent IDs and the current agent name. `sessions_spawn(task, summary, tag, label=None, agent_id=None)` requires a non-empty task plus a normalized summary and tag. `sessions_spawn()` posts a fresh room-level Matrix message that mentions the target agent, then treats the resulting event ID as the root of a new isolated session thread. After the spawn succeeds, it writes the requested thread summary and tag through the lower-level thread summary and thread tag APIs. If you pass a `label` and the current `(agent_name, room_id, requester_id)` scope already has a matching tracked session, `sessions_spawn()` reuses that session instead of creating a new one and still applies the requested summary and tag to the existing thread. If the post-spawn summary or tag write fails, the spawn still succeeds and the response includes a `warnings` list describing the follow-up failure. `sessions_send()` sends a follow-up message into an existing tracked session. If you omit `session_key`, `sessions_send()` defaults to the current room or thread session key from `create_session_id(room_id, thread_id)`. If you pass `label` without `session_key`, `sessions_send()` resolves the most recent in-scope session with that label. If you pass `agent_id`, `sessions_send()` prefixes the outgoing message with `@mindroom_<agent_id>` before sending it. Tracked sessions are persisted in `subagents/session_registry.json` under the current runtime storage root. `list_sessions()` paginates those tracked sessions with a default `limit` of 50 and a maximum of 200. Isolated spawned sessions require thread-capable agents. If the target agent uses `thread_mode=room`, `sessions_spawn()` fails and threaded `sessions_send()` calls to that session also fail.
+`subagents` exposes `agents_list()`, `sessions_spawn()`, `sessions_send()`, and `list_sessions()`.
+All four calls return JSON strings with a `status` field, a `tool` field, and operation-specific payload data.
+`agents_list()` returns the configured agent IDs and the current agent name.
+`sessions_spawn(task, summary, tag, label=None, agent_id=None)` requires a non-empty task plus a normalized summary and tag.
+`sessions_spawn()` posts a fresh room-level Matrix message that mentions the target agent, then treats the resulting event ID as the root of a new isolated session thread.
+After the spawn succeeds, it writes the requested thread summary and tag through the lower-level thread summary and thread tag APIs.
+If you pass a `label` and the current `(agent_name, room_id, requester_id)` scope already has a matching tracked session, `sessions_spawn()` reuses that session instead of creating a new one and still applies the requested summary and tag to the existing thread.
+If the post-spawn summary or tag write fails, the spawn still succeeds and the response includes a `warnings` list describing the follow-up failure.
+`sessions_send()` sends a follow-up message into an existing tracked session.
+If you omit `session_key`, `sessions_send()` defaults to the current room or thread session key from `create_session_id(room_id, thread_id)`.
+If you pass `label` without `session_key`, `sessions_send()` resolves the most recent in-scope session with that label.
+If you pass `agent_id`, `sessions_send()` prefixes the outgoing message with `@mindroom_<agent_id>` before sending it.
+Tracked sessions are persisted in `subagents/session_registry.json` under the current runtime storage root.
+`list_sessions()` paginates those tracked sessions with a default `limit` of 50 and a maximum of 200.
+Isolated spawned sessions require thread-capable agents.
+If the target agent uses `thread_mode=room`, `sessions_spawn()` fails and threaded `sessions_send()` calls to that session also fail.
 
 ### Configuration
 
@@ -72,11 +88,18 @@ list_sessions(limit=20)
 
 ### What It Does
 
-`delegate` exposes one tool call, `delegate_task(agent_name, task)`. The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller. The caller waits for the delegated agent to finish, and the delegated agent's `response.content` becomes the tool result. MindRoom gives the delegated agent any already-published last-good knowledge indexes and schedules missing or stale refresh work in the background. Interactive questions are disabled for delegated runs. Unlike \[`subagents`\], \[`delegate`\] does not create a Matrix thread, does not write to the room timeline, and does not keep a reusable session handle. If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string. Empty tasks are rejected.
+`delegate` exposes one tool call, `delegate_task(agent_name, task)`.
+The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller.
+The caller waits for the delegated agent to finish, and the delegated agent's `response.content` becomes the tool result.
+MindRoom gives the delegated agent any already-published last-good knowledge indexes and schedules missing or stale refresh work in the background.
+Interactive questions are disabled for delegated runs. Unlike \[`subagents`\], \[`delegate`\] does not create a Matrix thread, does not write to the room timeline, and does not keep a reusable session handle. If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string.
+Empty tasks are rejected.
 
 ### Configuration
 
-This tool has no tool-specific inline configuration fields. Enable it by setting `delegate_to` on the agent config. MindRoom adds the tool automatically when `delegate_to` is non-empty, so listing `delegate` in `tools:` is usually unnecessary.
+This tool has no tool-specific inline configuration fields.
+Enable it by setting `delegate_to` on the agent config.
+MindRoom adds the tool automatically when `delegate_to` is non-empty, so listing `delegate` in `tools:` is usually unnecessary.
 
 ### Example
 
@@ -126,7 +149,17 @@ delegate_task(
 
 ### What It Does
 
-`config_manager` exposes `get_info()`, `manage_agent()`, and `manage_team()`. `get_info(info_type, name=None)` supports `mindroom_docs`, `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, and `agent_template`. `tool_details` requires `name` and reads from live `TOOL_METADATA`, so it includes real config fields and statuses from the current worktree. `agent_config` returns the authored YAML for a specific agent. `agent_template` generates starter YAML for one of the built-in template types: `researcher`, `developer`, `social`, `communicator`, `analyst`, or `productivity`. `manage_agent()` supports `create`, `update`, and `validate`. Agent creates and updates validate tool names against the live registry and validate knowledge base IDs against the current config. When a plain string tool list replaces an existing tool list, `config_manager` preserves inline overrides for retained tools instead of flattening them away. On create, `include_default_tools` falls back to `true` when you omit it. `manage_team()` creates a new team with `coordinate` or `collaborate` mode and rejects unknown member agents or duplicate team names. All writes go through full runtime config validation before `config.yaml` is saved.
+`config_manager` exposes `get_info()`, `manage_agent()`, and `manage_team()`.
+`get_info(info_type, name=None)` supports `mindroom_docs`, `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, and `agent_template`.
+`tool_details` requires `name` and reads from live `TOOL_METADATA`, so it includes real config fields and statuses from the current worktree.
+`agent_config` returns the authored YAML for a specific agent.
+`agent_template` generates starter YAML for one of the built-in template types: `researcher`, `developer`, `social`, `communicator`, `analyst`, or `productivity`.
+`manage_agent()` supports `create`, `update`, and `validate`.
+Agent creates and updates validate tool names against the live registry and validate knowledge base IDs against the current config.
+When a plain string tool list replaces an existing tool list, `config_manager` preserves inline overrides for retained tools instead of flattening them away.
+On create, `include_default_tools` falls back to `true` when you omit it.
+`manage_team()` creates a new team with `coordinate` or `collaborate` mode and rejects unknown member agents or duplicate team names.
+All writes go through full runtime config validation before `config.yaml` is saved.
 
 ### Configuration
 
@@ -177,11 +210,20 @@ manage_team(
 
 ### What It Does
 
-`self_config` exposes `get_own_config()` and `update_own_config()`. `get_own_config()` returns the current agent's authored YAML block. `update_own_config()` only changes fields that you pass explicitly. On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`. The update path validates tool names against the live registry and validates knowledge base IDs against the current config. It also preserves inline tool overrides for retained tools when a string-only tool list is provided. Updates are validated through `AgentConfig.model_validate()` before the file is saved. Only the current agent can be changed. There is no path to modify other agents or teams through this tool.
+`self_config` exposes `get_own_config()` and `update_own_config()`.
+`get_own_config()` returns the current agent's authored YAML block.
+`update_own_config()` only changes fields that you pass explicitly.
+On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
+The update path validates tool names against the live registry and validates knowledge base IDs against the current config.
+It also preserves inline tool overrides for retained tools when a string-only tool list is provided.
+Updates are validated through `AgentConfig.model_validate()` before the file is saved.
+Only the current agent can be changed.
+There is no path to modify other agents or teams through this tool.
 
 ### Configuration
 
-This tool has no tool-specific inline configuration fields. The normal way to enable it is `agents.<name>.allow_self_config: true` or `defaults.allow_self_config: true`.
+This tool has no tool-specific inline configuration fields.
+The normal way to enable it is `agents.<name>.allow_self_config: true` or `defaults.allow_self_config: true`.
 
 ### Example
 
@@ -225,7 +267,12 @@ update_own_config(
 
 ### What It Does
 
-`openclaw_compat` is not a runtime toolkit. The registered factory returns an empty `Toolkit`, and the real behavior comes from `Config.TOOL_PRESETS`. `Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`. `matrix_message` then implies `attachments`, so the effective enabled set also includes `attachments` even though the preset does not list it directly. Preset expansion dedupes while preserving order, so adding `openclaw_compat` alongside one of its member tools does not create duplicates. This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom rather than for cloning the full OpenClaw gateway control plane.
+`openclaw_compat` is not a runtime toolkit.
+The registered factory returns an empty `Toolkit`, and the real behavior comes from `Config.TOOL_PRESETS`.
+`Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
+`matrix_message` then implies `attachments`, so the effective enabled set also includes `attachments` even though the preset does not list it directly.
+Preset expansion dedupes while preserving order, so adding `openclaw_compat` alongside one of its member tools does not create duplicates.
+This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom rather than for cloning the full OpenClaw gateway control plane.
 
 ### Configuration
 
@@ -266,7 +313,18 @@ agents:
 
 ### What It Does
 
-`claude_agent` exposes `claude_start_session()`, `claude_send()`, `claude_session_status()`, `claude_interrupt()`, and `claude_end_session()`. `claude_send()` automatically creates the session if it does not already exist, so `claude_start_session()` is optional. Session keys are namespaced by agent identity and Agno run session ID, with optional `session_label` suffixes for parallel sub-sessions. The same session key is serialized by an `asyncio.Lock`, so concurrent calls to one label run one after the other. Different `session_label` values create distinct Claude sessions that can proceed independently. Idle sessions expire after `session_ttl_minutes`, which defaults to 60 minutes. The process-wide session manager keeps at most `max_sessions` active sessions per agent namespace, defaulting to 200. `resume` and `fork_session` only apply when creating a new session. `fork_session=True` requires a non-empty `resume` session ID. If a session already exists for the computed key, passing `resume` or `fork_session` returns an error instead of silently changing the live session. `claude_session_status()` reports age, idle time, and the underlying Claude session ID once Claude has returned a result. On SDK failures, the tool includes recent Claude CLI stderr lines in its error output to help debug gateway or CLI issues.
+`claude_agent` exposes `claude_start_session()`, `claude_send()`, `claude_session_status()`, `claude_interrupt()`, and `claude_end_session()`.
+`claude_send()` automatically creates the session if it does not already exist, so `claude_start_session()` is optional.
+Session keys are namespaced by agent identity and Agno run session ID, with optional `session_label` suffixes for parallel sub-sessions.
+The same session key is serialized by an `asyncio.Lock`, so concurrent calls to one label run one after the other.
+Different `session_label` values create distinct Claude sessions that can proceed independently.
+Idle sessions expire after `session_ttl_minutes`, which defaults to 60 minutes.
+The process-wide session manager keeps at most `max_sessions` active sessions per agent namespace, defaulting to 200.
+`resume` and `fork_session` only apply when creating a new session.
+`fork_session=True` requires a non-empty `resume` session ID.
+If a session already exists for the computed key, passing `resume` or `fork_session` returns an error instead of silently changing the live session.
+`claude_session_status()` reports age, idle time, and the underlying Claude session ID once Claude has returned a result.
+On SDK failures, the tool includes recent Claude CLI stderr lines in its error output to help debug gateway or CLI issues.
 
 ### Configuration
 

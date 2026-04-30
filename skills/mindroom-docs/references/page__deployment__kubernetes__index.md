@@ -110,11 +110,18 @@ Both modes store agent data in the same per-agent directory structure.
 
 ### Shared Sidecar Mode
 
-`workerBackend: static_runner` is the default. The primary runtime talks to a shared sidecar over `localhost`. This keeps the deployment simple, but all proxied tool calls share the same runner process. The runner reads and writes the same agent storage directories as the main process.
+`workerBackend: static_runner` is the default.
+The primary runtime talks to a shared sidecar over `localhost`.
+This keeps the deployment simple, but all proxied tool calls share the same runner process.
+The runner reads and writes the same agent storage directories as the main process.
 
 ### Dedicated Worker Mode
 
-`workerBackend: kubernetes` enables the built-in Kubernetes worker backend. The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker. Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent. Worker-local files (caches, virtualenvs, metadata) are kept separate per worker. When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
+`workerBackend: kubernetes` enables the built-in Kubernetes worker backend.
+The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker.
+Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent.
+Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
+When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
 
 > [!WARNING] **Filesystem isolation depends on `worker_scope`.** With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available. With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user. Use `user_agent` for per-agent filesystem isolation.
 
@@ -158,7 +165,10 @@ Important behavior and constraints:
 
 ### Storage Requirements
 
-Dedicated workers need access to the same PVC as the primary runtime. Set `storageAccessMode: ReadWriteMany` so multiple workers can access agent storage concurrently. If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node. The chart enforces this constraint during template rendering.
+Dedicated workers need access to the same PVC as the primary runtime.
+Set `storageAccessMode: ReadWriteMany` so multiple workers can access agent storage concurrently.
+If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
+The chart enforces this constraint during template rendering.
 
 ### RBAC And Network Policy
 
@@ -170,7 +180,8 @@ When `workerBackend: kubernetes` is enabled, the chart creates:
 
 ### Operations
 
-The authenticated dashboard API exposes `/api/workers` to list active or idle workers and `/api/workers/cleanup` to trigger cleanup manually. Dedicated workers are internal-only cluster Services and are authenticated with per-worker runner tokens derived from the primary runtime's `sandbox_proxy_token`. See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the execution model, credential leases, and non-Kubernetes deployment modes.
+The authenticated dashboard API exposes `/api/workers` to list active or idle workers and `/api/workers/cleanup` to trigger cleanup manually.
+Dedicated workers are internal-only cluster Services and are authenticated with per-worker runner tokens derived from the primary runtime's `sandbox_proxy_token`. See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the execution model, credential leases, and non-Kubernetes deployment modes.
 
 ## Secrets Management
 

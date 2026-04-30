@@ -38,7 +38,8 @@ uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
 ```
 
-Generate the pair code in `https://chat.mindroom.chat` under: `Settings -> Local MindRoom`.
+Generate the pair code in `https://chat.mindroom.chat` under:
+`Settings -> Local MindRoom`.
 
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) for the full walkthrough.
 
@@ -53,7 +54,9 @@ $EDITOR .env  # add at least one AI provider key
 docker compose up -d
 ```
 
-The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`. The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default. If you access it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
+The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`.
+The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
+If you access it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
 ### Direct (Development)
 

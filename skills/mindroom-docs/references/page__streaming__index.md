@@ -1,6 +1,7 @@
 # Streaming Responses
 
-MindRoom streams agent responses to Matrix by progressively editing a single message. Instead of waiting for the full response, users see text appear in real time as the model generates it.
+MindRoom streams agent responses to Matrix by progressively editing a single message.
+Instead of waiting for the full response, users see text appear in real time as the model generates it.
 
 ## How It Works
 
@@ -30,7 +31,8 @@ User sends message
 
 ## Configuration
 
-Streaming is enabled by default. Disable it globally in `config.yaml`:
+Streaming is enabled by default.
+Disable it globally in `config.yaml`:
 
 ```
 defaults:
@@ -55,7 +57,8 @@ These timing settings are global-only. Agents inherit them from `defaults` and c
 
 ## Presence-Based Streaming
 
-Even when streaming is enabled, MindRoom only streams to users who are currently online. This is checked via `should_use_streaming()` which queries the Matrix presence API.
+Even when streaming is enabled, MindRoom only streams to users who are currently online.
+This is checked via `should_use_streaming()` which queries the Matrix presence API.
 
 | Presence State | Streaming Used?                        |
 | -------------- | -------------------------------------- |
@@ -63,7 +66,8 @@ Even when streaming is enabled, MindRoom only streams to users who are currently
 | `unavailable`  | Yes                                    |
 | `offline`      | No (single message sent when complete) |
 
-If the presence check fails, MindRoom defaults to non-streaming (safer, fewer API calls). When no requester user ID is available, MindRoom defaults to streaming.
+If the presence check fails, MindRoom defaults to non-streaming (safer, fewer API calls).
+When no requester user ID is available, MindRoom defaults to streaming.
 
 ## In-Progress Marker
 
@@ -76,7 +80,8 @@ Hello! I can help you with that ⋯..
 Hello! I can help you with that ⋯
 ```
 
-If no text has arrived yet, a `Thinking...` placeholder is shown with the marker. The marker is removed on the final edit.
+If no text has arrived yet, a `Thinking...` placeholder is shown with the marker.
+The marker is removed on the final edit.
 
 ## Throttling
 
@@ -99,9 +104,12 @@ When an agent calls tools during a streamed response, MindRoom shows inline mark
 🔧 `web_search` [1]          ← tool call completed
 ```
 
-The number in brackets (`[N]`) is a 1-indexed counter per message. Each marker maps to `io.mindroom.tool_trace.events[N-1]` in the message metadata.
+The number in brackets (`[N]`) is a 1-indexed counter per message.
+Each marker maps to `io.mindroom.tool_trace.events[N-1]` in the message metadata.
 
-When `show_tool_calls` is disabled for an entity, tool markers are omitted from the message text and tool-trace metadata is not attached. If a routed tool needs an isolated worker, streaming may still show a generic worker warmup line such as `Preparing isolated worker...`. That hidden-tool warmup copy never includes tool names or tool-trace metadata.
+When `show_tool_calls` is disabled for an entity, tool markers are omitted from the message text and tool-trace metadata is not attached.
+If a routed tool needs an isolated worker, streaming may still show a generic worker warmup line such as `Preparing isolated worker...`.
+That hidden-tool warmup copy never includes tool names or tool-trace metadata.
 
 ## Cancellation and Errors
 
@@ -149,9 +157,15 @@ defaults:
   show_stop_button: true    # Default: true — add 🛑 reaction for cancellation
 ```
 
-When `show_tool_calls` is `false`, inline tool markers (`🔧 tool_name [N]`) are omitted from the message text and `io.mindroom.tool_trace` metadata is not attached. The agent still shows typing activity during hidden tool calls. If a routed tool needs an isolated worker, users may still see generic worker progress copy such as `Preparing isolated worker...` or `Preparing isolated worker... 17s elapsed.`. Hidden-tool mode never includes tool identifiers or tool-trace metadata in that worker progress text. `show_tool_calls` can also be overridden per agent in the agent config.
+When `show_tool_calls` is `false`, inline tool markers (`🔧 tool_name [N]`) are omitted from the message text and `io.mindroom.tool_trace` metadata is not attached.
+The agent still shows typing activity during hidden tool calls.
+If a routed tool needs an isolated worker, users may still see generic worker progress copy such as `Preparing isolated worker...` or `Preparing isolated worker... 17s elapsed.`.
+Hidden-tool mode never includes tool identifiers or tool-trace metadata in that worker progress text.
+`show_tool_calls` can also be overridden per agent in the agent config.
 
-When `show_stop_button` is `false`, the 🛑 reaction is not added to in-progress messages. Streaming itself still works — only the cancellation affordance is removed. `show_stop_button` is a global-only setting under `defaults`.
+When `show_stop_button` is `false`, the 🛑 reaction is not added to in-progress messages.
+Streaming itself still works — only the cancellation affordance is removed.
+`show_stop_button` is a global-only setting under `defaults`.
 
 `enable_streaming` is also global-only and cannot be overridden per agent.
 
@@ -161,4 +175,5 @@ When an agent operates in `thread_mode: room` (see [Thread Mode Resolution](http
 
 ## Replacement Streaming
 
-MindRoom also supports a `ReplacementStreamingResponse` variant where each chunk replaces the entire message content instead of appending to it. This is used for structured live rendering where the full document is rebuilt on each tick.
+MindRoom also supports a `ReplacementStreamingResponse` variant where each chunk replaces the entire message content instead of appending to it.
+This is used for structured live rendering where the full document is rebuilt on each tick.

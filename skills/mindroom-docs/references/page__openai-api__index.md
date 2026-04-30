@@ -95,7 +95,9 @@ endpoints:
         X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
 ```
 
-`X-Session-Id` is recommended when you want deterministic MindRoom session continuity. This is especially important for tools that keep long-lived sessions inside the MindRoom runtime. `X-LibreChat-Conversation-Id` alone is still enough to keep continuity if you already use it.
+`X-Session-Id` is recommended when you want deterministic MindRoom session continuity.
+This is especially important for tools that keep long-lived sessions inside the MindRoom runtime.
+`X-LibreChat-Conversation-Id` alone is still enough to keep continuity if you already use it.
 
 ### Open WebUI
 
@@ -112,11 +114,14 @@ Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom i
 
 ### Model selection
 
-Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`. Only shared agents that are either unscoped or explicitly configured with `worker_scope=shared` appear in `/v1/models`. Agents that use `agents.<name>.private` are not listed there, because `private.per` creates requester-private instances and therefore an isolating execution scope.
+Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`.
+Only shared agents that are either unscoped or explicitly configured with `worker_scope=shared` appear in `/v1/models`.
+Agents that use `agents.<name>.private` are not listed there, because `private.per` creates requester-private instances and therefore an isolating execution scope.
 
 ### Auto-routing
 
-Select the `auto` model to let MindRoom's router pick the best agent for each message, the same routing logic used in Matrix rooms. Once routing resolves a specific agent, session continuity and streamed identity bind to that resolved agent name, not the literal `auto` label.
+Select the `auto` model to let MindRoom's router pick the best agent for each message, the same routing logic used in Matrix rooms.
+Once routing resolves a specific agent, session continuity and streamed identity bind to that resolved agent name, not the literal `auto` label.
 
 ### Teams
 
@@ -126,11 +131,14 @@ Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs
 
 `stream: true` returns Server-Sent Events in the standard OpenAI format: role chunk, content chunks, finish chunk, `[DONE]`.
 
-Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas). MindRoom currently emits tool events in stream chunks as inline `<tool id="N" state="start|done">...</tool>` content.
+Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas).
+MindRoom currently emits tool events in stream chunks as inline `<tool id="N" state="start|done">...</tool>` content.
 
 ### Multimodal messages
 
-When a message's `content` is an array of content parts (the OpenAI multimodal format), MindRoom extracts only the `text` parts and concatenates them as the prompt. Non-text parts such as `image_url` are silently ignored by the current implementation. Agents still process the text normally with all their configured tools and instructions.
+When a message's `content` is an array of content parts (the OpenAI multimodal format), MindRoom extracts only the `text` parts and concatenates them as the prompt.
+Non-text parts such as `image_url` are silently ignored by the current implementation.
+Agents still process the text normally with all their configured tools and instructions.
 
 ### Session continuity
 
@@ -140,13 +148,16 @@ Session IDs are derived from request headers:
 1. `X-LibreChat-Conversation-Id` header (automatic with LibreChat)
 1. Random UUID fallback
 
-Agent memory and conversation history persist across requests with the same session ID. For persistent MindRoom tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
+Agent memory and conversation history persist across requests with the same session ID.
+For persistent MindRoom tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
 
-Session IDs are namespaced internally with a hash of the API key to prevent cross-key session collision. Two different API keys using the same `X-Session-Id` value will not share a session.
+Session IDs are namespaced internally with a hash of the API key to prevent cross-key session collision.
+Two different API keys using the same `X-Session-Id` value will not share a session.
 
 ### Claude Agent tool sessions
 
-If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude session alive across turns. This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. See the `claude_agent` section in [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/index.md) for configuration details.
+If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude session alive across turns.
+This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. See the `claude_agent` section in [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/index.md) for configuration details.
 
 Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
 
@@ -155,7 +166,9 @@ Parallel Claude sub-sessions are supported by using different `session_label` va
 
 ### Knowledge bases
 
-Agents with configured `knowledge_bases` in `config.yaml` get RAG support automatically. No additional API configuration needed. For Git-backed knowledge bases, missing or stale published indexes schedule the same per-binding refresh flow used by the Matrix runtime. Explicit dashboard/API reindex runs Git sync first and then rebuilds a candidate index.
+Agents with configured `knowledge_bases` in `config.yaml` get RAG support automatically. No additional API configuration needed.
+For Git-backed knowledge bases, missing or stale published indexes schedule the same per-binding refresh flow used by the Matrix runtime.
+Explicit dashboard/API reindex runs Git sync first and then rebuilds a candidate index.
 
 ## What's ignored
 

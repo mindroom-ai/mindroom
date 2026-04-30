@@ -4,7 +4,8 @@ Use these tools to read external calendars, manage bookings, and schedule future
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `calendar-and-scheduling` group. Use these tools when you need Google Calendar access, Cal.com booking APIs, or Matrix-native scheduled tasks that post back into MindRoom later.
+This page documents the built-in tools in the `calendar-and-scheduling` group.
+Use these tools when you need Google Calendar access, Cal.com booking APIs, or Matrix-native scheduled tasks that post back into MindRoom later.
 
 ## Tools On This Page
 
@@ -14,7 +15,12 @@ This page documents the built-in tools in the `calendar-and-scheduling` group. U
 
 ## Common Setup Notes
 
-`google_calendar` is a Google-backed shared-only integration. It uses the shared Google Services OAuth connection instead of its own API key form. Agents can only use it when `worker_scope` is unset or `shared`, and MindRoom keeps it local even when other tools are routed through the sandbox proxy. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction. `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys. Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread. MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
+`google_calendar` is a Google-backed shared-only integration.
+It uses the shared Google Services OAuth connection instead of its own API key form.
+Agents can only use it when `worker_scope` is unset or `shared`, and MindRoom keeps it local even when other tools are routed through the sandbox proxy. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
+`scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
+Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
+MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
 
 ## \[`google_calendar`\]
 
@@ -22,7 +28,11 @@ This page documents the built-in tools in the `calendar-and-scheduling` group. U
 
 ### What It Does
 
-`google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`. MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`. Read-oriented calls work with calendar read scopes. Write calls are still part of the tool surface, but they only succeed when `allow_update: true` is configured and the connected Google account has granted calendar write scope. `find_available_slots()` derives openings from the user's current calendar events plus working-hours settings inferred from Google Calendar settings and locale.
+`google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`.
+MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`.
+Read-oriented calls work with calendar read scopes.
+Write calls are still part of the tool surface, but they only succeed when `allow_update: true` is configured and the connected Google account has granted calendar write scope.
+`find_available_slots()` derives openings from the user's current calendar events plus working-hours settings inferred from Google Calendar settings and locale.
 
 ### Configuration
 
@@ -68,7 +78,10 @@ create_event(
 
 ### What It Does
 
-`cal_com` exposes `get_available_slots()`, `create_booking()`, `get_upcoming_bookings()`, `reschedule_booking()`, and `cancel_booking()`. The toolkit uses one configured `event_type_id` as the default booking type for slot lookup and booking creation. Responses are converted from UTC into `user_timezone` before they are returned. The per-method enable flags let you narrow the exposed call surface when an agent should only inspect availability or only manage existing bookings.
+`cal_com` exposes `get_available_slots()`, `create_booking()`, `get_upcoming_bookings()`, `reschedule_booking()`, and `cancel_booking()`.
+The toolkit uses one configured `event_type_id` as the default booking type for slot lookup and booking creation.
+Responses are converted from UTC into `user_timezone` before they are returned.
+The per-method enable flags let you narrow the exposed call surface when an agent should only inspect availability or only manage existing bookings.
 
 ### Configuration
 
@@ -119,7 +132,12 @@ get_upcoming_bookings(email="alex@example.com")
 
 ### What It Does
 
-`scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`. It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`. By default `schedule()` posts back into the current room or thread scope, while `new_thread=True` schedules a future room-level root message. Scheduled tasks are stored in Matrix room state and persist across restarts. The scheduler validates mentioned agents against the current room or thread before it saves a task. If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
+`scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
+It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
+By default `schedule()` posts back into the current room or thread scope, while `new_thread=True` schedules a future room-level root message.
+Scheduled tasks are stored in Matrix room state and persist across restarts.
+The scheduler validates mentioned agents against the current room or thread before it saves a task.
+If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
 
 ### Configuration
 
