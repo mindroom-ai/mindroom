@@ -35,6 +35,13 @@ class _ProviderCacheEntry:
 _provider_cache: _ProviderCacheEntry | None = None
 
 
+def clear_oauth_provider_cache() -> None:
+    """Drop cached OAuth provider registries after plugin runtime changes."""
+    global _provider_cache
+    with _provider_cache_lock:
+        _provider_cache = None
+
+
 def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
     return (
         google_calendar_oauth_provider(),
