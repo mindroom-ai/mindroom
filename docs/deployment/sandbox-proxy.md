@@ -73,11 +73,13 @@ services:
     volumes:
       - ./mindroom_data:/app/mindroom_data:rw
       - sandbox-workspace:/app/workspace
+      - ./mindroom_data:/app/shared/.mindroom:rw
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
+      - MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared/.mindroom
 
 volumes:
   sandbox-workspace:
@@ -98,6 +100,7 @@ Key differences from the primary MindRoom runtime:
 - **Shared agent data** — the runner reads and writes the same agent storage directories used by the main process
 - **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
+- **`MINDROOM_SANDBOX_SHARED_STORAGE_ROOT`** — pointed at the shared agent-data mount so runner-issued OAuth connect tokens can be redeemed by the primary API
 
 > [!WARNING]
 > **Filesystem isolation depends on the worker backend.**
@@ -164,10 +167,12 @@ Run MindRoom directly on the host while isolating code-execution tools in a Dock
 docker run -d \
   --name mindroom-sandbox-runner \
   -p 8766:8766 \
+  -v "$PWD/mindroom_data:/app/shared/.mindroom:rw" \
   -e MINDROOM_WORKER_BACKEND=static_runner \
   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
+  -e MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared/.mindroom \
   ghcr.io/mindroom-ai/mindroom:latest \
   /app/run-sandbox-runner.sh
 
@@ -199,10 +204,12 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 >   --name mindroom-sandbox-runner \
 >   -p 8766:8766 \
 >   -v ./config.yaml:/app/config.yaml:ro \
+>   -v "$PWD/mindroom_data:/app/shared/.mindroom:rw" \
 >   -e MINDROOM_CONFIG_PATH=/app/config.yaml \
 >   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
 >   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
 >   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
+>   -e MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared/.mindroom \
 >   ghcr.io/mindroom-ai/mindroom:latest \
 >   /app/run-sandbox-runner.sh
 > ```
@@ -237,6 +244,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess` or `subprocess` | `inprocess` |
 | `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config _(will fail if not writable)_ |
+| `MINDROOM_SANDBOX_SHARED_STORAGE_ROOT` | Shared MindRoom storage mount used for scoped OAuth connect tokens (e.g., `/app/shared/.mindroom`) | _(required for static runners that issue scoped OAuth links)_ |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml (for plugin tool registration) | _(optional)_ |
 
 ## Execution modes
