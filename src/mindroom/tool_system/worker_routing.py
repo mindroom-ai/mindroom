@@ -373,6 +373,11 @@ def service_uses_local_shared_credentials(service: str, worker_scope: WorkerScop
     return worker_scope == "shared" and service in LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
 
 
+def service_uses_primary_runtime_scoped_credentials(service: str, worker_scope: WorkerScope | None) -> bool:
+    """Return whether one scoped service must stay outside worker-mounted storage."""
+    return worker_scope in {"user", "user_agent"} and service in LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
+
+
 def local_shared_credential_allowlist(
     service: str,
     worker_scope: WorkerScope | None,

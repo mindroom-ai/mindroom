@@ -17,9 +17,12 @@ from mindroom.api import config_lifecycle
 from mindroom.config.main import Config
 from mindroom.credentials import (
     CredentialsManager,
+    delete_scoped_credentials,
     get_runtime_credentials_manager,
     list_worker_grantable_shared_services,
+    load_scoped_credentials,
     load_worker_grantable_shared_credentials,
+    save_scoped_credentials,
     validate_service_name,
 )
 from mindroom.oauth.providers import OAuthProviderError
@@ -31,7 +34,9 @@ from mindroom.tool_system.worker_routing import (
     WorkerScope,
     local_shared_credential_allowlist,
     require_worker_key_for_scope,
+    resolve_worker_target,
     service_uses_local_shared_credentials,
+    service_uses_primary_runtime_scoped_credentials,
     unsupported_shared_only_integration_message,
     unsupported_shared_only_integration_names,
 )
@@ -39,6 +44,7 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.providers import OAuthProvider
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
@@ -488,6 +494,13 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
     """Load credentials for the resolved target, including scoped overlays when needed."""
     if target.worker_scope is None:
         return target.target_manager.load_credentials(service)
+    if _service_uses_primary_runtime_store(service, target):
+        return load_scoped_credentials(
+            service,
+            credentials_manager=target.base_manager,
+            worker_target=_worker_target_for_credentials_target(target),
+            allowed_shared_services=target.allowed_shared_services,
+        )
 
     shared_manager = target.base_manager.shared_manager()
     local_allowlist = local_shared_credential_allowlist(service, target.worker_scope)
@@ -504,6 +517,46 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
     if isinstance(worker_credentials, dict):
         merged_credentials.update(worker_credentials)
     return merged_credentials or None
+
+
+def _service_uses_primary_runtime_store(service: str, target: RequestCredentialsTarget) -> bool:
+    return service_uses_primary_runtime_scoped_credentials(
+        service,
+        target.worker_scope,
+    ) or service_uses_local_shared_credentials(service, target.worker_scope)
+
+
+def _worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:
+    if target.worker_scope is None:
+        return None
+    return resolve_worker_target(
+        target.worker_scope,
+        target.agent_name,
+        execution_identity=target.execution_identity,
+    )
+
+
+def _save_credentials_for_target(service: str, credentials: dict[str, Any], target: RequestCredentialsTarget) -> None:
+    if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
+        target.target_manager.save_credentials(service, credentials)
+        return
+    save_scoped_credentials(
+        service,
+        credentials,
+        credentials_manager=target.base_manager,
+        worker_target=_worker_target_for_credentials_target(target),
+    )
+
+
+def _delete_credentials_for_target(service: str, target: RequestCredentialsTarget) -> None:
+    if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
+        target.target_manager.delete_credentials(service)
+        return
+    delete_scoped_credentials(
+        service,
+        credentials_manager=target.base_manager,
+        worker_target=_worker_target_for_credentials_target(target),
+    )
 
 
 def _request_may_target_scoped_credentials(request: Request, agent_name: str | None) -> bool:
@@ -704,7 +757,7 @@ async def set_credentials(
         payload.credentials,
         strip_oauth_fields=oauth_service_match is not None,
     )
-    target.target_manager.save_credentials(service, creds)
+    _save_credentials_for_target(service, creds, target)
 
     return {"status": "success", "message": f"Credentials saved for {service}"}
 
@@ -730,7 +783,7 @@ async def set_api_key(
     _reject_oauth_credentials_document(credentials)
     credentials[payload.key_name] = payload.api_key
     credentials["_source"] = "ui"
-    target.target_manager.save_credentials(service, credentials)
+    _save_credentials_for_target(service, credentials, target)
 
     return {"status": "success", "message": f"API key set for {service}"}
 
@@ -815,7 +868,7 @@ async def delete_credentials(
     existing_credentials = load_credentials_for_target(service, target)
     if existing_credentials:
         _reject_oauth_credentials_document(existing_credentials)
-    target.target_manager.delete_credentials(service)
+    _delete_credentials_for_target(service, target)
 
     return {"status": "success", "message": f"Credentials deleted for {service}"}
 
@@ -849,7 +902,7 @@ async def copy_credentials(
     # Copy credentials, marking as UI-sourced
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
     target_creds["_source"] = "ui"
-    target.target_manager.save_credentials(service, target_creds)
+    _save_credentials_for_target(service, target_creds, target)
 
     return {"status": "success", "message": f"Credentials copied from {source_service} to {service}"}
 

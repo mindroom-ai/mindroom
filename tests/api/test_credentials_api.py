@@ -562,7 +562,8 @@ class TestCredentialsAPI:
         )
         worker_key = resolve_worker_key("user_agent", identity, agent_name="general")
         assert worker_key is not None
-        scoped_manager = manager.for_worker(worker_key)
+        worker_manager = manager.for_worker(worker_key)
+        scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
         expected_access_value = "scoped-drive-access-value"
         expected_refresh_value = "scoped-drive-refresh-value"
         scoped_manager.save_credentials(
@@ -592,6 +593,8 @@ class TestCredentialsAPI:
             "max_read_size": 42,
             "_source": "ui",
         }
+        assert worker_manager.load_credentials("google_drive_oauth") is None
+        assert worker_manager.load_credentials("google_drive") is None
 
     def test_get_private_oauth_credentials_filters_token_fields(
         self,
@@ -614,7 +617,8 @@ class TestCredentialsAPI:
         )
         worker_key = resolve_worker_key("user_agent", identity, agent_name="general")
         assert worker_key is not None
-        scoped_manager = manager.for_worker(worker_key)
+        worker_manager = manager.for_worker(worker_key)
+        scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
         scoped_manager.save_credentials(
             "google_drive_oauth",
             {
@@ -648,6 +652,8 @@ class TestCredentialsAPI:
         assert set(status_response.json()["key_names"]) == {"list_files", "max_read_size"}
         assert token_response.status_code == 400
         assert "OAuth token credentials" in token_response.json()["detail"]
+        assert worker_manager.load_credentials("google_drive_oauth") is None
+        assert worker_manager.load_credentials("google_drive") is None
 
     def test_non_oauth_tool_settings_still_reject_private_scopes(
         self,

@@ -29,7 +29,12 @@ from mindroom.oauth import (
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    WorkerScope,
+    resolve_worker_key,
+    resolve_worker_target,
+)
 
 
 def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) -> constants.RuntimePaths:
@@ -183,6 +188,21 @@ def _worker_key_for_matrix_user(requester_id: str) -> str:
         session_id=None,
     )
     worker_key = resolve_worker_key("user_agent", identity, agent_name="general")
+    assert worker_key is not None
+    return worker_key
+
+
+def _worker_key_for_matrix_user_scope(requester_id: str, worker_scope: WorkerScope = "user_agent") -> str:
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=requester_id,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_key = resolve_worker_key(worker_scope, identity, agent_name="general")
     assert worker_key is not None
     return worker_key
 
@@ -736,11 +756,16 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider(credential_service="test_drive_oauth", tool_config_service="test_drive")
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+    )
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
-    manager.for_worker(owner_worker_key).save_credentials(
-        "test_drive",
+    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+    scoped_manager.save_credentials(
+        "google_drive",
         {
             "list_files": False,
             "max_read_size": 42,
@@ -760,19 +785,92 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
 
     assert callback_response.status_code == 307
     assert urlparse(callback_response.headers["location"]).path == f"/api/oauth/{provider.id}/success"
-    worker_credentials = manager.for_worker(owner_worker_key).load_credentials(
+    scoped_credentials = scoped_manager.load_credentials(
         provider.credential_service,
     )
-    assert worker_credentials is not None
-    assert worker_credentials["token"] == "test_drive-access-token"
-    assert worker_credentials["_oauth_claims"]["email"] == "alice@example.com"
-    settings = manager.for_worker(owner_worker_key).load_credentials("test_drive")
+    assert scoped_credentials is not None
+    assert scoped_credentials["token"] == "google_drive-access-token"
+    assert scoped_credentials["_oauth_claims"]["email"] == "alice@example.com"
+    assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
+    settings = scoped_manager.load_credentials("google_drive")
     assert settings == {
         "list_files": False,
         "max_read_size": 42,
         "_source": "ui",
     }
+    assert manager.for_worker(owner_worker_key).load_credentials("google_drive") is None
     assert manager.for_worker(_worker_key_for_standalone_user()).load_credentials(provider.credential_service) is None
+
+
+def test_user_scope_oauth_token_not_in_worker_path(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user"))
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    manager = get_runtime_credentials_manager(runtime_paths)
+    user_worker_key = _worker_key_for_matrix_user_scope("@alice:example.org", "user")
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    stored_credentials = manager.for_primary_runtime_scope("@alice:example.org", None).load_credentials(
+        provider.credential_service,
+    )
+    assert stored_credentials is not None
+    assert stored_credentials["token"] == "google_drive-access-token"
+    assert manager.for_worker(user_worker_key).load_credentials(provider.credential_service) is None
+    assert not manager.for_worker(user_worker_key).get_credentials_path(provider.credential_service).exists()
+
+
+def test_shared_scope_oauth_token_uses_shared_store_not_worker_path(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="shared"))
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    manager = get_runtime_credentials_manager(runtime_paths)
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    shared_credentials = manager.shared_manager().load_credentials(provider.credential_service)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_key = resolve_worker_key("shared", identity, agent_name="general")
+    assert worker_key is not None
+    assert shared_credentials is not None
+    assert shared_credentials["token"] == "google_drive-access-token"
+    assert manager.for_worker(worker_key).load_credentials(provider.credential_service) is None
 
 
 def test_dashboard_private_oauth_rejects_unbound_standalone_requester(tmp_path: Path) -> None:
@@ -802,10 +900,15 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider(include_refresh_token=False)
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        include_refresh_token=False,
+    )
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
-    manager.for_worker(owner_worker_key).save_credentials(
+    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+    scoped_manager.save_credentials(
         provider.credential_service,
         {
             "token": "old-access-token",
@@ -830,13 +933,14 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
             )
 
     assert callback_response.status_code == 307
-    stored_credentials = manager.for_worker(owner_worker_key).load_credentials(provider.credential_service)
+    stored_credentials = scoped_manager.load_credentials(provider.credential_service)
     assert stored_credentials is not None
-    assert stored_credentials["token"] == "test_drive-access-token"
+    assert stored_credentials["token"] == "google_drive-access-token"
     assert stored_credentials["refresh_token"] == "old-refresh-token"
     assert "_id_token" not in stored_credentials
     assert "id_token" not in stored_credentials
     assert "client_secret" not in stored_credentials
+    assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
 
 
 def test_callback_drops_old_refresh_token_when_identity_changes(tmp_path: Path) -> None:
@@ -849,10 +953,15 @@ def test_callback_drops_old_refresh_token_when_identity_changes(tmp_path: Path) 
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider(include_refresh_token=False)
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        include_refresh_token=False,
+    )
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
-    manager.for_worker(owner_worker_key).save_credentials(
+    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+    scoped_manager.save_credentials(
         provider.credential_service,
         {
             "token": "old-access-token",
@@ -874,10 +983,11 @@ def test_callback_drops_old_refresh_token_when_identity_changes(tmp_path: Path) 
             )
 
     assert callback_response.status_code == 307
-    stored_credentials = manager.for_worker(owner_worker_key).load_credentials(provider.credential_service)
+    stored_credentials = scoped_manager.load_credentials(provider.credential_service)
     assert stored_credentials is not None
-    assert stored_credentials["token"] == "test_drive-access-token"
+    assert stored_credentials["token"] == "google_drive-access-token"
     assert "refresh_token" not in stored_credentials
+    assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
 
 
 def test_callback_replaces_old_refresh_token_when_provider_returns_new_one(tmp_path: Path) -> None:
@@ -890,10 +1000,15 @@ def test_callback_replaces_old_refresh_token_when_provider_returns_new_one(tmp_p
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider(include_refresh_token=True)
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        include_refresh_token=True,
+    )
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
-    manager.for_worker(owner_worker_key).save_credentials(
+    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+    scoped_manager.save_credentials(
         provider.credential_service,
         {
             "token": "old-access-token",
@@ -914,10 +1029,11 @@ def test_callback_replaces_old_refresh_token_when_provider_returns_new_one(tmp_p
             )
 
     assert callback_response.status_code == 307
-    stored_credentials = manager.for_worker(owner_worker_key).load_credentials(provider.credential_service)
+    stored_credentials = scoped_manager.load_credentials(provider.credential_service)
     assert stored_credentials is not None
-    assert stored_credentials["token"] == "test_drive-access-token"
-    assert stored_credentials["refresh_token"] == "test_drive-refresh-token"
+    assert stored_credentials["token"] == "google_drive-access-token"
+    assert stored_credentials["refresh_token"] == "google_drive-refresh-token"
+    assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
 
 
 def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_path: Path) -> None:
@@ -930,7 +1046,7 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider()
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -966,14 +1082,18 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
     assert authorize_response.status_code == 307
     assert callback_response.status_code == 307
     manager = get_runtime_credentials_manager(runtime_paths)
-    matrix_credentials = manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).load_credentials(
+    matrix_credentials = manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(
+        provider.credential_service,
+    )
+    worker_credentials = manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).load_credentials(
         provider.credential_service,
     )
     standalone_credentials = manager.for_worker(_worker_key_for_standalone_user()).load_credentials(
         provider.credential_service,
     )
     assert matrix_credentials is not None
-    assert matrix_credentials["token"] == "test_drive-access-token"
+    assert matrix_credentials["token"] == "google_drive-access-token"
+    assert worker_credentials is None
     assert standalone_credentials is None
 
 
@@ -1300,10 +1420,15 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider(credential_service="test_drive_oauth", tool_config_service="test_drive")
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+    )
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
-    manager.for_worker(owner_worker_key).save_credentials(
+    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+    scoped_manager.save_credentials(
         provider.credential_service,
         {
             "token": "stored-token",
@@ -1313,8 +1438,8 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
             "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
         },
     )
-    manager.for_worker(owner_worker_key).save_credentials(
-        "test_drive",
+    scoped_manager.save_credentials(
+        "google_drive",
         {
             "list_files": False,
             "max_read_size": 42,
@@ -1335,14 +1460,15 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
     assert disconnect_response.status_code == 200
     assert disconnected_status_response.status_code == 200
     assert disconnected_status_response.json()["connected"] is False
-    remaining_token_credentials = manager.for_worker(owner_worker_key).load_credentials(
+    remaining_token_credentials = scoped_manager.load_credentials(
         provider.credential_service,
     )
-    remaining_settings = manager.for_worker(owner_worker_key).load_credentials("test_drive")
+    remaining_settings = scoped_manager.load_credentials("google_drive")
     assert remaining_token_credentials is None
     assert remaining_settings is not None
     assert remaining_settings["list_files"] is False
     assert remaining_settings["max_read_size"] == 42
+    assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
 
 
 def test_disconnect_preserves_tool_config_settings(tmp_path: Path) -> None:
@@ -1355,10 +1481,15 @@ def test_disconnect_preserves_tool_config_settings(tmp_path: Path) -> None:
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider(credential_service="test_calendar_oauth", tool_config_service="test_calendar")
+    provider = _fake_provider(
+        provider_id="google_calendar",
+        credential_service="google_calendar_oauth",
+        tool_config_service="google_calendar",
+    )
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
-    manager.for_worker(owner_worker_key).save_credentials(
+    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+    scoped_manager.save_credentials(
         provider.credential_service,
         {
             "token": "stored-token",
@@ -1367,8 +1498,8 @@ def test_disconnect_preserves_tool_config_settings(tmp_path: Path) -> None:
             "_source": "oauth",
         },
     )
-    manager.for_worker(owner_worker_key).save_credentials(
-        "test_calendar",
+    scoped_manager.save_credentials(
+        "google_calendar",
         {
             "allow_update": True,
             "_source": "ui",
@@ -1381,8 +1512,9 @@ def test_disconnect_preserves_tool_config_settings(tmp_path: Path) -> None:
             response = client.post(f"/api/oauth/{provider.id}/disconnect?agent_name=general")
 
     assert response.status_code == 200
+    assert scoped_manager.load_credentials(provider.credential_service) is None
     assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
-    settings = manager.for_worker(owner_worker_key).load_credentials("test_calendar")
+    settings = scoped_manager.load_credentials("google_calendar")
     assert settings is not None
     assert settings["allow_update"] is True
 

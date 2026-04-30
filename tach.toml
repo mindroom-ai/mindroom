@@ -2449,6 +2449,7 @@ expose = [
     "requires_shared_only_integration_scope",
     "run_with_tool_execution_identity",
     "service_uses_local_shared_credentials",
+    "service_uses_primary_runtime_scoped_credentials",
     "shared_storage_root",
     "stream_with_tool_execution_identity",
     "supports_tool_name_for_worker_scope",

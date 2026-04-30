@@ -16,10 +16,9 @@ from mindroom.api.credentials import (
     build_dashboard_execution_identity,
     consume_pending_oauth_request,
     issue_pending_oauth_state,
-    load_credentials_for_target,
     resolve_request_credentials_target,
 )
-from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.oauth import (
     OAuthClaimValidationError,
@@ -164,6 +163,16 @@ def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsT
         "worker_scope": target.worker_scope or "unscoped",
         "worker_key": worker_target.worker_key or "",
     }
+
+
+def _resolved_worker_target_for_credentials(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:
+    if target.worker_scope is None:
+        return None
+    return resolve_worker_target(
+        target.worker_scope,
+        target.agent_name,
+        execution_identity=target.execution_identity,
+    )
 
 
 def _verify_connect_target_authorized(
@@ -346,16 +355,13 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
         token_result = await provider.exchange_code(code, runtime_paths)
         provider.validate_claims(token_result, runtime_paths)
         safe_result = sanitized_oauth_token_result(provider, token_result)
-        worker_target = resolve_worker_target(
-            target.worker_scope,
-            target.agent_name,
-            execution_identity=target.execution_identity,
-        )
+        worker_target = _resolved_worker_target_for_credentials(target)
         credentials_manager = target.base_manager
         existing_credentials = load_scoped_credentials(
             provider.credential_service,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
+            allowed_shared_services=target.allowed_shared_services,
         )
         token_data = _token_data_preserving_refresh_token(existing_credentials, safe_result.token_data)
         save_scoped_credentials(
@@ -390,7 +396,16 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         service_names=(provider.credential_service,),
         allow_private_scopes=True,
     )
-    credentials = load_credentials_for_target(provider.credential_service, target) or {}
+    worker_target = _resolved_worker_target_for_credentials(target)
+    credentials = (
+        load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=target.base_manager,
+            worker_target=worker_target,
+            allowed_shared_services=target.allowed_shared_services,
+        )
+        or {}
+    )
     has_client_config = provider.client_config(runtime_paths) is not None
     connected = oauth_credentials_usable(provider, runtime_paths, credentials)
     return OAuthStatusResponse(
@@ -417,5 +432,10 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
         service_names=(provider.credential_service,),
         allow_private_scopes=True,
     )
-    target.target_manager.delete_credentials(provider.credential_service)
+    worker_target = _resolved_worker_target_for_credentials(target)
+    delete_scoped_credentials(
+        provider.credential_service,
+        credentials_manager=target.base_manager,
+        worker_target=worker_target,
+    )
     return {"status": "disconnected", "provider": provider.id}

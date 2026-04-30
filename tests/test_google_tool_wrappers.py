@@ -12,7 +12,7 @@ from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.worker_routing import resolve_worker_target
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,13 +42,22 @@ def test_google_wrappers_allow_isolating_worker_scopes(
     tmp_path: Path,
 ) -> None:
     """Google OAuth-backed tools can use requester-isolated credential scopes."""
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
     tool = tool_class(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=resolve_worker_target(
             worker_scope,
             "general",
-            execution_identity=None,
+            execution_identity=identity,
             tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
             account_id=runtime_paths.env_value("ACCOUNT_ID"),
         ),
