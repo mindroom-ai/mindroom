@@ -25,7 +25,6 @@ _CONFIG_FIELD_INIT_ARG_ALIASES = {
     "read": "read_sheet",
     "create": "create_sheet",
     "update": "update_sheet",
-    "duplicate": "create_duplicate_sheet",
 }
 
 
@@ -66,16 +65,11 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, AgnoGoogleSheetsTools):
 
         # Store original auth method for fallback
         self._set_original_auth(AgnoGoogleSheetsTools._auth)
+        self._wrap_oauth_function_entrypoints()
 
     def _should_fallback_to_original_auth(self) -> bool:
         """Prefer the upstream auth path when a service account is configured."""
         return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
-
-    def read_sheet(self, spreadsheet_id: str | None = None, spreadsheet_range: str | None = None) -> str:
-        """Read a sheet with structured OAuth connection failures."""
-        if result := self._ensure_structured_auth():
-            return result
-        return super().read_sheet(spreadsheet_id=spreadsheet_id, spreadsheet_range=spreadsheet_range)
 
     def _normalize_dashboard_config_kwargs(self, kwargs: dict[str, Any]) -> None:
         """Map dashboard field names onto Agno's constructor argument names."""

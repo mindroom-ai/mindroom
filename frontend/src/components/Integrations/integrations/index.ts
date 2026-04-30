@@ -263,8 +263,7 @@ const googleSheetsIntegration = new GenericOAuthIntegrationProvider(
   {
     id: "google_sheets",
     name: "Google Sheets",
-    description:
-      "Read, create, update, and duplicate Google Sheets spreadsheets",
+    description: "Read, create, and update Google Sheets spreadsheets",
     category: "development",
     icon: createElement(SiGooglesheets, {
       className: "h-5 w-5 text-green-600",

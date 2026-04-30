@@ -76,6 +76,19 @@ def test_google_sheets_public_method_returns_structured_connect_instruction(tmp_
     assert result["provider"] == "google_sheets"
     assert "/api/oauth/google_sheets/authorize?connect_token=" in result["connect_url"]
 
+    writable_tool = GoogleSheetsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=_worker_target(),
+        create=True,
+        update=True,
+    )
+    result = json.loads(writable_tool.create_sheet("Budget"))
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "google_sheets"
+    assert "/api/oauth/google_sheets/authorize?connect_token=" in result["connect_url"]
+
 
 def test_google_sheets_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
     credentials_manager = CredentialsManager(tmp_path / "credentials")
@@ -105,7 +118,6 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
             "read": False,
             "create": True,
             "update": True,
-            "duplicate": True,
             "_source": "ui",
         },
     )
@@ -122,14 +134,14 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
     assert [registered.__name__ for registered in tool.tools] == [
         "create_sheet",
         "update_sheet",
-        "create_duplicate_sheet",
     ]
 
 
-def test_google_sheets_provider_uses_drive_file_scope_for_duplicate_support() -> None:
+def test_google_sheets_provider_uses_sheets_scope_without_drive_scope() -> None:
     provider = google_sheets_oauth_provider()
 
-    assert "https://www.googleapis.com/auth/drive.file" in provider.scopes
+    assert "https://www.googleapis.com/auth/spreadsheets" in provider.scopes
+    assert "https://www.googleapis.com/auth/drive.file" not in provider.scopes
     assert "https://www.googleapis.com/auth/drive" not in provider.scopes
 
 

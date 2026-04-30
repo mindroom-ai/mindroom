@@ -21,7 +21,7 @@ Use these tools when you need database access, dataframe-style analysis, spreads
 - [`csv`] - Pre-registered CSV reading and DuckDB-backed SQL queries over CSV files.
 - [`pandas`] - In-memory dataframe creation and dataframe method execution.
 - [`google_bigquery`] - BigQuery dataset inspection and SQL queries.
-- [`google_sheets`] - Google Sheets access through the per-service Google Sheets OAuth provider, with read support verified by default and upstream support for create, update, and duplicate operations.
+- [`google_sheets`] - Google Sheets access through the per-service Google Sheets OAuth provider, with read support verified by default and create/update support when enabled.
 - [`openbb`] - Stock prices, company search, news, profiles, and price targets through OpenBB.
 - [`yfinance`] - Yahoo Finance market data, fundamentals, news, and history.
 - [`financial_datasets_api`] - Structured financial statements, filings, ownership, and crypto data from Financial Datasets.
@@ -444,12 +444,11 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ### What It Does
 
-The underlying Agno toolkit supports `read_sheet()`, `create_sheet()`, `update_sheet()`, and `create_duplicate_sheet()`.
+MindRoom exposes Agno's `read_sheet()`, `create_sheet()`, and `update_sheet()` operations.
 MindRoom wraps Agno's Google Sheets toolkit with `ScopedOAuthClientMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files.
-MindRoom's `google_sheets` OAuth provider requests Sheets access plus the narrower `drive.file` scope, and dashboard flags only gate which Agno methods are exposed.
-`create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on the provider's `drive.file` scope in addition to Sheets access.
+MindRoom's `google_sheets` OAuth provider requests Sheets access, and dashboard flags only gate which Agno methods are exposed.
 If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call.
-MindRoom maps the dashboard config fields `read`, `create`, `update`, and `duplicate` onto Agno's constructor flags.
+MindRoom maps the dashboard config fields `read`, `create`, and `update` onto Agno's constructor flags.
 When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to Agno's local token flow.
 
 ### Configuration
@@ -461,7 +460,6 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | `read` | `boolean` | `no` | `true` | Enable read operations. |
 | `create` | `boolean` | `no` | `false` | Enable spreadsheet creation. |
 | `update` | `boolean` | `no` | `false` | Enable sheet updates. |
-| `duplicate` | `boolean` | `no` | `false` | Enable spreadsheet duplication. |
 
 ### Example
 
@@ -487,7 +485,7 @@ read_sheet(
 
 - `google_sheets` uses the per-service `google_sheets` OAuth provider and can use scoped OAuth credentials for isolated worker scopes.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md).
-- The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets and Drive scopes.
+- The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
 
 ## [`openbb`]
 
