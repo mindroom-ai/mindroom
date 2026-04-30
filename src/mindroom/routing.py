@@ -95,6 +95,7 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             role="Route messages to appropriate agents",
             model=model,
             output_schema=_AgentSuggestion,
+            telemetry=False,
         )
 
         response = await agent.arun(prompt, session_id="routing")

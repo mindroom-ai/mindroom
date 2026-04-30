@@ -1200,6 +1200,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         enable_agentic_culture=enable_agentic_culture,
         compress_tool_results=compress_tool_results,
         max_tool_calls_from_history=max_tool_calls_from_history,
+        telemetry=False,
     )
     if include_all_history:
         _enable_all_history_replay(agent)

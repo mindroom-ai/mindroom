@@ -566,6 +566,7 @@ Return the mode and a one-sentence reason why."""
         role="Determine team mode",
         model=model,
         output_schema=_TeamModeDecision,
+        telemetry=False,
     )
 
     try:
@@ -1311,6 +1312,7 @@ def _create_team_instance(
         store_history_messages=False,
         show_members_responses=True,
         debug_mode=False,
+        telemetry=False,
         # Agno will automatically list members with their names, roles, and tools
     )
     if history_settings.policy.mode == "all":

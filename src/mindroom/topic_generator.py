@@ -93,6 +93,7 @@ Generate the topic:"""
         role="Generate contextual room topics",
         model=model,
         output_schema=_RoomTopic,
+        telemetry=False,
     )
 
     session_id = f"topic_{room_key}"

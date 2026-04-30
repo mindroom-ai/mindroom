@@ -4,9 +4,9 @@
   "private": true,
   "license": "BUSL-1.1",
   "scripts": {
-    "dev": "NEXT_PUBLIC_DEV_AUTH=true next dev --turbopack -H 0.0.0.0",
-    "build": "next build",
-    "start": "next start",
+    "dev": "NEXT_TELEMETRY_DISABLED=1 TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 NEXT_PUBLIC_DEV_AUTH=true next dev --turbopack -H 0.0.0.0",
+    "build": "NEXT_TELEMETRY_DISABLED=1 TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 next build",
+    "start": "NEXT_TELEMETRY_DISABLED=1 TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 next start",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",

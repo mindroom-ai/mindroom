@@ -657,6 +657,10 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
 
         for name, value in sorted(self.config.extra_env.items()):
+            if name in constants.VENDOR_TELEMETRY_ENV_VALUES:
+                continue
+            env.append({"name": name, "value": value})
+        for name, value in sorted(constants.VENDOR_TELEMETRY_ENV_VALUES.items()):
             env.append({"name": name, "value": value})
         return env
 
@@ -713,6 +717,7 @@ class KubernetesResourceManager:
             },
         )
         process_env.update(self.config.extra_env)
+        process_env.update(constants.VENDOR_TELEMETRY_ENV_VALUES)
         return constants.isolated_runtime_paths(
             RuntimePaths(
                 config_path=config_path,

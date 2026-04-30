@@ -31,6 +31,31 @@ SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
 SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 _RUNTIME_STARTUP_ENV_PREFIXES = ("MINDROOM_", "MATRIX_", "BROWSER_")
+# Evidence sources: installed package code in .venv; vendor docs only for
+# frontend/W&B controls. Python runtime envs are centralized here so
+# deployments do not repeat them.
+VENDOR_TELEMETRY_ENV_VALUES: Mapping[str, str] = MappingProxyType(
+    {
+        "AGNO_TELEMETRY": "false",
+        "ANONYMIZED_TELEMETRY": "false",
+        "CHROMA_OTEL_COLLECTION_ENDPOINT": "",
+        "CHROMA_OTEL_GRANULARITY": "none",
+        "COMPOSIO_DISABLE_SENTRY": "true",
+        "COMPOSIO_DISABLE_VERSION_CHECK": "true",
+        "DISABLE_TELEMETRY": "1",
+        "DO_NOT_TRACK": "1",
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+        "LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS": "true",
+        "LITELLM_LOCAL_MODEL_COST_MAP": "true",
+        "MEM0_TELEMETRY": "false",
+        "MEM0_TELEMETRY_SAMPLE_RATE": "0",
+        "NEXT_TELEMETRY_DISABLED": "1",
+        "OTEL_SDK_DISABLED": "true",
+        "TURBO_TELEMETRY_DISABLED": "1",
+        "WANDB_MODE": "disabled",
+    },
+)
+_VENDOR_TELEMETRY_ENV_NAMES = frozenset(VENDOR_TELEMETRY_ENV_VALUES)
 _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
     {
         "ACCOUNT_ID",
@@ -44,9 +69,17 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
         "OLLAMA_HOST",
         "OPENAI_BASE_URL",
         "POD_NAMESPACE",
+        *_VENDOR_TELEMETRY_ENV_NAMES,
     },
 )
-_ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset({"ACCOUNT_ID", "CUSTOMER_ID", "POD_NAMESPACE"})
+_ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset(
+    {
+        "ACCOUNT_ID",
+        "CUSTOMER_ID",
+        "POD_NAMESPACE",
+        *_VENDOR_TELEMETRY_ENV_NAMES,
+    },
+)
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
     {
         "MINDROOM_EVENT_CACHE_DATABASE_URL",

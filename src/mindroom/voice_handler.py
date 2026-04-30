@@ -467,6 +467,7 @@ Output the formatted message only, no explanation:"""
             name="VoiceTranscriptionNormalizer",
             role="Normalize voice transcriptions while preserving natural language and mention intent",
             model=model,
+            telemetry=False,
         )
 
         # Process the transcription with the agent

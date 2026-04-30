@@ -14,6 +14,8 @@ from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mindroom.vendor_telemetry import vendor_telemetry_env_values
+
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
@@ -142,7 +144,9 @@ def _install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
     cmd = ["uv", "tool", "install", package_spec, "--force", "--python", python_version]
     if quiet:
         cmd.append("-q")
-    result = subprocess.run(cmd, check=False)
+    env = os.environ.copy()
+    env.update(vendor_telemetry_env_values())
+    result = subprocess.run(cmd, check=False, env=env)
     return result.returncode == 0
 
 
@@ -172,6 +176,7 @@ def _install_via_uv_sync(extras: list[str], *, quiet: bool) -> bool:
     """Install extras using ``uv sync --locked --inexact`` for pinned versions from uv.lock."""
     cmd = ["uv", "sync", "--locked", "--inexact", "--no-dev"]
     env = os.environ.copy()
+    env.update(vendor_telemetry_env_values())
     if _in_virtualenv():
         # Ensure uv targets the interpreter that is currently running MindRoom.
         cmd.append("--active")
@@ -188,7 +193,9 @@ def _install_in_environment(extras: list[str], *, quiet: bool) -> bool:
     extras_str = ",".join(extras)
     package_spec = f"{_PACKAGE_NAME}[{extras_str}]"
     cmd = [*install_command_for_current_python(), package_spec]
-    result = subprocess.run(cmd, check=False, capture_output=quiet)
+    env = os.environ.copy()
+    env.update(vendor_telemetry_env_values())
+    result = subprocess.run(cmd, check=False, capture_output=quiet, env=env)
     return result.returncode == 0
 
 

@@ -22,6 +22,9 @@ data:
   INSTANCE_MINDROOM_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceMindroomImagePullPolicy | default "" | quote }}
   INSTANCE_SYNAPSE_IMAGE: {{ .Values.provisioner.instanceSynapseImage | default "" | quote }}
   INSTANCE_SYNAPSE_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceSynapseImagePullPolicy | default "" | quote }}
+  DO_NOT_TRACK: "1"
+  NEXT_TELEMETRY_DISABLED: "1"
+  TURBO_TELEMETRY_DISABLED: "1"
   SUPABASE_URL: {{ .Values.supabase.url | default "" | quote }}
   SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey | default "" | quote }}
   STRIPE_PUBLISHABLE_KEY: {{ .Values.stripe.publishableKey | default "" | quote }}
