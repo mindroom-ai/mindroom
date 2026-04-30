@@ -51,6 +51,7 @@ WORKDIR /app
 # - bash and tmux for shell tooling and detached interactive CLI flows
 # - common small CLI utilities used by headless auth/install workflows
 RUN apt-get update && apt-get install -y bash bzip2 curl git git-lfs jq nano procps ripgrep tmux unzip \
+    && printf 'set-option -g exit-empty off\n' > /etc/tmux.conf \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user before copying files
