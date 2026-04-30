@@ -45,6 +45,7 @@ import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 import {
   Integration,
   IntegrationConfig,
+  GenericOAuthIntegrationProvider,
   integrationProviders,
   getAllIntegrations,
 } from "./integrations/index";
@@ -52,6 +53,13 @@ import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
 import { FilterSelector } from "@/components/shared/FilterSelector";
 
 const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
+
+const titleFromProviderId = (providerId: string) =>
+  providerId
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 
 export function Integrations() {
   const { agents, agentPoliciesByAgent } = useConfigStore();
@@ -123,6 +131,19 @@ export function Integrations() {
     currentScopeKeyRef.current === scopeKey;
   const isCurrentLoadRequest = (requestId: number, scopeKey: string) =>
     requestId === loadRequestIdRef.current && isCurrentScope(scopeKey);
+  const oauthProviderForIntegration = (integration: Integration) => {
+    const provider = integrationProviders[integration.id];
+    if (provider) {
+      return provider;
+    }
+    if (integration.setup_type !== "oauth" || !integration.oauth_provider_id) {
+      return null;
+    }
+    return new GenericOAuthIntegrationProvider(
+      integration,
+      integration.oauth_provider_id,
+    );
+  };
   const [activeDialog, setActiveDialog] = useState<{
     integrationId: string;
     config: IntegrationConfig;
@@ -226,6 +247,59 @@ export function Integrations() {
         });
       }
 
+      const dynamicOAuthProviderIds = new Set(
+        backendTools
+          .map((tool) => tool.auth_provider)
+          .filter(
+            (providerId): providerId is string =>
+              typeof providerId === "string" &&
+              providerId.length > 0 &&
+              !providerIds.has(providerId),
+          ),
+      );
+      for (const providerId of dynamicOAuthProviderIds) {
+        const providerTool = backendTools.find(
+          (tool) => tool.auth_provider === providerId,
+        );
+        const integration: Integration = {
+          id: providerId,
+          name: titleFromProviderId(providerId),
+          description: `Connect ${titleFromProviderId(providerId)} OAuth for ${providerTool?.display_name ?? "this tool"}.`,
+          category: providerTool?.category ?? "productivity",
+          icon: getIconForTool(
+            providerTool?.icon ?? null,
+            providerTool?.icon_color ?? null,
+          ),
+          icon_color: providerTool?.icon_color ?? null,
+          status: "available",
+          setup_type: "oauth",
+          connected: false,
+          config_fields: providerTool?.config_fields ?? null,
+          docs_url: providerTool?.docs_url ?? null,
+          helper_text: providerTool?.helper_text ?? null,
+          dependencies: providerTool?.dependencies ?? null,
+          oauth_provider_id: providerId,
+          config_service: providerTool?.name,
+          dashboard_configuration_supported:
+            providerTool?.dashboard_configuration_supported,
+          execution_scope_supported: providerTool?.execution_scope_supported,
+        };
+        const provider = new GenericOAuthIntegrationProvider(
+          integration,
+          providerId,
+        );
+        const status = await provider.loadStatus?.(scope);
+        loadedIntegrations.push({
+          ...integration,
+          ...status,
+          config_service:
+            providerTool?.name ??
+            status?.config_service ??
+            integration.config_service,
+        });
+        providerIds.add(providerId);
+      }
+
       // Load backend tools and map them to integrations
       // (excluding those already handled by providers)
       const backendIntegrations = backendTools
@@ -290,7 +364,7 @@ export function Integrations() {
 
   const integrationHasScopedOAuthProvider = (integration: Integration) =>
     integration.setup_type === "oauth" &&
-    integrationProviders[integration.id] != null &&
+    oauthProviderForIntegration(integration) != null &&
     !SHARED_ONLY_PROVIDER_IDS.has(integration.id);
 
   const blocksScopedDashboardCredentials = (integration: Integration) =>
@@ -328,7 +402,7 @@ export function Integrations() {
     }
 
     // Check if we have a provider for this integration
-    const provider = integrationProviders[integration.id];
+    const provider = oauthProviderForIntegration(integration);
     const scope = {
       agentName: effectiveScopeAgentName,
       executionScope: selectedExecutionScope,
@@ -404,7 +478,7 @@ export function Integrations() {
       return;
     }
 
-    const provider = integrationProviders[integration.id];
+    const provider = oauthProviderForIntegration(integration);
     const scope = {
       agentName: effectiveScopeAgentName,
       executionScope: selectedExecutionScope,
@@ -462,7 +536,7 @@ export function Integrations() {
     }
 
     // Check if there's a custom action button
-    const provider = integrationProviders[integration.id];
+    const provider = oauthProviderForIntegration(integration);
     const config = provider?.getConfig({
       agentName: effectiveScopeAgentName,
       executionScope: selectedExecutionScope,

@@ -49,7 +49,7 @@ function isOAuthCompleteMessage(
   );
 }
 
-class GenericOAuthIntegrationProvider implements IntegrationProvider {
+export class GenericOAuthIntegrationProvider implements IntegrationProvider {
   constructor(
     private readonly integration: Integration,
     private readonly providerId: string,

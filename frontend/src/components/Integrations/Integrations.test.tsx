@@ -73,6 +73,8 @@ const {
   mockSpotifyOnDisconnect,
   mockPlexOnAction,
   mockPlexOnDisconnect,
+  mockGenericOAuthOnAction,
+  mockGenericOAuthLoadStatus,
   mockGoogleDriveLoadStatus,
   mockGoogleGmailLoadStatus,
   mockSpotifyLoadStatus,
@@ -87,6 +89,10 @@ const {
   mockSpotifyOnDisconnect: vi.fn(),
   mockPlexOnAction: vi.fn(),
   mockPlexOnDisconnect: vi.fn(),
+  mockGenericOAuthOnAction: vi.fn(),
+  mockGenericOAuthLoadStatus: vi
+    .fn()
+    .mockResolvedValue({ status: "available", connected: false }),
   mockGoogleDriveLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
@@ -178,6 +184,26 @@ vi.mock("./EnhancedConfigDialog", () => ({
 
 // Mock integration providers
 vi.mock("./integrations/index", () => ({
+  GenericOAuthIntegrationProvider: class {
+    integration: any;
+    providerId: string;
+
+    constructor(integration: any, providerId: string) {
+      this.integration = integration;
+      this.providerId = providerId;
+    }
+
+    getConfig() {
+      return {
+        integration: this.integration,
+        onAction: () => mockGenericOAuthOnAction(this.providerId),
+      };
+    }
+
+    loadStatus() {
+      return mockGenericOAuthLoadStatus(this.providerId);
+    }
+  },
   integrationProviders: {
     google_drive: {
       getConfig: () => ({
@@ -335,6 +361,11 @@ describe("Integrations", () => {
     mockSpotifyOnDisconnect.mockResolvedValue(undefined);
     mockPlexOnAction.mockResolvedValue(undefined);
     mockPlexOnDisconnect.mockResolvedValue(undefined);
+    mockGenericOAuthOnAction.mockResolvedValue(undefined);
+    mockGenericOAuthLoadStatus.mockResolvedValue({
+      status: "available",
+      connected: false,
+    });
     mockGoogleDriveLoadStatus.mockResolvedValue({
       status: "available",
       connected: false,
@@ -1088,6 +1119,53 @@ describe("Integrations", () => {
       expect(screen.getByText("Service: gmail")).toBeInTheDocument();
     });
     expect(mockGoogleGmailOnAction).not.toHaveBeenCalled();
+  });
+
+  it("connects plugin OAuth providers discovered from backend tool metadata", async () => {
+    const pluginTools = [
+      {
+        name: "acme_drive",
+        display_name: "Acme Drive",
+        description: "Search Acme Drive files",
+        icon: "AcmeIcon",
+        icon_color: "text-cyan-600",
+        category: "productivity",
+        status: "requires_config",
+        setup_type: "oauth",
+        auth_provider: "acme_drive",
+        config_fields: null,
+        helper_text: null,
+        docs_url: null,
+        dependencies: null,
+      },
+    ];
+    mockUseTools.mockImplementation(() => ({
+      tools: pluginTools,
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    }));
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Acme Drive")).toBeInTheDocument();
+    });
+
+    const acmeCard = screen.getByText("Acme Drive").closest(".h-full");
+    expect(acmeCard).toBeInstanceOf(HTMLElement);
+    fireEvent.click(
+      within(acmeCard as HTMLElement).getByRole("button", {
+        name: /connect/i,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(mockGenericOAuthOnAction).toHaveBeenCalledWith("acme_drive");
+    });
+    expect(
+      screen.queryByText(/Connect acme_drive first/i),
+    ).not.toBeInTheDocument();
   });
 
   it("ignores stale shared-scope reloads after switching scope mid-action", async () => {

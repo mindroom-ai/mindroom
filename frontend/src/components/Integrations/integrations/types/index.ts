@@ -22,6 +22,7 @@ export interface Integration {
   dependencies?: string[] | null;
   icon_color?: string | null;
   auth_provider?: string;
+  oauth_provider_id?: string;
   dashboard_configuration_supported?: boolean;
   execution_scope_supported?: boolean;
   oauth_client_configured?: boolean;
