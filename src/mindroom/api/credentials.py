@@ -130,6 +130,41 @@ class OAuthCredentialServiceMatch:
     tool_config_service: bool
 
 
+@dataclass(frozen=True)
+class OAuthCredentialServices:
+    """Classify dashboard credential services registered by OAuth providers."""
+
+    providers: dict[str, OAuthProvider]
+
+    @property
+    def token_services(self) -> frozenset[str]:
+        """Return OAuth token credential service names."""
+        return frozenset(provider.credential_service for provider in self.providers.values())
+
+    def match(self, service: str) -> OAuthCredentialServiceMatch | None:
+        """Return the OAuth role for one credential service, if registered."""
+        for provider in self.providers.values():
+            token_service = provider.credential_service == service
+            tool_config_service = provider.tool_config_service == service
+            if token_service or tool_config_service:
+                return OAuthCredentialServiceMatch(
+                    provider=provider,
+                    token_service=token_service,
+                    tool_config_service=tool_config_service,
+                )
+        return None
+
+    def reject_token_services(self, services: tuple[str, ...]) -> None:
+        """Reject direct dashboard access to OAuth token credential services."""
+        for service in services:
+            _reject_oauth_token_service(self.match(service))
+
+    def allows_private_scope_for(self, service: str) -> bool:
+        """Return whether this OAuth tool config service can target a private scope."""
+        match = self.match(service)
+        return match is not None and match.tool_config_service
+
+
 def _request_auth_user(request: Request) -> dict[str, Any] | None:
     auth_user = request.scope.get("auth_user")
     return auth_user if isinstance(auth_user, dict) else None
@@ -587,21 +622,12 @@ def _oauth_providers_for_request(request: Request) -> dict[str, OAuthProvider]:
     return load_oauth_providers_for_snapshot(snapshot)
 
 
-def _oauth_token_services_for_request(request: Request) -> frozenset[str]:
-    return frozenset(provider.credential_service for provider in _oauth_providers_for_request(request).values())
+def _oauth_services_for_request(request: Request) -> OAuthCredentialServices:
+    return OAuthCredentialServices(providers=_oauth_providers_for_request(request))
 
 
 def _oauth_service_match(request: Request, service: str) -> OAuthCredentialServiceMatch | None:
-    for provider in _oauth_providers_for_request(request).values():
-        token_service = provider.credential_service == service
-        tool_config_service = provider.tool_config_service == service
-        if token_service or tool_config_service:
-            return OAuthCredentialServiceMatch(
-                provider=provider,
-                token_service=token_service,
-                tool_config_service=tool_config_service,
-            )
-    return None
+    return _oauth_services_for_request(request).match(service)
 
 
 def _reject_oauth_token_service(
@@ -633,15 +659,6 @@ def _reject_oauth_api_key_field(
     )
 
 
-def _allow_private_scopes_for_service(
-    *,
-    oauth_service_match: OAuthCredentialServiceMatch | None,
-    request: Request,
-    agent_name: str | None,
-) -> bool:
-    return oauth_service_match is not None and _request_may_target_scoped_credentials(request, agent_name)
-
-
 def _dashboard_credentials_for_save(
     config_values: dict[str, Any],
     *,
@@ -656,6 +673,103 @@ def _dashboard_credentials_for_save(
         }
     credentials["_source"] = "ui"
     return credentials
+
+
+@dataclass(frozen=True)
+class DashboardCredentialAccess:
+    """Credential storage access for one dashboard request target."""
+
+    target: RequestCredentialsTarget
+    oauth_services: OAuthCredentialServices
+
+    @classmethod
+    def resolve(
+        cls,
+        request: Request,
+        *,
+        agent_name: str | None,
+        service_names: tuple[str, ...] = (),
+        allow_private_scopes: bool = False,
+    ) -> DashboardCredentialAccess:
+        """Resolve dashboard credential access for one request."""
+        oauth_services = _oauth_services_for_request(request)
+        oauth_services.reject_token_services(service_names)
+        allow_oauth_private_scopes = any(
+            oauth_services.allows_private_scope_for(service) for service in service_names
+        ) and _request_may_target_scoped_credentials(request, agent_name)
+        target = resolve_request_credentials_target(
+            request,
+            agent_name=agent_name,
+            service_names=service_names,
+            allow_private_scopes=allow_private_scopes or allow_oauth_private_scopes,
+        )
+        return cls(target=target, oauth_services=oauth_services)
+
+    def match(self, service: str) -> OAuthCredentialServiceMatch | None:
+        """Return the OAuth role for one credential service, if registered."""
+        return self.oauth_services.match(service)
+
+    def reject_token_service(self, service: str) -> None:
+        """Reject direct dashboard access to OAuth token credentials."""
+        _reject_oauth_token_service(self.match(service))
+
+    def reject_stored_oauth_credentials(self, credentials: dict[str, Any]) -> None:
+        """Reject stored OAuth token documents returned through generic routes."""
+        _reject_oauth_credentials_document(credentials)
+
+    def load(self, service: str) -> dict[str, Any] | None:
+        """Load dashboard-visible credentials for one service."""
+        self.reject_token_service(service)
+        return load_credentials_for_target(service, self.target)
+
+    def save(self, service: str, credentials: dict[str, Any]) -> None:
+        """Save dashboard-visible credentials for one service."""
+        self.reject_token_service(service)
+        _save_credentials_for_target(service, credentials, self.target)
+
+    def delete(self, service: str) -> None:
+        """Delete dashboard-visible credentials for one service."""
+        self.reject_token_service(service)
+        _delete_credentials_for_target(service, self.target)
+
+    def response_credentials(self, service: str, credentials: dict[str, Any]) -> dict[str, Any]:
+        """Return credentials filtered for dashboard responses."""
+        return _filter_credentials_for_response(credentials, is_oauth_service=self.match(service) is not None)
+
+    def credentials_for_save(self, service: str, config_values: dict[str, Any]) -> dict[str, Any]:
+        """Return user-submitted credentials normalized for storage."""
+        return _dashboard_credentials_for_save(
+            config_values,
+            strip_oauth_fields=self.match(service) is not None,
+        )
+
+    def list_services(self) -> list[str]:
+        """List dashboard-visible services for the resolved target."""
+        if self.target.worker_scope is None:
+            return [
+                service
+                for service in self.target.target_manager.list_services()
+                if service not in self.oauth_services.token_services
+            ]
+        worker_services = set(self.target.target_manager.list_services())
+        primary_runtime_services = _primary_runtime_scoped_services_for_target(self.target)
+        shared_manager = self.target.base_manager.shared_manager()
+        shared_services = set(
+            list_worker_grantable_shared_services(
+                shared_manager=shared_manager,
+                allowed_services=self.target.allowed_shared_services or frozenset(),
+            ),
+        )
+        if self.target.worker_scope == "shared":
+            shared_services |= {
+                service
+                for service in shared_manager.list_services()
+                if service_uses_local_shared_credentials(service, self.target.worker_scope)
+            }
+        services = worker_services | primary_runtime_services | shared_services
+        services -= set(unsupported_shared_only_integration_names(sorted(services), self.target.worker_scope))
+        services -= set(self.oauth_services.token_services)
+        return sorted(services)
 
 
 class SetApiKeyRequest(BaseModel):
@@ -686,29 +800,8 @@ async def list_services(
     agent_name: str | None = None,
 ) -> list[str]:
     """List all services with stored credentials."""
-    oauth_token_services = _oauth_token_services_for_request(request)
-    target = resolve_request_credentials_target(request, agent_name=agent_name, allow_private_scopes=True)
-    if target.worker_scope is None:
-        return [service for service in target.target_manager.list_services() if service not in oauth_token_services]
-    worker_services = set(target.target_manager.list_services())
-    primary_runtime_services = _primary_runtime_scoped_services_for_target(target)
-    shared_manager = target.base_manager.shared_manager()
-    shared_services = set(
-        list_worker_grantable_shared_services(
-            shared_manager=shared_manager,
-            allowed_services=target.allowed_shared_services or frozenset(),
-        ),
-    )
-    if target.worker_scope == "shared":
-        shared_services |= {
-            service
-            for service in shared_manager.list_services()
-            if service_uses_local_shared_credentials(service, target.worker_scope)
-        }
-    services = worker_services | primary_runtime_services | shared_services
-    services -= set(unsupported_shared_only_integration_names(sorted(services), target.worker_scope))
-    services -= oauth_token_services
-    return sorted(services)
+    access = DashboardCredentialAccess.resolve(request, agent_name=agent_name, allow_private_scopes=True)
+    return access.list_services()
 
 
 @router.get("/{service}/status")
@@ -719,23 +812,16 @@ async def get_credential_status(
 ) -> CredentialStatus:
     """Get the status of credentials for a service."""
     service = _validated_service(service)
-    oauth_service_match = _oauth_service_match(request, service)
-    _reject_oauth_token_service(oauth_service_match)
-    target = resolve_request_credentials_target(
+    access = DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
         service_names=(service,),
-        allow_private_scopes=_allow_private_scopes_for_service(
-            oauth_service_match=oauth_service_match,
-            request=request,
-            agent_name=agent_name,
-        ),
     )
-    credentials = load_credentials_for_target(service, target)
+    credentials = access.load(service)
 
     if credentials:
-        _reject_oauth_credentials_document(credentials)
-        filtered = _filter_credentials_for_response(credentials, is_oauth_service=oauth_service_match is not None)
+        access.reject_stored_oauth_credentials(credentials)
+        filtered = access.response_credentials(service, credentials)
         return CredentialStatus(
             service=service,
             has_credentials=True,
@@ -754,28 +840,18 @@ async def set_credentials(
 ) -> dict[str, str]:
     """Set multiple credentials for a service."""
     service = _validated_service(service)
-    oauth_service_match = _oauth_service_match(http_request, service)
-    _reject_oauth_token_service(oauth_service_match)
     _reject_oauth_credentials_document(payload.credentials)
-    target = resolve_request_credentials_target(
+    access = DashboardCredentialAccess.resolve(
         http_request,
         agent_name=agent_name,
         service_names=(service,),
-        allow_private_scopes=_allow_private_scopes_for_service(
-            oauth_service_match=oauth_service_match,
-            request=http_request,
-            agent_name=agent_name,
-        ),
     )
-    existing_credentials = load_credentials_for_target(service, target)
+    existing_credentials = access.load(service)
     if existing_credentials:
-        _reject_oauth_credentials_document(existing_credentials)
+        access.reject_stored_oauth_credentials(existing_credentials)
 
-    creds = _dashboard_credentials_for_save(
-        payload.credentials,
-        strip_oauth_fields=oauth_service_match is not None,
-    )
-    _save_credentials_for_target(service, creds, target)
+    creds = access.credentials_for_save(service, payload.credentials)
+    access.save(service, creds)
 
     return {"status": "success", "message": f"Credentials saved for {service}"}
 
@@ -849,27 +925,20 @@ async def get_credentials(
 ) -> dict[str, Any]:
     """Get credentials for a service (for editing)."""
     service = _validated_service(service)
-    oauth_service_match = _oauth_service_match(request, service)
-    _reject_oauth_token_service(oauth_service_match)
-    target = resolve_request_credentials_target(
+    access = DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
         service_names=(service,),
-        allow_private_scopes=_allow_private_scopes_for_service(
-            oauth_service_match=oauth_service_match,
-            request=request,
-            agent_name=agent_name,
-        ),
     )
-    credentials = load_credentials_for_target(service, target)
+    credentials = access.load(service)
 
     if not credentials:
         return {"service": service, "credentials": {}}
-    _reject_oauth_credentials_document(credentials)
+    access.reject_stored_oauth_credentials(credentials)
 
     return {
         "service": service,
-        "credentials": _filter_credentials_for_response(credentials, is_oauth_service=oauth_service_match is not None),
+        "credentials": access.response_credentials(service, credentials),
     }
 
 
@@ -881,12 +950,15 @@ async def delete_credentials(
 ) -> dict[str, str]:
     """Delete all credentials for a service."""
     service = _validated_service(service)
-    _reject_oauth_token_service(_oauth_service_match(request, service))
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
-    existing_credentials = load_credentials_for_target(service, target)
+    access = DashboardCredentialAccess.resolve(
+        request,
+        agent_name=agent_name,
+        service_names=(service,),
+    )
+    existing_credentials = access.load(service)
     if existing_credentials:
-        _reject_oauth_credentials_document(existing_credentials)
-    _delete_credentials_for_target(service, target)
+        access.reject_stored_oauth_credentials(existing_credentials)
+    access.delete(service)
 
     return {"status": "success", "message": f"Credentials deleted for {service}"}
 

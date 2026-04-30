@@ -686,9 +686,16 @@ class TestCredentialsAPI:
         )
 
         response = client.get("/api/credentials/list?agent_name=general")
+        delete_response = client.delete("/api/credentials/google_drive?agent_name=general")
+        deleted_list_response = client.get("/api/credentials/list?agent_name=general")
 
         assert response.status_code == 200
         assert response.json() == ["google_drive"]
+        assert delete_response.status_code == 200
+        assert scoped_manager.load_credentials("google_drive") is None
+        assert scoped_manager.load_credentials("google_drive_oauth") is not None
+        assert deleted_list_response.status_code == 200
+        assert deleted_list_response.json() == []
 
     def test_non_oauth_tool_settings_still_reject_private_scopes(
         self,
