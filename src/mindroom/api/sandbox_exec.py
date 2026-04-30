@@ -64,6 +64,18 @@ SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
 )
 
 
+def _is_oauth_client_secret_env_name(name: str) -> bool:
+    return (
+        name == "GOOGLE_CLIENT_SECRET"
+        or (name.startswith("GOOGLE_") and name.endswith("_CLIENT_SECRET"))
+        or (name.startswith("MINDROOM_OAUTH_") and name.endswith("_CLIENT_SECRET"))
+    )
+
+
+def _without_oauth_client_secrets(env: Mapping[str, str]) -> dict[str, str]:
+    return {key: value for key, value in env.items() if not _is_oauth_client_secret_env_name(key)}
+
+
 def runner_execution_mode(runtime_paths: RuntimePaths) -> str:
     """Return the configured sandbox runner execution mode."""
     return (runtime_paths.env_value(RUNNER_EXECUTION_MODE_ENV, default="inprocess") or "inprocess").strip().lower()
@@ -165,10 +177,10 @@ def request_execution_env(
 ) -> dict[str, str]:
     """Return the effective runtime-scoped execution env for one request."""
     if execution_env:
-        return dict(execution_env)
+        return _without_oauth_client_secrets(execution_env)
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
-    return dict(constants.sandbox_execution_runtime_env_values(runtime_paths))
+    return _without_oauth_client_secrets(constants.execution_runtime_env_values(runtime_paths))
 
 
 def runtime_paths_with_execution_env(
@@ -181,11 +193,15 @@ def runtime_paths_with_execution_env(
     if not execution_env and not trusted_env_overlay:
         return runtime_paths
 
-    process_env = dict(execution_env)
-    env_file_values: dict[str, str] = {}
+    process_env = _without_oauth_client_secrets(constants.execution_runtime_env_values(runtime_paths))
+    process_env.update(_without_oauth_client_secrets(execution_env))
+    env_file_values = {
+        key: value for key, value in runtime_paths.env_file_values.items() if not _is_oauth_client_secret_env_name(key)
+    }
     if trusted_env_overlay:
-        env_file_values.update(trusted_env_overlay)
-        process_env.update(trusted_env_overlay)
+        clean_overlay = _without_oauth_client_secrets(trusted_env_overlay)
+        env_file_values.update(clean_overlay)
+        process_env.update(clean_overlay)
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
