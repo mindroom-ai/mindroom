@@ -4,7 +4,8 @@ Use these tools to search places, fetch weather data, analyze Shopify stores, an
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `location-commerce-and-home` group. Use these tools when you need physical-world lookup data, store analytics, or smart home control.
+This page documents the built-in tools in the `location-commerce-and-home` group.
+Use these tools when you need physical-world lookup data, store analytics, or smart home control.
 
 ## Tools On This Page
 
@@ -15,7 +16,14 @@ This page documents the built-in tools in the `location-commerce-and-home` group
 
 ## Common Setup Notes
 
-All four tools on this page are `requires_config`, so they only become available after the needed credentials or integration setup is present. MindRoom validates inline overrides against the declared `config_fields`, and `type="password"` fields such as `key`, `api_key`, `access_token`, and `HOMEASSISTANT_TOKEN` must be stored through the dashboard or credential store instead of inline YAML. `google_maps`, `openweather`, and `shopify` are standard credential-backed tools with no dedicated MindRoom integration routes in `src/mindroom/api/integrations.py`. Their upstream Agno toolkits also support environment fallbacks through `GOOGLE_MAPS_API_KEY`, `OPENWEATHER_API_KEY`, `SHOPIFY_SHOP_NAME`, and `SHOPIFY_ACCESS_TOKEN`. `homeassistant` is different because MindRoom ships a dedicated integration flow in `src/mindroom/api/homeassistant_integration.py` with both OAuth and long-lived-token setup paths. `homeassistant` is also a shared-only integration, so it requires `worker_scope` to be unset or `shared`. Unlike `google` and `spotify`, `homeassistant` always stays local and is never proxied through worker sandbox routing. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+All four tools on this page are `requires_config`, so they only become available after the needed credentials or integration setup is present.
+MindRoom validates inline overrides against the declared `config_fields`, and `type="password"` fields such as `key`, `api_key`, `access_token`, and `HOMEASSISTANT_TOKEN` must be stored through the dashboard or credential store instead of inline YAML.
+`google_maps`, `openweather`, and `shopify` are standard credential-backed tools with no dedicated MindRoom integration routes in `src/mindroom/api/integrations.py`.
+Their upstream Agno toolkits also support environment fallbacks through `GOOGLE_MAPS_API_KEY`, `OPENWEATHER_API_KEY`, `SHOPIFY_SHOP_NAME`, and `SHOPIFY_ACCESS_TOKEN`.
+`homeassistant` is different because MindRoom ships a dedicated integration flow in `src/mindroom/api/homeassistant_integration.py` with both OAuth and long-lived-token setup paths.
+`homeassistant` is also a shared-only integration, so it requires `worker_scope` to be unset or `shared`.
+Unlike `google` and `spotify`, `homeassistant` always stays local and is never proxied through worker sandbox routing.
+Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## \[`google_maps`\]
 
@@ -23,7 +31,11 @@ All four tools on this page are `requires_config`, so they only become available
 
 ### What It Does
 
-`google_maps` exposes `search_places()`, `get_directions()`, `validate_address()`, `geocode_address()`, `reverse_geocode()`, `get_distance_matrix()`, `get_elevation()`, and `get_timezone()`. The upstream toolkit builds both a `googlemaps.Client` and a `google.maps.places_v1.PlacesClient`. `search_places()` returns rich place details including name, formatted address, rating, reviews, phone number, website, and opening hours. `validate_address()` uses Google's Address Validation API rather than normal geocoding. MindRoom does not add extra runtime behavior on top of the upstream toolkit beyond metadata, dependency management, and credential storage.
+`google_maps` exposes `search_places()`, `get_directions()`, `validate_address()`, `geocode_address()`, `reverse_geocode()`, `get_distance_matrix()`, `get_elevation()`, and `get_timezone()`.
+The upstream toolkit builds both a `googlemaps.Client` and a `google.maps.places_v1.PlacesClient`.
+`search_places()` returns rich place details including name, formatted address, rating, reviews, phone number, website, and opening hours.
+`validate_address()` uses Google's Address Validation API rather than normal geocoding.
+MindRoom does not add extra runtime behavior on top of the upstream toolkit beyond metadata, dependency management, and credential storage.
 
 ### Configuration
 
@@ -60,7 +72,11 @@ validate_address("1600 Amphitheatre Pkwy, Mountain View, CA", region_code="US")
 
 ### What It Does
 
-`openweather` exposes `get_current_weather()`, `get_forecast()`, `get_air_pollution()`, and `geocode_location()`. The weather, forecast, and air pollution methods geocode the requested location first and then query OpenWeather by latitude and longitude. `units` controls whether the toolkit requests `standard`, `metric`, or `imperial` output from the API. `get_forecast()` uses the 5-day forecast endpoint and caps the response to 40 three-hour entries. MindRoom does not add custom behavior here beyond metadata, dependency management, and credential storage.
+`openweather` exposes `get_current_weather()`, `get_forecast()`, `get_air_pollution()`, and `geocode_location()`.
+The weather, forecast, and air pollution methods geocode the requested location first and then query OpenWeather by latitude and longitude.
+`units` controls whether the toolkit requests `standard`, `metric`, or `imperial` output from the API.
+`get_forecast()` uses the 5-day forecast endpoint and caps the response to 40 three-hour entries.
+MindRoom does not add custom behavior here beyond metadata, dependency management, and credential storage.
 
 ### Configuration
 
@@ -104,7 +120,11 @@ geocode_location("Reykjavik", limit=3)
 
 ### What It Does
 
-`shopify` exposes `get_shop_info()`, `get_products()`, `get_orders()`, `get_top_selling_products()`, `get_products_bought_together()`, `get_sales_by_date_range()`, `get_order_analytics()`, `get_product_sales_breakdown()`, `get_customer_order_history()`, `get_inventory_levels()`, `get_low_stock_products()`, `get_sales_trends()`, `get_average_order_value()`, and `get_repeat_customers()`. The toolkit talks to Shopify's Admin GraphQL endpoint at `https://<shop_name>.myshopify.com/admin/api/<api_version>/graphql.json`. Most list-style methods cap query size to Shopify's first-page limits, such as 250 products or orders. `get_orders()` supports `created_after`, `created_before`, and financial status filters, and the date filters expect `YYYY-MM-DD`. MindRoom does not wrap the Shopify API further, so behavior comes directly from the upstream Agno toolkit.
+`shopify` exposes `get_shop_info()`, `get_products()`, `get_orders()`, `get_top_selling_products()`, `get_products_bought_together()`, `get_sales_by_date_range()`, `get_order_analytics()`, `get_product_sales_breakdown()`, `get_customer_order_history()`, `get_inventory_levels()`, `get_low_stock_products()`, `get_sales_trends()`, `get_average_order_value()`, and `get_repeat_customers()`.
+The toolkit talks to Shopify's Admin GraphQL endpoint at `https://<shop_name>.myshopify.com/admin/api/<api_version>/graphql.json`.
+Most list-style methods cap query size to Shopify's first-page limits, such as 250 products or orders.
+`get_orders()` supports `created_after`, `created_before`, and financial status filters, and the date filters expect `YYYY-MM-DD`.
+MindRoom does not wrap the Shopify API further, so behavior comes directly from the upstream Agno toolkit.
 
 ### Configuration
 
@@ -147,7 +167,11 @@ get_average_order_value(days=30)
 
 ### What It Does
 
-`homeassistant` exposes `get_entity_state()`, `list_entities()`, `turn_on()`, `turn_off()`, `toggle()`, `set_brightness()`, `set_color()`, `set_temperature()`, `activate_scene()`, `trigger_automation()`, and `call_service()`. The toolkit calls Home Assistant's REST API through `/api/states` and `/api/services/...`. `list_entities()` returns a simplified response and limits the output to the first 50 entities to avoid huge payloads. `set_brightness()` validates a `0` to `255` range, `set_color()` validates each RGB channel in the same range, and `call_service()` expects extra service data as a JSON string. MindRoom adds important runtime behavior here by loading scoped credentials, enforcing shared-only integration rules, and returning a clear error when the agent's `worker_scope` does not allow the integration.
+`homeassistant` exposes `get_entity_state()`, `list_entities()`, `turn_on()`, `turn_off()`, `toggle()`, `set_brightness()`, `set_color()`, `set_temperature()`, `activate_scene()`, `trigger_automation()`, and `call_service()`.
+The toolkit calls Home Assistant's REST API through `/api/states` and `/api/services/...`.
+`list_entities()` returns a simplified response and limits the output to the first 50 entities to avoid huge payloads.
+`set_brightness()` validates a `0` to `255` range, `set_color()` validates each RGB channel in the same range, and `call_service()` expects extra service data as a JSON string.
+MindRoom adds important runtime behavior here by loading scoped credentials, enforcing shared-only integration rules, and returning a clear error when the agent's `worker_scope` does not allow the integration.
 
 ### Configuration
 

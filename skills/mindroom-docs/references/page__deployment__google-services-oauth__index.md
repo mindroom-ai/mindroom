@@ -1,6 +1,7 @@
 # Google Services OAuth (Admin Setup)
 
-This is the one-time setup for a shared Google OAuth app in MindRoom. After you finish these steps, users only click **Login with Google** in the frontend.
+This is the one-time setup for a shared Google OAuth app in MindRoom.
+After you finish these steps, users only click **Login with Google** in the frontend.
 
 ## Who This Is For
 

@@ -4,7 +4,8 @@ Use these tools to query SQL and graph databases, analyze tabular files, work wi
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `data-and-databases` group. Use these tools when you need database access, dataframe-style analysis, spreadsheet automation, or market and company data.
+This page documents the built-in tools in the `data-and-databases` group.
+Use these tools when you need database access, dataframe-style analysis, spreadsheet automation, or market and company data.
 
 ## Tools On This Page
 
@@ -23,7 +24,15 @@ This page documents the built-in tools in the `data-and-databases` group. Use th
 
 ## Common Setup Notes
 
-`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present. `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed. MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML. Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`. Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields. `src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, so the tools on this page are configured through standard tool credentials, environment-backed SDK auth, or the shared Google Services OAuth flow instead of dedicated per-tool integration routes. `google_sheets` is special because it declares `auth_provider="google"`, checks for Google Sheets OAuth scopes, is restricted to unscoped agents or `worker_scope=shared`, and always stays local instead of being proxied through worker sandbox routing. `csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
+`duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed.
+MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML.
+Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`.
+Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields.
+`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, so the tools on this page are configured through standard tool credentials, environment-backed SDK auth, or the shared Google Services OAuth flow instead of dedicated per-tool integration routes.
+`google_sheets` is special because it declares `auth_provider="google"`, checks for Google Sheets OAuth scopes, is restricted to unscoped agents or `worker_scope=shared`, and always stays local instead of being proxied through worker sandbox routing.
+`csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly.
+Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## \[`sql`\]
 
@@ -31,7 +40,11 @@ This page documents the built-in tools in the `data-and-databases` group. Use th
 
 ### What It Does
 
-`sql` exposes `list_tables()`, `describe_table()`, and `run_sql_query()`. The toolkit can connect through `db_url`, an existing `db_engine`, or a URL assembled from `user`, `password`, `host`, `port`, `schema`, and `dialect`. `list_tables()` and `describe_table()` use SQLAlchemy inspection, and `run_sql_query()` returns JSON rows with a default limit of 10 unless you pass `limit=None`. If you pass a `tables` mapping, `list_tables()` returns that mapping directly instead of live database introspection. For dialects where database name and schema are distinct concepts, `db_url` is the safest authored configuration because the generic `schema` field is used both in the constructed URL path and in later table inspection calls.
+`sql` exposes `list_tables()`, `describe_table()`, and `run_sql_query()`.
+The toolkit can connect through `db_url`, an existing `db_engine`, or a URL assembled from `user`, `password`, `host`, `port`, `schema`, and `dialect`.
+`list_tables()` and `describe_table()` use SQLAlchemy inspection, and `run_sql_query()` returns JSON rows with a default limit of 10 unless you pass `limit=None`.
+If you pass a `tables` mapping, `list_tables()` returns that mapping directly instead of live database introspection.
+For dialects where database name and schema are distinct concepts, `db_url` is the safest authored configuration because the generic `schema` field is used both in the constructed URL path and in later table inspection calls.
 
 ### Configuration
 
@@ -80,7 +93,10 @@ run_sql_query("SELECT * FROM events ORDER BY created_at DESC", limit=20)
 
 ### What It Does
 
-`postgres` exposes `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`. The toolkit opens a Psycopg connection, sets `search_path` to `table_schema`, and marks the connection read-only. `inspect_query()` runs `EXPLAIN`, which makes it the safe first step before a larger `run_query()`. `export_table_to_path()` writes queryable table output to a local file path from the running process.
+`postgres` exposes `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
+The toolkit opens a Psycopg connection, sets `search_path` to `table_schema`, and marks the connection read-only.
+`inspect_query()` runs `EXPLAIN`, which makes it the safe first step before a larger `run_query()`.
+`export_table_to_path()` writes queryable table output to a local file path from the running process.
 
 ### Configuration
 
@@ -128,7 +144,10 @@ export_table_to_path("daily_revenue", "/tmp/daily_revenue.csv")
 
 ### What It Does
 
-`redshift` exposes `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`. The upstream connector supports standard `user` and `password` authentication, IAM authentication through `profile`, and IAM authentication through explicit AWS credentials. When IAM auth is enabled, the toolkit can fall back to environment variables such as `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION`, and `AWS_PROFILE`. `table_schema` defaults to `public`, and `ssl` defaults to `true`.
+`redshift` exposes `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
+The upstream connector supports standard `user` and `password` authentication, IAM authentication through `profile`, and IAM authentication through explicit AWS credentials.
+When IAM auth is enabled, the toolkit can fall back to environment variables such as `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION`, and `AWS_PROFILE`.
+`table_schema` defaults to `public`, and `ssl` defaults to `true`.
 
 ### Configuration
 
@@ -185,7 +204,9 @@ export_table_to_path("fact_orders", "/tmp/fact_orders.csv")
 
 ### What It Does
 
-`neo4j` exposes `list_labels()`, `list_relationship_types()`, `get_schema()`, and `run_cypher_query()`. It uses the Neo4j Python driver and can target a specific database when `database` is set. The individual enable flags let you expose schema discovery without allowing arbitrary Cypher execution.
+`neo4j` exposes `list_labels()`, `list_relationship_types()`, `get_schema()`, and `run_cypher_query()`.
+It uses the Neo4j Python driver and can target a specific database when `database` is set.
+The individual enable flags let you expose schema discovery without allowing arbitrary Cypher execution.
 
 ### Configuration
 
@@ -233,7 +254,10 @@ run_cypher_query("MATCH (u:User)-[:PLACED]->(o:Order) RETURN u.id, count(o) AS o
 
 ### What It Does
 
-`duckdb` exposes `show_tables()`, `describe_table()`, `inspect_query()`, `run_query()`, `summarize_table()`, `create_table_from_path()`, `export_table_to_path()`, `load_local_path_to_table()`, `load_local_csv_to_table()`, `load_s3_path_to_table()`, `load_s3_csv_to_table()`, `create_fts_index()`, and `full_text_search()`. If `db_path` is unset, DuckDB runs in memory. `create_table_from_path()` can load CSV or other file formats directly into a table, and `export_table_to_path()` defaults to `PARQUET`. `init_commands`, `connection`, and `config` are advanced constructor inputs that are passed directly to the upstream toolkit.
+`duckdb` exposes `show_tables()`, `describe_table()`, `inspect_query()`, `run_query()`, `summarize_table()`, `create_table_from_path()`, `export_table_to_path()`, `load_local_path_to_table()`, `load_local_csv_to_table()`, `load_s3_path_to_table()`, `load_s3_csv_to_table()`, `create_fts_index()`, and `full_text_search()`.
+If `db_path` is unset, DuckDB runs in memory.
+`create_table_from_path()` can load CSV or other file formats directly into a table, and `export_table_to_path()` defaults to `PARQUET`.
+`init_commands`, `connection`, and `config` are advanced constructor inputs that are passed directly to the upstream toolkit.
 
 ### Configuration
 
@@ -276,7 +300,10 @@ export_table_to_path("orders", format="CSV", path="/tmp")
 
 ### What It Does
 
-`csv` exposes `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()`. The toolkit works with a preconfigured list of CSV paths and exposes each one by its filename stem. `read_csv_file()` returns JSON rows and respects either the per-call `row_limit` or the configured default `row_limit`. `query_csv_file()` loads the target CSV into DuckDB and runs one SQL statement against it.
+`csv` exposes `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()`.
+The toolkit works with a preconfigured list of CSV paths and exposes each one by its filename stem.
+`read_csv_file()` returns JSON rows and respects either the per-call `row_limit` or the configured default `row_limit`.
+`query_csv_file()` loads the target CSV into DuckDB and runs one SQL statement against it.
 
 ### Configuration
 
@@ -321,7 +348,10 @@ query_csv_file("sales_2025", 'SELECT "region", COUNT(*) FROM sales_2025 GROUP BY
 
 ### What It Does
 
-`pandas` exposes `create_pandas_dataframe()` and `run_dataframe_operation()`. `create_pandas_dataframe()` calls a top-level Pandas constructor such as `read_csv` or `read_json` and stores the resulting dataframe under a caller-chosen name. `run_dataframe_operation()` then calls a dataframe method such as `head`, `tail`, `describe`, or `groupby` on that stored dataframe. Stored dataframes live in the current process memory only and are not persisted to disk.
+`pandas` exposes `create_pandas_dataframe()` and `run_dataframe_operation()`.
+`create_pandas_dataframe()` calls a top-level Pandas constructor such as `read_csv` or `read_json` and stores the resulting dataframe under a caller-chosen name.
+`run_dataframe_operation()` then calls a dataframe method such as `head`, `tail`, `describe`, or `groupby` on that stored dataframe.
+Stored dataframes live in the current process memory only and are not persisted to disk.
 
 ### Configuration
 
@@ -362,7 +392,10 @@ run_dataframe_operation("sales", "describe", {})
 
 ### What It Does
 
-`google_bigquery` exposes `list_tables()`, `describe_table()`, and `run_sql_query()`. The toolkit builds a `bigquery.Client` at initialization and scopes query jobs to `project.dataset` through the default query job configuration. MindRoom's metadata marks `dataset`, `project`, and `location` as required, even though the upstream toolkit can fall back to `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` if those values are omitted. `credentials` is an advanced programmatic Google credentials object for cases where the process should not rely on default application credentials.
+`google_bigquery` exposes `list_tables()`, `describe_table()`, and `run_sql_query()`.
+The toolkit builds a `bigquery.Client` at initialization and scopes query jobs to `project.dataset` through the default query job configuration.
+MindRoom's metadata marks `dataset`, `project`, and `location` as required, even though the upstream toolkit can fall back to `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` if those values are omitted.
+`credentials` is an advanced programmatic Google credentials object for cases where the process should not rely on default application credentials.
 
 ### Configuration
 
@@ -407,7 +440,13 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ### What It Does
 
-The underlying Agno toolkit supports `read_sheet()`, `create_sheet()`, `update_sheet()`, and `create_duplicate_sheet()`. MindRoom wraps Agno's Google Sheets toolkit with `ScopedGoogleOAuthMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files. The upstream toolkit selects read-only Sheets scope when only reads are enabled, and it selects write scope when create, update, or duplicate operations are enabled. `create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on Google Drive scope in addition to Sheets access. If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call. On this branch, the declared MindRoom config fields are `read`, `create`, `update`, and `duplicate`, while the upstream constructor consumes `enable_read_sheet`, `enable_create_sheet`, `enable_update_sheet`, and `enable_create_duplicate_sheet`. That means the read path is the verified default behavior here, while the write toggles should be treated as intended metadata until the field names are aligned with the upstream constructor.
+The underlying Agno toolkit supports `read_sheet()`, `create_sheet()`, `update_sheet()`, and `create_duplicate_sheet()`.
+MindRoom wraps Agno's Google Sheets toolkit with `ScopedGoogleOAuthMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files.
+The upstream toolkit selects read-only Sheets scope when only reads are enabled, and it selects write scope when create, update, or duplicate operations are enabled.
+`create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on Google Drive scope in addition to Sheets access.
+If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call.
+On this branch, the declared MindRoom config fields are `read`, `create`, `update`, and `duplicate`, while the upstream constructor consumes `enable_read_sheet`, `enable_create_sheet`, `enable_update_sheet`, and `enable_create_duplicate_sheet`.
+That means the read path is the verified default behavior here, while the write toggles should be treated as intended metadata until the field names are aligned with the upstream constructor.
 
 ### Configuration
 
@@ -454,7 +493,10 @@ read_sheet(
 
 ### What It Does
 
-`openbb` exposes `get_stock_price()`, `search_company_symbol()`, `get_company_news()`, `get_company_profile()`, and `get_price_targets()`. The toolkit logs into OpenBB when `openbb_pat` or `OPENBB_PAT` is available, but it still works without a PAT when the selected provider supports unauthenticated access. The default provider is `yfinance`, which makes the tool usable without premium OpenBB credentials for many common quote lookups. You can selectively enable additional research functions without exposing the full OpenBB surface.
+`openbb` exposes `get_stock_price()`, `search_company_symbol()`, `get_company_news()`, `get_company_profile()`, and `get_price_targets()`.
+The toolkit logs into OpenBB when `openbb_pat` or `OPENBB_PAT` is available, but it still works without a PAT when the selected provider supports unauthenticated access.
+The default provider is `yfinance`, which makes the tool usable without premium OpenBB credentials for many common quote lookups.
+You can selectively enable additional research functions without exposing the full OpenBB surface.
 
 ### Configuration
 
@@ -502,7 +544,9 @@ get_price_targets("NVDA")
 
 ### What It Does
 
-`yfinance` exposes `get_current_stock_price()`, `get_company_info()`, `get_historical_stock_prices()`, `get_stock_fundamentals()`, `get_income_statements()`, `get_key_financial_ratios()`, `get_analyst_recommendations()`, `get_company_news()`, and `get_technical_indicators()`. Unlike `openbb`, it does not require a PAT or provider selection. The optional `session` field is an advanced programmatic HTTP session hook for callers that need custom transport behavior.
+`yfinance` exposes `get_current_stock_price()`, `get_company_info()`, `get_historical_stock_prices()`, `get_stock_fundamentals()`, `get_income_statements()`, `get_key_financial_ratios()`, `get_analyst_recommendations()`, `get_company_news()`, and `get_technical_indicators()`.
+Unlike `openbb`, it does not require a PAT or provider selection.
+The optional `session` field is an advanced programmatic HTTP session hook for callers that need custom transport behavior.
 
 ### Configuration
 
@@ -538,7 +582,9 @@ get_company_news("TSLA", num_stories=5)
 
 ### What It Does
 
-`financial_datasets_api` exposes methods such as `get_income_statements()`, `get_balance_sheets()`, `get_cash_flow_statements()`, `get_segmented_financials()`, `get_financial_metrics()`, `get_company_info()`, `get_stock_prices()`, `get_earnings()`, `get_insider_trades()`, `get_institutional_ownership()`, `get_news()`, `get_sec_filings()`, `get_crypto_prices()`, and `search_tickers()`. The toolkit sends authenticated HTTP requests to `https://api.financialdatasets.ai` with `X-API-KEY`. If `api_key` is unset, it falls back to `FINANCIAL_DATASETS_API_KEY`, and otherwise the tool returns an API-key-not-set error instead of working partially.
+`financial_datasets_api` exposes methods such as `get_income_statements()`, `get_balance_sheets()`, `get_cash_flow_statements()`, `get_segmented_financials()`, `get_financial_metrics()`, `get_company_info()`, `get_stock_prices()`, `get_earnings()`, `get_insider_trades()`, `get_institutional_ownership()`, `get_news()`, `get_sec_filings()`, `get_crypto_prices()`, and `search_tickers()`.
+The toolkit sends authenticated HTTP requests to `https://api.financialdatasets.ai` with `X-API-KEY`.
+If `api_key` is unset, it falls back to `FINANCIAL_DATASETS_API_KEY`, and otherwise the tool returns an API-key-not-set error instead of working partially.
 
 ### Configuration
 

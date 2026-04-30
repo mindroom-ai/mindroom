@@ -4,7 +4,8 @@ Use these tools to process local video files, search GIFs and stock images, insp
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `media-and-content` group. Use these tools when you need local video processing, media lookup, brand asset retrieval, or Spotify-backed search and playlist workflows.
+This page documents the built-in tools in the `media-and-content` group.
+Use these tools when you need local video processing, media lookup, brand asset retrieval, or Spotify-backed search and playlist workflows.
 
 ## Tools On This Page
 
@@ -17,7 +18,15 @@ This page documents the built-in tools in the `media-and-content` group. Use the
 
 ## Common Setup Notes
 
-`moviepy_video_tools` and `youtube` are `setup_type: none`, so they do not need dashboard OAuth or stored API credentials. `giphy`, `unsplash`, `brandfetch`, and `spotify` all use stored credentials, and password-type fields such as `api_key`, `access_key`, and `access_token` should be managed through the dashboard or credential store instead of inline YAML. The upstream toolkits for `giphy`, `unsplash`, and `brandfetch` also fall back to provider-specific environment variables such as `GIPHY_API_KEY`, `UNSPLASH_ACCESS_KEY`, `BRANDFETCH_API_KEY`, and `BRANDFETCH_CLIENT_ID`. These tools operate on external URLs or local file paths rather than Matrix attachment IDs directly. When you pass local files, the paths must exist inside the runtime that executes the tool. Missing optional Python dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set. That matters most on this page for `moviepy_video_tools`, `giphy`, `brandfetch`, `spotify`, and `youtube`. `spotify` is the only tool on this page with dedicated integration routes in `src/mindroom/api/integrations.py`. MindRoom treats `spotify` as a shared-only integration, so dashboard credential management and tool support require `worker_scope` unset or `shared`, not `user` or `user_agent`.
+`moviepy_video_tools` and `youtube` are `setup_type: none`, so they do not need dashboard OAuth or stored API credentials.
+`giphy`, `unsplash`, `brandfetch`, and `spotify` all use stored credentials, and password-type fields such as `api_key`, `access_key`, and `access_token` should be managed through the dashboard or credential store instead of inline YAML.
+The upstream toolkits for `giphy`, `unsplash`, and `brandfetch` also fall back to provider-specific environment variables such as `GIPHY_API_KEY`, `UNSPLASH_ACCESS_KEY`, `BRANDFETCH_API_KEY`, and `BRANDFETCH_CLIENT_ID`.
+These tools operate on external URLs or local file paths rather than Matrix attachment IDs directly.
+When you pass local files, the paths must exist inside the runtime that executes the tool.
+Missing optional Python dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+That matters most on this page for `moviepy_video_tools`, `giphy`, `brandfetch`, `spotify`, and `youtube`.
+`spotify` is the only tool on this page with dedicated integration routes in `src/mindroom/api/integrations.py`.
+MindRoom treats `spotify` as a shared-only integration, so dashboard credential management and tool support require `worker_scope` unset or `shared`, not `user` or `user_agent`.
 
 ## \[`moviepy_video_tools`\]
 
@@ -25,7 +34,11 @@ This page documents the built-in tools in the `media-and-content` group. Use the
 
 ### What It Does
 
-`moviepy_video_tools` exposes `extract_audio(video_path, output_path)`, `create_srt(transcription, output_path)`, and `embed_captions(video_path, srt_path, output_path=None, font_size=24, font_color="white", stroke_color="black", stroke_width=1)`. Despite the `enable_process_video` config name, the current upstream method it enables is specifically `extract_audio()`, not a general-purpose video editing surface. `create_srt()` writes the provided transcription text directly to disk, so it expects the caller to already have SRT-formatted content. `embed_captions()` reads an SRT file, converts it to word timings, and renders word-highlighted captions onto a new MP4 output. This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
+`moviepy_video_tools` exposes `extract_audio(video_path, output_path)`, `create_srt(transcription, output_path)`, and `embed_captions(video_path, srt_path, output_path=None, font_size=24, font_color="white", stroke_color="black", stroke_width=1)`.
+Despite the `enable_process_video` config name, the current upstream method it enables is specifically `extract_audio()`, not a general-purpose video editing surface.
+`create_srt()` writes the provided transcription text directly to disk, so it expects the caller to already have SRT-formatted content.
+`embed_captions()` reads an SRT file, converts it to word timings, and renders word-highlighted captions onto a new MP4 output.
+This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
 
 ### Configuration
 
@@ -64,7 +77,10 @@ embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_capti
 
 ### What It Does
 
-`giphy` exposes `search_gifs(query)`. The upstream method signature includes the active agent or team object, but MindRoom callers only provide the search query because the runtime injects the current tool context. Successful calls return a `ToolResult` with both plain-text URLs and attached image artifacts for each GIF. `limit` is fixed at toolkit construction time, so callers do not set result count per request.
+`giphy` exposes `search_gifs(query)`.
+The upstream method signature includes the active agent or team object, but MindRoom callers only provide the search query because the runtime injects the current tool context.
+Successful calls return a `ToolResult` with both plain-text URLs and attached image artifacts for each GIF.
+`limit` is fixed at toolkit construction time, so callers do not set result count per request.
 
 ### Configuration
 
@@ -101,7 +117,11 @@ search_gifs("matrix code review celebration")
 
 ### What It Does
 
-`youtube` exposes `get_youtube_video_data(url)`, `get_youtube_video_captions(url)`, and `get_video_timestamps(url)`. `get_youtube_video_data()` uses YouTube's oEmbed endpoint and returns metadata such as title, author, thumbnail, size, and provider fields. `get_youtube_video_captions()` and `get_video_timestamps()` use `youtube_transcript_api` against the parsed video ID. The current tool does not perform keyword-based YouTube search. It expects a specific YouTube URL and then fetches metadata or transcript-derived output for that video.
+`youtube` exposes `get_youtube_video_data(url)`, `get_youtube_video_captions(url)`, and `get_video_timestamps(url)`.
+`get_youtube_video_data()` uses YouTube's oEmbed endpoint and returns metadata such as title, author, thumbnail, size, and provider fields.
+`get_youtube_video_captions()` and `get_video_timestamps()` use `youtube_transcript_api` against the parsed video ID.
+The current tool does not perform keyword-based YouTube search.
+It expects a specific YouTube URL and then fetches metadata or transcript-derived output for that video.
 
 ### Configuration
 
@@ -142,7 +162,12 @@ get_video_timestamps("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
 ### What It Does
 
-`unsplash` exposes `search_photos(query, per_page=10, page=1, orientation=None, color=None)`, `get_photo(photo_id)`, `get_random_photo(query=None, orientation=None, count=1)`, and optionally `download_photo(photo_id)`. `search_photos()` returns a JSON payload with total counts plus a simplified list of photo metadata, author info, and image URLs. `get_photo()` adds extra fields such as EXIF data, views, downloads, and location when the API returns them. `get_random_photo()` supports an optional query filter and returns one or more formatted photo records. `download_photo()` does not fetch the image binary. It triggers Unsplash's required download-tracking endpoint and returns the download URL that the caller can fetch separately.
+`unsplash` exposes `search_photos(query, per_page=10, page=1, orientation=None, color=None)`, `get_photo(photo_id)`, `get_random_photo(query=None, orientation=None, count=1)`, and optionally `download_photo(photo_id)`.
+`search_photos()` returns a JSON payload with total counts plus a simplified list of photo metadata, author info, and image URLs.
+`get_photo()` adds extra fields such as EXIF data, views, downloads, and location when the API returns them.
+`get_random_photo()` supports an optional query filter and returns one or more formatted photo records.
+`download_photo()` does not fetch the image binary.
+It triggers Unsplash's required download-tracking endpoint and returns the download URL that the caller can fetch separately.
 
 ### Configuration
 
@@ -183,7 +208,11 @@ get_photo("abcd1234")
 
 ### What It Does
 
-`brandfetch` exposes `search_by_identifier(identifier)` and optionally `search_by_brand(name)`. `search_by_identifier()` uses the Brand API and accepts domains, Brandfetch brand IDs, ISINs, or stock tickers. `search_by_brand()` uses the Brand Search API and is useful when you only know the brand name and need to discover the canonical brand entry first. The two methods use different credentials. `search_by_identifier()` requires `api_key`, while `search_by_brand()` requires `client_id`.
+`brandfetch` exposes `search_by_identifier(identifier)` and optionally `search_by_brand(name)`.
+`search_by_identifier()` uses the Brand API and accepts domains, Brandfetch brand IDs, ISINs, or stock tickers.
+`search_by_brand()` uses the Brand Search API and is useful when you only know the brand name and need to discover the canonical brand entry first.
+The two methods use different credentials.
+`search_by_identifier()` requires `api_key`, while `search_by_brand()` requires `client_id`.
 
 ### Configuration
 
@@ -226,7 +255,11 @@ search_by_brand("OpenAI")
 
 ### What It Does
 
-`spotify` exposes a broad toolkit including `search_tracks()`, `search_playlists()`, `search_artists()`, `search_albums()`, `get_user_playlists()`, `get_track_recommendations()`, `get_artist_top_tracks()`, `get_album_tracks()`, `get_my_top_tracks()`, `get_my_top_artists()`, `create_playlist()`, `add_tracks_to_playlist()`, `get_playlist()`, `update_playlist_details()`, `remove_tracks_from_playlist()`, `get_current_user()`, `play_track()`, and `get_currently_playing()`. The tool itself consumes an `access_token`, but MindRoom also provides a dedicated dashboard OAuth flow in `src/mindroom/api/integrations.py` via `/api/integrations/spotify/connect`, `/spotify/status`, `/spotify/callback`, and `/spotify/disconnect`. That OAuth flow stores `access_token` plus extra metadata such as `refresh_token`, `expires_at`, and `username`. By default the connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, and `user-top-read`. The upstream playlist and playback methods need additional Spotify scopes beyond that base dashboard flow, so manual token provisioning or a broadened OAuth scope set is still required if you want playlist modification or playback control to succeed.
+`spotify` exposes a broad toolkit including `search_tracks()`, `search_playlists()`, `search_artists()`, `search_albums()`, `get_user_playlists()`, `get_track_recommendations()`, `get_artist_top_tracks()`, `get_album_tracks()`, `get_my_top_tracks()`, `get_my_top_artists()`, `create_playlist()`, `add_tracks_to_playlist()`, `get_playlist()`, `update_playlist_details()`, `remove_tracks_from_playlist()`, `get_current_user()`, `play_track()`, and `get_currently_playing()`.
+The tool itself consumes an `access_token`, but MindRoom also provides a dedicated dashboard OAuth flow in `src/mindroom/api/integrations.py` via `/api/integrations/spotify/connect`, `/spotify/status`, `/spotify/callback`, and `/spotify/disconnect`.
+That OAuth flow stores `access_token` plus extra metadata such as `refresh_token`, `expires_at`, and `username`.
+By default the connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, and `user-top-read`.
+The upstream playlist and playback methods need additional Spotify scopes beyond that base dashboard flow, so manual token provisioning or a broadened OAuth scope set is still required if you want playlist modification or playback control to succeed.
 
 ### Configuration
 

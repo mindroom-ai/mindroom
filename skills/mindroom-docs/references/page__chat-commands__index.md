@@ -1,6 +1,7 @@
 # Chat Commands
 
-MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents are present. Commands start with `!` and are handled by the router agent.
+MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents are present.
+Commands start with `!` and are handled by the router agent.
 
 ## Quick Reference
 
@@ -17,15 +18,19 @@ MindRoom provides chat commands that users can type in any Matrix room where Min
 
 ## Who Handles Commands
 
-The **router** handles all commands exclusively. Even in single-agent rooms, commands are always processed by the router, not the agent. Commands work in both main room messages and within threads.
+The **router** handles all commands exclusively.
+Even in single-agent rooms, commands are always processed by the router, not the agent.
+Commands work in both main room messages and within threads.
 
 Voice messages that contain commands (e.g., spoken `!schedule`) are recognized after transcription and processed the same way.
 
 ## Permission Behavior
 
-Commands are subject to the same authorization rules as normal messages. The sender must be authorized to interact with agents in the room (via `global_users`, `room_permissions`, or `default_room_access`). See [Authorization](https://docs.mindroom.chat/authorization/index.md) for details.
+Commands are subject to the same authorization rules as normal messages.
+The sender must be authorized to interact with agents in the room (via `global_users`, `room_permissions`, or `default_room_access`). See [Authorization](https://docs.mindroom.chat/authorization/index.md) for details.
 
-For `!config set`, only the user who requested the change can confirm or cancel it via reactions. Pending config changes expire after 24 hours.
+For `!config set`, only the user who requested the change can confirm or cancel it via reactions.
+Pending config changes expire after 24 hours.
 
 ## Commands
 
@@ -53,7 +58,8 @@ Show the welcome message for the current room, listing available agents, their r
 
 ### `!schedule`
 
-Schedule a one-time or recurring task using natural language. Tasks run in the thread where they were created.
+Schedule a one-time or recurring task using natural language.
+Tasks run in the thread where they were created.
 
 ```
 !schedule <natural-language-request>
@@ -76,14 +82,16 @@ Schedule a one-time or recurring task using natural language. Tasks run in the t
 
 **Conditional workflows (polling-based):**
 
-Conditional requests are converted to recurring cron-based polling schedules. These are periodic checks, not real event subscriptions.
+Conditional requests are converted to recurring cron-based polling schedules.
+These are periodic checks, not real event subscriptions.
 
 ```
 !schedule If I get an email about "urgent", @phone_agent call me
 !schedule When Bitcoin drops below $40k, @crypto_agent notify me
 ```
 
-Include `@agent_name` in your schedule to target specific agents. The scheduler validates that mentioned agents are available in the room before creating the task.
+Include `@agent_name` in your schedule to target specific agents.
+The scheduler validates that mentioned agents are available in the room before creating the task.
 
 Schedules use the timezone from `config.yaml` (defaults to UTC). See [Scheduling](https://docs.mindroom.chat/scheduling/index.md) for full details.
 
@@ -118,13 +126,15 @@ Replace an existing scheduled task with new timing and content.
 !edit_schedule <task-id> <new-task-description>
 ```
 
-The task description is re-parsed to update timing and content. Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel and recreate instead.
+The task description is re-parsed to update timing and content.
+Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel and recreate instead.
 
 **Aliases:** `!editschedule`, `!edit-schedule`
 
 ### `!config`
 
-View and modify MindRoom configuration from chat. Changes are validated against the Pydantic config schema before applying.
+View and modify MindRoom configuration from chat.
+Changes are validated against the Pydantic config schema before applying.
 
 **View configuration:**
 
@@ -159,7 +169,9 @@ When you use `!config set`, MindRoom:
 1. Adds reaction buttons to the preview message
 1. Waits for the requester to react with ✅ (confirm) or ❌ (cancel)
 
-Only the user who requested the change can confirm or cancel it. Pending changes are persisted in Matrix room state and survive restarts. Unconfirmed changes expire after 24 hours.
+Only the user who requested the change can confirm or cancel it.
+Pending changes are persisted in Matrix room state and survive restarts.
+Unconfirmed changes expire after 24 hours.
 
 Changes are saved to `config.yaml` immediately on confirmation and take effect for new agent interactions.
 
@@ -185,9 +197,12 @@ Plugins are also auto-reloaded on file save, typically about 1-2 seconds after s
 
 MindRoom supports cancelling in-progress responses via a reaction-based stop button, not a chat command.
 
-When `defaults.show_stop_button` is `true` (the default), MindRoom adds a 🛑 reaction to the agent's message while it is generating. React with 🛑 on the message to cancel the response. The agent finalizes the partial text with `**[Response cancelled by user]**`.
+When `defaults.show_stop_button` is `true` (the default), MindRoom adds a 🛑 reaction to the agent's message while it is generating.
+React with 🛑 on the message to cancel the response.
+The agent finalizes the partial text with `**[Response cancelled by user]**`.
 
-The stop button only works on messages currently being generated. Only non-agent users can trigger cancellation — agent reactions are ignored.
+The stop button only works on messages currently being generated.
+Only non-agent users can trigger cancellation — agent reactions are ignored.
 
 See [Streaming — Cancellation](https://docs.mindroom.chat/streaming/#cancellation-and-errors) for details on how cancelled responses are finalized.
 

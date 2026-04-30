@@ -1,6 +1,7 @@
 # Interactive Q&A
 
-MindRoom agents can present clickable multiple-choice questions to users using Matrix reactions. When an agent's response contains a specially formatted JSON block, MindRoom automatically renders it as a numbered list with emoji reactions that users can click to respond.
+MindRoom agents can present clickable multiple-choice questions to users using Matrix reactions.
+When an agent's response contains a specially formatted JSON block, MindRoom automatically renders it as a numbered list with emoji reactions that users can click to respond.
 
 ## How It Works
 

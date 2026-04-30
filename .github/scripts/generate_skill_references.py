@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import tomllib
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -153,13 +154,66 @@ def _copy_main_outputs(site_dir: Path) -> None:
         shutil.copyfile(source, REFERENCES_DIR / filename)
 
 
-def _flatten_page_references(site_dir: Path) -> dict[str, str]:
+def _strip_frontmatter(text: str) -> str:
+    if not text.startswith("---\n"):
+        return text
+
+    _, separator, rest = text[4:].partition("\n---\n")
+    return rest if separator else text
+
+
+def _source_paragraph_lines(source_text: str) -> list[list[str]]:
+    paragraphs: list[list[str]] = []
+    current: list[str] = []
+    in_code = False
+
+    for line in _strip_frontmatter(source_text).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+
+        starts_block = (
+            in_code
+            or not stripped
+            or line.startswith((" ", "\t"))
+            or stripped.startswith(("#", "-", "*", "|", ">", "```", "===", "!!!"))
+            or stripped[0].isdigit()
+        )
+        if starts_block:
+            if current:
+                paragraphs.append(current)
+                current = []
+            continue
+
+        current.append(stripped)
+
+    if current:
+        paragraphs.append(current)
+
+    return paragraphs
+
+
+def _restore_source_line_breaks(rendered_text: str, source_text: str) -> str:
+    for paragraph in _source_paragraph_lines(source_text):
+        for left, right in pairwise(paragraph):
+            rendered_text = rendered_text.replace(f"{left} {right}", f"{left}\n{right}")
+
+    return rendered_text
+
+
+def _flatten_page_references(site_dir: Path, nav_pages: list[NavPage]) -> dict[str, str]:
     built_to_reference: dict[str, str] = {}
-    for source in sorted(site_dir.rglob("*.md")):
-        relative = source.relative_to(site_dir).as_posix()
-        reference_name = f"page__{relative.replace('/', '__')}"
-        shutil.copyfile(source, REFERENCES_DIR / reference_name)
-        built_to_reference[relative] = reference_name
+    for page in nav_pages:
+        generated = site_dir / page.built_path
+        assert generated.exists(), f"Expected generated page: {generated}"
+        source_path = DOCS_DIR / page.source_path
+        assert source_path.exists(), f"Expected docs source page: {source_path}"
+        reference_name = f"page__{page.built_path.replace('/', '__')}"
+        rendered_text = generated.read_text(encoding="utf-8")
+        source_text = source_path.read_text(encoding="utf-8")
+        restored_text = _restore_source_line_breaks(rendered_text, source_text)
+        (REFERENCES_DIR / reference_name).write_text(restored_text, encoding="utf-8")
+        built_to_reference[page.built_path] = reference_name
     return built_to_reference
 
 
@@ -206,7 +260,7 @@ def main() -> None:
 
         _clear_reference_dir()
         _copy_main_outputs(generated_site_dir)
-        built_to_reference = _flatten_page_references(generated_site_dir)
+        built_to_reference = _flatten_page_references(generated_site_dir, nav_pages)
         _write_reference_index(nav_pages, built_to_reference)
 
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)

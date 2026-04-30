@@ -61,7 +61,9 @@ All API key variables also support a `_FILE` suffix for file-based secrets (e.g.
 
 ### Codex CLI Subscription Auth
 
-The `codex` provider does not use an API key environment variable. Run `codex login` so `~/.codex/auth.json` contains ChatGPT OAuth tokens. Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
+The `codex` provider does not use an API key environment variable.
+Run `codex login` so `~/.codex/auth.json` contains ChatGPT OAuth tokens.
+Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 
 ### Operational
 
@@ -409,7 +411,9 @@ timezone: America/Los_Angeles      # Default: UTC
 
 ## Managed Avatars
 
-MindRoom can generate managed avatars for agents, teams, rooms, and the optional root Matrix Space. Use the optional `avatars.prompts` block to override the built-in prompt styles without editing Python code. Every field is optional and falls back to MindRoom's built-in defaults when omitted.
+MindRoom can generate managed avatars for agents, teams, rooms, and the optional root Matrix Space.
+Use the optional `avatars.prompts` block to override the built-in prompt styles without editing Python code.
+Every field is optional and falls back to MindRoom's built-in defaults when omitted.
 
 ```
 avatars:
@@ -421,7 +425,10 @@ avatars:
     room_system_prompt: "You are creating a refined, minimalist icon design for a room avatar."
 ```
 
-`mindroom avatars generate` only creates missing local avatar files by default. Run `mindroom avatars generate --force` to overwrite existing managed workspace avatar files after changing prompts or styles. `mindroom avatars sync` only fills missing Matrix avatars by default. Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars.
+`mindroom avatars generate` only creates missing local avatar files by default.
+Run `mindroom avatars generate --force` to overwrite existing managed workspace avatar files after changing prompts or styles.
+`mindroom avatars sync` only fills missing Matrix avatars by default.
+Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars.
 
 ## Internal User Username
 

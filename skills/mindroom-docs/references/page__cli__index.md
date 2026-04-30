@@ -105,7 +105,11 @@ Generate and sync managed avatar assets.
 
 ## avatars generate
 
-Generate missing managed avatar files in the workspace. In a source checkout, generated files are written under `./avatars/`. In containerized deployments, generated overrides are written under the persistent MindRoom storage path. Existing managed files are skipped by default. Use `--force` to overwrite them after changing avatar prompts or styles.
+Generate missing managed avatar files in the workspace.
+In a source checkout, generated files are written under `./avatars/`.
+In containerized deployments, generated overrides are written under the persistent MindRoom storage path.
+Existing managed files are skipped by default.
+Use `--force` to overwrite them after changing avatar prompts or styles.
 
 ```
  Usage: root avatars generate [OPTIONS]
@@ -120,7 +124,9 @@ Generate missing managed avatar files in the workspace. In a source checkout, ge
 
 ## avatars sync
 
-Sync configured room and root-space avatars to Matrix using the initialized router account. Existing Matrix avatars are skipped by default. Use `--force` to replace them.
+Sync configured room and root-space avatars to Matrix using the initialized router account.
+Existing Matrix avatars are skipped by default.
+Use `--force` to replace them.
 
 ```
  Usage: root avatars sync [OPTIONS]
@@ -161,7 +167,8 @@ Runs a series of checks in one pass:
 
 ## config
 
-Manage MindRoom configuration files. The `config` subgroup contains commands for creating, viewing, editing, and validating your `config.yaml`.
+Manage MindRoom configuration files.
+The `config` subgroup contains commands for creating, viewing, editing, and validating your `config.yaml`.
 
 ```
  Usage: root config [OPTIONS] COMMAND [ARGS]...
@@ -211,7 +218,10 @@ mindroom config init --profile public-vertexai-anthropic
 mindroom config init --force
 ```
 
-The `public-codex` profile and `--provider codex` preset generate `provider: codex` with `id: gpt-5.5` and `context_window: 258000`. They set `extra_kwargs.reasoning_effort: medium`. Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key. Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
+The `public-codex` profile and `--provider codex` preset generate `provider: codex` with `id: gpt-5.5` and `context_window: 258000`.
+They set `extra_kwargs.reasoning_effort: medium`.
+Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
+Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 
 ### config show
 
@@ -230,7 +240,8 @@ mindroom config show --path /custom/path/config.yaml
 
 ### config edit
 
-Open `config.yaml` in your default editor. Editor preference: `$EDITOR` → `$VISUAL` → `nano` → `vim` → `vi`.
+Open `config.yaml` in your default editor.
+Editor preference: `$EDITOR` → `$VISUAL` → `nano` → `vim` → `vi`.
 
 ```
 mindroom config edit
@@ -238,7 +249,9 @@ mindroom config edit
 
 ### config validate
 
-Validate `config.yaml` and check for common issues. Parses the YAML config using Pydantic and reports errors in a friendly format. Also checks whether required API keys are set as environment variables.
+Validate `config.yaml` and check for common issues.
+Parses the YAML config using Pydantic and reports errors in a friendly format.
+Also checks whether required API keys are set as environment variables.
 
 ```
 mindroom config validate

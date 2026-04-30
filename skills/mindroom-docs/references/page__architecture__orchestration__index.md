@@ -119,7 +119,8 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 1. Check for team formation or individual response
 1. Generate response and store memory
 
-**Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content. The agent edits its own previous reply in place rather than sending a new message. Edits from other agents are ignored, and the feature requires that the original response event ID is tracked by the `ResponseTracker`.
+**Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content. The agent edits its own previous reply in place rather than sending a new message.
+Edits from other agents are ignored, and the feature requires that the original response event ID is tracked by the `ResponseTracker`.
 
 **`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the agent. When no agent is mentioned, AI routing is used to select the appropriate agent, similar to text messages.
 

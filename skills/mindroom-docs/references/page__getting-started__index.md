@@ -4,7 +4,8 @@ This guide will help you set up MindRoom and create your first AI agent.
 
 ## Recommended: Hosted Matrix + Local MindRoom (`uv` only)
 
-If you do not want to self-host Matrix yet, this is the simplest setup. You only run MindRoom locally.
+If you do not want to self-host Matrix yet, this is the simplest setup.
+You only run MindRoom locally.
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
@@ -19,7 +20,8 @@ This creates:
 - `~/.mindroom/config.yaml`
 - `~/.mindroom/.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
 
-The `--profile public` template defaults to the `openai` provider. Use `--provider` to select a different provider preset:
+The `--profile public` template defaults to the `openai` provider.
+Use `--provider` to select a different provider preset:
 
 ```
 # Use Anthropic Claude
@@ -32,9 +34,12 @@ uvx mindroom config init --profile public-codex
 uvx mindroom config init --profile public-vertexai-anthropic
 ```
 
-`public-codex` is the canonical profile name for hosted Matrix with Codex CLI subscription auth. The shorter `codex` profile alias is also accepted. Run `codex login` before starting MindRoom when using this profile.
+`public-codex` is the canonical profile name for hosted Matrix with Codex CLI subscription auth.
+The shorter `codex` profile alias is also accepted.
+Run `codex login` before starting MindRoom when using this profile.
 
-`public-vertexai-anthropic` is the canonical profile name for Vertex AI Claude on hosted Matrix. Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
+`public-vertexai-anthropic` is the canonical profile name for Vertex AI Claude on hosted Matrix.
+Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
 
 Other profiles:
 

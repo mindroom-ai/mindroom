@@ -4,7 +4,8 @@ Use these tools to read and send email, post into chat systems, deliver SMS or W
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `messaging-and-social` group. Use these tools when you need outbound communication, mailbox access, team-chat delivery, social/community lookups, or Zoom meeting management.
+This page documents the built-in tools in the `messaging-and-social` group.
+Use these tools when you need outbound communication, mailbox access, team-chat delivery, social/community lookups, or Zoom meeting management.
 
 ## Tools On This Page
 
@@ -23,7 +24,17 @@ This page documents the built-in tools in the `messaging-and-social` group. Use 
 
 ## Common Setup Notes
 
-`gmail` is the only tool on this page with `auth_provider="google"`. It uses the shared Google Services integration instead of standalone per-tool credentials. `gmail` is also a shared-only integration, so it is supported only for unscoped agents or agents with `worker_scope: shared`. Like `google_calendar`, `google_sheets`, and `homeassistant`, `gmail` stays local even when other tools are routed through the sandbox proxy. MindRoom enforces that restriction both at config-validation time and again during tool construction. On this branch, `src/mindroom/api/integrations.py` only exposes Spotify routes, while Google OAuth lives in `src/mindroom/api/google_integration.py`, so the rest of the tools on this page rely on ordinary stored tool credentials or SDK environment variables rather than a dedicated MindRoom OAuth flow. Password fields should be stored through the dashboard or credential store instead of inline YAML. Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice. Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`. The generic-looking `email` tool is not a fully configurable SMTP client on this branch. Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gmail.com:465` and does not expose SMTP host, port, or TLS configuration fields.
+`gmail` is the only tool on this page with `auth_provider="google"`.
+It uses the shared Google Services integration instead of standalone per-tool credentials.
+`gmail` is also a shared-only integration, so it is supported only for unscoped agents or agents with `worker_scope: shared`.
+Like `google_calendar`, `google_sheets`, and `homeassistant`, `gmail` stays local even when other tools are routed through the sandbox proxy.
+MindRoom enforces that restriction both at config-validation time and again during tool construction.
+On this branch, `src/mindroom/api/integrations.py` only exposes Spotify routes, while Google OAuth lives in `src/mindroom/api/google_integration.py`, so the rest of the tools on this page rely on ordinary stored tool credentials or SDK environment variables rather than a dedicated MindRoom OAuth flow.
+Password fields should be stored through the dashboard or credential store instead of inline YAML.
+Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice.
+Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
+The generic-looking `email` tool is not a fully configurable SMTP client on this branch.
+Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gmail.com:465` and does not expose SMTP host, port, or TLS configuration fields.
 
 ## \[`gmail`\]
 
@@ -31,7 +42,10 @@ This page documents the built-in tools in the `messaging-and-social` group. Use 
 
 ### What It Does
 
-MindRoom wraps Agno's `GmailTools` with `ScopedGoogleOAuthMixin`, so Gmail credentials are loaded from MindRoom's unified Google credential store instead of a local `token.json` file. The wrapper refreshes stored Google tokens when needed and falls back to the upstream auth flow only when no stored credentials are available. The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`. Draft and send operations accept local file-system paths for attachments.
+MindRoom wraps Agno's `GmailTools` with `ScopedGoogleOAuthMixin`, so Gmail credentials are loaded from MindRoom's unified Google credential store instead of a local `token.json` file.
+The wrapper refreshes stored Google tokens when needed and falls back to the upstream auth flow only when no stored credentials are available.
+The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`.
+Draft and send operations accept local file-system paths for attachments.
 
 ### Configuration
 
@@ -78,7 +92,10 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 
 ### What It Does
 
-The installed upstream tool exposes `send_message()`, `send_message_thread()`, `list_channels()`, and `get_channel_history()`. It uses Slack's `WebClient` from `slack_sdk`. `markdown` maps to the `mrkdwn` flag on `chat_postMessage()`. Channel-history responses are normalized into a smaller JSON structure instead of returning the full Slack API payload.
+The installed upstream tool exposes `send_message()`, `send_message_thread()`, `list_channels()`, and `get_channel_history()`.
+It uses Slack's `WebClient` from `slack_sdk`.
+`markdown` maps to the `mrkdwn` flag on `chat_postMessage()`.
+Channel-history responses are normalized into a smaller JSON structure instead of returning the full Slack API payload.
 
 ### Configuration
 
@@ -122,7 +139,10 @@ get_channel_history("C0123456789", limit=25)
 
 ### What It Does
 
-The installed upstream tool exposes `send_message()`, `get_channel_messages()`, `get_channel_info()`, `list_channels()`, and `delete_message()`. It talks directly to `https://discord.com/api/v10` with a bot token in the `Authorization` header. This is a raw REST wrapper rather than a gateway-connected real-time bot runtime. Most functions expect Discord IDs such as `channel_id`, `guild_id`, and `message_id`, not display names.
+The installed upstream tool exposes `send_message()`, `get_channel_messages()`, `get_channel_info()`, `list_channels()`, and `delete_message()`.
+It talks directly to `https://discord.com/api/v10` with a bot token in the `Authorization` header.
+This is a raw REST wrapper rather than a gateway-connected real-time bot runtime.
+Most functions expect Discord IDs such as `channel_id`, `guild_id`, and `message_id`, not display names.
 
 ### Configuration
 
@@ -165,7 +185,10 @@ send_message("123456789012345678", "Hello from MindRoom.")
 
 ### What It Does
 
-The installed upstream tool exposes only `send_message()`. It posts to Telegram Bot API `sendMessage` for the configured `chat_id`. The tool instance is bound to one chat destination, so callers do not pass a chat ID per request. Responses are returned as the raw Telegram API response text.
+The installed upstream tool exposes only `send_message()`.
+It posts to Telegram Bot API `sendMessage` for the configured `chat_id`.
+The tool instance is bound to one chat destination, so callers do not pass a chat ID per request.
+Responses are returned as the raw Telegram API response text.
 
 ### Configuration
 
@@ -202,7 +225,10 @@ send_message("Nightly backup completed.")
 
 ### What It Does
 
-The installed upstream tool can expose either `send_text_message_sync()` and `send_template_message_sync()` or their async variants, depending on `async_mode`. It posts to `https://graph.facebook.com/<version>/<phone_number_id>/messages`. `recipient_waid` sets a default recipient so callers can omit the `recipient` argument. If no default recipient is configured, every send call must provide one.
+The installed upstream tool can expose either `send_text_message_sync()` and `send_template_message_sync()` or their async variants, depending on `async_mode`.
+It posts to `https://graph.facebook.com/<version>/<phone_number_id>/messages`.
+`recipient_waid` sets a default recipient so callers can omit the `recipient` argument.
+If no default recipient is configured, every send call must provide one.
 
 ### Configuration
 
@@ -243,7 +269,10 @@ send_template_message_sync(template_name="deployment_notice", language_code="en_
 
 ### What It Does
 
-The installed upstream tool exposes `send_sms()`, `get_call_details()`, and `list_messages()`. It supports two auth modes: `account_sid` plus `auth_token`, or `account_sid` plus `api_key` and `api_secret`. Optional `region` and `edge` are passed into the Twilio client for regional routing. `send_sms()` validates that both `to` and `from_` are in E.164 format before sending.
+The installed upstream tool exposes `send_sms()`, `get_call_details()`, and `list_messages()`.
+It supports two auth modes: `account_sid` plus `auth_token`, or `account_sid` plus `api_key` and `api_secret`.
+Optional `region` and `edge` are passed into the Twilio client for regional routing.
+`send_sms()` validates that both `to` and `from_` are in E.164 format before sending.
 
 ### Configuration
 
@@ -291,7 +320,10 @@ list_messages(limit=10)
 
 ### What It Does
 
-The installed upstream tool exposes `send_message()` and `list_rooms()`. It authenticates with `webexpythonsdk.WebexAPI` using one access token. Despite the broader description in the registry, the current tool surface is messaging-centric and does not manage meetings. Responses are returned as JSON strings built from the SDK result objects.
+The installed upstream tool exposes `send_message()` and `list_rooms()`.
+It authenticates with `webexpythonsdk.WebexAPI` using one access token.
+Despite the broader description in the registry, the current tool surface is messaging-centric and does not manage meetings.
+Responses are returned as JSON strings built from the SDK result objects.
 
 ### Configuration
 
@@ -329,7 +361,10 @@ send_message("Y2lzY29zcGFyazovL3VzL1JPT00v...", "Agenda is ready.")
 
 ### What It Does
 
-The installed upstream tool exposes one function, `send_email()`. It sets `resend.api_key` on each call and sends email through `resend.Emails.send()`. The current implementation passes the message body as HTML, not plain text. `from_email` is stored on the tool instance and reused for every call.
+The installed upstream tool exposes one function, `send_email()`.
+It sets `resend.api_key` on each call and sends email through `resend.Emails.send()`.
+The current implementation passes the message body as HTML, not plain text.
+`from_email` is stored on the tool instance and reused for every call.
 
 ### Configuration
 
@@ -366,7 +401,10 @@ send_email("alice@example.com", "Welcome", "<p>Your account is ready.</p>")
 
 ### What It Does
 
-The installed upstream tool exposes one function, `email_user()`. It builds an `EmailMessage`, then logs in with `smtplib.SMTP_SSL("smtp.gmail.com", 465)`. That means the sender account must be a Gmail account or a Google Workspace account compatible with Gmail SMTP. The current implementation sends plain-text bodies only.
+The installed upstream tool exposes one function, `email_user()`.
+It builds an `EmailMessage`, then logs in with `smtplib.SMTP_SSL("smtp.gmail.com", 465)`.
+That means the sender account must be a Gmail account or a Google Workspace account compatible with Gmail SMTP.
+The current implementation sends plain-text bodies only.
 
 ### Configuration
 
@@ -408,7 +446,10 @@ email_user("Nightly report", "The report finished successfully.")
 
 ### What It Does
 
-The installed upstream tool exposes `create_post()`, `reply_to_post()`, `send_dm()`, `get_user_info()`, `get_home_timeline()`, and `search_posts()`. It uses `tweepy.Client` and passes through `wait_on_rate_limit`. `search_posts()` calls `search_recent_tweets()` and, when `include_post_metrics` is enabled, augments each returned post with reply, retweet, like, and quote counts. The implementation clamps `max_results` for search to the Twitter API's supported `10` to `100` range.
+The installed upstream tool exposes `create_post()`, `reply_to_post()`, `send_dm()`, `get_user_info()`, `get_home_timeline()`, and `search_posts()`.
+It uses `tweepy.Client` and passes through `wait_on_rate_limit`.
+`search_posts()` calls `search_recent_tweets()` and, when `include_post_metrics` is enabled, augments each returned post with reply, retweet, like, and quote counts.
+The implementation clamps `max_results` for search to the Twitter API's supported `10` to `100` range.
 
 ### Configuration
 
@@ -452,7 +493,10 @@ reply_to_post("1890123456789012345", "Thanks for the feedback.")
 
 ### What It Does
 
-The installed upstream tool exposes `get_user_info()`, `get_top_posts()`, `get_subreddit_info()`, `get_trending_subreddits()`, `get_subreddit_stats()`, `create_post()`, `reply_to_post()`, and `reply_to_comment()`. With only `client_id` and `client_secret`, the tool initializes a read-only `praw.Reddit` client. If `username` and `password` are also configured, the tool enables posting and replying with authenticated user actions. `reddit_instance` is an advanced programmatic injection point for an existing `praw.Reddit` object rather than a normal YAML value.
+The installed upstream tool exposes `get_user_info()`, `get_top_posts()`, `get_subreddit_info()`, `get_trending_subreddits()`, `get_subreddit_stats()`, `create_post()`, `reply_to_post()`, and `reply_to_comment()`.
+With only `client_id` and `client_secret`, the tool initializes a read-only `praw.Reddit` client.
+If `username` and `password` are also configured, the tool enables posting and replying with authenticated user actions.
+`reddit_instance` is an advanced programmatic injection point for an existing `praw.Reddit` object rather than a normal YAML value.
 
 ### Configuration
 
@@ -494,7 +538,10 @@ get_user_info("spez")
 
 ### What It Does
 
-The installed upstream tool exposes `get_access_token()`, `schedule_meeting()`, `get_upcoming_meetings()`, `list_meetings()`, `get_meeting_recordings()`, `delete_meeting()`, and `get_meeting()`. It exchanges `account_id`, `client_id`, and `client_secret` against `https://zoom.us/oauth/token` with `grant_type=account_credentials`. The generated access token is cached in process until shortly before expiry. Meeting creation always targets `users/me/meetings` and applies a fixed set of default meeting settings in the upstream implementation.
+The installed upstream tool exposes `get_access_token()`, `schedule_meeting()`, `get_upcoming_meetings()`, `list_meetings()`, `get_meeting_recordings()`, `delete_meeting()`, and `get_meeting()`.
+It exchanges `account_id`, `client_id`, and `client_secret` against `https://zoom.us/oauth/token` with `grant_type=account_credentials`.
+The generated access token is cached in process until shortly before expiry.
+Meeting creation always targets `users/me/meetings` and applies a fixed set of default meeting settings in the upstream implementation.
 
 ### Configuration
 

@@ -4,7 +4,8 @@ Use these tools to search the public web, query paid search APIs, access Google-
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `web-search` group. Use these tools when you need general web discovery, current-events search, answer-style search APIs, Google or Baidu specific results, or a self-hosted metasearch backend.
+This page documents the built-in tools in the `web-search` group.
+Use these tools when you need general web discovery, current-events search, answer-style search APIs, Google or Baidu specific results, or a self-hosted metasearch backend.
 
 ## Tools On This Page
 
@@ -20,7 +21,19 @@ This page documents the built-in tools in the `web-search` group. Use these tool
 
 ## Common Setup Notes
 
-`duckduckgo`, `googlesearch`, and `baidusearch` are `setup_type: none`, so they work out of the box once their optional Python dependencies are available. `tavily`, `exa`, `serpapi`, `serper`, and `linkup` are `status=requires_config` and are intended to be configured with a stored `api_key`. `searxng` is also `status=requires_config`, but it needs a reachable `host` URL instead of an API key. None of the tools on this page declare an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so these tools use ordinary tool credentials or SDK environment variables rather than a dedicated dashboard OAuth flow. Password fields such as `api_key` should be stored through the dashboard or credential store instead of inline YAML. Current upstream SDKs also support environment variables such as `TAVILY_API_KEY`, `TAVILY_API_BASE_URL`, `EXA_API_KEY`, `SERP_API_KEY`, `SERPER_API_KEY`, and `LINKUP_API_KEY`. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set. `duckduckgo` and `googlesearch` are the simplest no-key defaults for general search and basic news lookups. `baidusearch` is the better fit when you want Baidu indexing or Chinese-language defaults. `tavily` and `linkup` are useful when you want answer-oriented search output instead of only result lists. `exa` is the deepest research option on this page when you need domain filters, date filters, content fetches, find-similar, or a long-running research task. `serpapi` and `serper` are Google-focused paid APIs, with `serpapi` covering Google and YouTube verticals and `serper` covering Google web, news, scholar, and a scrape endpoint. `searxng` is the best fit when you control your own search stack or want SearXNG categories such as images, maps, music, science, and video.
+`duckduckgo`, `googlesearch`, and `baidusearch` are `setup_type: none`, so they work out of the box once their optional Python dependencies are available.
+`tavily`, `exa`, `serpapi`, `serper`, and `linkup` are `status=requires_config` and are intended to be configured with a stored `api_key`.
+`searxng` is also `status=requires_config`, but it needs a reachable `host` URL instead of an API key.
+None of the tools on this page declare an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so these tools use ordinary tool credentials or SDK environment variables rather than a dedicated dashboard OAuth flow.
+Password fields such as `api_key` should be stored through the dashboard or credential store instead of inline YAML.
+Current upstream SDKs also support environment variables such as `TAVILY_API_KEY`, `TAVILY_API_BASE_URL`, `EXA_API_KEY`, `SERP_API_KEY`, `SERPER_API_KEY`, and `LINKUP_API_KEY`.
+Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+`duckduckgo` and `googlesearch` are the simplest no-key defaults for general search and basic news lookups.
+`baidusearch` is the better fit when you want Baidu indexing or Chinese-language defaults.
+`tavily` and `linkup` are useful when you want answer-oriented search output instead of only result lists.
+`exa` is the deepest research option on this page when you need domain filters, date filters, content fetches, find-similar, or a long-running research task.
+`serpapi` and `serper` are Google-focused paid APIs, with `serpapi` covering Google and YouTube verticals and `serper` covering Google web, news, scholar, and a scrape endpoint.
+`searxng` is the best fit when you control your own search stack or want SearXNG categories such as images, maps, music, science, and video.
 
 ## \[`duckduckgo`\]
 
@@ -28,7 +41,10 @@ This page documents the built-in tools in the `web-search` group. Use these tool
 
 ### What It Does
 
-`duckduckgo` wraps Agno's `DuckDuckGoTools`, which is a convenience layer over the shared `WebSearchTools` backend with `backend="duckduckgo"`. It exposes `web_search(query, max_results=5)` and `search_news(query, max_results=5)`. `modifier` prepends extra query text, `fixed_max_results` caps all calls, and `proxy`, `timeout`, and `verify_ssl` control the underlying DDGS client. The tool returns JSON strings from DDGS rather than a MindRoom-specific normalized response format.
+`duckduckgo` wraps Agno's `DuckDuckGoTools`, which is a convenience layer over the shared `WebSearchTools` backend with `backend="duckduckgo"`.
+It exposes `web_search(query, max_results=5)` and `search_news(query, max_results=5)`.
+`modifier` prepends extra query text, `fixed_max_results` caps all calls, and `proxy`, `timeout`, and `verify_ssl` control the underlying DDGS client.
+The tool returns JSON strings from DDGS rather than a MindRoom-specific normalized response format.
 
 ### Configuration
 
@@ -70,7 +86,10 @@ search_news("Matrix ecosystem", max_results=5)
 
 ### What It Does
 
-MindRoom registers `googlesearch` as a custom wrapper around Agno's `WebSearchTools` with `backend="google"`. It exposes `web_search(query, max_results=5)` and `search_news(query, max_results=5)`. Runtime behavior matches the `duckduckgo` tool surface, including `modifier`, `fixed_max_results`, `proxy`, `timeout`, and `verify_ssl`. This is still a DDGS-backed scraper-style search path rather than an official Google paid search API.
+MindRoom registers `googlesearch` as a custom wrapper around Agno's `WebSearchTools` with `backend="google"`.
+It exposes `web_search(query, max_results=5)` and `search_news(query, max_results=5)`.
+Runtime behavior matches the `duckduckgo` tool surface, including `modifier`, `fixed_max_results`, `proxy`, `timeout`, and `verify_ssl`.
+This is still a DDGS-backed scraper-style search path rather than an official Google paid search API.
 
 ### Configuration
 
@@ -112,7 +131,10 @@ search_news("open source Matrix news", max_results=5)
 
 ### What It Does
 
-`baidusearch` exposes one method, `baidu_search(query, max_results=5, language="zh")`. `fixed_language` overrides the per-call `language`, and non-two-letter language values are normalized through `pycountry` when possible. If language normalization fails, the upstream tool falls back to `zh`. The returned payload is a JSON array with `title`, `url`, `abstract`, and `rank`.
+`baidusearch` exposes one method, `baidu_search(query, max_results=5, language="zh")`.
+`fixed_language` overrides the per-call `language`, and non-two-letter language values are normalized through `pycountry` when possible.
+If language normalization fails, the upstream tool falls back to `zh`.
+The returned payload is a JSON array with `title`, `url`, `abstract`, and `rank`.
 
 ### Configuration
 
@@ -154,7 +176,10 @@ baidu_search("Matrix 协议 新闻", max_results=5, language="zh")
 
 ### What It Does
 
-`tavily` can expose `web_search_using_tavily(query, max_results=5)`, `web_search_with_tavily(query)`, and `extract_url_content(urls)`, depending on the enable flags. `enable_search_context` switches the search surface from the normal result-list call to the context-oriented call, so you get one search method or the other instead of both. `web_search_using_tavily()` can include an AI-generated answer and returns either JSON or Markdown depending on `format`. `extract_url_content()` accepts one URL or a comma-separated URL list and formats extracted page content as Markdown or plain text depending on `extract_format`.
+`tavily` can expose `web_search_using_tavily(query, max_results=5)`, `web_search_with_tavily(query)`, and `extract_url_content(urls)`, depending on the enable flags.
+`enable_search_context` switches the search surface from the normal result-list call to the context-oriented call, so you get one search method or the other instead of both.
+`web_search_using_tavily()` can include an AI-generated answer and returns either JSON or Markdown depending on `format`.
+`extract_url_content()` accepts one URL or a comma-separated URL list and formats extracted page content as Markdown or plain text depending on `extract_format`.
 
 ### Configuration
 
@@ -206,7 +231,10 @@ extract_url_content("https://matrix.org/blog/")
 
 ### What It Does
 
-`exa` can expose `search_exa(query, num_results=5, category=None)`, `get_contents(urls)`, `find_similar(url, num_results=5)`, `exa_answer(query, text=False)`, and `research(instructions, output_schema=None)`. Search results can include title, author, published date, URL, and truncated page text. The toolkit supports domain allowlists and denylists, crawl-date and publish-date filters, category and type filters, answer-model selection, and a separate `research_model` for long-running research tasks. `enable_research` is off by default, so deep research is opt-in even when the rest of the toolkit is enabled.
+`exa` can expose `search_exa(query, num_results=5, category=None)`, `get_contents(urls)`, `find_similar(url, num_results=5)`, `exa_answer(query, text=False)`, and `research(instructions, output_schema=None)`.
+Search results can include title, author, published date, URL, and truncated page text.
+The toolkit supports domain allowlists and denylists, crawl-date and publish-date filters, category and type filters, answer-model selection, and a separate `research_model` for long-running research tasks.
+`enable_research` is off by default, so deep research is opt-in even when the rest of the toolkit is enabled.
 
 ### Configuration
 
@@ -271,7 +299,10 @@ research("Compare hosted Matrix bridges for small teams.")
 
 ### What It Does
 
-`serpapi` exposes `search_google(query, num_results=10)` and `search_youtube(query)`. `search_google()` returns a JSON payload with `search_results`, `recipes_results`, `shopping_results`, `knowledge_graph`, and `related_questions`. `search_youtube()` returns `video_results`, `movie_results`, and `channel_results`. MindRoom does not add extra behavior here beyond registering the tool metadata and dependency set.
+`serpapi` exposes `search_google(query, num_results=10)` and `search_youtube(query)`.
+`search_google()` returns a JSON payload with `search_results`, `recipes_results`, `shopping_results`, `knowledge_graph`, and `related_questions`.
+`search_youtube()` returns `video_results`, `movie_results`, and `channel_results`.
+MindRoom does not add extra behavior here beyond registering the tool metadata and dependency set.
 
 ### Configuration
 
@@ -309,7 +340,10 @@ search_youtube("Matrix conference talks")
 
 ### What It Does
 
-`serper` exposes `search_web(query, num_results=None)`, `search_news(query, num_results=None)`, `search_scholar(query, num_results=None)`, and `scrape_webpage(url, markdown=False)`. `location`, `language`, and `date_range` become shared request parameters across the search endpoints. The search methods return raw JSON responses from Serper. `scrape_webpage()` hits Serper's scrape endpoint and can optionally request Markdown output.
+`serper` exposes `search_web(query, num_results=None)`, `search_news(query, num_results=None)`, `search_scholar(query, num_results=None)`, and `scrape_webpage(url, markdown=False)`.
+`location`, `language`, and `date_range` become shared request parameters across the search endpoints.
+The search methods return raw JSON responses from Serper.
+`scrape_webpage()` hits Serper's scrape endpoint and can optionally request Markdown output.
 
 ### Configuration
 
@@ -357,7 +391,10 @@ scrape_webpage("https://matrix.org/blog/", markdown=True)
 
 ### What It Does
 
-`searxng` exposes `search_web(query, max_results=5)`, `image_search(query, max_results=5)`, `it_search(query, max_results=5)`, `map_search(query, max_results=5)`, `music_search(query, max_results=5)`, `news_search(query, max_results=5)`, `science_search(query, max_results=5)`, and `video_search(query, max_results=5)`. All of those calls route through the same `/search?format=json` endpoint on the configured `host`. If `engines` is set, the tool appends those engine names to the SearXNG request. `fixed_max_results` truncates every category response to a consistent maximum.
+`searxng` exposes `search_web(query, max_results=5)`, `image_search(query, max_results=5)`, `it_search(query, max_results=5)`, `map_search(query, max_results=5)`, `music_search(query, max_results=5)`, `news_search(query, max_results=5)`, `science_search(query, max_results=5)`, and `video_search(query, max_results=5)`.
+All of those calls route through the same `/search?format=json` endpoint on the configured `host`.
+If `engines` is set, the tool appends those engine names to the SearXNG request.
+`fixed_max_results` truncates every category response to a consistent maximum.
 
 ### Configuration
 
@@ -400,7 +437,10 @@ image_search("Matrix logo", max_results=5)
 
 ### What It Does
 
-`linkup` exposes `web_search_with_linkup(query, depth=None, output_type=None)`. `depth` controls how aggressively Linkup searches, and `output_type` controls whether the response is a `searchResults` list or a `sourcedAnswer`. The configured defaults are applied when the call does not override them. The tool returns the raw response from the Linkup SDK rather than a MindRoom-specific normalized envelope.
+`linkup` exposes `web_search_with_linkup(query, depth=None, output_type=None)`.
+`depth` controls how aggressively Linkup searches, and `output_type` controls whether the response is a `searchResults` list or a `sourcedAnswer`.
+The configured defaults are applied when the call does not override them.
+The tool returns the raw response from the Linkup SDK rather than a MindRoom-specific normalized envelope.
 
 ### Configuration
 

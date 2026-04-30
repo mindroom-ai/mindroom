@@ -6,7 +6,13 @@ MindRoom supports three memory backends:
 - `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
 - `none`: disabled memory for stateless agents
 
-Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. When an agent uses `memory_backend: file`, its file memory lives in its canonical workspace root. When an agent uses `memory_backend: none`, MindRoom skips prompt memory lookup, automatic memory persistence, and the explicit `memory` tool for that agent. Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root. `private` changes where private files live. It does not switch the memory backend by itself.
+Set the global default backend with `memory.backend`.
+Override the backend per agent with `agents.<name>.memory_backend`.
+When an agent uses `memory_backend: file`, its file memory lives in its canonical workspace root.
+When an agent uses `memory_backend: none`, MindRoom skips prompt memory lookup, automatic memory persistence, and the explicit `memory` tool for that agent.
+Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root.
+`private` changes where private files live.
+It does not switch the memory backend by itself.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -116,7 +122,8 @@ agents:
     memory_backend: none
 ```
 
-Disabled memory does not disable Agno Learning. Set `learning: false` separately if you also want to disable learning.
+Disabled memory does not disable Agno Learning.
+Set `learning: false` separately if you also want to disable learning.
 
 ## Backend: `file`
 
@@ -131,7 +138,9 @@ memory:
     max_entrypoint_lines: 200
 ```
 
-`memory.file.path` is an optional fallback root for file-memory paths. It does not relocate canonical agent file memory (which always lives under the agent's workspace root). It can affect team file memory when the resolution determines the configured path should be used.
+`memory.file.path` is an optional fallback root for file-memory paths.
+It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
+It can affect team file memory when the resolution determines the configured path should be used.
 
 Per-agent override example:
 
@@ -146,7 +155,9 @@ agents:
     memory_backend: file
 ```
 
-For shared agents, file memory now lives directly under `agents/<name>/workspace/`. For requester-private agents, file memory lives directly under the effective private root. Use `private` when you need per-requester file-memory isolation.
+For shared agents, file memory now lives directly under `agents/<name>/workspace/`.
+For requester-private agents, file memory lives directly under the effective private root.
+Use `private` when you need per-requester file-memory isolation.
 
 Private instance example:
 
@@ -162,7 +173,14 @@ agents:
       template_dir: ./mind_template
 ```
 
-In this setup, each requester gets their own private `mind_data/` root inside a canonical private-instance state root in shared storage. When `memory_backend: file` is enabled, that private root becomes the agent's effective file-memory root. If `./mind_template/` contains `MEMORY.md` and `memory/`, those files are copied into each private root on first use and then remain editable per requester. Later runs backfill newly added scaffold files without overwriting requester edits. MindRoom does not invent `MEMORY.md` or `memory/` for private agents. Put those files in your template directory if you want them scaffolded into each private root. If `memory_backend` is not `file`, `private` still creates private files and directories, but it does not make file memory active. Use `private` for requester-isolated workspaces.
+In this setup, each requester gets their own private `mind_data/` root inside a canonical private-instance state root in shared storage.
+When `memory_backend: file` is enabled, that private root becomes the agent's effective file-memory root.
+If `./mind_template/` contains `MEMORY.md` and `memory/`, those files are copied into each private root on first use and then remain editable per requester.
+Later runs backfill newly added scaffold files without overwriting requester edits.
+MindRoom does not invent `MEMORY.md` or `memory/` for private agents.
+Put those files in your template directory if you want them scaffolded into each private root.
+If `memory_backend` is not `file`, `private` still creates private files and directories, but it does not make file memory active.
+Use `private` for requester-isolated workspaces.
 
 ### File layout
 
@@ -225,7 +243,8 @@ The Dashboard **Memory** page supports:
 - batch sizing
 - extractor settings (`no_reply_token`, message/char/time limits, `include_memory_context` dedupe bounds)
 
-Save from the Memory page to persist changes to `config.yaml`. Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override.
+Save from the Memory page to persist changes to `config.yaml`.
+Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override.
 
 ## Optional Memory Tool
 
@@ -241,7 +260,8 @@ This exposes `add_memory`, `search_memories`, `list_memories`, `get_memory`, `up
 
 ## Agno Learning
 
-MindRoom integrates Agno's built-in Learning system, which lets agents learn and adapt from conversations. Learning is separate from the memory backends above — it uses Agno's own SQLite-backed storage in each agent's state root (`learning/`).
+MindRoom integrates Agno's built-in Learning system, which lets agents learn and adapt from conversations.
+Learning is separate from the memory backends above — it uses Agno's own SQLite-backed storage in each agent's state root (`learning/`).
 
 ### Configuration
 
@@ -266,4 +286,6 @@ agents:
 | `learning`      | bool   | `true`   | Enable Agno Learning for the agent                                                               |
 | `learning_mode` | string | `always` | `always`: automatic extraction after every turn. `agentic`: agent decides via tool when to learn |
 
-Agents inherit `learning` and `learning_mode` from `defaults` unless explicitly overridden. Disabled agents do not create or update learning state. Learning data persists in `agents/<name>/learning/<agent>.db` within the agent's state root.
+Agents inherit `learning` and `learning_mode` from `defaults` unless explicitly overridden.
+Disabled agents do not create or update learning state.
+Learning data persists in `agents/<name>/learning/<agent>.db` within the agent's state root.

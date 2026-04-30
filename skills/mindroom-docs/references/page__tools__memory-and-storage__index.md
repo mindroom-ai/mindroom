@@ -4,7 +4,8 @@ Use these tools to explicitly manage MindRoom memory or connect an agent to exte
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `memory-and-storage` group. Use these tools when you need explicit memory CRUD operations, direct provider-specific memory access, or a clear separation between MindRoom memory and third-party memory services.
+This page documents the built-in tools in the `memory-and-storage` group.
+Use these tools when you need explicit memory CRUD operations, direct provider-specific memory access, or a clear separation between MindRoom memory and third-party memory services.
 
 ## Tools On This Page
 
@@ -14,7 +15,14 @@ This page documents the built-in tools in the `memory-and-storage` group. Use th
 
 ## Common Setup Notes
 
-`memory` is MindRoom-native and has no tool-specific configuration fields. It operates on the same MindRoom memory backend configured through `memory.backend` or `agents.<name>.memory_backend`, so it follows the effective `mem0`, `file`, or `none` backend for that agent. If the effective backend is `none`, MindRoom does not attach the `memory` tool to that agent. Use [Memory System](https://docs.mindroom.chat/memory/index.md) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout. `mem0` and `zep` are separate upstream Agno toolkits that talk to external memory providers directly. Enabling `mem0` or `zep` does not change MindRoom's own memory backend, automatic memory extraction, or the behavior of the `memory` tool. `mem0` can work with a hosted Mem0 API key or with local/default upstream Mem0 configuration. `zep` requires a Zep API key, either through stored credentials or the `ZEP_API_KEY` environment variable. If optional dependencies for these tools are missing, MindRoom can auto-install them at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set. This page does not document conversation-scoped file attachments even though they are storage-like. Use [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/index.md) and [Attachments](https://docs.mindroom.chat/attachments/index.md) for attachment IDs, retention, and Matrix media flow.
+`memory` is MindRoom-native and has no tool-specific configuration fields.
+It operates on the same MindRoom memory backend configured through `memory.backend` or `agents.<name>.memory_backend`, so it follows the effective `mem0`, `file`, or `none` backend for that agent.
+If the effective backend is `none`, MindRoom does not attach the `memory` tool to that agent. Use [Memory System](https://docs.mindroom.chat/memory/index.md) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout. `mem0` and `zep` are separate upstream Agno toolkits that talk to external memory providers directly.
+Enabling `mem0` or `zep` does not change MindRoom's own memory backend, automatic memory extraction, or the behavior of the `memory` tool.
+`mem0` can work with a hosted Mem0 API key or with local/default upstream Mem0 configuration.
+`zep` requires a Zep API key, either through stored credentials or the `ZEP_API_KEY` environment variable.
+If optional dependencies for these tools are missing, MindRoom can auto-install them at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+This page does not document conversation-scoped file attachments even though they are storage-like. Use [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/index.md) and [Attachments](https://docs.mindroom.chat/attachments/index.md) for attachment IDs, retention, and Matrix media flow.
 
 ## \[`memory`\]
 
@@ -22,7 +30,12 @@ This page documents the built-in tools in the `memory-and-storage` group. Use th
 
 ### What It Does
 
-`memory` exposes `add_memory()`, `search_memories()`, `list_memories()`, `get_memory()`, `update_memory()`, and `delete_memory()`. It complements MindRoom's automatic post-response memory extraction by letting the agent deliberately remember or inspect something on demand. The tool always uses the current agent's configured MindRoom memory backend, so the same calls work whether that agent uses built-in `mem0` storage or file-backed memory. Agents with `memory_backend: none` do not receive this tool. Search and list results include memory IDs, and those IDs are then used with `get_memory()`, `update_memory()`, and `delete_memory()`. The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
+`memory` exposes `add_memory()`, `search_memories()`, `list_memories()`, `get_memory()`, `update_memory()`, and `delete_memory()`.
+It complements MindRoom's automatic post-response memory extraction by letting the agent deliberately remember or inspect something on demand.
+The tool always uses the current agent's configured MindRoom memory backend, so the same calls work whether that agent uses built-in `mem0` storage or file-backed memory.
+Agents with `memory_backend: none` do not receive this tool.
+Search and list results include memory IDs, and those IDs are then used with `get_memory()`, `update_memory()`, and `delete_memory()`.
+The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
 
 ### Configuration
 
@@ -61,7 +74,12 @@ delete_memory("abc123")
 
 ### What It Does
 
-`mem0` exposes `add_memory()`, `search_memory()`, `get_all_memories()`, and `delete_all_memories()`. It uses the upstream `mem0ai` client directly rather than MindRoom's built-in memory API. If `api_key` is set, or `MEM0_API_KEY` is present in the environment, the toolkit connects to Mem0's hosted platform client. If no API key is present but `config` is supplied, the toolkit initializes upstream Mem0 from that local config object. If neither `api_key` nor `config` is supplied, the toolkit falls back to upstream Mem0 defaults. Operations need a `user_id`, either from tool config or from the run context, and they return an error string when no user ID can be resolved.
+`mem0` exposes `add_memory()`, `search_memory()`, `get_all_memories()`, and `delete_all_memories()`.
+It uses the upstream `mem0ai` client directly rather than MindRoom's built-in memory API.
+If `api_key` is set, or `MEM0_API_KEY` is present in the environment, the toolkit connects to Mem0's hosted platform client.
+If no API key is present but `config` is supplied, the toolkit initializes upstream Mem0 from that local config object.
+If neither `api_key` nor `config` is supplied, the toolkit falls back to upstream Mem0 defaults.
+Operations need a `user_id`, either from tool config or from the run context, and they return an error string when no user ID can be resolved.
 
 ### Configuration
 
@@ -110,7 +128,14 @@ delete_all_memories()
 
 ### What It Does
 
-`zep` exposes `add_zep_message()`, `get_zep_memory()`, and `search_zep_memory()`. The toolkit requires a Zep API key at initialization time and raises an error when neither `api_key` nor `ZEP_API_KEY` is available. If `session_id` is omitted, the toolkit generates a new session ID automatically. If `user_id` is omitted, the toolkit generates a new Zep user and creates it in the remote account. If `user_id` is provided but the user does not exist yet, the toolkit attempts to create it before use. `get_zep_memory(memory_type="context")` returns either session context or raw message history. `search_zep_memory(query, search_scope="edges")` searches the Zep user graph by facts or nodes. `ignore_assistant_messages` skips assistant-role content when messages are added to Zep.
+`zep` exposes `add_zep_message()`, `get_zep_memory()`, and `search_zep_memory()`.
+The toolkit requires a Zep API key at initialization time and raises an error when neither `api_key` nor `ZEP_API_KEY` is available.
+If `session_id` is omitted, the toolkit generates a new session ID automatically.
+If `user_id` is omitted, the toolkit generates a new Zep user and creates it in the remote account.
+If `user_id` is provided but the user does not exist yet, the toolkit attempts to create it before use.
+`get_zep_memory(memory_type="context")` returns either session context or raw message history.
+`search_zep_memory(query, search_scope="edges")` searches the Zep user graph by facts or nodes.
+`ignore_assistant_messages` skips assistant-role content when messages are added to Zep.
 
 ### Configuration
 

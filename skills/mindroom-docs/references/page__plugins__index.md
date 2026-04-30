@@ -2,7 +2,8 @@
 
 > [!WARNING] **Plugins execute arbitrary Python code in the same process as MindRoom.** A malicious plugin has full access to your credentials, Matrix sessions, file system, and network. Only install plugins you trust and have reviewed.
 
-MindRoom plugins extend agents with custom tools, [hooks](https://docs.mindroom.chat/hooks/index.md), and skills. A plugin is a directory with a `mindroom.plugin.json` manifest, one or more Python modules, and optionally skill directories. Plugins are loaded from paths listed under `plugins:` in `config.yaml`.
+MindRoom plugins extend agents with custom tools, [hooks](https://docs.mindroom.chat/hooks/index.md), and skills. A plugin is a directory with a `mindroom.plugin.json` manifest, one or more Python modules, and optionally skill directories.
+Plugins are loaded from paths listed under `plugins:` in `config.yaml`.
 
 ## Plugin structure
 
@@ -18,7 +19,10 @@ my-plugin/
         └── SKILL.md
 ```
 
-A plugin must have at least one of `tools_module`, `hooks_module`, or `skills`. A tools-only plugin exposes callable functions to agents. A hooks-only plugin observes or transforms events without adding agent-facing tools. Many plugins combine both.
+A plugin must have at least one of `tools_module`, `hooks_module`, or `skills`.
+A tools-only plugin exposes callable functions to agents.
+A hooks-only plugin observes or transforms events without adding agent-facing tools.
+Many plugins combine both.
 
 ## Manifest format
 
@@ -40,9 +44,12 @@ The manifest is a JSON file named `mindroom.plugin.json` at the plugin root:
 | `hooks_module` | string          | no       | Relative path to the Python module containing `@hook`-decorated functions. Must exist on disk if declared.                                                                                                        |
 | `skills`       | list of strings | no       | Relative directories containing skill subdirectories (each with a `SKILL.md`). Each directory must exist on disk.                                                                                                 |
 
-Unknown fields are silently ignored. Invalid, duplicate, or malformed manifests are configuration errors and stop all plugin loading. All declared module files and skill directories must exist on disk.
+Unknown fields are silently ignored.
+Invalid, duplicate, or malformed manifests are configuration errors and stop all plugin loading.
+All declared module files and skill directories must exist on disk.
 
-If `hooks_module` is omitted, MindRoom auto-scans `tools_module` for `@hook`-decorated functions. If both fields point at the same file, MindRoom imports it once and reuses it for both tool registration and hook discovery.
+If `hooks_module` is omitted, MindRoom auto-scans `tools_module` for `@hook`-decorated functions.
+If both fields point at the same file, MindRoom imports it once and reuses it for both tool registration and hook discovery.
 
 ## Configure plugins
 
@@ -66,7 +73,8 @@ plugins:
 
 ### Entry formats
 
-Plugin entries can be **strings** (path only) or **objects** (with options). Both forms can be mixed in the same list.
+Plugin entries can be **strings** (path only) or **objects** (with options).
+Both forms can be mixed in the same list.
 
 **String entry** — just the path:
 
@@ -133,7 +141,9 @@ MindRoom resolves the package location via `importlib` and looks for `mindroom.p
 
 ## Tools module
 
-A tools module is a Python file that registers one or more tool factories using the `@register_tool_with_metadata` decorator. Each factory function returns a **Toolkit class** (not an instance). MindRoom instantiates the class when building agents.
+A tools module is a Python file that registers one or more tool factories using the `@register_tool_with_metadata` decorator.
+Each factory function returns a **Toolkit class** (not an instance).
+MindRoom instantiates the class when building agents.
 
 ### Minimal example
 
@@ -220,11 +230,13 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 
 ### Dependencies
 
-The `dependencies` field lists Python packages that the tool requires at runtime. MindRoom checks whether each package is importable before the tool is instantiated.
+The `dependencies` field lists Python packages that the tool requires at runtime.
+MindRoom checks whether each package is importable before the tool is instantiated.
 
 **For built-in tools** (those shipped inside `src/mindroom/tools/`), missing dependencies trigger automatic installation via `uv sync` or `pip install` using the matching optional extra from MindRoom's `pyproject.toml`.
 
-**For plugin tools**, automatic installation does **not** apply — there is no matching optional extra in MindRoom's package metadata. If the listed dependencies are not already installed in the environment, MindRoom raises an `ImportError` with a message listing the missing packages. Plugin authors should document their dependencies in their README so users can install them manually:
+**For plugin tools**, automatic installation does **not** apply — there is no matching optional extra in MindRoom's package metadata. If the listed dependencies are not already installed in the environment, MindRoom raises an `ImportError` with a message listing the missing packages.
+Plugin authors should document their dependencies in their README so users can install them manually:
 
 ```
 pip install openviking-client aiohttp
@@ -289,7 +301,8 @@ def weather_tools() -> type[Toolkit]:
 
 ### Managed init args
 
-If your toolkit constructor needs MindRoom-managed runtime values, declare them with `managed_init_args`. MindRoom does **not** auto-detect constructor parameter names — undeclared managed args are not passed through.
+If your toolkit constructor needs MindRoom-managed runtime values, declare them with `managed_init_args`.
+MindRoom does **not** auto-detect constructor parameter names — undeclared managed args are not passed through.
 
 | Value                 | Constructor kwarg     | Description                                                             |
 | --------------------- | --------------------- | ----------------------------------------------------------------------- |
@@ -366,11 +379,14 @@ agents:
       - mcp_filesystem
 ```
 
-The factory function must return the toolkit class, not an instance. MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) handle MCP connect and disconnect automatically.
+The factory function must return the toolkit class, not an instance.
+MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) handle MCP connect and disconnect automatically.
 
 ## Plugin skills
 
-List skill directories in the manifest `skills` array. Each listed directory is added to MindRoom's skill search roots. Skill subdirectories must contain a `SKILL.md` file with YAML frontmatter (name, description, requirements).
+List skill directories in the manifest `skills` array.
+Each listed directory is added to MindRoom's skill search roots.
+Skill subdirectories must contain a `SKILL.md` file with YAML frontmatter (name, description, requirements).
 
 ## Hooks
 
@@ -385,7 +401,10 @@ Plugins can ship typed event hooks for message enrichment, response transformati
 
 ## Live development (hot reload)
 
-Plugins hot-reload automatically. When you edit any file inside a configured plugin directory, MindRoom notices the change on the next poll, waits out the debounce window, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code. In practice the new code is usually live about 1-2 seconds after a save. No service restart and no agent session disruption.
+Plugins hot-reload automatically.
+When you edit any file inside a configured plugin directory, MindRoom notices the change on the next poll, waits out the debounce window, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code.
+In practice the new code is usually live about 1-2 seconds after a save.
+No service restart and no agent session disruption.
 
 ### How it works
 
@@ -407,7 +426,11 @@ journalctl -u mindroom.service -f | grep -E 'Reloading plugins|Plugin reload com
 #    The new code path is live.
 ```
 
-You can break and fix a plugin freely. A broken save that prevents reload, such as an import error or plugin validation error, can deactivate the affected plugin set, and the next valid save reloads it successfully. A hook that only raises at runtime is different: that failure is logged for that event, and the hook is tried again on the next matching event. There is no quarantine, failure threshold, or cooldown. Each save just reloads.
+You can break and fix a plugin freely.
+A broken save that prevents reload, such as an import error or plugin validation error, can deactivate the affected plugin set, and the next valid save reloads it successfully.
+A hook that only raises at runtime is different: that failure is logged for that event, and the hook is tried again on the next matching event.
+There is no quarantine, failure threshold, or cooldown.
+Each save just reloads.
 
 ### Manual reload
 
@@ -417,7 +440,8 @@ If you need to force a reload, for example because the watcher missed something 
 !reload-plugins
 ```
 
-The bot replies with the active plugin set and the count of cancelled background tasks. Admin gating uses `authorization.global_users` from `config.yaml`.
+The bot replies with the active plugin set and the count of cancelled background tasks.
+Admin gating uses `authorization.global_users` from `config.yaml`.
 
 ### Caveats and tradeoffs
 
@@ -431,11 +455,14 @@ The hot-reload path is intentionally best-effort, not transactional.
 
 ### Production tip
 
-Hot reload is enabled by default in production. Edit any configured plugin directory directly while `mindroom.service` is running. `~/.mindroom/plugins/<name>/` is the common local layout, and active agent sessions, in-flight conversations, and streaming responses continue untouched.
+Hot reload is enabled by default in production.
+Edit any configured plugin directory directly while `mindroom.service` is running.
+`~/.mindroom/plugins/<name>/` is the common local layout, and active agent sessions, in-flight conversations, and streaming responses continue untouched.
 
 ## Community plugins
 
-The [mindroom-ai](https://github.com/mindroom-ai) organization maintains a collection of open-source plugins. Clone any of them into your plugins directory and add the path to `config.yaml`:
+The [mindroom-ai](https://github.com/mindroom-ai) organization maintains a collection of open-source plugins.
+Clone any of them into your plugins directory and add the path to `config.yaml`:
 
 ```
 git clone https://github.com/mindroom-ai/ping-hook-plugin.git ~/.mindroom/plugins/ping-hook

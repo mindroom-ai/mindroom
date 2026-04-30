@@ -4,7 +4,8 @@ Use these tools to work with source hosts, issue trackers, knowledge bases, kanb
 
 ## What This Page Covers
 
-This page documents the built-in tools in the `project-management` group. Use these tools when you need repository context, issue tracking, documentation updates, board workflows, personal task management, or support article search.
+This page documents the built-in tools in the `project-management` group.
+Use these tools when you need repository context, issue tracking, documentation updates, board workflows, personal task management, or support article search.
 
 ## Tools On This Page
 
@@ -21,7 +22,12 @@ This page documents the built-in tools in the `project-management` group. Use th
 
 ## Common Setup Notes
 
-All tools on this page are registered as `status=requires_config`, so they stay unavailable in the dashboard until their required credentials or connection fields are present. None of these tools declare an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so project-management tools are configured through stored tool credentials or environment variables rather than a dedicated dashboard OAuth flow. Password and token fields should be stored through the dashboard or credential store instead of inline YAML. Most upstream SDKs also read environment variables, including `GITHUB_ACCESS_TOKEN`, `BITBUCKET_USERNAME`, `BITBUCKET_PASSWORD`, `BITBUCKET_TOKEN`, `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_PASSWORD`, `JIRA_TOKEN`, `LINEAR_API_KEY`, `CLICKUP_API_KEY`, `MASTER_SPACE_ID`, `CONFLUENCE_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_KEY`, `CONFLUENCE_PASSWORD`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`, `TRELLO_API_KEY`, `TRELLO_API_SECRET`, `TRELLO_TOKEN`, `TODOIST_API_TOKEN`, `ZENDESK_USERNAME`, `ZENDESK_PASSWORD`, and `ZENDESK_COMPANY_NAME`. Several registry fields on this page are marked optional in metadata even though the upstream tool effectively requires them at runtime, so the notes below call out the practical requirement level for each tool. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+All tools on this page are registered as `status=requires_config`, so they stay unavailable in the dashboard until their required credentials or connection fields are present.
+None of these tools declare an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so project-management tools are configured through stored tool credentials or environment variables rather than a dedicated dashboard OAuth flow.
+Password and token fields should be stored through the dashboard or credential store instead of inline YAML.
+Most upstream SDKs also read environment variables, including `GITHUB_ACCESS_TOKEN`, `BITBUCKET_USERNAME`, `BITBUCKET_PASSWORD`, `BITBUCKET_TOKEN`, `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_PASSWORD`, `JIRA_TOKEN`, `LINEAR_API_KEY`, `CLICKUP_API_KEY`, `MASTER_SPACE_ID`, `CONFLUENCE_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_KEY`, `CONFLUENCE_PASSWORD`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`, `TRELLO_API_KEY`, `TRELLO_API_SECRET`, `TRELLO_TOKEN`, `TODOIST_API_TOKEN`, `ZENDESK_USERNAME`, `ZENDESK_PASSWORD`, and `ZENDESK_COMPANY_NAME`.
+Several registry fields on this page are marked optional in metadata even though the upstream tool effectively requires them at runtime, so the notes below call out the practical requirement level for each tool.
+Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## \[`github`\]
 
@@ -29,7 +35,10 @@ All tools on this page are registered as `status=requires_config`, so they stay 
 
 ### What It Does
 
-`github` exposes repository discovery methods such as `search_repositories()`, `list_repositories()`, `get_repository()`, `get_repository_with_stats()`, `list_branches()`, `get_repository_languages()`, and `get_repository_stars()`. It also exposes issue and pull request workflows such as `list_issues()`, `get_issue()`, `comment_on_issue()`, `edit_issue()`, `get_pull_request()`, `get_pull_request_comments()`, `create_pull_request()`, `create_pull_request_comment()`, and `create_review_request()`. The file-management surface includes `create_file()`, `get_file_content()`, `update_file()`, `delete_file()`, `get_directory_content()`, and `get_branch_content()`. `base_url` lets the same tool talk to GitHub Enterprise, but it must point at the API root rather than the normal web UI root.
+`github` exposes repository discovery methods such as `search_repositories()`, `list_repositories()`, `get_repository()`, `get_repository_with_stats()`, `list_branches()`, `get_repository_languages()`, and `get_repository_stars()`.
+It also exposes issue and pull request workflows such as `list_issues()`, `get_issue()`, `comment_on_issue()`, `edit_issue()`, `get_pull_request()`, `get_pull_request_comments()`, `create_pull_request()`, `create_pull_request_comment()`, and `create_review_request()`.
+The file-management surface includes `create_file()`, `get_file_content()`, `update_file()`, `delete_file()`, `get_directory_content()`, and `get_branch_content()`.
+`base_url` lets the same tool talk to GitHub Enterprise, but it must point at the API root rather than the normal web UI root.
 
 ### Configuration
 
@@ -66,7 +75,9 @@ get_pull_request("mindroom-ai/mindroom", 123)
 
 ### What It Does
 
-`bitbucket` exposes `list_repositories()`, `get_repository_details()`, `create_repository()`, `list_repository_commits()`, `list_all_pull_requests()`, `get_pull_request_details()`, `get_pull_request_changes()`, and `list_issues()`. The tool always authenticates with a configured `username` plus either `password` or `token`, and it scopes most operations to the configured `workspace` and `repo_slug`. If `server_url` has no scheme, the upstream tool normalizes it to `https://<server_url>/<api_version>`.
+`bitbucket` exposes `list_repositories()`, `get_repository_details()`, `create_repository()`, `list_repository_commits()`, `list_all_pull_requests()`, `get_pull_request_details()`, `get_pull_request_changes()`, and `list_issues()`.
+The tool always authenticates with a configured `username` plus either `password` or `token`, and it scopes most operations to the configured `workspace` and `repo_slug`.
+If `server_url` has no scheme, the upstream tool normalizes it to `https://<server_url>/<api_version>`.
 
 ### Configuration
 
@@ -110,7 +121,9 @@ list_repository_commits(count=10)
 
 ### What It Does
 
-`jira` can expose `get_issue()`, `create_issue()`, `search_issues()`, `add_comment()`, and `add_worklog()` through individual enable flags. `server_url` is required at runtime, and the upstream client authenticates with `username` plus `token` when both are present, falls back to `username` plus `password`, and otherwise attempts anonymous access. `search_issues()` uses plain JQL, which makes it the main entry point for filtered issue lists and backlog queries.
+`jira` can expose `get_issue()`, `create_issue()`, `search_issues()`, `add_comment()`, and `add_worklog()` through individual enable flags.
+`server_url` is required at runtime, and the upstream client authenticates with `username` plus `token` when both are present, falls back to `username` plus `password`, and otherwise attempts anonymous access.
+`search_issues()` uses plain JQL, which makes it the main entry point for filtered issue lists and backlog queries.
 
 ### Configuration
 
@@ -157,7 +170,9 @@ add_comment("PROJ-123", "Reviewed and ready for testing.")
 
 ### What It Does
 
-`linear` exposes `get_user_details()`, `get_teams_details()`, `get_issue_details()`, `create_issue()`, `update_issue()`, `get_user_assigned_issues()`, `get_workflow_issues()`, and `get_high_priority_issues()`. All calls go to `https://api.linear.app/graphql`, and the tool expects a Linear API key in either `api_key` or `LINEAR_API_KEY`. The read methods are useful for discovering the IDs you need before calling `create_issue()` or `update_issue()`.
+`linear` exposes `get_user_details()`, `get_teams_details()`, `get_issue_details()`, `create_issue()`, `update_issue()`, `get_user_assigned_issues()`, `get_workflow_issues()`, and `get_high_priority_issues()`.
+All calls go to `https://api.linear.app/graphql`, and the tool expects a Linear API key in either `api_key` or `LINEAR_API_KEY`.
+The read methods are useful for discovering the IDs you need before calling `create_issue()` or `update_issue()`.
 
 ### Configuration
 
@@ -192,7 +207,10 @@ get_high_priority_issues()
 
 ### What It Does
 
-`clickup` exposes `list_tasks()`, `create_task()`, `get_task()`, `update_task()`, `delete_task()`, `list_spaces()`, and `list_lists()`. The tool uses `master_space_id` to call ClickUp's `team/{id}/space` endpoints, so this field is effectively the team or workspace identifier used to discover spaces. Name-based space and list lookup is case-insensitive and also supports regex-style matching in the current upstream implementation. `list_tasks()` aggregates tasks across all lists in a space, while `create_task()` creates into the first list returned for the matched space.
+`clickup` exposes `list_tasks()`, `create_task()`, `get_task()`, `update_task()`, `delete_task()`, `list_spaces()`, and `list_lists()`.
+The tool uses `master_space_id` to call ClickUp's `team/{id}/space` endpoints, so this field is effectively the team or workspace identifier used to discover spaces.
+Name-based space and list lookup is case-insensitive and also supports regex-style matching in the current upstream implementation.
+`list_tasks()` aggregates tasks across all lists in a space, while `create_task()` creates into the first list returned for the matched space.
 
 ### Configuration
 
@@ -229,7 +247,10 @@ create_task("Engineering", "ISSUE-075", "Draft the project-management tool page"
 
 ### What It Does
 
-`confluence` exposes `get_page_content()`, `get_space_key()`, `create_page()`, `update_page()`, `get_all_space_detail()`, and `get_all_page_from_space()`. The tool resolves a space by human-readable name or by key, and other space-scoped methods depend on that resolution step. `get_page_content()` defaults to `expand="body.storage"`, and `create_page()` and `update_page()` pass raw body content to the Confluence API. At runtime the tool accepts either `api_key` or `password`, with the current implementation preferring `api_key` or `CONFLUENCE_API_KEY` when both are present.
+`confluence` exposes `get_page_content()`, `get_space_key()`, `create_page()`, `update_page()`, `get_all_space_detail()`, and `get_all_page_from_space()`.
+The tool resolves a space by human-readable name or by key, and other space-scoped methods depend on that resolution step.
+`get_page_content()` defaults to `expand="body.storage"`, and `create_page()` and `update_page()` pass raw body content to the Confluence API.
+At runtime the tool accepts either `api_key` or `password`, with the current implementation preferring `api_key` or `CONFLUENCE_API_KEY` when both are present.
 
 ### Configuration
 
@@ -270,7 +291,11 @@ create_page("Engineering", "Release Notes", "<p>Initial draft</p>")
 
 ### What It Does
 
-`notion` can expose `create_page()`, `update_page()`, and `search_pages()` through individual enable flags. The current upstream implementation assumes the target database has a title property named `Name` and a select property named `Tag`. `create_page()` creates a page with a title, a tag, and one initial paragraph block. `update_page()` appends a paragraph block to an existing page instead of rewriting the whole page. `search_pages()` queries the database directly over HTTP and filters by the `Tag` select value.
+`notion` can expose `create_page()`, `update_page()`, and `search_pages()` through individual enable flags.
+The current upstream implementation assumes the target database has a title property named `Name` and a select property named `Tag`.
+`create_page()` creates a page with a title, a tag, and one initial paragraph block.
+`update_page()` appends a paragraph block to an existing page instead of rewriting the whole page.
+`search_pages()` queries the database directly over HTTP and filters by the `Tag` select value.
 
 ### Configuration
 
@@ -312,7 +337,10 @@ update_page("PAGE_ID", "Added rollout notes")
 
 ### What It Does
 
-`trello` exposes `create_card()`, `get_board_lists()`, `move_card()`, `get_cards()`, `create_board()`, `create_list()`, and `list_boards()`. `create_card()` looks up the target list by case-insensitive `list_name` within a board and then creates the card there. `move_card()` works by card ID and destination list ID, which makes `get_board_lists()` and `get_cards()` the normal discovery helpers before edits. If the Trello client cannot initialize, the current upstream methods return `"Trello client not initialized"` instead of structured JSON.
+`trello` exposes `create_card()`, `get_board_lists()`, `move_card()`, `get_cards()`, `create_board()`, `create_list()`, and `list_boards()`.
+`create_card()` looks up the target list by case-insensitive `list_name` within a board and then creates the card there.
+`move_card()` works by card ID and destination list ID, which makes `get_board_lists()` and `get_cards()` the normal discovery helpers before edits.
+If the Trello client cannot initialize, the current upstream methods return `"Trello client not initialized"` instead of structured JSON.
 
 ### Configuration
 
@@ -349,7 +377,10 @@ create_card("BOARD_ID", "To Do", "Write docs", "Draft the new tool page")
 
 ### What It Does
 
-`todoist` exposes `create_task()`, `get_task()`, `update_task()`, `close_task()`, `delete_task()`, `get_active_tasks()`, and `get_projects()`. `create_task()` supports optional `project_id`, natural-language `due_string`, `priority`, and `labels`. `update_task()` is the richest write method, with support for content, description, labels, priority, `due_string`, `due_date`, `due_datetime`, `due_lang`, `assignee_id`, and `section_id`. `close_task()` marks a task complete, while `delete_task()` permanently removes it.
+`todoist` exposes `create_task()`, `get_task()`, `update_task()`, `close_task()`, `delete_task()`, `get_active_tasks()`, and `get_projects()`.
+`create_task()` supports optional `project_id`, natural-language `due_string`, `priority`, and `labels`.
+`update_task()` is the richest write method, with support for content, description, labels, priority, `due_string`, `due_date`, `due_datetime`, `due_lang`, `assignee_id`, and `section_id`.
+`close_task()` marks a task complete, while `delete_task()` permanently removes it.
 
 ### Configuration
 
@@ -384,7 +415,10 @@ close_task("TASK_ID")
 
 ### What It Does
 
-`zendesk` can expose `search_zendesk()` through the `enable_search_zendesk` flag. The current upstream implementation calls the Zendesk Help Center articles search endpoint at `https://<company_name>.zendesk.com/api/v2/help_center/articles/search.json`. Search results are reduced to cleaned article body text with HTML tags removed. This tool does not expose ticket lookup or ticket updates on this branch.
+`zendesk` can expose `search_zendesk()` through the `enable_search_zendesk` flag.
+The current upstream implementation calls the Zendesk Help Center articles search endpoint at `https://<company_name>.zendesk.com/api/v2/help_center/articles/search.json`.
+Search results are reduced to cleaned article body text with HTML tags removed.
+This tool does not expose ticket lookup or ticket updates on this branch.
 
 ### Configuration
 

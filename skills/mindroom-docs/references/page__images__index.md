@@ -53,11 +53,13 @@ Images work in both direct messages and threads, and with both individual agents
 
 ## Captions (MSC2530)
 
-If the Matrix event's `filename` field differs from `body`, the `body` is used as a user caption. This follows [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/2530) semantics and works with clients that set the caption in the body.
+If the Matrix event's `filename` field differs from `body`, the `body` is used as a user caption.
+This follows [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/2530) semantics and works with clients that set the caption in the body.
 
 ## Image Persistence
 
-Images are saved under `mindroom_data/attachments/` and `mindroom_data/incoming_media/` and registered as attachment records with 30-day retention. In addition to being passed to the AI model as vision input, each image is also registered as an `att_*` attachment ID so agents can reference it via tool calls. See [Attachments](https://docs.mindroom.chat/attachments/index.md) for details on retention and context scoping.
+Images are saved under `mindroom_data/attachments/` and `mindroom_data/incoming_media/` and registered as attachment records with 30-day retention.
+In addition to being passed to the AI model as vision input, each image is also registered as an `att_*` attachment ID so agents can reference it via tool calls. See [Attachments](https://docs.mindroom.chat/attachments/index.md) for details on retention and context scoping.
 
 ## Encryption
 
@@ -69,9 +71,12 @@ AI response caching is automatically skipped when images are present, since imag
 
 ## Media Fallback
 
-If a model rejects inline media (images, audio, video, or documents), MindRoom automatically retries the request without the inline media. The retried prompt includes `[Inline media unavailable for this model]` to inform the agent that attachments were dropped. Agents can still reference the files via attachment IDs and tools.
+If a model rejects inline media (images, audio, video, or documents), MindRoom automatically retries the request without the inline media.
+The retried prompt includes `[Inline media unavailable for this model]` to inform the agent that attachments were dropped.
+Agents can still reference the files via attachment IDs and tools.
 
-This fallback is transparent — no user action is required. It detects provider-specific error patterns such as unsupported media type, base64 field validation failures, and capability rejections.
+This fallback is transparent — no user action is required.
+It detects provider-specific error patterns such as unsupported media type, base64 field validation failures, and capability rejections.
 
 ## Limitations
 
