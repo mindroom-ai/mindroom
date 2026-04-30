@@ -83,6 +83,8 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 - Connect Gmail through the `google_gmail` OAuth provider rather than storing a Gmail-specific API key.
 - The Gmail provider requests Gmail read, modify, and compose scopes.
 - `gmail` can use scoped OAuth credentials for isolated worker scopes.
+- Agno's Gmail constructor accepts per-method selector kwargs (`get_latest_emails`, `get_unread_emails`, `search_emails`, etc.), and the MindRoom wrapper forwards them via `**kwargs`.
+- Use those selector kwargs to disable specific methods you do not want the agent calling.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
 
 ## \[`slack`\]
