@@ -3603,6 +3603,56 @@ def test_workspace_home_contract_overrides_request_env_for_platform_and_worker_n
     assert execution_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
 
 
+def test_workspace_home_contract_uses_prepared_default_worker_workspace_without_base_dir(tmp_path: Path) -> None:
+    """Worker-keyed requests without explicit base_dir still own the default worker workspace."""
+    config_path = tmp_path / "config.yaml"
+    _write_general_agent_config(config_path)
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    worker_key = "worker-a"
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    prepared = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker-1",
+            worker_key=worker_key,
+            endpoint="/api/sandbox-runner/execute",
+            auth_token=SANDBOX_TOKEN,
+            status="ready",
+            backend_name="local",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=worker_paths,
+        runtime_overrides={"base_dir": worker_paths.workspace},
+    )
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_key=worker_key,
+        execution_env={
+            "HOME": "/request-home",
+            "MINDROOM_AGENT_WORKSPACE": "/request-workspace",
+        },
+    )
+    execution_env = dict(request.execution_env)
+
+    workspace_home = sandbox_runner_module._apply_workspace_home_contract_for_request(
+        request,
+        prepared=prepared,
+        execution_env=execution_env,
+        runtime_paths=runtime_paths,
+        config=config,
+    )
+
+    assert workspace_home == worker_paths.workspace.resolve()
+    assert execution_env["HOME"] == str(worker_paths.workspace.resolve())
+    assert execution_env["MINDROOM_AGENT_WORKSPACE"] == str(worker_paths.workspace.resolve())
+    assert execution_env["XDG_CACHE_HOME"] == str(worker_paths.cache_dir)
+    assert execution_env["PIP_CACHE_DIR"] == str(worker_paths.cache_dir / "pip")
+    assert execution_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
+
+
 def test_workspace_home_contract_protects_owned_names_after_hook_overlay(tmp_path: Path) -> None:
     """Hooks cannot redirect workspace identity, worker cache, or venv locations."""
     config_path = tmp_path / "config.yaml"
@@ -3903,6 +3953,77 @@ def test_worker_routed_shell_uses_agent_workspace_as_home(
     assert agent_workspace == str(workspace.resolve())
     assert xdg_config == str(workspace.resolve() / ".config")
     assert xdg_cache == str(worker_root / "cache")
+    assert virtual_env == str(worker_root / "venv")
+
+
+@requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
+def test_worker_routed_shell_ignores_dotenv_for_workspace_home_contract(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Config .env must not redirect workspace identity, worker cache, or venv env."""
+    _set_sandbox_token(monkeypatch)
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+    _write_general_agent_config(config_path)
+    (config_path.parent / ".env").write_text(
+        "HOME=/env-home\n"
+        "MINDROOM_AGENT_WORKSPACE=/env-agent-workspace\n"
+        "XDG_CONFIG_HOME=/env-config\n"
+        "XDG_CACHE_HOME=/env-cache\n"
+        "PIP_CACHE_DIR=/env-pip-cache\n"
+        "UV_CACHE_DIR=/env-uv-cache\n"
+        "PYTHONPYCACHEPREFIX=/env-pycache\n"
+        "VIRTUAL_ENV=/env-venv\n",
+        encoding="utf-8",
+    )
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    _refresh_runner_app_from_env()
+
+    worker_key = "v1:tenant-123:shared:general"
+    worker_root = storage_root / "workers" / worker_dir_name(worker_key)
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=_fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [
+                    [
+                        "bash",
+                        "-c",
+                        (
+                            'printf "%s|%s|%s|%s|%s|%s|%s|%s" '
+                            '"$HOME" "$MINDROOM_AGENT_WORKSPACE" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" '
+                            '"$PIP_CACHE_DIR" "$UV_CACHE_DIR" "$PYTHONPYCACHEPREFIX" "$VIRTUAL_ENV"'
+                        ),
+                    ],
+                ],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "routing_agent_name": "general",
+                "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, payload
+    home, agent_workspace, xdg_config, xdg_cache, pip_cache, uv_cache, pycache, virtual_env = payload["result"].split(
+        "|",
+        7,
+    )
+    assert home == str(workspace.resolve())
+    assert agent_workspace == str(workspace.resolve())
+    assert xdg_config == str(workspace.resolve() / ".config")
+    assert xdg_cache == str(worker_root / "cache")
+    assert pip_cache == str(worker_root / "cache" / "pip")
+    assert uv_cache == str(worker_root / "cache" / "uv")
+    assert pycache == str(worker_root / "cache" / "pycache")
     assert virtual_env == str(worker_root / "venv")
 
 

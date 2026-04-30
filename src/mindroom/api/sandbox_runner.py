@@ -646,8 +646,6 @@ def _request_workspace_home_root(
     """Return the request workspace that should behave as HOME, if explicit."""
     if request.tool_name not in _WORKSPACE_ENV_HOOK_TOOL_NAMES:
         return None
-    if request.routing_agent_name is None and "base_dir" not in request.tool_init_overrides:
-        return None
     return _workspace_env_hook_workspace_for_request(
         request,
         prepared,
@@ -727,6 +725,48 @@ def _protected_execution_env(
     if workspace_home is not None:
         return _workspace_home_contract_env(workspace=workspace_home, prepared=prepared)
     return _worker_owned_env(prepared)
+
+
+def _build_request_execution_env(
+    request: SandboxRunnerExecuteRequest,
+    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+    execution_env: dict[str, str],
+    *,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    subprocess_env: dict[str, str] | None = None,
+    apply_workspace_home_contract: bool = True,
+    apply_workspace_env_hook: bool = True,
+) -> tuple[Path | None, dict[str, str], SandboxRunnerExecuteResponse | None]:
+    """Apply request env overlays in the security-sensitive canonical order."""
+    workspace_home = (
+        _apply_workspace_home_contract_for_request(
+            request,
+            prepared,
+            execution_env,
+            runtime_paths=runtime_paths,
+            config=config,
+        )
+        if apply_workspace_home_contract
+        else None
+    )
+    overlay, overlay_failure = _workspace_env_overlay_for_request(
+        request,
+        prepared,
+        execution_env,
+        runtime_paths,
+        config,
+        subprocess_env=subprocess_env,
+        apply=apply_workspace_env_hook,
+    )
+    if overlay_failure is not None:
+        return None, {}, overlay_failure
+    if overlay:
+        execution_env.update(overlay)
+    protected_env = _protected_execution_env(workspace_home=workspace_home, prepared=prepared)
+    execution_env.update(protected_env)
+    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
+    return workspace_home, trusted_overlay, None
 
 
 def _workspace_env_hook_workspace_for_request(
@@ -822,32 +862,17 @@ async def _execute_request_inprocess(
         worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
         worker_execution_env.update(execution_env)
         execution_env = worker_execution_env
-    workspace_home = (
-        _apply_workspace_home_contract_for_request(
-            request,
-            prepared,
-            execution_env,
-            runtime_paths=runtime_paths,
-            config=config,
-        )
-        if apply_workspace_home_contract
-        else None
-    )
-    overlay, overlay_failure = _workspace_env_overlay_for_request(
+    _workspace_home, trusted_overlay, env_failure = _build_request_execution_env(
         request,
         prepared,
         execution_env,
-        runtime_paths,
-        config,
-        apply=apply_workspace_env_hook,
+        runtime_paths=runtime_paths,
+        config=config,
+        apply_workspace_home_contract=apply_workspace_home_contract,
+        apply_workspace_env_hook=apply_workspace_env_hook,
     )
-    if overlay_failure is not None:
-        return overlay_failure
-    if overlay:
-        execution_env.update(overlay)
-    protected_env = _protected_execution_env(workspace_home=workspace_home, prepared=prepared)
-    execution_env.update(protected_env)
-    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
+    if env_failure is not None:
+        return env_failure
     runtime_overrides = _request_runtime_overrides(request, prepared)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
@@ -981,29 +1006,17 @@ def _execute_request_subprocess_sync(
     python_executable, subprocess_env, cwd = sandbox_exec.resolve_subprocess_worker_context(
         prepared.paths if prepared is not None else None,
     )
-    workspace_home = _apply_workspace_home_contract_for_request(
+    workspace_home, trusted_overlay, env_failure = _build_request_execution_env(
         request,
         prepared,
         execution_env,
+        subprocess_env=subprocess_env,
         runtime_paths=runtime_paths,
         config=config,
+        apply_workspace_env_hook=apply_workspace_env_hook,
     )
-    overlay, overlay_failure = _workspace_env_overlay_for_request(
-        request,
-        prepared,
-        execution_env,
-        runtime_paths,
-        config,
-        subprocess_env=subprocess_env,
-        apply=apply_workspace_env_hook,
-    )
-    if overlay_failure is not None:
-        return overlay_failure
-    if overlay:
-        execution_env.update(overlay)
-    protected_env = _protected_execution_env(workspace_home=workspace_home, prepared=prepared)
-    execution_env.update(protected_env)
-    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
+    if env_failure is not None:
+        return env_failure
     subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, execution_env)
     # python's subprocess inherits this cwd as Path.cwd(); shell sets its own cwd via base_dir.
     if workspace_home is not None and request.tool_name == "python":

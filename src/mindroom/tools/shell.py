@@ -64,6 +64,20 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
         "no_proxy",
     },
 )
+_WORKSPACE_HOME_CONTRACT_ENV_KEYS = frozenset(
+    {
+        "HOME",
+        "MINDROOM_AGENT_WORKSPACE",
+        "PIP_CACHE_DIR",
+        "PYTHONPYCACHEPREFIX",
+        "UV_CACHE_DIR",
+        "VIRTUAL_ENV",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    },
+)
 _STALE_RECORD_SECONDS = 600  # 10 minutes
 _MAX_BACKGROUNDED = 16
 _MAX_OUTPUT_LINES = 10_000
@@ -138,6 +152,10 @@ def _shell_subprocess_env(
     if base_process_env is not None:
         env.update({key: value for key, value in base_process_env.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS})
     env.update(runtime_env)
+    if base_process_env is not None:
+        env.update(
+            {key: value for key, value in base_process_env.items() if key in _WORKSPACE_HOME_CONTRACT_ENV_KEYS},
+        )
 
     path_value = _shell_subprocess_path(
         env.get("PATH"),

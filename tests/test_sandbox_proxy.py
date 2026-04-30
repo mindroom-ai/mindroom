@@ -1442,9 +1442,26 @@ def test_subprocess_env_for_request_forces_vendor_telemetry_over_execution_env()
 def test_shell_subprocess_env_preserves_workspace_home_contract_names() -> None:
     """Workspace-home env names should survive into the shell command process."""
     env = shell_tool_module._shell_subprocess_env(
-        {"MINDROOM_AGENT_WORKSPACE": "/workspace"},
+        {
+            "HOME": "/env-home",
+            "MINDROOM_AGENT_WORKSPACE": "/env-agent-workspace",
+            "PIP_CACHE_DIR": "/env-pip-cache",
+            "PYTHONPYCACHEPREFIX": "/env-pycache",
+            "UV_CACHE_DIR": "/env-uv-cache",
+            "VIRTUAL_ENV": "/env-venv",
+            "XDG_CACHE_HOME": "/env-cache",
+            "XDG_CONFIG_HOME": "/env-config",
+            "XDG_DATA_HOME": "/env-data",
+            "XDG_STATE_HOME": "/env-state",
+        },
         base_process_env={
             "HOME": "/workspace",
+            "MINDROOM_AGENT_WORKSPACE": "/workspace",
+            "PIP_CACHE_DIR": "/worker-cache/pip",
+            "PYTHONPYCACHEPREFIX": "/worker-cache/pycache",
+            "UV_CACHE_DIR": "/worker-cache/uv",
+            "VIRTUAL_ENV": "/worker-venv",
+            "XDG_CACHE_HOME": "/worker-cache",
             "XDG_CONFIG_HOME": "/workspace/.config",
             "XDG_DATA_HOME": "/workspace/.local/share",
             "XDG_STATE_HOME": "/workspace/.local/state",
@@ -1456,6 +1473,11 @@ def test_shell_subprocess_env_preserves_workspace_home_contract_names() -> None:
     assert env["XDG_CONFIG_HOME"] == "/workspace/.config"
     assert env["XDG_DATA_HOME"] == "/workspace/.local/share"
     assert env["XDG_STATE_HOME"] == "/workspace/.local/state"
+    assert env["XDG_CACHE_HOME"] == "/worker-cache"
+    assert env["PIP_CACHE_DIR"] == "/worker-cache/pip"
+    assert env["UV_CACHE_DIR"] == "/worker-cache/uv"
+    assert env["PYTHONPYCACHEPREFIX"] == "/worker-cache/pycache"
+    assert env["VIRTUAL_ENV"] == "/worker-venv"
 
 
 def test_execution_env_payload_denies_provider_env_by_default_in_isolated_runtime(
