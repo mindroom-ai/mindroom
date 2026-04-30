@@ -163,7 +163,7 @@ def _reject_unbound_private_dashboard_requester(
         status_code=400,
         detail=(
             "Dashboard credential management for private user scopes requires a Matrix requester identity. "
-            "Set MINDROOM_OWNER_USER_ID for standalone deployments or use an agent-issued connect link."
+            "Set MINDROOM_OWNER_USER_ID to your Matrix user ID, or run MindRoom under Matrix authentication."
         ),
     )
 
