@@ -4,7 +4,8 @@
 
 - Migrated Google Drive, Calendar, Sheets, and Gmail to the generic OAuth provider framework.
 - Removed the legacy `/api/google/*` integration, helper code, and the custom-tools Google OAuth mixin.
-- Added shared Google OAuth provider helpers, signed OAuth state/connect tokens, snapshot-cached provider loading, provider-driven custom tool clients, and structured `OAuthConnectionRequired` tool results.
+- Added shared Google OAuth provider helpers, opaque server-side OAuth state/connect tokens, snapshot-cached provider loading, provider-driven custom tool clients, and structured `OAuthConnectionRequired` tool results.
+- Hardened the follow-up review items: requester-bound shared connect links, core-stamped OAuth token metadata, granted-scope availability checks, missing-client-config dashboard state, Gmail card merge behavior, env-only Google service-account fallback, local redirect envs, and Sheets duplicate Drive scope.
 - Updated disconnect to clear both OAuth token credentials and per-tool configuration credentials.
 - Replaced the frontend legacy Google integration with per-service Google OAuth providers.
 - Rewrote Google OAuth docs for the per-provider model and regenerated the MindRoom docs skill references.
@@ -22,7 +23,8 @@
 
 - `tests/test_google_calendar_oauth_tool.py`
 - `tests/test_google_sheets_oauth_tool.py`
-- Extended `tests/api/test_oauth_api.py` for migrated providers, signed state/connect tokens, and disconnect clearing tool config.
+- Extended `tests/api/test_oauth_api.py` for migrated providers, opaque state/connect tokens, requester binding, core token metadata, scope checks, and disconnect clearing tool config.
+- Extended Gmail, Calendar, and Sheets tool tests for env-only service account fallback.
 
 ## Validation
 
@@ -43,6 +45,8 @@ Provider smoke output:
 ## Git Log
 
 ```text
+e980774b0 fix(oauth): harden Google provider migration
+43a617df0 docs: add PR 809 implementation notes
 52d8e92d2 feat(oauth): migrate Google services to generic providers
 34b9975eb Tighten OAuth credential invariants
 ```
