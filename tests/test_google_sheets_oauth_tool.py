@@ -111,10 +111,11 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
     ]
 
 
-def test_google_sheets_provider_includes_drive_scope_for_duplicate_support() -> None:
+def test_google_sheets_provider_uses_drive_file_scope_for_duplicate_support() -> None:
     provider = google_sheets_oauth_provider()
 
-    assert "https://www.googleapis.com/auth/drive" in provider.scopes
+    assert "https://www.googleapis.com/auth/drive.file" in provider.scopes
+    assert "https://www.googleapis.com/auth/drive" not in provider.scopes
 
 
 def test_google_sheets_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:

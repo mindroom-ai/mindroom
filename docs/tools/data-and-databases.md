@@ -447,7 +447,7 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 The underlying Agno toolkit supports `read_sheet()`, `create_sheet()`, `update_sheet()`, and `create_duplicate_sheet()`.
 MindRoom wraps Agno's Google Sheets toolkit with `ScopedOAuthClientMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files.
 The upstream toolkit selects read-only Sheets scope when only reads are enabled, and it selects write scope when create, update, or duplicate operations are enabled.
-`create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on Google Drive scope in addition to Sheets access.
+`create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on the provider's `drive.file` scope in addition to Sheets access.
 If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call.
 MindRoom maps the dashboard config fields `read`, `create`, `update`, and `duplicate` onto Agno's constructor flags.
 

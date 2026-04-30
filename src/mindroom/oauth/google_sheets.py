@@ -14,7 +14,7 @@ from mindroom.oauth.providers import OAuthProvider
 GOOGLE_SHEETS_OAUTH_SCOPES = (
     *GOOGLE_IDENTITY_SCOPES,
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file",
 )
 
 
