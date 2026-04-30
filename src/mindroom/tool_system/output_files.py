@@ -280,6 +280,18 @@ def _validate_output_path(policy: ToolOutputFilePolicy, raw_path: object) -> _Va
     )
 
 
+def validate_output_path(policy: ToolOutputFilePolicy, raw_path: object) -> str | None:
+    """Validate one output path without creating parent directories or writing bytes."""
+    validation = _validate_output_path(policy, raw_path)
+    return validation if isinstance(validation, str) else None
+
+
+def validate_output_path_syntax(raw_path: object) -> str | None:
+    """Validate output-path syntax when the destination workspace is remote."""
+    validation = _validate_raw_output_path(raw_path)
+    return validation if isinstance(validation, str) else None
+
+
 def _validate_parent_components(workspace_root: Path, relative_parent: Path) -> str | None:
     """Reject existing unsafe parent components without creating anything."""
     if relative_parent == Path():

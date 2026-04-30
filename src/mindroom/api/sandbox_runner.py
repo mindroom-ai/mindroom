@@ -14,11 +14,12 @@ import pickle
 import secrets
 import subprocess
 import sys
+from collections.abc import Mapping
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import yaml
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
@@ -46,6 +47,8 @@ from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
     normalize_output_path_argument,
+    validate_output_path,
+    validate_output_path_syntax,
     write_bytes_to_output_path,
 )
 from mindroom.tool_system.sandbox_proxy import (
@@ -1089,6 +1092,8 @@ def _save_attachment_output_path(payload: SandboxRunnerSaveAttachmentRequest) ->
 
 def _decode_attachment_save_bytes(payload: SandboxRunnerSaveAttachmentRequest) -> bytes | str:
     """Decode and integrity-check one save-attachment payload."""
+    if payload.size_bytes is not None and (type(payload.size_bytes) is not int or payload.size_bytes < 0):
+        return "Attachment size_bytes must be a non-negative integer."
     try:
         payload_bytes = base64.b64decode(payload.bytes_b64.encode("ascii"), validate=True)
     except (UnicodeEncodeError, binascii.Error):
@@ -1102,7 +1107,7 @@ def _decode_attachment_save_bytes(payload: SandboxRunnerSaveAttachmentRequest) -
 
 
 @router.post("/save-attachment", response_model=SandboxRunnerSaveAttachmentResponse)
-async def save_attachment_to_worker(  # noqa: PLR0911
+async def save_attachment_to_worker(  # noqa: C901, PLR0911
     request: Request,
     payload: SandboxRunnerSaveAttachmentRequest,
 ) -> SandboxRunnerSaveAttachmentResponse:
@@ -1117,33 +1122,40 @@ async def save_attachment_to_worker(  # noqa: PLR0911
         return SandboxRunnerSaveAttachmentResponse(
             ok=False,
             error="attachment_id is invalid.",
-            failure_kind="worker",
+            failure_kind="tool",
         )
     output_path = _save_attachment_output_path(payload)
     if output_path is None:
         return SandboxRunnerSaveAttachmentResponse(
             ok=False,
             error="Use exactly one matching mindroom_output_path or save_to_disk value.",
-            failure_kind="worker",
+            failure_kind="tool",
         )
+    raw_path_error = validate_output_path_syntax(output_path)
+    if raw_path_error is not None:
+        return SandboxRunnerSaveAttachmentResponse(ok=False, error=raw_path_error, failure_kind="tool")
 
-    try:
-        prepared_worker = sandbox_worker_prep.prepare_worker_request(
-            worker_key=payload.worker_key,
-            tool_init_overrides={},
-            runtime_paths=runtime_paths,
-            private_agent_names=(
-                frozenset(payload.private_agent_names) if payload.private_agent_names is not None else None
-            ),
-            runner_token=runner_token,
-        )
-    except sandbox_worker_prep.WorkerRequestPreparationError as exc:
-        if exc.failure_kind == "worker":
-            return SandboxRunnerSaveAttachmentResponse(ok=False, error=str(exc), failure_kind="worker")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None
+    if payload.worker_key is not None:
+        try:
+            prepared_worker = sandbox_worker_prep.prepare_worker_request(
+                worker_key=payload.worker_key,
+                tool_init_overrides={},
+                runtime_paths=runtime_paths,
+                private_agent_names=(
+                    frozenset(payload.private_agent_names) if payload.private_agent_names is not None else None
+                ),
+                runner_token=runner_token,
+            )
+        except sandbox_worker_prep.WorkerRequestPreparationError as exc:
+            if exc.failure_kind == "worker":
+                return SandboxRunnerSaveAttachmentResponse(ok=False, error=str(exc), failure_kind="worker")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     execution_identity = ToolExecutionIdentity(**payload.execution_identity) if payload.execution_identity else None
-    runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(prepared_worker.runtime_overrides)
+    runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(
+        prepared_worker.runtime_overrides if prepared_worker is not None else None,
+    )
     workspace_root = _runner_tool_output_workspace_root(
         config=config,
         runtime_paths=runtime_paths,
@@ -1158,18 +1170,30 @@ async def save_attachment_to_worker(  # noqa: PLR0911
             failure_kind="worker",
         )
 
+    policy = ToolOutputFilePolicy.from_runtime(workspace_root, runtime_paths)
+    path_error = validate_output_path(policy, output_path)
+    if path_error is not None:
+        return SandboxRunnerSaveAttachmentResponse(ok=False, error=path_error, failure_kind="tool")
+
     decoded_bytes = _decode_attachment_save_bytes(payload)
     if isinstance(decoded_bytes, str):
-        return SandboxRunnerSaveAttachmentResponse(ok=False, error=decoded_bytes, failure_kind="worker")
+        return SandboxRunnerSaveAttachmentResponse(ok=False, error=decoded_bytes, failure_kind="tool")
 
-    policy = ToolOutputFilePolicy.from_runtime(workspace_root, runtime_paths)
     write_result = write_bytes_to_output_path(policy, output_path, decoded_bytes, file_mode=0o600)
     if isinstance(write_result, str):
-        return SandboxRunnerSaveAttachmentResponse(ok=False, error=write_result, failure_kind="worker")
+        return SandboxRunnerSaveAttachmentResponse(ok=False, error=write_result, failure_kind="tool")
+
+    output_receipt = write_result.receipt["mindroom_tool_output"]
+    worker_path = output_path
+    if isinstance(output_receipt, Mapping):
+        output_receipt_map = cast("Mapping[str, object]", output_receipt)
+        receipt_path = output_receipt_map.get("path")
+        if isinstance(receipt_path, str):
+            worker_path = receipt_path
 
     return SandboxRunnerSaveAttachmentResponse(
         ok=True,
-        worker_path=str(write_result.absolute_path),
+        worker_path=worker_path,
         size_bytes=write_result.byte_count,
         sha256=payload.sha256,
     )

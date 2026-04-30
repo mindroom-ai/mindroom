@@ -2635,6 +2635,7 @@ from = ["mindroom.tool_system.tool_hooks"]
 expose = [
     "DEFAULT_INLINE_ATTACHMENT_BYTES",
     "WorkerAttachmentSaveReceipt",
+    "attachment_save_uses_worker",
     "inline_attachment_byte_limit",
     "maybe_wrap_toolkit_for_sandbox_proxy",
     "sandbox_proxy_config",

@@ -8,6 +8,7 @@ import functools
 import hashlib
 import json
 import os
+import secrets
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
@@ -520,10 +521,100 @@ def _record_proxy_response_failure_for_worker(
     manager.record_failure(worker_handle.worker_key, error)
 
 
+def attachment_save_uses_worker(
+    *,
+    runtime_paths: RuntimePaths,
+    worker_target: ResolvedWorkerTarget | None,
+    worker_tools_override: list[str] | None = None,
+) -> bool:
+    """Return whether attachment saves should land where workspace file tools run."""
+    return _sandbox_proxy_enabled_for_tool(
+        "file",
+        runtime_paths=runtime_paths,
+        worker_tools_override=worker_tools_override,
+        worker_scope=worker_target.worker_scope if worker_target is not None else None,
+    )
+
+
+def _record_worker_save_failure(
+    *,
+    worker_handle: WorkerHandle | None,
+    runtime_paths: RuntimePaths,
+    proxy_config: SandboxProxyConfig,
+    error: str,
+) -> None:
+    """Record a worker save protocol/integrity failure against worker health."""
+    if worker_handle is not None:
+        _get_worker_manager(runtime_paths, proxy_config).record_failure(worker_handle.worker_key, error)
+
+
+def _validated_worker_save_receipt(
+    data: Mapping[str, object],
+    *,
+    requested_path: str,
+    byte_count: int,
+    sha256: str,
+    worker_handle: WorkerHandle | None,
+    runtime_paths: RuntimePaths,
+    proxy_config: SandboxProxyConfig,
+) -> WorkerAttachmentSaveReceipt:
+    """Validate one successful worker save response against the sent bytes."""
+    worker_path = data.get("worker_path")
+    response_size = data.get("size_bytes")
+    response_sha256 = data.get("sha256")
+    if (
+        not isinstance(worker_path, str)
+        or type(response_size) is not int
+        or response_size < 0
+        or not isinstance(response_sha256, str)
+    ):
+        msg = "Sandbox save-attachment response is missing its receipt fields."
+        _record_worker_save_failure(
+            worker_handle=worker_handle,
+            runtime_paths=runtime_paths,
+            proxy_config=proxy_config,
+            error=msg,
+        )
+        raise RuntimeError(msg)
+    if worker_path != requested_path:
+        msg = "Sandbox save-attachment response path does not match the requested workspace path."
+        _record_worker_save_failure(
+            worker_handle=worker_handle,
+            runtime_paths=runtime_paths,
+            proxy_config=proxy_config,
+            error=msg,
+        )
+        raise RuntimeError(msg)
+    if response_size != byte_count:
+        msg = "Sandbox save-attachment response size does not match the sent bytes."
+        _record_worker_save_failure(
+            worker_handle=worker_handle,
+            runtime_paths=runtime_paths,
+            proxy_config=proxy_config,
+            error=msg,
+        )
+        raise RuntimeError(msg)
+    if not secrets.compare_digest(response_sha256, sha256):
+        msg = "Sandbox save-attachment response SHA256 does not match the sent bytes."
+        _record_worker_save_failure(
+            worker_handle=worker_handle,
+            runtime_paths=runtime_paths,
+            proxy_config=proxy_config,
+            error=msg,
+        )
+        raise RuntimeError(msg)
+    return WorkerAttachmentSaveReceipt(
+        worker_path=worker_path,
+        size_bytes=response_size,
+        sha256=response_sha256,
+    )
+
+
 def save_attachment_to_worker(
     *,
     runtime_paths: RuntimePaths,
     worker_target: ResolvedWorkerTarget | None,
+    worker_tools_override: list[str] | None = None,
     attachment_id: str,
     mindroom_output_path: str,
     payload_bytes: bytes,
@@ -531,6 +622,13 @@ def save_attachment_to_worker(
     filename: str | None,
 ) -> WorkerAttachmentSaveReceipt | None:
     """Write attachment bytes to the selected worker, returning None when no worker endpoint exists."""
+    if not attachment_save_uses_worker(
+        runtime_paths=runtime_paths,
+        worker_target=worker_target,
+        worker_tools_override=worker_tools_override,
+    ):
+        return None
+
     byte_limit = inline_attachment_byte_limit(runtime_paths)
     byte_count = len(payload_bytes)
     if byte_count > byte_limit:
@@ -585,25 +683,26 @@ def save_attachment_to_worker(
 
     if not isinstance(data, Mapping):
         msg = "Sandbox save-attachment returned a non-object response."
+        _record_worker_save_failure(
+            worker_handle=worker_handle,
+            runtime_paths=runtime_paths,
+            proxy_config=proxy_config,
+            error=msg,
+        )
         raise TypeError(msg)
     if data.get("ok") is True:
-        worker_path = data.get("worker_path")
-        response_size = data.get("size_bytes")
-        response_sha256 = data.get("sha256")
-        if (
-            not isinstance(worker_path, str)
-            or not isinstance(response_size, int)
-            or not isinstance(response_sha256, str)
-        ):
-            msg = "Sandbox save-attachment response is missing its receipt fields."
-            raise TypeError(msg)
+        receipt = _validated_worker_save_receipt(
+            data,
+            requested_path=mindroom_output_path,
+            byte_count=byte_count,
+            sha256=sha256,
+            worker_handle=worker_handle,
+            runtime_paths=runtime_paths,
+            proxy_config=proxy_config,
+        )
         if worker_handle is not None:
             _get_worker_manager(runtime_paths, proxy_config).touch_worker(worker_handle.worker_key)
-        return WorkerAttachmentSaveReceipt(
-            worker_path=worker_path,
-            size_bytes=response_size,
-            sha256=response_sha256,
-        )
+        return receipt
 
     error = data.get("error") or "Sandbox attachment save failed."
     _record_proxy_response_failure_for_worker(
