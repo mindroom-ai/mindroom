@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
+import hashlib
 import json
 import os
+import stat
 import sys
 import threading
 from dataclasses import asdict
@@ -433,6 +436,106 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_sandbox_runner_save_attachment_writes_worker_workspace(tmp_path: Path) -> None:
+    """The runner save endpoint should validate and atomically write bytes under the worker workspace."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": _TEST_AUTH_TOKEN},
+    )
+    config = Config(agents={"code": AgentConfig(display_name="Code")}, models={})
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            sandbox_runner_context=sandbox_runner_module._SandboxRunnerContext(
+                runtime_paths=runtime_paths,
+                config=config,
+                tool_metadata=TOOL_METADATA.copy(),
+                runner_token=_TEST_AUTH_TOKEN,
+            ),
+        ),
+    )
+    payload_bytes = b"worker-bytes"
+    sha256 = hashlib.sha256(payload_bytes).hexdigest()
+
+    response = await sandbox_runner_module.save_attachment_to_worker(
+        SimpleNamespace(app=app),
+        sandbox_runner_module.SandboxRunnerSaveAttachmentRequest(
+            worker_key="worker-test",
+            attachment_id="att_sample",
+            mindroom_output_path="inputs/sample.bin",
+            sha256=sha256,
+            size_bytes=len(payload_bytes),
+            bytes_b64=base64.b64encode(payload_bytes).decode("ascii"),
+        ),
+    )
+
+    assert response.ok is True
+    assert response.worker_path is not None
+    saved_path = Path(response.worker_path)
+    assert saved_path.read_bytes() == payload_bytes
+    assert saved_path.is_relative_to(runtime_paths.storage_root)
+    assert stat.S_IMODE(saved_path.stat().st_mode) == 0o600
+    assert response.size_bytes == len(payload_bytes)
+    assert response.sha256 == sha256
+
+
+@pytest.mark.asyncio
+async def test_sandbox_runner_save_attachment_rejects_sha_mismatch_and_unsafe_path(tmp_path: Path) -> None:
+    """The save endpoint should reject mismatched bytes and unsafe output paths without writing files."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": _TEST_AUTH_TOKEN},
+    )
+    config = Config(agents={"code": AgentConfig(display_name="Code")}, models={})
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            sandbox_runner_context=sandbox_runner_module._SandboxRunnerContext(
+                runtime_paths=runtime_paths,
+                config=config,
+                tool_metadata=TOOL_METADATA.copy(),
+                runner_token=_TEST_AUTH_TOKEN,
+            ),
+        ),
+    )
+    request = SimpleNamespace(app=app)
+    payload_bytes = b"worker-bytes"
+    encoded = base64.b64encode(payload_bytes).decode("ascii")
+
+    mismatch = await sandbox_runner_module.save_attachment_to_worker(
+        request,
+        sandbox_runner_module.SandboxRunnerSaveAttachmentRequest(
+            worker_key="worker-test",
+            attachment_id="att_sample",
+            mindroom_output_path="inputs/sample.bin",
+            sha256="0" * 64,
+            size_bytes=len(payload_bytes),
+            bytes_b64=encoded,
+        ),
+    )
+    unsafe = await sandbox_runner_module.save_attachment_to_worker(
+        request,
+        sandbox_runner_module.SandboxRunnerSaveAttachmentRequest(
+            worker_key="worker-test",
+            attachment_id="att_sample",
+            mindroom_output_path="../escape.bin",
+            sha256=hashlib.sha256(payload_bytes).hexdigest(),
+            size_bytes=len(payload_bytes),
+            bytes_b64=encoded,
+        ),
+    )
+
+    assert mismatch.ok is False
+    assert mismatch.failure_kind == "worker"
+    assert "SHA256" in (mismatch.error or "")
+    assert unsafe.ok is False
+    assert unsafe.failure_kind == "worker"
+    assert "mindroom_output_path" in (unsafe.error or "")
+    assert not list(runtime_paths.storage_root.rglob("sample.bin"))
+    assert not list(runtime_paths.storage_root.rglob("escape.bin"))
+
+
+@pytest.mark.asyncio
 async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_worker(tmp_path: Path) -> None:
     """Static runner redirects should rebuild with the routing agent workspace root."""
     tool_name = "test_static_runner_output_redirect"
@@ -688,6 +791,80 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     execute_url, execute_payload = captured_calls[1]
     assert execute_url.endswith("/api/sandbox-runner/execute")
     assert execute_payload["lease_id"] == "lease-123"
+
+
+def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attachment worker saves should use the selected worker handle and reject oversized payloads locally."""
+    captured: dict[str, Any] = {}
+    manager = _TrackingWorkerManager()
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    payload_bytes = b"attachment-bytes"
+    sha256 = hashlib.sha256(payload_bytes).hexdigest()
+
+    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", lambda *_args, **_kwargs: manager)
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured=captured,
+            responder=lambda _url, _json: {
+                "ok": True,
+                "worker_path": "/worker/workspace/sample.bin",
+                "size_bytes": len(payload_bytes),
+                "sha256": sha256,
+            },
+        ),
+    )
+
+    receipt = sandbox_proxy_module.save_attachment_to_worker(
+        runtime_paths=runtime_paths,
+        worker_target=worker_target,
+        attachment_id="att_sample",
+        mindroom_output_path="sample.bin",
+        payload_bytes=payload_bytes,
+        mime_type="application/octet-stream",
+        filename="sample.bin",
+    )
+
+    assert receipt is not None
+    assert receipt.worker_path == "/worker/workspace/sample.bin"
+    assert captured["url"] == "http://worker/api/sandbox-runner/save-attachment"
+    assert captured["headers"] == {"x-mindroom-sandbox-token": _TEST_AUTH_TOKEN}
+    request_json = captured["json"]
+    assert request_json["attachment_id"] == "att_sample"
+    assert request_json["mindroom_output_path"] == "sample.bin"
+    assert request_json["worker_key"] == worker_target.worker_key
+    assert base64.b64decode(request_json["bytes_b64"]) == payload_bytes
+    assert request_json["sha256"] == sha256
+    assert manager.touched == [worker_target.worker_key]
+
+    monkeypatch.setenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", "3")
+    with pytest.raises(RuntimeError, match="att_sample"):
+        sandbox_proxy_module.save_attachment_to_worker(
+            runtime_paths=_runtime_paths_from_env(),
+            worker_target=worker_target,
+            attachment_id="att_sample",
+            mindroom_output_path="sample.bin",
+            payload_bytes=payload_bytes,
+            mime_type=None,
+            filename=None,
+        )
 
 
 def test_get_tool_by_name_rejects_unsafe_tool_init_overrides() -> None:

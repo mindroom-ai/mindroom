@@ -562,6 +562,8 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
             "MINDROOM_NAMESPACE=alpha1234\n"
             "MATRIX_HOMESERVER=http://dotenv-hs\n"
             "MATRIX_SERVER_NAME=alpha.example\n"
+            "MATRIX_ACCESS_TOKEN=matrix-access-secret\n"
+            "MATRIX_REGISTRATION_TOKEN=matrix-registration-secret\n"
             "CUSTOMER_ID=tenant-123\n"
             "ACCOUNT_ID=account-456\n"
             f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n"
@@ -596,6 +598,8 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
     assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
+    assert committed_runtime.env_value("MATRIX_ACCESS_TOKEN") is None
+    assert committed_runtime.env_value("MATRIX_REGISTRATION_TOKEN") is None
     assert committed_runtime.env_value("CUSTOMER_ID") == "tenant-123"
     assert committed_runtime.env_value("ACCOUNT_ID") == "account-456"
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None

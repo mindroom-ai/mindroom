@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import stat
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -149,6 +150,123 @@ async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_pa
     assert payload["status"] == "error"
     assert payload["tool"] == "attachments"
     assert "not available in this context" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_get_attachment_mindroom_output_path_writes_primary_workspace(
+    tmp_path: Path,
+) -> None:
+    """Saving an attachment without a worker target should write bytes into the primary workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_bytes(b"hello")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_sample",
+    )
+    assert attachment is not None
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+        payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path="inputs/sample.txt"))
+
+    saved_path = workspace / "inputs" / "sample.txt"
+    assert saved_path.read_bytes() == b"hello"
+    assert stat.S_IMODE(saved_path.stat().st_mode) == 0o600
+    assert payload["status"] == "ok"
+    assert payload["attachment_id"] == "att_sample"
+    assert payload["attachment"]["save_path"] == str(saved_path)
+    assert payload["attachment"]["size_bytes"] == 5
+    assert "sha256" in payload["attachment"]
+    assert "local_path" not in payload["attachment"]
+    assert payload["mindroom_tool_output"]["status"] == "saved_to_file"
+    assert payload["mindroom_tool_output"]["path"] == "inputs/sample.txt"
+    assert payload["mindroom_tool_output"]["format"] == "binary"
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_get_attachment_save_to_disk_alias_writes_primary_workspace(
+    tmp_path: Path,
+) -> None:
+    """The save_to_disk alias should remain available while mindroom_output_path is preferred."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_bytes(b"hello")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_sample",
+    )
+    assert attachment is not None
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+        payload = json.loads(await tool.get_attachment("att_sample", save_to_disk="alias/sample.txt"))
+
+    assert payload["status"] == "ok"
+    assert (workspace / "alias" / "sample.txt").read_bytes() == b"hello"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe_path", ["", "  ", "..", "../escape.txt", "/abs/path", "foo\x00bar", "$HOME/x", "~/x"])
+async def test_attachments_tool_get_attachment_mindroom_output_path_rejects_unsafe_paths(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    """Attachment save paths should reuse the normal workspace output path policy."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_bytes(b"hello")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_sample",
+    )
+    assert attachment is not None
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+        payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path=unsafe_path))
+
+    assert payload["status"] == "error"
+    assert "mindroom_output_path" in payload["message"]
+    assert not any(workspace.rglob("*"))
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_get_attachment_out_of_context_save_does_not_send_bytes(
+    tmp_path: Path,
+) -> None:
+    """Out-of-context IDs should fail before reading or sending attachment bytes."""
+    workspace = tmp_path / "workspace"
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_bytes(b"hello")
+    attachment = register_local_attachment(
+        tmp_path,
+        sample_file,
+        kind="file",
+        attachment_id="att_sample",
+    )
+    assert attachment is not None
+
+    with (
+        tool_runtime_context(_tool_context(tmp_path, attachment_ids=())),
+        patch("mindroom.custom_tools.attachments.save_attachment_to_worker") as mocked_save,
+    ):
+        payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path="sample.txt"))
+
+    assert payload["status"] == "error"
+    assert "not available in this context" in payload["message"]
+    mocked_save.assert_not_called()
+    assert not workspace.exists()
 
 
 @pytest.mark.asyncio

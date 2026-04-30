@@ -52,7 +52,10 @@ class WorkerReadyProgress:
 ProgressSink = Callable[[WorkerReadyProgress], None]
 
 
-def worker_api_endpoint(handle: WorkerHandle, operation: Literal["execute", "leases", "workers", "cleanup"]) -> str:
+def worker_api_endpoint(
+    handle: WorkerHandle,
+    operation: Literal["execute", "leases", "workers", "cleanup", "save-attachment"],
+) -> str:
     """Return the API endpoint for one worker operation."""
     api_root = handle.debug_metadata.get("api_root")
     if api_root is None:

@@ -384,6 +384,7 @@ def _build_managed_tool_init_kwargs(
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
     worker_target: ResolvedWorkerTarget | None,
+    tool_output_workspace_root: Path | None,
 ) -> dict[str, object]:
     """Build declared MindRoom-managed constructor kwargs for one tool."""
     init_kwargs: dict[str, object] = {}
@@ -394,6 +395,8 @@ def _build_managed_tool_init_kwargs(
             init_kwargs[init_arg.value] = credentials_manager
         elif init_arg == ToolManagedInitArg.WORKER_TARGET:
             init_kwargs[init_arg.value] = worker_target
+        elif init_arg == ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT:
+            init_kwargs[init_arg.value] = tool_output_workspace_root
     return init_kwargs
 
 
@@ -478,6 +481,7 @@ def _build_tool_instance(
             runtime_paths=runtime_paths,
             credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
+            tool_output_workspace_root=tool_output_workspace_root,
         ),
     )
 
@@ -620,6 +624,7 @@ class ToolManagedInitArg(str, Enum):
     RUNTIME_PATHS = "runtime_paths"
     CREDENTIALS_MANAGER = "credentials_manager"
     WORKER_TARGET = "worker_target"
+    TOOL_OUTPUT_WORKSPACE_ROOT = "tool_output_workspace_root"
 
 
 @dataclass

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
+from mindroom.tool_system.metadata import (
+    SetupType,
+    ToolCategory,
+    ToolManagedInitArg,
+    ToolStatus,
+    register_tool_with_metadata,
+)
 
 if TYPE_CHECKING:
     from mindroom.custom_tools.attachments import AttachmentTools
@@ -21,6 +27,11 @@ if TYPE_CHECKING:
     icon_color="text-teal-500",
     config_fields=[],
     dependencies=[],
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
+    ),
     function_names=("get_attachment", "list_attachments", "register_attachment"),
 )
 def attachments_tools() -> type[AttachmentTools]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,15 +21,19 @@ from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
 from mindroom.matrix.client_delivery import send_file_message
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, write_bytes_to_output_path
 from mindroom.tool_system.runtime_context import (
     append_tool_runtime_attachment_id,
     attachment_id_available_in_tool_runtime_context,
     get_tool_runtime_context,
     list_tool_runtime_attachment_ids,
 )
+from mindroom.tool_system.sandbox_proxy import inline_attachment_byte_limit, save_attachment_to_worker
 
 if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,17 @@ def _resolve_context_attachment_path(
     attachment_id: str,
 ) -> tuple[Path | None, str | None]:
     """Resolve a context attachment ID to a local file path."""
+    attachment, error = _resolve_context_attachment_record(context, attachment_id)
+    if error is not None or attachment is None:
+        return None, error
+    return attachment.local_path, None
+
+
+def _resolve_context_attachment_record(
+    context: ToolRuntimeContext,
+    attachment_id: str,
+) -> tuple[AttachmentRecord | None, str | None]:
+    """Resolve a context attachment ID to a readable attachment record."""
     if context.storage_path is None:
         return None, "Attachment storage path is unavailable in this runtime path."
     if not attachment_id_available_in_tool_runtime_context(context, attachment_id):
@@ -95,7 +111,30 @@ def _resolve_context_attachment_path(
         return None, f"Attachment metadata not found: {attachment_id}"
     if not attachment.local_path.is_file():
         return None, f"Attachment file is missing on disk: {attachment_id}"
-    return attachment.local_path, None
+    return attachment, None
+
+
+def _attachment_bytes_for_save(
+    context: ToolRuntimeContext,
+    attachment: AttachmentRecord,
+) -> tuple[bytes | None, str | None]:
+    """Read attachment bytes after enforcing the inline save cap."""
+    byte_limit = inline_attachment_byte_limit(context.runtime_paths)
+    try:
+        size_bytes = attachment.local_path.stat().st_size
+    except OSError:
+        return None, f"Attachment file is missing on disk: {attachment.attachment_id}"
+    if size_bytes > byte_limit:
+        return (
+            None,
+            f"Attachment {attachment.attachment_id} exceeds inline save-to-disk size limit "
+            f"({size_bytes} bytes > {byte_limit} bytes).",
+        )
+    try:
+        payload = attachment.local_path.read_bytes()
+    except OSError:
+        return None, f"Attachment file is missing on disk: {attachment.attachment_id}"
+    return payload, None
 
 
 def _resolve_attachment_ids(
@@ -307,7 +346,16 @@ def _resolve_send_target(
 class AttachmentTools(Toolkit):
     """Toolkit for reading and sending context-scoped attachments."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        runtime_paths: RuntimePaths | None = None,
+        worker_target: ResolvedWorkerTarget | None = None,
+        tool_output_workspace_root: Path | None = None,
+    ) -> None:
+        self._runtime_paths = runtime_paths
+        self._worker_target = worker_target
+        self._tool_output_workspace_root = tool_output_workspace_root
         super().__init__(
             name="attachments",
             tools=[
@@ -337,8 +385,13 @@ class AttachmentTools(Toolkit):
             missing_attachment_ids=missing_attachment_ids,
         )
 
-    async def get_attachment(self, attachment_id: str) -> str:
-        """Return one context attachment record, including local file path."""
+    async def get_attachment(  # noqa: PLR0911
+        self,
+        attachment_id: str,
+        mindroom_output_path: str | None = None,
+        save_to_disk: str | None = None,
+    ) -> str:
+        """Return one context attachment record, or save its bytes to a workspace path."""
         context = get_tool_runtime_context()
         if context is None:
             return _attachment_tool_payload(
@@ -349,6 +402,12 @@ class AttachmentTools(Toolkit):
             return _attachment_tool_payload("error", message="attachment_id must be a non-empty string.")
 
         requested_attachment_id = attachment_id.strip()
+        output_path, output_path_error = self._resolve_output_path_argument(
+            mindroom_output_path=mindroom_output_path,
+            save_to_disk=save_to_disk,
+        )
+        if output_path_error is not None:
+            return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=output_path_error)
         requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             requested_attachment_id,
@@ -367,11 +426,126 @@ class AttachmentTools(Toolkit):
                 attachment_id=requested_attachment_id,
                 message=f"Attachment not found in context: {requested_attachment_id}",
             )
+        if output_path is not None:
+            return self._save_attachment_to_output_path(
+                context,
+                requested_attachment_id=requested_attachment_ids[0],
+                output_path=output_path,
+            )
 
         return _attachment_tool_payload(
             "ok",
             attachment_id=requested_attachment_ids[0],
             attachment=attachments[0],
+        )
+
+    def _resolve_output_path_argument(
+        self,
+        *,
+        mindroom_output_path: str | None,
+        save_to_disk: str | None,
+    ) -> tuple[str | None, str | None]:
+        """Resolve the preferred output-path argument plus the legacy alias."""
+        if mindroom_output_path is not None and save_to_disk is not None and mindroom_output_path != save_to_disk:
+            return None, "Use only one of mindroom_output_path or save_to_disk."
+        output_path = mindroom_output_path if mindroom_output_path is not None else save_to_disk
+        if output_path is None:
+            return None, None
+        if not isinstance(output_path, str):
+            return None, "mindroom_output_path must be a workspace-relative string path."
+        return output_path, None
+
+    def _save_attachment_to_output_path(  # noqa: PLR0911
+        self,
+        context: ToolRuntimeContext,
+        *,
+        requested_attachment_id: str,
+        output_path: str,
+    ) -> str:
+        attachment, resolve_error = _resolve_context_attachment_record(context, requested_attachment_id)
+        if resolve_error is not None or attachment is None:
+            return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=resolve_error)
+
+        payload_bytes, read_error = _attachment_bytes_for_save(context, attachment)
+        if read_error is not None or payload_bytes is None:
+            return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=read_error)
+
+        sha256 = hashlib.sha256(payload_bytes).hexdigest()
+        try:
+            worker_receipt = save_attachment_to_worker(
+                runtime_paths=self._runtime_paths or context.runtime_paths,
+                worker_target=self._worker_target,
+                attachment_id=requested_attachment_id,
+                mindroom_output_path=output_path,
+                payload_bytes=payload_bytes,
+                mime_type=attachment.mime_type,
+                filename=attachment.filename,
+            )
+        except RuntimeError as exc:
+            return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=str(exc))
+
+        attachment_payload = attachments_for_tool_payload([attachment])[0]
+        attachment_payload.pop("local_path", None)
+        if worker_receipt is not None:
+            attachment_payload.update(
+                {
+                    "save_path": worker_receipt.worker_path,
+                    "worker_path": worker_receipt.worker_path,
+                    "size_bytes": worker_receipt.size_bytes,
+                    "sha256": worker_receipt.sha256,
+                },
+            )
+            return _attachment_tool_payload(
+                "ok",
+                attachment_id=requested_attachment_id,
+                attachment=attachment_payload,
+                mindroom_tool_output={
+                    "status": "saved_to_file",
+                    "path": output_path,
+                    "worker_path": worker_receipt.worker_path,
+                    "bytes": worker_receipt.size_bytes,
+                    "format": "binary",
+                    "sha256": worker_receipt.sha256,
+                },
+            )
+
+        if self._tool_output_workspace_root is None:
+            return _attachment_tool_payload(
+                "error",
+                attachment_id=requested_attachment_id,
+                message="mindroom_output_path requires an agent workspace in this runtime path.",
+            )
+        policy = ToolOutputFilePolicy.from_runtime(
+            self._tool_output_workspace_root,
+            self._runtime_paths or context.runtime_paths,
+        )
+        write_result = write_bytes_to_output_path(policy, output_path, payload_bytes, file_mode=0o600)
+        if isinstance(write_result, str):
+            return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=write_result)
+
+        attachment_payload.update(
+            {
+                "save_path": str(write_result.absolute_path),
+                "size_bytes": write_result.byte_count,
+                "sha256": sha256,
+            },
+        )
+        output_receipt = write_result.receipt["mindroom_tool_output"]
+        if not isinstance(output_receipt, dict):
+            return _attachment_tool_payload(
+                "error",
+                attachment_id=requested_attachment_id,
+                message="Failed to build attachment save receipt.",
+            )
+        return _attachment_tool_payload(
+            "ok",
+            attachment_id=requested_attachment_id,
+            attachment=attachment_payload,
+            mindroom_tool_output={
+                **output_receipt,
+                "absolute_path": str(write_result.absolute_path),
+                "sha256": sha256,
+            },
         )
 
     async def register_attachment(self, file_path: str) -> str:

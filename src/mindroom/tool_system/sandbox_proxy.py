@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
+import hashlib
 import json
+import os
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
@@ -53,6 +56,18 @@ _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 _EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
+_SANDBOX_PROXY_SAVE_ATTACHMENT_PATH = "/api/sandbox-runner/save-attachment"
+_INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
+DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class WorkerAttachmentSaveReceipt:
+    """Receipt returned after writing attachment bytes into a worker workspace."""
+
+    worker_path: str
+    size_bytes: int
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -92,6 +107,22 @@ def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
         return float(raw or _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS)
     except ValueError:
         return _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS
+
+
+def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
+    """Return the hard cap for inline primary-to-worker attachment saves."""
+    raw_value = (
+        runtime_paths.env_value(_INLINE_ATTACHMENT_BYTES_ENV)
+        or os.environ.get(_INLINE_ATTACHMENT_BYTES_ENV)
+        or str(DEFAULT_INLINE_ATTACHMENT_BYTES)
+    )
+    try:
+        limit = int(raw_value)
+    except ValueError:
+        return DEFAULT_INLINE_ATTACHMENT_BYTES
+    if limit <= 0:
+        return DEFAULT_INLINE_ATTACHMENT_BYTES
+    return limit
 
 
 def _read_execution_mode(runtime_paths: RuntimePaths) -> str | None:
@@ -487,6 +518,102 @@ def _record_proxy_response_failure_for_worker(
         manager.touch_worker(worker_handle.worker_key)
         return
     manager.record_failure(worker_handle.worker_key, error)
+
+
+def save_attachment_to_worker(
+    *,
+    runtime_paths: RuntimePaths,
+    worker_target: ResolvedWorkerTarget | None,
+    attachment_id: str,
+    mindroom_output_path: str,
+    payload_bytes: bytes,
+    mime_type: str | None,
+    filename: str | None,
+) -> WorkerAttachmentSaveReceipt | None:
+    """Write attachment bytes to the selected worker, returning None when no worker endpoint exists."""
+    byte_limit = inline_attachment_byte_limit(runtime_paths)
+    byte_count = len(payload_bytes)
+    if byte_count > byte_limit:
+        msg = (
+            f"Attachment {attachment_id} exceeds inline save-to-disk size limit "
+            f"({byte_count} bytes > {byte_limit} bytes)."
+        )
+        raise RuntimeError(msg)
+
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    worker_payload, worker_handle = _build_worker_routing_payload(
+        runtime_paths=runtime_paths,
+        tool_name="attachments",
+        function_name="get_attachment",
+        worker_target=worker_target,
+        progress_sink=None,
+    )
+    if worker_handle is None and proxy_config.proxy_url is None:
+        return None
+
+    sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    request_payload: dict[str, object] = {
+        **worker_payload,
+        "attachment_id": attachment_id,
+        "mindroom_output_path": mindroom_output_path,
+        "sha256": sha256,
+        "size_bytes": byte_count,
+        "mime_type": mime_type,
+        "filename": filename,
+        "bytes_b64": base64.b64encode(payload_bytes).decode("ascii"),
+    }
+
+    try:
+        headers = _request_headers_for_handle(worker_handle, proxy_config=proxy_config)
+        save_url = (
+            worker_api_endpoint(worker_handle, "save-attachment")
+            if worker_handle is not None
+            else (f"{proxy_config.proxy_url}{_SANDBOX_PROXY_SAVE_ATTACHMENT_PATH}")
+        )
+        with httpx.Client(timeout=proxy_config.proxy_timeout_seconds) as client:
+            response = client.post(save_url, json=request_payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        _record_proxy_exception_for_worker(
+            exc,
+            worker_handle=worker_handle,
+            runtime_paths=runtime_paths,
+            proxy_config=proxy_config,
+        )
+        raise
+
+    if not isinstance(data, Mapping):
+        msg = "Sandbox save-attachment returned a non-object response."
+        raise TypeError(msg)
+    if data.get("ok") is True:
+        worker_path = data.get("worker_path")
+        response_size = data.get("size_bytes")
+        response_sha256 = data.get("sha256")
+        if (
+            not isinstance(worker_path, str)
+            or not isinstance(response_size, int)
+            or not isinstance(response_sha256, str)
+        ):
+            msg = "Sandbox save-attachment response is missing its receipt fields."
+            raise TypeError(msg)
+        if worker_handle is not None:
+            _get_worker_manager(runtime_paths, proxy_config).touch_worker(worker_handle.worker_key)
+        return WorkerAttachmentSaveReceipt(
+            worker_path=worker_path,
+            size_bytes=response_size,
+            sha256=response_sha256,
+        )
+
+    error = data.get("error") or "Sandbox attachment save failed."
+    _record_proxy_response_failure_for_worker(
+        worker_handle=worker_handle,
+        runtime_paths=runtime_paths,
+        proxy_config=proxy_config,
+        error=str(error),
+        failure_kind=data.get("failure_kind"),
+    )
+    raise RuntimeError(str(error))
 
 
 def _make_progress_sink(

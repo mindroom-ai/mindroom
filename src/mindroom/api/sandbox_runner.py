@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
+import hashlib
 import inspect
 import io
 import json
@@ -24,6 +26,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants
 from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
+from mindroom.attachments import _normalize_attachment_id
 from mindroom.config.main import Config, _normalized_config_data, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
@@ -39,7 +42,12 @@ from mindroom.tool_system.catalog import (
     sanitize_tool_init_overrides,
     validate_authored_tool_entry_overrides,
 )
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, normalize_output_path_argument
+from mindroom.tool_system.output_files import (
+    OUTPUT_PATH_ARGUMENT,
+    ToolOutputFilePolicy,
+    normalize_output_path_argument,
+    write_bytes_to_output_path,
+)
 from mindroom.tool_system.sandbox_proxy import (
     sandbox_proxy_config,
     to_json_compatible,
@@ -323,6 +331,34 @@ class SandboxRunnerExecuteResponse(BaseModel):
 
     ok: bool
     result: Any | None = None
+    error: str | None = None
+    failure_kind: Literal["tool", "worker"] | None = None
+
+
+class SandboxRunnerSaveAttachmentRequest(BaseModel):
+    """Attachment bytes forwarded from the primary runtime to a worker workspace."""
+
+    worker_key: str | None = None
+    routing_agent_name: str | None = None
+    execution_identity: dict[str, Any] = Field(default_factory=dict)
+    private_agent_names: list[str] | None = None
+    attachment_id: str
+    mindroom_output_path: str | None = None
+    save_to_disk: str | None = None
+    sha256: str
+    size_bytes: int | None = None
+    mime_type: str | None = None
+    filename: str | None = None
+    bytes_b64: str
+
+
+class SandboxRunnerSaveAttachmentResponse(BaseModel):
+    """Result from saving attachment bytes into one worker workspace."""
+
+    ok: bool
+    worker_path: str | None = None
+    size_bytes: int | None = None
+    sha256: str | None = None
     error: str | None = None
     failure_kind: Literal["tool", "worker"] | None = None
 
@@ -1038,6 +1074,105 @@ def _validate_execute_request_payload(
         raise HTTPException(status_code=400, detail="execution_env is only supported for execution tools.")
     if payload.extra_env_passthrough is not None and payload.tool_name != "shell":
         raise HTTPException(status_code=400, detail="extra_env_passthrough is only supported for shell.")
+
+
+def _save_attachment_output_path(payload: SandboxRunnerSaveAttachmentRequest) -> str | None:
+    """Resolve the preferred output path plus the save_to_disk alias."""
+    if (
+        payload.mindroom_output_path is not None
+        and payload.save_to_disk is not None
+        and payload.mindroom_output_path != payload.save_to_disk
+    ):
+        return None
+    return payload.mindroom_output_path if payload.mindroom_output_path is not None else payload.save_to_disk
+
+
+def _decode_attachment_save_bytes(payload: SandboxRunnerSaveAttachmentRequest) -> bytes | str:
+    """Decode and integrity-check one save-attachment payload."""
+    try:
+        payload_bytes = base64.b64decode(payload.bytes_b64.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error):
+        return "Attachment bytes are not valid base64."
+    if payload.size_bytes is not None and len(payload_bytes) != payload.size_bytes:
+        return "Attachment byte length does not match the request receipt."
+    actual_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    if not secrets.compare_digest(actual_sha256, payload.sha256):
+        return "Attachment SHA256 does not match the request payload."
+    return payload_bytes
+
+
+@router.post("/save-attachment", response_model=SandboxRunnerSaveAttachmentResponse)
+async def save_attachment_to_worker(  # noqa: PLR0911
+    request: Request,
+    payload: SandboxRunnerSaveAttachmentRequest,
+) -> SandboxRunnerSaveAttachmentResponse:
+    """Save one context-authorized attachment into the prepared worker workspace."""
+    runtime_paths = sandbox_runner_runtime_paths(request)
+    config = sandbox_runner_runtime_config(request)
+    runner_token = _app_runner_token(request.app)
+    payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
+
+    attachment_id = _normalize_attachment_id(payload.attachment_id)
+    if attachment_id is None:
+        return SandboxRunnerSaveAttachmentResponse(
+            ok=False,
+            error="attachment_id is invalid.",
+            failure_kind="worker",
+        )
+    output_path = _save_attachment_output_path(payload)
+    if output_path is None:
+        return SandboxRunnerSaveAttachmentResponse(
+            ok=False,
+            error="Use exactly one matching mindroom_output_path or save_to_disk value.",
+            failure_kind="worker",
+        )
+
+    try:
+        prepared_worker = sandbox_worker_prep.prepare_worker_request(
+            worker_key=payload.worker_key,
+            tool_init_overrides={},
+            runtime_paths=runtime_paths,
+            private_agent_names=(
+                frozenset(payload.private_agent_names) if payload.private_agent_names is not None else None
+            ),
+            runner_token=runner_token,
+        )
+    except sandbox_worker_prep.WorkerRequestPreparationError as exc:
+        if exc.failure_kind == "worker":
+            return SandboxRunnerSaveAttachmentResponse(ok=False, error=str(exc), failure_kind="worker")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    execution_identity = ToolExecutionIdentity(**payload.execution_identity) if payload.execution_identity else None
+    runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(prepared_worker.runtime_overrides)
+    workspace_root = _runner_tool_output_workspace_root(
+        config=config,
+        runtime_paths=runtime_paths,
+        runtime_overrides=runtime_overrides,
+        execution_identity=execution_identity,
+        routing_agent_name=payload.routing_agent_name,
+    )
+    if workspace_root is None:
+        return SandboxRunnerSaveAttachmentResponse(
+            ok=False,
+            error="Worker output workspace is unavailable.",
+            failure_kind="worker",
+        )
+
+    decoded_bytes = _decode_attachment_save_bytes(payload)
+    if isinstance(decoded_bytes, str):
+        return SandboxRunnerSaveAttachmentResponse(ok=False, error=decoded_bytes, failure_kind="worker")
+
+    policy = ToolOutputFilePolicy.from_runtime(workspace_root, runtime_paths)
+    write_result = write_bytes_to_output_path(policy, output_path, decoded_bytes, file_mode=0o600)
+    if isinstance(write_result, str):
+        return SandboxRunnerSaveAttachmentResponse(ok=False, error=write_result, failure_kind="worker")
+
+    return SandboxRunnerSaveAttachmentResponse(
+        ok=True,
+        worker_path=str(write_result.absolute_path),
+        size_bytes=write_result.byte_count,
+        sha256=payload.sha256,
+    )
 
 
 @router.post("/execute", response_model=SandboxRunnerExecuteResponse)
