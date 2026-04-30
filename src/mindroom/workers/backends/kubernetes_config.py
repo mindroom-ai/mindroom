@@ -56,6 +56,7 @@ _MEMORY_LIMIT_ENV = "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT"
 _CPU_REQUEST_ENV = "MINDROOM_KUBERNETES_WORKER_CPU_REQUEST"
 _CPU_LIMIT_ENV = "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT"
 _ENABLE_SERVICE_LINKS_ENV = "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"
+_AUTH_SECRET_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME"  # noqa: S105
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 
 
@@ -136,6 +137,7 @@ class _KubernetesWorkerBackendConfig:
     resource_requests: dict[str, str]
     resource_limits: dict[str, str]
     enable_service_links: bool
+    auth_secret_name: str | None
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _KubernetesWorkerBackendConfig:
@@ -189,6 +191,7 @@ class _KubernetesWorkerBackendConfig:
             resource_requests=resource_requests,
             resource_limits=resource_limits,
             enable_service_links=_read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
+            auth_secret_name=_read_env(env, _AUTH_SECRET_NAME_ENV) or None,
         )
 
 
@@ -230,6 +233,7 @@ def kubernetes_backend_config_signature(
         resource_requests_json,
         resource_limits_json,
         str(config.enable_service_links),
+        config.auth_secret_name or "",
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )

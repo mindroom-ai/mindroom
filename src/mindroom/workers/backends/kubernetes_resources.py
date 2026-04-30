@@ -44,7 +44,7 @@ ANNOTATION_WORKER_KEY = "mindroom.ai/worker-key"
 ANNOTATION_WORKER_STATUS = "mindroom.ai/worker-status"
 ANNOTATION_STATE_SUBPATH = "mindroom.ai/state-subpath"
 ANNOTATION_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
-ANNOTATION_RUNNER_TOKEN_HASH = "mindroom.ai/runner-token-hash"
+ANNOTATION_RUNNER_TOKEN_HASH = "mindroom.ai/runner-token-hash"  # noqa: S105
 ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
@@ -143,7 +143,7 @@ class _CoreApiProtocol(Protocol):
 
     def create_namespaced_secret(self, namespace: str, body: dict[str, object]) -> object: ...
 
-    def patch_namespaced_secret(self, name: str, namespace: str, body: dict[str, object]) -> object: ...
+    def patch_namespaced_secret(self, name: str, namespace: str, body: object, **kwargs: object) -> object: ...
 
     def delete_namespaced_secret(self, name: str, namespace: str) -> None: ...
 
@@ -336,6 +336,14 @@ class KubernetesResourceManager:
 
     def apply_auth_secret(self, *, worker_key: str, worker_id: str) -> None:
         """Create-or-patch one worker Secret containing its derived runner token."""
+        worker_token = self._worker_auth_token(worker_key)
+        if self.config.auth_secret_name is not None:
+            self._core.patch_namespaced_secret(
+                self.config.auth_secret_name,
+                self.config.namespace,
+                {"stringData": {worker_id: worker_token}},
+            )
+            return
         self._apply_object(
             read_fn=self._core.read_namespaced_secret,
             create_fn=self._core.create_namespaced_secret,
@@ -408,6 +416,14 @@ class KubernetesResourceManager:
 
     def delete_secret(self, secret_name: str) -> None:
         """Delete one worker auth Secret, ignoring 404s."""
+        if self.config.auth_secret_name is not None:
+            self._core.patch_namespaced_secret(
+                self.config.auth_secret_name,
+                self.config.namespace,
+                {"data": {secret_name: None}},
+                _content_type="application/merge-patch+json",
+            )
+            return
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
     def _recreate_deployment(
@@ -553,11 +569,7 @@ class KubernetesResourceManager:
         }
 
     def _auth_secret_manifest(self, *, worker_key: str, worker_id: str) -> dict[str, object]:
-        worker_token = worker_auth_token(self.auth_token, worker_key)
-        if worker_token is None:
-            msg = "A worker auth token is required for Kubernetes workers."
-            raise WorkerBackendError(msg)
-
+        worker_token = self._worker_auth_token(worker_key)
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
         metadata: dict[str, object] = {
             "name": worker_id,
@@ -715,15 +727,7 @@ class KubernetesResourceManager:
             {"name": _DEDICATED_WORKER_KEY_ENV, "value": worker_key},
             {"name": _DEDICATED_WORKER_ROOT_ENV, "value": dedicated_root},
             {"name": "HOME", "value": dedicated_root},
-            {
-                "name": _TOKEN_ENV_NAME,
-                "valueFrom": {
-                    "secretKeyRef": {
-                        "name": worker_id,
-                        "key": _TOKEN_ENV_NAME,
-                    },
-                },
-            },
+            self._worker_token_env(worker_key=worker_key, worker_id=worker_id),
         ]
 
         for name, value in sorted(self.config.extra_env.items()):
@@ -733,6 +737,25 @@ class KubernetesResourceManager:
         for name, value in sorted(constants.VENDOR_TELEMETRY_ENV_VALUES.items()):
             env.append({"name": name, "value": value})
         return env
+
+    def _worker_token_env(self, *, worker_key: str, worker_id: str) -> dict[str, object]:
+        self._worker_auth_token(worker_key)
+        return {
+            "name": _TOKEN_ENV_NAME,
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": self.config.auth_secret_name or worker_id,
+                    "key": worker_id if self.config.auth_secret_name is not None else _TOKEN_ENV_NAME,
+                },
+            },
+        }
+
+    def _worker_auth_token(self, worker_key: str) -> str:
+        worker_token = worker_auth_token(self.auth_token, worker_key)
+        if worker_token is None:
+            msg = "A worker auth token is required for Kubernetes workers."
+            raise WorkerBackendError(msg)
+        return worker_token
 
     def _write_startup_manifest(
         self,

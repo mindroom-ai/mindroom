@@ -106,7 +106,7 @@ Both modes store agent data in the same per-agent directory structure.
 | Helm value                     | Behavior                                                            | Best for                                                                              |
 | ------------------------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod | Simpler deployments                                                                   |
-| `workerBackend: kubernetes`    | Creates dedicated worker Deployments, Services, and per-worker auth Secrets on demand | Stronger runtime isolation per agent (filesystem isolation depends on `worker_scope`) |
+| `workerBackend: kubernetes`    | Creates dedicated worker Deployments and Services on demand         | Stronger runtime isolation per agent (filesystem isolation depends on `worker_scope`) |
 
 ### Shared Sidecar Mode
 
@@ -118,10 +118,13 @@ The runner reads and writes the same agent storage directories as the main proce
 ### Dedicated Worker Mode
 
 `workerBackend: kubernetes` enables the built-in Kubernetes worker backend.
-The primary runtime creates worker Deployments, Services, and per-worker auth Secrets on demand and routes tool calls to the matching worker.
+The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker.
 Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
+The runtime chart can store derived per-worker runner tokens in Kubernetes Secrets when workers run in an isolated namespace.
+The hosted instance chart stores derived worker tokens as per-worker keys in a pre-created tenant auth Secret.
+The hosted instance worker-manager Role can only read and patch that tenant auth Secret, so it cannot read or mutate API-key Secrets in the shared `mindroom-instances` namespace.
 
 > [!WARNING] **Filesystem isolation depends on `worker_scope`.** With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available. With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user. Use `user_agent` for per-agent filesystem isolation.
 
@@ -175,7 +178,8 @@ The chart enforces this constraint during template rendering.
 When `workerBackend: kubernetes` is enabled, the chart creates:
 
 - A worker-manager ServiceAccount for the primary runtime.
-- A Role and RoleBinding that allow managing worker Deployments, Services, and per-worker auth Secrets in the instance namespace.
+- A Role and RoleBinding that allow managing worker Deployments and Services in the instance namespace.
+- In the hosted instance chart, a pre-created tenant worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
 - NetworkPolicy rules that allow the primary runtime to reach the internal worker port while denying worker-to-worker runner ingress.
 
 ### Operations
