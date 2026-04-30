@@ -3434,6 +3434,50 @@ def _write_workspace_env_hook(workspace: Path, body: str) -> Path:
     return hook_path
 
 
+def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_path: Path) -> None:
+    """Agent-routed requests should not depend on a tool base_dir to source the hook."""
+    config_path = tmp_path / "config.yaml"
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "memory_backend": "file",
+                },
+            },
+            "router": {"model": "default"},
+        },
+        runtime_paths,
+    )
+    workspace = agent_workspace_root_path(storage_root, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(
+        workspace,
+        'export WORKSPACE_HOOK_TOKEN=from-agent-workspace\nexport PATH="$PWD/.local/bin:$PATH"\n',
+    )
+
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        routing_agent_name="general",
+    )
+    overlay, failure = sandbox_runner_module._workspace_env_overlay_for_request(
+        request,
+        prepared=None,
+        execution_env={"PATH": "/usr/bin:/bin"},
+        runtime_paths=runtime_paths,
+        config=config,
+        apply=True,
+    )
+
+    assert failure is None
+    assert overlay["WORKSPACE_HOOK_TOKEN"] == "from-agent-workspace"  # noqa: S105
+    assert overlay["PATH"].startswith(f"{workspace.resolve()}/.local/bin:")
+
+
 @REQUIRES_LINUX_LOCAL_WORKER
 def test_workspace_env_hook_overlays_shell_execution(
     runner_client: TestClient,

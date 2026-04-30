@@ -265,7 +265,7 @@ The runner sources this script with `bash` before each worker-routed `shell`, `p
 
 **Discovery:**
 
-- The hook lives at `<base_dir>/.mindroom/worker-env.sh` where `<base_dir>` is the resolved tool workspace.
+- For agent-routed worker requests, the hook lives at the resolved agent workspace root as `.mindroom/worker-env.sh`.
 - For shared and unscoped agents that means `agents/<agent>/workspace/.mindroom/worker-env.sh`.
 - For private agents that means `private_instances/<scope>/<agent>/workspace/.mindroom/worker-env.sh`.
 - For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different agent workspaces.
