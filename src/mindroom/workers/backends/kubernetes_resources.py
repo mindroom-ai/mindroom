@@ -417,12 +417,16 @@ class KubernetesResourceManager:
     def delete_secret(self, secret_name: str) -> None:
         """Delete one worker auth Secret, ignoring 404s."""
         if self.config.auth_secret_name is not None:
-            self._core.patch_namespaced_secret(
-                self.config.auth_secret_name,
-                self.config.namespace,
-                {"data": {secret_name: None}},
-                _content_type="application/merge-patch+json",
-            )
+            try:
+                self._core.patch_namespaced_secret(
+                    self.config.auth_secret_name,
+                    self.config.namespace,
+                    {"data": {secret_name: None}},
+                    _content_type="application/merge-patch+json",
+                )
+            except self._api_exception as exc:
+                if exc.status != 404:
+                    raise
             return
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
@@ -727,7 +731,7 @@ class KubernetesResourceManager:
             {"name": _DEDICATED_WORKER_KEY_ENV, "value": worker_key},
             {"name": _DEDICATED_WORKER_ROOT_ENV, "value": dedicated_root},
             {"name": "HOME", "value": dedicated_root},
-            self._worker_token_env(worker_key=worker_key, worker_id=worker_id),
+            self._worker_token_env(worker_id=worker_id),
         ]
 
         for name, value in sorted(self.config.extra_env.items()):
@@ -738,8 +742,7 @@ class KubernetesResourceManager:
             env.append({"name": name, "value": value})
         return env
 
-    def _worker_token_env(self, *, worker_key: str, worker_id: str) -> dict[str, object]:
-        self._worker_auth_token(worker_key)
+    def _worker_token_env(self, *, worker_id: str) -> dict[str, object]:
         return {
             "name": _TOKEN_ENV_NAME,
             "valueFrom": {

@@ -126,9 +126,10 @@ The primary runtime creates worker Deployments and Services on demand and routes
 Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
-The runtime chart can store derived per-worker runner tokens in Kubernetes Secrets when workers run in an isolated namespace.
+The runtime chart stores derived worker tokens as per-worker keys in one chart-created worker-auth Secret when workers run in the release namespace.
+If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
 The hosted instance chart stores derived worker tokens as per-worker keys in a pre-created tenant auth Secret.
-The hosted instance worker-manager Role can only read and patch that tenant auth Secret, so it cannot read or mutate API-key Secrets in the shared `mindroom-instances` namespace.
+The hosted instance worker-manager Role does not grant broad Secret API access in the shared `mindroom-instances` namespace.
 
 > [!WARNING]
 > **Filesystem isolation depends on `worker_scope`.**
@@ -187,6 +188,8 @@ When `workerBackend: kubernetes` is enabled, the chart creates:
 
 - A worker-manager ServiceAccount for the primary runtime.
 - A Role and RoleBinding that allow managing worker Deployments and Services in the instance namespace.
+- In the runtime chart's default same-namespace mode, a chart-created worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
+- In the runtime chart's explicit separate worker namespace mode, Secret CRUD for per-worker auth Secrets in that worker namespace.
 - In the hosted instance chart, a pre-created tenant worker-auth Secret plus narrow `get` and `patch` access to only that Secret.
 - NetworkPolicy rules that allow the primary runtime to reach the internal worker port while denying worker-to-worker runner ingress.
 

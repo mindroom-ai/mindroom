@@ -123,6 +123,12 @@ app.kubernetes.io/component: runtime
 {{- default .Release.Namespace .Values.workers.kubernetes.namespace -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.workerAuthSecretName" -}}
+{{- if and (eq .Values.workers.backend "kubernetes") (eq (include "mindroom-runtime.workerNamespace" .) .Release.Namespace) -}}
+{{- printf "%s-worker-auth" (include "mindroom-runtime.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerNetworkPolicyName" -}}
 {{- default (printf "%s-workers" (include "mindroom-runtime.fullname" .)) .Values.workers.kubernetes.networkPolicy.name -}}
 {{- end -}}

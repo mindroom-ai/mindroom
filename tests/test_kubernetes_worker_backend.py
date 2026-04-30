@@ -140,7 +140,7 @@ class _FakeApiError(Exception):
         self.status = status
 
 
-_MAPPING_KEYS = {"annotations", "labels", "matchLabels", "selector"}
+_MAPPING_KEYS = {"annotations", "labels", "matchLabels", "selector", "stringData", "data"}
 
 
 def _to_namespace(value: object, *, key: str | None = None) -> object:
@@ -613,6 +613,72 @@ def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -
         {"stringData": {handle.worker_id: handle.auth_token}},
     )
     assert core_api.secrets[auth_secret_name].stringData == {handle.worker_id: handle.auth_token}
+
+
+def test_kubernetes_backend_evict_removes_only_own_key_from_tenant_auth_secret(tmp_path: Path) -> None:
+    """Evicting one worker should null out only its key in the shared tenant Secret."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    auth_secret_name = "mindroom-worker-auth-demo"  # noqa: S105
+    backend, _apps_api, core_api = _backend(runtime_paths=runtime_paths, auth_secret_name=auth_secret_name)
+    other_worker_id = "mindroom-worker-other"
+    core_api.secrets[auth_secret_name].data = {other_worker_id: "preexisting"}
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=False, now=20.0)
+
+    assert core_api.deleted_secret_names == []
+    delete_patch = (
+        auth_secret_name,
+        {"data": {handle.worker_id: None}},
+    )
+    assert delete_patch in core_api.patched_secret_bodies
+    tenant_secret = core_api.secrets[auth_secret_name]
+    assert handle.worker_id not in tenant_secret.data
+    assert tenant_secret.data[other_worker_id] == "preexisting"
+
+
+def test_kubernetes_backend_startup_failure_removes_key_from_tenant_auth_secret(tmp_path: Path) -> None:
+    """Failing to apply the worker Deployment should release the tenant-Secret key."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    auth_secret_name = "mindroom-worker-auth-demo"  # noqa: S105
+    backend, _apps_api, core_api = _backend(runtime_paths=runtime_paths, auth_secret_name=auth_secret_name)
+
+    def apply_deployment_with_failure(**_kwargs: object) -> object:
+        msg = "deployment apply failed"
+        raise WorkerBackendError(msg)
+
+    backend._resources.apply_deployment = apply_deployment_with_failure  # type: ignore[method-assign]
+    worker_id = backend._worker_id(_TEST_SCOPED_WORKER_KEY_A)
+
+    with pytest.raises(WorkerBackendError):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    delete_patch = (auth_secret_name, {"data": {worker_id: None}})
+    assert delete_patch in core_api.patched_secret_bodies
+    assert worker_id not in core_api.secrets[auth_secret_name].data
+
+
+def test_kubernetes_backend_shared_auth_secret_cleanup_ignores_missing_secret(tmp_path: Path) -> None:
+    """Cleanup should stay idempotent if the shared tenant auth Secret was already removed."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    auth_secret_name = "mindroom-worker-auth-demo"  # noqa: S105
+    backend, _apps_api, core_api = _backend(runtime_paths=runtime_paths, auth_secret_name=auth_secret_name)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    core_api.secrets.pop(auth_secret_name)
+
+    evicted = backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=False, now=20.0)
+
+    assert evicted is None
+    assert (auth_secret_name, {"data": {handle.worker_id: None}}) in core_api.patched_secret_bodies
 
 
 def test_kubernetes_backend_recreates_worker_when_startup_manifest_changes(tmp_path: Path) -> None:

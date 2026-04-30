@@ -1,6 +1,7 @@
 {{- $fullname := include "mindroom-runtime.fullname" . -}}
 {{- $proxyTokenSecretName := include "mindroom-runtime.proxyTokenSecretName" . -}}
 {{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
+{{- $workerAuthSecretName := include "mindroom-runtime.workerAuthSecretName" . -}}
 {{- $eventCacheDatabaseUrlSecretName := include "mindroom-runtime.eventCacheDatabaseUrlSecretName" . -}}
 {{- $eventCacheDatabaseUrlSecretKey := include "mindroom-runtime.eventCacheDatabaseUrlSecretKey" . -}}
 apiVersion: apps/v1
@@ -126,6 +127,10 @@ spec:
             {{- else if eq .Values.workers.backend "kubernetes" }}
             - name: MINDROOM_KUBERNETES_WORKER_NAMESPACE
               value: {{ include "mindroom-runtime.workerNamespace" . | quote }}
+            {{- if $workerAuthSecretName }}
+            - name: MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME
+              value: {{ $workerAuthSecretName | quote }}
+            {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_IMAGE
               value: {{ include "mindroom-runtime.workerImage" . | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY

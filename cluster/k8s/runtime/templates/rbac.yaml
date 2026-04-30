@@ -1,4 +1,5 @@
 {{- if and (eq .Values.workers.backend "kubernetes") .Values.workers.kubernetes.rbac.create }}
+{{- $workerAuthSecretName := include "mindroom-runtime.workerAuthSecretName" . -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -23,11 +24,19 @@ rules:
       - ""
     resources:
       - secrets
+    {{- if $workerAuthSecretName }}
+    resourceNames:
+      - {{ $workerAuthSecretName }}
+    verbs:
+      - get
+      - patch
+    {{- else }}
     verbs:
       - create
       - delete
       - get
       - patch
+    {{- end }}
   - apiGroups:
       - ""
     resources:

@@ -137,8 +137,10 @@ workers:
 - The chart can create PostgreSQL for MindRoom's event cache, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
-- `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments, Services, and per-worker auth Secrets on demand.
-  The chart can create the worker-manager RBAC and a worker NetworkPolicy for the same namespace.
+- `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.
+  In the release namespace, the chart stores derived worker tokens as keys in one chart-created worker-auth Secret and grants only `get` and `patch` on that Secret.
+  When `workers.kubernetes.namespace` points at a separate worker namespace, the chart uses per-worker auth Secrets and grants Secret CRUD only in that namespace.
+  The chart can create the worker-manager RBAC and a worker NetworkPolicy.
 - If workers run in a different namespace, provide storage, service accounts, and network policy behavior that are valid for that namespace.
   Kubernetes owner references are only set by default for same-namespace workers.
   The sandbox proxy token secret is only needed by the primary runtime; dedicated worker pods receive per-worker derived runner tokens.

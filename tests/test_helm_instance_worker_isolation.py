@@ -141,11 +141,46 @@ def test_runtime_chart_disables_service_links_for_dynamic_worker_pods_by_default
     assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
 
 
-def test_runtime_chart_worker_manager_can_manage_per_worker_auth_secrets() -> None:
-    """Runtime-chart RBAC should include Secret CRUD for derived per-worker runner tokens."""
+def test_runtime_chart_worker_manager_can_only_patch_default_worker_auth_secret() -> None:
+    """Default same-namespace runtime workers should not get broad Secret permissions."""
     docs = _render_runtime_chart()
     role = _resource(docs, "Role", "mindroom-runtime-worker-manager")
 
+    secret_rules = [rule for rule in role["rules"] if "secrets" in rule.get("resources", [])]
+    assert secret_rules == [
+        {
+            "apiGroups": [""],
+            "resources": ["secrets"],
+            "resourceNames": ["mindroom-runtime-worker-auth"],
+            "verbs": ["get", "patch"],
+        },
+    ]
+
+
+def test_runtime_chart_uses_default_worker_auth_secret() -> None:
+    """The runtime chart should use one scoped auth Secret in its release namespace by default."""
+    docs = _render_runtime_chart()
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    worker_auth_secret = _resource(docs, "Secret", "mindroom-runtime-worker-auth")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+
+    assert env_values["MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME"] == "mindroom-runtime-worker-auth"  # noqa: S105
+    assert worker_auth_secret["metadata"]["namespace"] == "default"
+    assert "stringData" not in worker_auth_secret
+    assert "data" not in worker_auth_secret
+
+
+def test_runtime_chart_separate_worker_namespace_can_manage_per_worker_auth_secrets() -> None:
+    """Explicit worker namespaces may use per-worker Secrets in that namespace."""
+    docs = _render_runtime_chart_with_separate_worker_namespace()
+    role = _resource(docs, "Role", "mindroom-runtime-worker-manager")
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_names = {env["name"] for env in container["env"]}
+
+    assert "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME" not in env_names
+    assert role["metadata"]["namespace"] == "mindroom-workers"
     assert {
         "apiGroups": [""],
         "resources": ["secrets"],
