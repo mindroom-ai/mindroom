@@ -4182,6 +4182,58 @@ def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_pat
     assert overlay["PATH"].startswith(f"{workspace.resolve()}/.local/bin:")
 
 
+def test_workspace_home_contract_filters_worker_names_for_routed_static_sidecar(tmp_path: Path) -> None:
+    """Routed static sidecar hooks cannot redirect worker-owned runtime env names."""
+    config_path = tmp_path / "config.yaml"
+    _write_general_agent_config(config_path)
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    workspace = agent_workspace_root_path(storage_root, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(
+        workspace,
+        (
+            "export WORKSPACE_TOOLCHAIN_PATH=/hook/bin\n"
+            "export VIRTUAL_ENV=/hook-venv\n"
+            "export XDG_CACHE_HOME=/hook-cache\n"
+            "export PIP_CACHE_DIR=/hook-pip-cache\n"
+            "export UV_CACHE_DIR=/hook-uv-cache\n"
+            "export PYTHONPYCACHEPREFIX=/hook-pycache\n"
+        ),
+    )
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        routing_agent_name="general",
+        execution_env={
+            "PATH": "/usr/bin:/bin",
+            "VIRTUAL_ENV": "/runtime-venv",
+        },
+    )
+    execution_env = dict(request.execution_env)
+
+    workspace_home, trusted_overlay, failure = sandbox_runner_module._build_request_execution_env(
+        request,
+        prepared=None,
+        execution_env=execution_env,
+        runtime_paths=runtime_paths,
+        config=config,
+    )
+
+    assert failure is None
+    assert workspace_home == workspace.resolve()
+    assert execution_env["HOME"] == str(workspace.resolve())
+    assert execution_env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
+    assert execution_env["VIRTUAL_ENV"] == "/runtime-venv"
+    assert "XDG_CACHE_HOME" not in execution_env
+    assert "PIP_CACHE_DIR" not in execution_env
+    assert "UV_CACHE_DIR" not in execution_env
+    assert "PYTHONPYCACHEPREFIX" not in execution_env
+    assert execution_env["WORKSPACE_TOOLCHAIN_PATH"] == "/hook/bin"
+    assert trusted_overlay == {"WORKSPACE_TOOLCHAIN_PATH": "/hook/bin"}
+
+
 def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

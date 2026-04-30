@@ -14,7 +14,7 @@ import pickle
 import secrets
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -77,6 +77,24 @@ logger = get_logger(__name__)
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
+_WORKSPACE_HOME_CONTRACT_ENV_NAMES = frozenset(
+    {
+        "HOME",
+        "MINDROOM_AGENT_WORKSPACE",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    },
+)
+_WORKER_RUNTIME_ENV_NAMES = frozenset(
+    {
+        "XDG_CACHE_HOME",
+        "PIP_CACHE_DIR",
+        "UV_CACHE_DIR",
+        "PYTHONPYCACHEPREFIX",
+        "VIRTUAL_ENV",
+    },
+)
 
 
 def _startup_manifest_path_from_env() -> Path:
@@ -684,14 +702,40 @@ def _worker_owned_env(prepared: sandbox_worker_prep.PreparedWorkerRequest | None
     return {}
 
 
+def _existing_worker_runtime_env(
+    execution_env: Mapping[str, str],
+    *,
+    subprocess_env: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Return existing worker-runtime env values to preserve when no worker was prepared."""
+    env: dict[str, str] = {}
+    if subprocess_env is not None:
+        env.update({name: subprocess_env[name] for name in _WORKER_RUNTIME_ENV_NAMES if name in subprocess_env})
+    env.update({name: execution_env[name] for name in _WORKER_RUNTIME_ENV_NAMES if name in execution_env})
+    return env
+
+
+def _protected_execution_env_names(
+    *,
+    workspace_home: Path | None,
+    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+) -> frozenset[str]:
+    """Return env names that workspace hooks must not override."""
+    if workspace_home is not None:
+        return _WORKSPACE_HOME_CONTRACT_ENV_NAMES | _WORKER_RUNTIME_ENV_NAMES
+    if prepared is not None:
+        return _WORKER_RUNTIME_ENV_NAMES
+    return frozenset()
+
+
 def _trusted_workspace_overlay_for_runtime_paths(
     overlay: dict[str, str],
-    protected_env: dict[str, str],
+    protected_names: Collection[str],
 ) -> dict[str, str]:
     """Return hook overlay values that may influence runtime path reconstruction."""
-    if not protected_env:
+    if not protected_names:
         return overlay
-    return {name: value for name, value in overlay.items() if name not in protected_env}
+    return {name: value for name, value in overlay.items() if name not in protected_names}
 
 
 def _apply_workspace_home_contract_for_request(
@@ -720,10 +764,15 @@ def _protected_execution_env(
     *,
     workspace_home: Path | None,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+    execution_env: Mapping[str, str],
+    subprocess_env: Mapping[str, str] | None,
 ) -> dict[str, str]:
     """Return env names owned by MindRoom for this request."""
     if workspace_home is not None:
-        return _workspace_home_contract_env(workspace=workspace_home, prepared=prepared)
+        protected_env = _workspace_home_contract_env(workspace=workspace_home, prepared=prepared)
+        if prepared is None:
+            protected_env.update(_existing_worker_runtime_env(execution_env, subprocess_env=subprocess_env))
+        return protected_env
     return _worker_owned_env(prepared)
 
 
@@ -750,6 +799,13 @@ def _build_request_execution_env(
         if apply_workspace_home_contract
         else None
     )
+    protected_names = _protected_execution_env_names(workspace_home=workspace_home, prepared=prepared)
+    protected_env = _protected_execution_env(
+        workspace_home=workspace_home,
+        prepared=prepared,
+        execution_env=execution_env,
+        subprocess_env=subprocess_env,
+    )
     overlay, overlay_failure = _workspace_env_overlay_for_request(
         request,
         prepared,
@@ -761,11 +817,10 @@ def _build_request_execution_env(
     )
     if overlay_failure is not None:
         return None, {}, overlay_failure
-    if overlay:
-        execution_env.update(overlay)
-    protected_env = _protected_execution_env(workspace_home=workspace_home, prepared=prepared)
+    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, protected_names)
+    if trusted_overlay:
+        execution_env.update(trusted_overlay)
     execution_env.update(protected_env)
-    trusted_overlay = _trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
     return workspace_home, trusted_overlay, None
 
 
