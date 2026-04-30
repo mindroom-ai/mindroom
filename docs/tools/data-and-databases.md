@@ -4,12 +4,12 @@ icon: lucide/wrench
 
 # Data & Databases
 
-Use these tools to query SQL and graph databases, analyze tabular files, work with Google datasets and spreadsheets, and fetch financial or business data.
+Use these tools to query SQL and graph databases, analyze tabular files, work with Google datasets, Drive files, and spreadsheets, and fetch financial or business data.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `data-and-databases` group.
-Use these tools when you need database access, dataframe-style analysis, spreadsheet automation, or market and company data.
+Use these tools when you need database access, dataframe-style analysis, Google Drive file lookup, spreadsheet automation, or market and company data.
 
 ## Tools On This Page
 
@@ -21,6 +21,7 @@ Use these tools when you need database access, dataframe-style analysis, spreads
 - [`csv`] - Pre-registered CSV reading and DuckDB-backed SQL queries over CSV files.
 - [`pandas`] - In-memory dataframe creation and dataframe method execution.
 - [`google_bigquery`] - BigQuery dataset inspection and SQL queries.
+- [`google_drive`] - Google Drive file listing, metadata search, and file reading through the per-service Google Drive OAuth provider.
 - [`google_sheets`] - Google Sheets access through the per-service Google Sheets OAuth provider, with read support verified by default and create/update support when enabled.
 - [`openbb`] - Stock prices, company search, news, profiles, and price targets through OpenBB.
 - [`yfinance`] - Yahoo Finance market data, fundamentals, news, and history.
@@ -28,13 +29,13 @@ Use these tools when you need database access, dataframe-style analysis, spreads
 
 ## Common Setup Notes
 
-`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
+`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
 `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed.
 MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML.
 Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`.
 Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields.
-`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Sheets uses the generic `/api/oauth/google_sheets/*` flow.
-`google_sheets` declares `auth_provider="google_sheets"` and stores OAuth tokens separately from editable Sheets tool settings.
+`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive and Google Sheets use the generic `/api/oauth/google_drive/*` and `/api/oauth/google_sheets/*` flows.
+`google_drive` and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
 `csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
@@ -437,6 +438,49 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 - Configure `dataset`, `project`, and `location` explicitly in MindRoom, because that is the documented and validated path in the live metadata.
 - `google_bigquery` does not use a MindRoom Google OAuth provider.
 - If `credentials` is unset, the BigQuery SDK falls back to the process's default Google Cloud authentication behavior.
+
+## [`google_drive`]
+
+`google_drive` is the Google Drive toolkit for listing, searching, and reading files from the connected user's Drive account.
+
+### What It Does
+
+MindRoom exposes `list_files()`, `search_files()`, and `read_file()` through the Google Drive OAuth provider.
+`list_files()` returns recent Drive files visible to the connected account.
+`search_files()` searches Drive metadata.
+`read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
+When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to a local token flow.
+
+### Configuration
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `list_files` | `boolean` | `no` | `true` | Enable recent file listing. |
+| `search_files` | `boolean` | `no` | `true` | Enable Drive metadata search. |
+| `read_file` | `boolean` | `no` | `true` | Enable file content reads. |
+| `max_read_size` | `number` | `no` | `10485760` | Maximum non-Google-Workspace file size to read in bytes. |
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - google_drive:
+          max_read_size: 10485760
+```
+
+```python
+list_files()
+search_files("name contains 'budget'")
+read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
+```
+
+### Notes
+
+- `google_drive` uses the per-service `google_drive` OAuth provider and always runs in the primary MindRoom runtime.
+- The provider requests Drive read-only access plus OpenID email/profile scopes.
+- Configure Google OAuth through [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md).
 
 ## [`google_sheets`]
 

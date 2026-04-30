@@ -36,7 +36,7 @@ When the same tool appears in both `defaults.tools` and an agent's `tools` with 
 ## Browse By Topic
 
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/index.md) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
-- [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/index.md) - SQL, databases, spreadsheets, tabular analysis, and financial/business datasets.
+- [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/index.md) - SQL, databases, Google Drive files, spreadsheets, tabular analysis, and financial/business datasets.
 - [Web Search](https://docs.mindroom.chat/tools/web-search/index.md) - Search engines and search APIs.
 - [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/index.md) - Crawlers, extractors, browser automation, and page-reading tools.
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/index.md) - ArXiv, Wikipedia, PubMed, and Hacker News.
