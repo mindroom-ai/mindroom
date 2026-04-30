@@ -775,6 +775,7 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
             "client_secret": "old-client-secret",
             "_source": "oauth",
             "_oauth_provider": provider.id,
+            "_oauth_claims": {"sub": "subject-1", "email": "alice@example.com"},
         },
     )
 
@@ -796,6 +797,47 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
     assert "_id_token" not in stored_credentials
     assert "id_token" not in stored_credentials
     assert "client_secret" not in stored_credentials
+
+
+def test_callback_drops_old_refresh_token_when_identity_changes(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(include_refresh_token=False)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
+    manager.for_worker(owner_worker_key).save_credentials(
+        provider.credential_service,
+        {
+            "token": "old-access-token",
+            "refresh_token": "old-refresh-token",
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+            "_oauth_claims": {"sub": "subject-2", "email": "bob@example.com"},
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    stored_credentials = manager.for_worker(owner_worker_key).load_credentials(provider.credential_service)
+    assert stored_credentials is not None
+    assert stored_credentials["token"] == "test_drive-access-token"
+    assert "refresh_token" not in stored_credentials
 
 
 def test_callback_replaces_old_refresh_token_when_provider_returns_new_one(tmp_path: Path) -> None:

@@ -264,13 +264,29 @@ def _claim_str(credentials: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _same_external_identity(existing_credentials: dict[str, Any] | None, token_data: dict[str, Any]) -> bool:
+    existing_sub = _claim_str(existing_credentials or {}, "sub")
+    new_sub = _claim_str(token_data, "sub")
+    if existing_sub is not None or new_sub is not None:
+        return existing_sub == new_sub
+
+    existing_email = _claim_str(existing_credentials or {}, "email")
+    new_email = _claim_str(token_data, "email")
+    return existing_email is not None and existing_email == new_email
+
+
 def _token_data_preserving_refresh_token(
     existing_credentials: dict[str, Any] | None,
     safe_token_data: dict[str, Any],
 ) -> dict[str, Any]:
     token_data = dict(safe_token_data)
     existing_refresh_token = (existing_credentials or {}).get("refresh_token")
-    if "refresh_token" not in token_data and isinstance(existing_refresh_token, str) and existing_refresh_token:
+    if (
+        "refresh_token" not in token_data
+        and isinstance(existing_refresh_token, str)
+        and existing_refresh_token
+        and _same_external_identity(existing_credentials, token_data)
+    ):
         token_data["refresh_token"] = existing_refresh_token
     return token_data
 
