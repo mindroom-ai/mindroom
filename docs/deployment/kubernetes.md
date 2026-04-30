@@ -189,7 +189,7 @@ When `workerBackend: kubernetes` is enabled, the chart creates:
 ### Operations
 
 The authenticated dashboard API exposes `/api/workers` to list active or idle workers and `/api/workers/cleanup` to trigger cleanup manually.
-Dedicated workers are internal-only cluster Services and are authenticated with the shared `sandbox_proxy_token`.
+Dedicated workers are internal-only cluster Services and are authenticated with per-worker runner tokens derived from the primary runtime's `sandbox_proxy_token`.
 See [Sandbox Proxy Isolation](sandbox-proxy.md) for the execution model, credential leases, and non-Kubernetes deployment modes.
 
 ## Secrets Management
