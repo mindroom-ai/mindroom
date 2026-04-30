@@ -218,6 +218,7 @@ def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp
             "_source": "oauth",
             "_oauth_provider": "google_drive",
             "_oauth_claims": {"email": "alice@blocked.example", "email_verified": True},
+            "_oauth_claims_verified": True,
         },
     )
     tool = GoogleDriveTools(

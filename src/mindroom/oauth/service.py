@@ -22,6 +22,7 @@ OAUTH_CREDENTIAL_FIELDS = frozenset(
     {
         "_id_token",
         "_oauth_claims",
+        "_oauth_claims_verified",
         "_oauth_provider",
         "_source",
         "access_token",
@@ -247,6 +248,8 @@ def oauth_credentials_satisfy_identity_policy(
 
     raw_claims = credentials.get("_oauth_claims")
     if not isinstance(raw_claims, dict) or not raw_claims:
+        return False
+    if credentials.get("_oauth_claims_verified") is not True:
         return False
     claims = cast("dict[str, Any]", raw_claims)
     try:

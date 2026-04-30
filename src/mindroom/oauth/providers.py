@@ -179,8 +179,6 @@ def _default_token_parser(
     if isinstance(id_token, str) and id_token:
         token_data["_id_token"] = id_token
         claims = _decode_jwt_claims_unverified(id_token)
-        if claims:
-            token_data["_oauth_claims"] = _safe_claim_summary(claims)
 
     return OAuthTokenResult(token_data=token_data, claims=claims, claims_verified=False)
 
@@ -405,10 +403,13 @@ class OAuthProvider:
             return None
         merged_response = dict(response_data)
         existing_claims = token_data.get("_oauth_claims")
+        existing_claims_verified = token_data.get("_oauth_claims_verified")
         if "refresh_token" not in merged_response:
             merged_response["refresh_token"] = refresh_token
         if "_oauth_claims" not in merged_response and isinstance(existing_claims, Mapping):
             merged_response["_oauth_claims"] = dict(existing_claims)
+        if "_oauth_claims_verified" not in merged_response and existing_claims_verified is True:
+            merged_response["_oauth_claims_verified"] = True
         parsed = _token_result_with_core_metadata(
             self,
             (self.token_parser or _default_token_parser)(self, merged_response, client_config, runtime_paths),
@@ -471,8 +472,10 @@ class OAuthProvider:
         token_data.pop("id_token", None)
         token_data.pop("client_secret", None)
         token_data.pop("_oauth_claims", None)
-        if result.claims:
+        token_data.pop("_oauth_claims_verified", None)
+        if result.claims and result.claims_verified:
             token_data["_oauth_claims"] = _safe_claim_summary(result.claims)
+            token_data["_oauth_claims_verified"] = True
         return OAuthTokenResult(
             token_data=token_data,
             claims=dict(result.claims),

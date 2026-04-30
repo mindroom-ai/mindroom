@@ -45,7 +45,12 @@ def _google_token_parser(
         raise OAuthClaimValidationError(msg)
 
     existing_claims = token_response.get("_oauth_claims")
-    if (not isinstance(id_token, str) or not id_token) and isinstance(existing_claims, Mapping):
+    existing_claims_verified = token_response.get("_oauth_claims_verified") is True
+    if (
+        (not isinstance(id_token, str) or not id_token)
+        and isinstance(existing_claims, Mapping)
+        and existing_claims_verified
+    ):
         claims = dict(existing_claims)
     elif not isinstance(id_token, str) or not id_token:
         msg = "Google did not return a verifiable identity token"

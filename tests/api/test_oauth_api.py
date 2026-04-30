@@ -618,6 +618,31 @@ def test_safe_token_result_drops_raw_id_token() -> None:
         "email": "alice@example.com",
         "sub": "google-subject",
     }
+    assert safe_result.token_data["_oauth_claims_verified"] is True
+
+
+def test_safe_token_result_does_not_persist_unverified_claims() -> None:
+    provider = OAuthProvider(
+        id="custom_mail",
+        display_name="Custom Mail",
+        authorization_url="https://auth.example.test/custom/authorize",
+        token_url="https://auth.example.test/custom/token",
+        scopes=("mail.read",),
+        credential_service="custom_mail_oauth",
+        client_id_env="TEST_OAUTH_CLIENT_ID",
+        client_secret_env="TEST_OAUTH_CLIENT_SECRET",
+    )
+
+    safe_result = provider.token_result_with_safe_claims(
+        OAuthTokenResult(
+            token_data={"token": "access-token"},
+            claims={"email": "alice@example.com", "email_verified": True},
+            claims_verified=False,
+        ),
+    )
+
+    assert "_oauth_claims" not in safe_result.token_data
+    assert "_oauth_claims_verified" not in safe_result.token_data
 
 
 def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp_path: Path) -> None:
@@ -633,6 +658,7 @@ def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp
             "access_token": "refreshed-access",
             "expires_at": 2234.0,
             "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
+            "_oauth_claims_verified": True,
         },
         OAuthClientConfig(
             client_id="client-id",
@@ -647,6 +673,27 @@ def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp
     assert "_id_token" not in result.token_data
     assert result.claims["email"] == "alice@example.com"
     assert result.claims_verified is True
+
+
+def test_google_drive_refresh_parser_rejects_unverified_existing_claim_summary(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    provider = google_drive_oauth_provider()
+    assert provider.token_parser is not None
+
+    with pytest.raises(OAuthClaimValidationError, match="verifiable identity token"):
+        provider.token_parser(
+            provider,
+            {
+                "access_token": "refreshed-access",
+                "_oauth_claims": {"email": "alice@example.com", "email_verified": True},
+            },
+            OAuthClientConfig(
+                client_id="client-id",
+                client_secret="client-secret",
+                redirect_uri="http://localhost/callback",
+            ),
+            runtime_paths,
+        )
 
 
 def test_google_token_parser_rejects_invalid_id_token_with_claim_error(
@@ -793,6 +840,7 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
     assert scoped_credentials is not None
     assert scoped_credentials["token"] == "google_drive-access-token"
     assert scoped_credentials["_oauth_claims"]["email"] == "alice@example.com"
+    assert scoped_credentials["_oauth_claims_verified"] is True
     assert manager.for_worker(owner_worker_key).load_credentials(provider.credential_service) is None
     settings = scoped_manager.load_credentials("google_drive")
     assert settings == {
@@ -921,6 +969,7 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
             "_source": "oauth",
             "_oauth_provider": provider.id,
             "_oauth_claims": {"sub": "subject-1", "email": "alice@example.com"},
+            "_oauth_claims_verified": True,
         },
     )
 
@@ -971,6 +1020,7 @@ def test_callback_drops_old_refresh_token_when_identity_changes(tmp_path: Path) 
             "_source": "oauth",
             "_oauth_provider": provider.id,
             "_oauth_claims": {"sub": "subject-2", "email": "bob@example.com"},
+            "_oauth_claims_verified": True,
         },
     )
 
@@ -1438,6 +1488,7 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
             "scopes": list(provider.scopes),
             "_source": "oauth",
             "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
+            "_oauth_claims_verified": True,
         },
     )
     scoped_manager.save_credentials(
@@ -1724,6 +1775,39 @@ def test_status_rejects_stored_oauth_token_disallowed_by_new_identity_policy(tmp
             "_source": "oauth",
             "_oauth_provider": provider.id,
             "_oauth_claims": {"email": "alice@blocked.example", "email_verified": True},
+            "_oauth_claims_verified": True,
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["connected"] is False
+
+
+def test_status_rejects_stored_oauth_token_unverified_claim_summary(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(allowed_email_domains=("example.com",))
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).save_credentials(
+        provider.credential_service,
+        {
+            "token": "stored-token",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+            "_oauth_claims": {"email": "alice@example.com", "email_verified": True},
         },
     )
 

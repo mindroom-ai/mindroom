@@ -233,6 +233,8 @@ def _verify_pending_target_binding(
 
 
 def _claim_str(credentials: dict[str, Any], key: str) -> str | None:
+    if credentials.get("_oauth_claims_verified") is not True:
+        return None
     claims = credentials.get("_oauth_claims")
     if not isinstance(claims, dict):
         return None
