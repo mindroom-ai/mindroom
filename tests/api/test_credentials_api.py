@@ -259,17 +259,18 @@ class TestCredentialsAPI:
         assert response.status_code == 400
         assert "worker_scope=user" in response.json()["detail"]
 
-    def test_list_services_rejects_unsupported_isolating_scope(
+    def test_list_services_allows_empty_isolating_scope(
         self,
         client: TestClient,
     ) -> None:
-        """Dashboard service listing should reject unsupported worker scopes."""
+        """Dashboard service listing should support private scoped OAuth services."""
+        _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user")
         _publish_committed_runtime_config(client.app, config)
         response = client.get("/api/credentials/list?agent_name=general")
 
-        assert response.status_code == 400
-        assert "worker_scope=user" in response.json()["detail"]
+        assert response.status_code == 200
+        assert response.json() == []
 
     def test_execution_scope_override_rejects_draft_isolating_scope(
         self,
@@ -654,6 +655,40 @@ class TestCredentialsAPI:
         assert "OAuth token credentials" in token_response.json()["detail"]
         assert worker_manager.load_credentials("google_drive_oauth") is None
         assert worker_manager.load_credentials("google_drive") is None
+
+    def test_list_services_includes_private_oauth_tool_settings(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Private-scope OAuth tool settings should appear in service listings."""
+        _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("user_agent")
+        _publish_committed_runtime_config(client.app, config)
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+        scoped_manager.save_credentials(
+            "google_drive_oauth",
+            {
+                "token": "scoped-drive-access-value",
+                "refresh_token": "scoped-drive-refresh-value",
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+            },
+        )
+        scoped_manager.save_credentials(
+            "google_drive",
+            {
+                "list_files": False,
+                "max_read_size": 42,
+                "_source": "ui",
+            },
+        )
+
+        response = client.get("/api/credentials/list?agent_name=general")
+
+        assert response.status_code == 200
+        assert response.json() == ["google_drive"]
 
     def test_non_oauth_tool_settings_still_reject_private_scopes(
         self,

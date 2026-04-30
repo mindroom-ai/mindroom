@@ -548,6 +548,23 @@ def _save_credentials_for_target(service: str, credentials: dict[str, Any], targ
     )
 
 
+def _primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget) -> set[str]:
+    if target.worker_scope not in {"user", "user_agent"}:
+        return set()
+    if target.execution_identity is None or target.execution_identity.requester_id is None:
+        return set()
+    agent_name = target.agent_name if target.worker_scope == "user_agent" else None
+    scoped_manager = target.base_manager.for_primary_runtime_scope(
+        target.execution_identity.requester_id,
+        agent_name,
+    )
+    return {
+        service
+        for service in scoped_manager.list_services()
+        if service_uses_primary_runtime_scoped_credentials(service, target.worker_scope)
+    }
+
+
 def _delete_credentials_for_target(service: str, target: RequestCredentialsTarget) -> None:
     if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
         target.target_manager.delete_credentials(service)
@@ -670,10 +687,11 @@ async def list_services(
 ) -> list[str]:
     """List all services with stored credentials."""
     oauth_token_services = _oauth_token_services_for_request(request)
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, allow_private_scopes=True)
     if target.worker_scope is None:
         return [service for service in target.target_manager.list_services() if service not in oauth_token_services]
     worker_services = set(target.target_manager.list_services())
+    primary_runtime_services = _primary_runtime_scoped_services_for_target(target)
     shared_manager = target.base_manager.shared_manager()
     shared_services = set(
         list_worker_grantable_shared_services(
@@ -687,7 +705,7 @@ async def list_services(
             for service in shared_manager.list_services()
             if service_uses_local_shared_credentials(service, target.worker_scope)
         }
-    services = worker_services | shared_services
+    services = worker_services | primary_runtime_services | shared_services
     services -= set(unsupported_shared_only_integration_names(sorted(services), target.worker_scope))
     services -= oauth_token_services
     return sorted(services)
