@@ -163,6 +163,21 @@ def test_runtime_images_copy_workspace_avatars(dockerfile_path: Path) -> None:
     assert "COPY avatars /app/avatars" in dockerfile
 
 
+@pytest.mark.parametrize(
+    "dockerfile_path",
+    [
+        Path("local/instances/deploy/Dockerfile.mindroom"),
+        Path("local/instances/deploy/Dockerfile.mindroom-minimal"),
+    ],
+)
+def test_runtime_images_include_headless_cli_utilities(dockerfile_path: Path) -> None:
+    """Worker images should include baseline utilities for detached interactive CLI auth flows."""
+    dockerfile = dockerfile_path.read_text(encoding="utf-8")
+
+    for package_name in ("tmux", "nano", "procps", "jq", "unzip", "bzip2", "ripgrep"):
+        assert package_name in dockerfile
+
+
 def test_tools_requiring_config_metadata() -> None:
     """Test that tools marked REQUIRES_CONFIG have config_fields or auth_provider."""
     inconsistent = []
