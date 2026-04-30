@@ -121,3 +121,11 @@ def test_isolated_runtime_keeps_google_oauth_client_secret(
     assert isolated_runtime_paths.env_value(client_secret_env) == "client-secret"
     assert tool.creds is not None
     assert tool.creds.client_secret == "client-secret"
+    assert client_secret_env not in constants.sandbox_execution_runtime_env_values(
+        isolated_runtime_paths,
+    )
+    assert client_secret_env not in constants.sandbox_shell_execution_runtime_env_values(
+        isolated_runtime_paths,
+        extra_env_passthrough="*",
+        process_env=isolated_runtime_paths.process_env,
+    )

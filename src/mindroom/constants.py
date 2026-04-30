@@ -102,6 +102,9 @@ _RUNTIME_DATABASE_URL_SUFFIXES = ("_DATABASE_URL",)
 _OAUTH_CLIENT_CONFIG_ENV_PATTERN = re.compile(
     r"(?:MINDROOM_OAUTH_[A-Z0-9_]+|GOOGLE(?:_[A-Z0-9]+)*)_CLIENT_(?:ID|SECRET)",
 )
+_OAUTH_CLIENT_SECRET_ENV_PATTERN = re.compile(
+    r"(?:MINDROOM_OAUTH_[A-Z0-9_]+|GOOGLE(?:_[A-Z0-9]+)*)_CLIENT_SECRET",
+)
 _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
     {
         *_RUNTIME_STARTUP_EXCLUDED_NAMES,
@@ -366,6 +369,20 @@ def _is_isolated_runtime_public_env_name(name: str) -> bool:
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
 
 
+def _is_sandbox_execution_runtime_env_name(name: str) -> bool:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+        return False
+    if is_runtime_database_url_env_name(name):
+        return False
+    if _OAUTH_CLIENT_SECRET_ENV_PATTERN.fullmatch(name):
+        return False
+    if _OAUTH_CLIENT_CONFIG_ENV_PATTERN.fullmatch(name):
+        return True
+    if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _ISOLATED_RUNTIME_ENV_EXTRA_KEYS):
+        return False
+    return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
+
+
 def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
     process_env = {
@@ -592,6 +609,20 @@ def _sandbox_execution_runtime_env_layers(
     runtime_paths: RuntimePaths,
 ) -> tuple[dict[str, str], dict[str, str]]:
     env_file_values = {
+        key: value
+        for key, value in runtime_paths.env_file_values.items()
+        if _is_sandbox_execution_runtime_env_name(key)
+    }
+    process_env = {
+        key: value for key, value in runtime_paths.process_env.items() if _is_sandbox_execution_runtime_env_name(key)
+    }
+    return process_env, env_file_values
+
+
+def _isolated_runtime_env_layers(
+    runtime_paths: RuntimePaths,
+) -> tuple[dict[str, str], dict[str, str]]:
+    env_file_values = {
         key: value for key, value in runtime_paths.env_file_values.items() if _is_isolated_runtime_public_env_name(key)
     }
     process_env = {
@@ -623,6 +654,8 @@ def shell_extra_env_values(
         if key in _RUNNER_CONTROL_ENV_EXCLUDED_NAMES:
             continue
         if key.startswith("MINDROOM_SANDBOX_"):
+            continue
+        if _OAUTH_CLIENT_SECRET_ENV_PATTERN.fullmatch(key):
             continue
         if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns):
             selected_env[key] = value
@@ -660,7 +693,7 @@ def sandbox_execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping
 
 def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Return one runtime view filtered for isolated worker execution."""
-    process_env, env_file_values = _sandbox_execution_runtime_env_layers(runtime_paths)
+    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     return RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
