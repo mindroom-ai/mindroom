@@ -53,12 +53,8 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
 )
 from mindroom.workers.backends import local as local_workers_module
-<<<<<<< HEAD
 from mindroom.workers.backends.kubernetes_resources import worker_auth_token
-from mindroom.workers.models import WorkerSpec
-=======
 from mindroom.workers.models import WorkerHandle, WorkerSpec
->>>>>>> 65716d8b (Fix worker workspace home contract)
 from tests.conftest import requires_linux
 
 if TYPE_CHECKING:
@@ -4105,7 +4101,7 @@ def test_workspace_env_hook_skips_non_execution_tools_for_routed_agent(tmp_path:
         routing_agent_name="general",
     )
     execution_env = {"PATH": "/usr/bin:/bin"}
-    applied_home_env = sandbox_runner_module._apply_workspace_home_contract(
+    sandbox_runner_module._apply_workspace_home_contract(
         request,
         prepared=None,
         execution_env=execution_env,
@@ -4121,7 +4117,6 @@ def test_workspace_env_hook_skips_non_execution_tools_for_routed_agent(tmp_path:
         apply=True,
     )
 
-    assert applied_home_env == {}
     assert execution_env == {"PATH": "/usr/bin:/bin"}
     assert overlay == {}
     assert failure is None

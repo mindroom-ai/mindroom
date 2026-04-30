@@ -704,7 +704,7 @@ def _apply_workspace_home_contract(
     *,
     runtime_paths: RuntimePaths,
     config: Config,
-) -> dict[str, str]:
+) -> None:
     """Overlay MindRoom's workspace-home defaults before hook execution."""
     workspace = _request_workspace_home_root(
         request,
@@ -713,11 +713,10 @@ def _apply_workspace_home_contract(
         config=config,
     )
     if workspace is None:
-        return {}
+        return
 
     contract_env = _workspace_home_contract_env(workspace=workspace, prepared=prepared)
     execution_env.update(contract_env)
-    return contract_env
 
 
 def _workspace_env_hook_workspace_for_request(
