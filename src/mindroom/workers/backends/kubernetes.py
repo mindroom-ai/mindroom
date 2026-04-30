@@ -384,8 +384,10 @@ class KubernetesWorkerBackend:
                         progress_sink=self._emit_progress,
                     )
                 deployment_apply: resources.DeploymentApplyResult | None = None
+                auth_secret_applied = False
                 try:
                     self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
+                    auth_secret_applied = True
                     deployment_apply = self._resources.apply_deployment(
                         worker_key=worker_key,
                         worker_id=worker_id,
@@ -436,13 +438,16 @@ class KubernetesWorkerBackend:
                 except Exception as exc:
                     failure_reason = str(exc)
                     finalize_progress("failed", failure_reason)
-                    if destructive_failure_allowed and self._resources.read_deployment(worker_id) is not None:
-                        self.record_failure(
-                            worker_key,
-                            failure_reason,
-                            now=timestamp,
-                            annotations_override=annotations,
-                        )
+                    if destructive_failure_allowed:
+                        if self._resources.read_deployment(worker_id) is not None:
+                            self.record_failure(
+                                worker_key,
+                                failure_reason,
+                                now=timestamp,
+                                annotations_override=annotations,
+                            )
+                        elif auth_secret_applied:
+                            self._resources.delete_secret(worker_id)
                     if isinstance(exc, WorkerBackendError):
                         raise
                     raise WorkerBackendError(failure_reason) from exc

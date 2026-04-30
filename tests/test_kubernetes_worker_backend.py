@@ -1995,7 +1995,7 @@ def test_kubernetes_backend_apply_deployment_failure_is_normalized(tmp_path: Pat
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
     )
-    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    backend, _apps_api, core_api = _backend(runtime_paths=runtime_paths)
 
     def apply_deployment_with_failure(**_kwargs: object) -> object:
         msg = "deployment apply failed"
@@ -2012,6 +2012,7 @@ def test_kubernetes_backend_apply_deployment_failure_is_normalized(tmp_path: Pat
         )
 
     assert [event.phase for event in events] == ["failed"]
+    assert backend._worker_id(_TEST_SCOPED_WORKER_KEY_A) not in core_api.secrets
 
 
 def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:
