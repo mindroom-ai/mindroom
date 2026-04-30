@@ -3434,6 +3434,90 @@ def _write_workspace_env_hook(workspace: Path, body: str) -> Path:
     return hook_path
 
 
+def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_path: Path) -> None:
+    """Agent-routed requests should not depend on a tool base_dir to source the hook."""
+    config_path = tmp_path / "config.yaml"
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "memory_backend": "file",
+                },
+            },
+            "router": {"model": "default"},
+        },
+        runtime_paths,
+    )
+    workspace = agent_workspace_root_path(storage_root, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(
+        workspace,
+        'export WORKSPACE_HOOK_TOKEN=from-agent-workspace\nexport PATH="$PWD/.local/bin:$PATH"\n',
+    )
+
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        routing_agent_name="general",
+    )
+    overlay, failure = sandbox_runner_module._workspace_env_overlay_for_request(
+        request,
+        prepared=None,
+        execution_env={"PATH": "/usr/bin:/bin"},
+        runtime_paths=runtime_paths,
+        config=config,
+        apply=True,
+    )
+
+    assert failure is None
+    assert overlay["WORKSPACE_HOOK_TOKEN"] == "from-agent-workspace"  # noqa: S105
+    assert overlay["PATH"].startswith(f"{workspace.resolve()}/.local/bin:")
+
+
+def test_workspace_env_hook_skips_non_execution_tools_for_routed_agent(tmp_path: Path) -> None:
+    """Routed non-execution tools should not be blocked by a shell env hook."""
+    config_path = tmp_path / "config.yaml"
+    storage_root = tmp_path / "storage"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root, process_env={})
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "memory_backend": "file",
+                },
+            },
+            "router": {"model": "default"},
+        },
+        runtime_paths,
+    )
+    workspace = agent_workspace_root_path(storage_root, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_workspace_env_hook(workspace, 'echo "bad hook" >&2\nexit 5\n')
+
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="file",
+        function_name="read_file",
+        routing_agent_name="general",
+    )
+    overlay, failure = sandbox_runner_module._workspace_env_overlay_for_request(
+        request,
+        prepared=None,
+        execution_env={"PATH": "/usr/bin:/bin"},
+        runtime_paths=runtime_paths,
+        config=config,
+        apply=True,
+    )
+
+    assert overlay == {}
+    assert failure is None
+
+
 @REQUIRES_LINUX_LOCAL_WORKER
 def test_workspace_env_hook_overlays_shell_execution(
     runner_client: TestClient,
@@ -3674,12 +3758,12 @@ def test_workspace_env_hook_overlays_worker_routed_python_default_mode(
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
-def test_workspace_env_hook_overlays_worker_routed_coding_default_mode(
+def test_workspace_env_hook_skips_worker_routed_coding_default_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker-keyed coding sees hook PATH changes in the default inprocess runner mode."""
+    """Worker-keyed coding should not source the workspace env hook."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     workspace = storage_root / "agents" / "general" / "workspace"
@@ -3710,16 +3794,16 @@ def test_workspace_env_hook_overlays_worker_routed_coding_default_mode(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    assert payload["result"] == "Error running grep: hook-rg"
+    assert payload["result"] == "note.txt:1:needle"
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
-def test_workspace_env_hook_failure_blocks_worker_routed_file_default_mode(
+def test_workspace_env_hook_failure_does_not_block_worker_routed_file_default_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker-keyed file requests source the hook before running."""
+    """Worker-keyed file requests should not source the workspace env hook."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     workspace = storage_root / "agents" / "general" / "workspace"
@@ -3744,10 +3828,9 @@ def test_workspace_env_hook_failure_blocks_worker_routed_file_default_mode(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["ok"] is False, payload
-    assert payload["failure_kind"] == "tool"
-    assert "exited with code 6" in payload["error"]
-    assert not (workspace / "note.txt").exists()
+    assert payload["ok"] is True, payload
+    assert payload["result"] == "note.txt"
+    assert (workspace / "note.txt").read_text(encoding="utf-8") == "should not be written"
 
 
 @REQUIRES_LINUX_LOCAL_WORKER

@@ -261,11 +261,11 @@ To make that work, shell background-handle requests stay owned by the long-lived
 
 Agents can drop a shell script at `<workspace>/.mindroom/worker-env.sh` to set custom env for worker-routed tool calls without changing config or redeploying.
 
-The runner sources this script with `bash` before each worker-routed `shell`, `python`, `coding`, or `file` request, then merges its exported env into the tool's execution environment.
+The runner sources this script with `bash` before each worker-routed `shell` or `python` request, then merges its exported env into the tool's execution environment.
 
 **Discovery:**
 
-- The hook lives at `<base_dir>/.mindroom/worker-env.sh` where `<base_dir>` is the resolved tool workspace.
+- For agent-routed worker requests, the hook lives at the resolved agent workspace root as `.mindroom/worker-env.sh`.
 - For shared and unscoped agents that means `agents/<agent>/workspace/.mindroom/worker-env.sh`.
 - For private agents that means `private_instances/<scope>/<agent>/workspace/.mindroom/worker-env.sh`.
 - For `worker_scope: user`, the hook follows the per-request workspace, so one shared user runtime can pick up different hooks as it works in different agent workspaces.

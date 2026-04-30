@@ -65,6 +65,7 @@ logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
+_WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
 
 
 def _startup_manifest_path_from_env() -> Path:
@@ -542,6 +543,8 @@ def _workspace_env_overlay_for_request(
     request: SandboxRunnerExecuteRequest,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     execution_env: dict[str, str],
+    runtime_paths: RuntimePaths,
+    config: Config,
     *,
     subprocess_env: dict[str, str] | None = None,
     apply: bool,
@@ -561,18 +564,15 @@ def _workspace_env_overlay_for_request(
     )
     if not apply:
         return {}, None
+    if request.tool_name not in _WORKSPACE_ENV_HOOK_TOOL_NAMES:
+        return {}, None
 
-    workspace: Path | None = None
-    if prepared is not None:
-        base_dir = prepared.runtime_overrides.get("base_dir")
-        if isinstance(base_dir, Path):
-            workspace = base_dir
-        elif isinstance(base_dir, str):
-            workspace = Path(base_dir)
-    elif isinstance(raw_base_dir := request.tool_init_overrides.get("base_dir"), str):
-        candidate = Path(raw_base_dir).expanduser()
-        if candidate.is_absolute():
-            workspace = candidate
+    workspace = _workspace_env_hook_workspace_for_request(
+        request,
+        prepared,
+        runtime_paths=runtime_paths,
+        config=config,
+    )
     if workspace is None:
         return {}, None
 
@@ -595,6 +595,48 @@ def _workspace_env_overlay_for_request(
             ),
         )
     return overlay, None
+
+
+def _workspace_env_hook_workspace_for_request(
+    request: SandboxRunnerExecuteRequest,
+    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+    *,
+    runtime_paths: RuntimePaths,
+    config: Config,
+) -> Path | None:
+    """Return the workspace root whose `.mindroom/worker-env.sh` applies.
+
+    Agent-routed requests use the canonical resolved agent workspace instead of
+    treating a tool's `base_dir` override as the source of truth.  Static
+    sidecar calls without an agent routing context still use an explicit
+    absolute `base_dir` when provided.
+    """
+    if request.routing_agent_name is not None:
+        execution_identity: ToolExecutionIdentity | None = None
+        if request.execution_identity:
+            execution_identity = ToolExecutionIdentity(**request.execution_identity)
+        agent_runtime = resolve_agent_runtime(
+            request.routing_agent_name,
+            config,
+            _runtime_paths_for_runner_agent_paths(runtime_paths),
+            execution_identity=execution_identity,
+            create=True,
+        )
+        return agent_runtime.tool_base_dir
+
+    if prepared is not None:
+        base_dir = prepared.runtime_overrides.get("base_dir")
+        if isinstance(base_dir, Path):
+            return base_dir
+        if isinstance(base_dir, str):
+            return Path(base_dir)
+        return None
+
+    if isinstance(raw_base_dir := request.tool_init_overrides.get("base_dir"), str):
+        candidate = Path(raw_base_dir).expanduser()
+        if candidate.is_absolute():
+            return candidate
+    return None
 
 
 def _workspace_env_overlay_base_env(
@@ -651,6 +693,8 @@ async def _execute_request_inprocess(
         request,
         prepared,
         execution_env,
+        runtime_paths,
+        config,
         apply=apply_workspace_env_hook,
     )
     if overlay_failure is not None:
@@ -794,6 +838,8 @@ def _execute_request_subprocess_sync(
         request,
         prepared,
         execution_env,
+        runtime_paths,
+        config,
         subprocess_env=subprocess_env,
         apply=apply_workspace_env_hook,
     )
