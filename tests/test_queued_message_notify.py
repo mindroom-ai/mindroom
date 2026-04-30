@@ -1642,6 +1642,16 @@ def test_notice_reinjects_at_end_across_multiple_tool_rounds() -> None:
             assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
 
 
+def test_queued_notice_uses_interrupting_language() -> None:
+    """The hidden notice should make queued user messages an explicit turn-ending interruption."""
+    assert "[SYSTEM NOTICE - NEWER USER MESSAGE WAITING]" in QUEUED_MESSAGE_NOTICE_TEXT
+    assert "Treat this as a turn boundary" in QUEUED_MESSAGE_NOTICE_TEXT
+    assert "finish the current response promptly" in QUEUED_MESSAGE_NOTICE_TEXT
+    assert "Do not answer the newer message in this turn" in QUEUED_MESSAGE_NOTICE_TEXT
+    assert "Avoid new tool calls unless they are needed" in QUEUED_MESSAGE_NOTICE_TEXT
+    assert "the next turn may continue, adjust, or redirect this same work" in QUEUED_MESSAGE_NOTICE_TEXT
+
+
 def test_stop_after_tool_call_strips_stale_notice_without_readding() -> None:
     """A stop-after-tool-call round should remove any stale queued notice and not append a new one."""
     model = _FakeModel()
