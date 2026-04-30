@@ -65,6 +65,7 @@ logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
+_WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
 
 
 def _startup_manifest_path_from_env() -> Path:
@@ -562,6 +563,8 @@ def _workspace_env_overlay_for_request(
         subprocess_env=subprocess_env,
     )
     if not apply:
+        return {}, None
+    if request.tool_name not in _WORKSPACE_ENV_HOOK_TOOL_NAMES:
         return {}, None
 
     workspace = _workspace_env_hook_workspace_for_request(

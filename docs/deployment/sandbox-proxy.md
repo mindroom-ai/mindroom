@@ -261,7 +261,7 @@ To make that work, shell background-handle requests stay owned by the long-lived
 
 Agents can drop a shell script at `<workspace>/.mindroom/worker-env.sh` to set custom env for worker-routed tool calls without changing config or redeploying.
 
-The runner sources this script with `bash` before each worker-routed `shell`, `python`, `coding`, or `file` request, then merges its exported env into the tool's execution environment.
+The runner sources this script with `bash` before each worker-routed `shell` or `python` request, then merges its exported env into the tool's execution environment.
 
 **Discovery:**
 
