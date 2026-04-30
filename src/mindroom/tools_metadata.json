@@ -3793,18 +3793,6 @@
           "required": false,
           "type": "boolean",
           "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": "Allow duplicating spreadsheets",
-          "label": "Enable Duplicate Operations",
-          "name": "duplicate",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
         }
       ],
       "default_execution_target": "primary",
@@ -3813,11 +3801,10 @@
         "google-auth-httplib2",
         "google-auth-oauthlib"
       ],
-      "description": "Read, create, update, and duplicate Google Sheets spreadsheets",
+      "description": "Read, create, and update Google Sheets spreadsheets",
       "display_name": "Google Sheets",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_sheets",
       "function_names": [
-        "create_duplicate_sheet",
         "create_sheet",
         "read_sheet",
         "update_sheet"
