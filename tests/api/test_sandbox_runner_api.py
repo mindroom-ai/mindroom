@@ -22,6 +22,7 @@ import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_protocol as sandbox_protocol_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
+import mindroom.constants as constants_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
@@ -2924,8 +2925,8 @@ def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
         ToolExecutionIdentity(
             channel="matrix",
             agent_name="persistent_worker_lab",
-            requester_id="@smoketest_a:chat-internal.ionq.co",
-            room_id="!persistent-workers:chat-internal.ionq.co",
+            requester_id="@smoketest_a:chat-internal.example.com",
+            room_id="!persistent-workers:chat-internal.example.com",
             thread_id="$thread",
             resolved_thread_id="$thread",
             session_id="session-1",
@@ -3734,6 +3735,32 @@ def test_workspace_home_contract_protects_owned_names_after_hook_overlay(tmp_pat
     assert effective_runtime_paths.process_env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
     assert effective_runtime_paths.process_env["XDG_CACHE_HOME"] == str(worker_paths.cache_dir)
     assert effective_runtime_paths.process_env["VIRTUAL_ENV"] == str(worker_paths.venv_dir)
+
+
+def test_workspace_home_contract_keys_match_shared_constant(tmp_path: Path) -> None:
+    """The constructed workspace contract must stay synced with the shared env-name set."""
+    worker_paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    prepared = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle(
+            worker_id="worker-1",
+            worker_key="worker-key",
+            endpoint="/api/sandbox-runner/execute",
+            auth_token=SANDBOX_TOKEN,
+            status="ready",
+            backend_name="local",
+            last_used_at=0.0,
+            created_at=0.0,
+        ),
+        paths=worker_paths,
+        runtime_overrides={"base_dir": tmp_path / "workspace"},
+    )
+
+    contract = sandbox_runner_module._workspace_home_contract_env(
+        workspace=tmp_path / "workspace",
+        prepared=prepared,
+    )
+
+    assert set(contract) == constants_module.WORKSPACE_HOME_CONTRACT_ENV_NAMES
 
 
 @pytest.mark.asyncio

@@ -241,7 +241,8 @@ To make that work, shell background-handle requests stay owned by the long-lived
 
 ## Workspace home contract
 
-For agent-routed worker requests with a resolved workspace, MindRoom sets `HOME` and `MINDROOM_AGENT_WORKSPACE` to that workspace before running shell or python tools.
+For worker-routed shell or python requests with a resolved workspace, MindRoom sets `HOME` and `MINDROOM_AGENT_WORKSPACE` to that workspace before running the tool.
+This includes agent-routed calls, worker-keyed calls whose prepared runtime has a `base_dir`, and unkeyed static-sidecar calls with an explicit absolute `base_dir` override.
 It also sets `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` under that workspace.
 Workspace identity variables and worker cache variables are owned by MindRoom for the request.
 `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` stay under the workspace.

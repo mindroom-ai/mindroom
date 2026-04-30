@@ -19,7 +19,11 @@ from typing import Annotated, cast
 from agno.tools.toolkit import Toolkit
 from pydantic import BeforeValidator
 
-from mindroom.constants import RuntimePaths, shell_execution_runtime_env_values
+from mindroom.constants import (
+    WORKSPACE_HOME_CONTRACT_ENV_NAMES,
+    RuntimePaths,
+    shell_execution_runtime_env_values,
+)
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import (
     ConfigField,
@@ -62,20 +66,6 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
         "http_proxy",
         "https_proxy",
         "no_proxy",
-    },
-)
-_WORKSPACE_HOME_CONTRACT_ENV_KEYS = frozenset(
-    {
-        "HOME",
-        "MINDROOM_AGENT_WORKSPACE",
-        "PIP_CACHE_DIR",
-        "PYTHONPYCACHEPREFIX",
-        "UV_CACHE_DIR",
-        "VIRTUAL_ENV",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
     },
 )
 _STALE_RECORD_SECONDS = 600  # 10 minutes
@@ -154,7 +144,7 @@ def _shell_subprocess_env(
     env.update(runtime_env)
     if base_process_env is not None:
         env.update(
-            {key: value for key, value in base_process_env.items() if key in _WORKSPACE_HOME_CONTRACT_ENV_KEYS},
+            {key: value for key, value in base_process_env.items() if key in WORKSPACE_HOME_CONTRACT_ENV_NAMES},
         )
 
     path_value = _shell_subprocess_path(

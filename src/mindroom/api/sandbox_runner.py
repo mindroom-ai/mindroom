@@ -77,24 +77,6 @@ logger = get_logger(__name__)
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
-_WORKSPACE_HOME_CONTRACT_ENV_NAMES = frozenset(
-    {
-        "HOME",
-        "MINDROOM_AGENT_WORKSPACE",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-    },
-)
-_WORKER_RUNTIME_ENV_NAMES = frozenset(
-    {
-        "XDG_CACHE_HOME",
-        "PIP_CACHE_DIR",
-        "UV_CACHE_DIR",
-        "PYTHONPYCACHEPREFIX",
-        "VIRTUAL_ENV",
-    },
-)
 
 
 def _startup_manifest_path_from_env() -> Path:
@@ -710,8 +692,10 @@ def _existing_worker_runtime_env(
     """Return existing worker-runtime env values to preserve when no worker was prepared."""
     env: dict[str, str] = {}
     if subprocess_env is not None:
-        env.update({name: subprocess_env[name] for name in _WORKER_RUNTIME_ENV_NAMES if name in subprocess_env})
-    env.update({name: execution_env[name] for name in _WORKER_RUNTIME_ENV_NAMES if name in execution_env})
+        env.update(
+            {name: subprocess_env[name] for name in constants.WORKER_RUNTIME_ENV_NAMES if name in subprocess_env},
+        )
+    env.update({name: execution_env[name] for name in constants.WORKER_RUNTIME_ENV_NAMES if name in execution_env})
     return env
 
 
@@ -722,9 +706,9 @@ def _protected_execution_env_names(
 ) -> frozenset[str]:
     """Return env names that workspace hooks must not override."""
     if workspace_home is not None:
-        return _WORKSPACE_HOME_CONTRACT_ENV_NAMES | _WORKER_RUNTIME_ENV_NAMES
+        return constants.WORKSPACE_HOME_CONTRACT_ENV_NAMES
     if prepared is not None:
-        return _WORKER_RUNTIME_ENV_NAMES
+        return constants.WORKER_RUNTIME_ENV_NAMES
     return frozenset()
 
 
