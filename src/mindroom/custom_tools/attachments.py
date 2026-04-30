@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Mapping
@@ -459,7 +460,7 @@ class AttachmentTools(Toolkit):
                 message=f"Attachment not found in context: {requested_attachment_id}",
             )
         if output_path is not None:
-            return self._save_attachment_to_output_path(
+            return await self._save_attachment_to_output_path(
                 context,
                 requested_attachment_id=requested_attachment_ids[0],
                 output_path=output_path,
@@ -509,13 +510,13 @@ class AttachmentTools(Toolkit):
         local_policy: ToolOutputFilePolicy | None,
     ) -> str | None:
         """Validate the requested output path before reading attachment bytes."""
-        if local_policy is not None:
-            return validate_output_path(local_policy, output_path)
         if use_worker:
             return validate_output_path_syntax(output_path)
+        if local_policy is not None:
+            return validate_output_path(local_policy, output_path)
         return "mindroom_output_path requires an agent workspace in this runtime path."
 
-    def _save_attachment_to_output_path(  # noqa: C901, PLR0911, PLR0912
+    async def _save_attachment_to_output_path(  # noqa: C901, PLR0911, PLR0912
         self,
         context: ToolRuntimeContext,
         *,
@@ -562,7 +563,8 @@ class AttachmentTools(Toolkit):
 
         if use_worker:
             try:
-                worker_receipt = save_attachment_to_worker(
+                worker_receipt = await asyncio.to_thread(
+                    save_attachment_to_worker,
                     runtime_paths=runtime_paths,
                     worker_target=self._worker_target,
                     worker_tools_override=self._worker_tools_override,
