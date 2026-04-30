@@ -58,13 +58,8 @@ class GmailTools(ScopedOAuthClientMixin, AgnoGmailTools):
 
         # Store original auth method for fallback
         self._set_original_auth(AgnoGmailTools._auth)
+        self._wrap_oauth_function_entrypoints()
 
     def _should_fallback_to_original_auth(self) -> bool:
         """Prefer the upstream auth path when a service account is configured."""
         return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
-
-    def get_latest_emails(self, count: int) -> str:
-        """Get latest emails with structured OAuth connection failures."""
-        if result := self._ensure_structured_auth():
-            return result
-        return super().get_latest_emails(count=count)

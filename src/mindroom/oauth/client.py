@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import UTC, datetime
+from functools import wraps
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
@@ -55,11 +56,32 @@ class ScopedOAuthClientMixin:
         self._worker_target = worker_target
         self._provided_creds = provided_creds is not None
         self._oauth_logger = logger
+        self.functions = {}
         return provided_creds or self._load_stored_credentials()
 
     def _set_original_auth(self, auth_method: _AuthDescriptor) -> None:
         """Store the bound parent auth callable for fallback."""
         self._original_auth = auth_method.__get__(self, type(self))
+
+    def _wrap_oauth_function_entrypoints(self) -> None:
+        """Return structured OAuth prompts from every registered toolkit function."""
+        for function in self.functions.values():
+            entrypoint = function.entrypoint
+            if entrypoint is None:
+                continue
+
+            @wraps(entrypoint)
+            def oauth_entrypoint(
+                *args: object,
+                _entrypoint: Callable[..., object] = entrypoint,
+                **kwargs: object,
+            ) -> object:
+                if result := self._ensure_structured_auth():
+                    return result
+                return _entrypoint(*args, **kwargs)
+
+            function.entrypoint = oauth_entrypoint
+            setattr(self, function.name, oauth_entrypoint)
 
     def _load_token_data(self) -> dict[str, Any] | None:
         """Load OAuth credentials for the current execution scope."""

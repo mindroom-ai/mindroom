@@ -76,6 +76,12 @@ def test_google_calendar_public_method_returns_structured_connect_instruction(tm
     assert result["provider"] == "google_calendar"
     assert "/api/oauth/google_calendar/authorize?connect_token=" in result["connect_url"]
 
+    result = json.loads(tool.list_events(limit=1))
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "google_calendar"
+    assert "/api/oauth/google_calendar/authorize?connect_token=" in result["connect_url"]
+
 
 def test_google_calendar_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
     credentials_manager = CredentialsManager(tmp_path / "credentials")

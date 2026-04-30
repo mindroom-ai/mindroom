@@ -142,6 +142,12 @@ class TestGmailTools:
         assert result["provider"] == "google_gmail"
         assert "/api/oauth/google_gmail/authorize" in result["connect_url"]
 
+        result = json.loads(gmail_tools.search_emails("invoice", 1))
+
+        assert result["oauth_connection_required"] is True
+        assert result["provider"] == "google_gmail"
+        assert "/api/oauth/google_gmail/authorize" in result["connect_url"]
+
     @patch("mindroom.custom_tools.gmail.logger")
     @patch("google.oauth2.credentials.Credentials")
     def test_initialization_with_invalid_credentials(

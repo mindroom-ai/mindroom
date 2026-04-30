@@ -53,6 +53,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, AgnoGoogleDriveTools):
         )
         super().__init__(creds=creds, **kwargs)
         self._set_original_auth(AgnoGoogleDriveTools._auth)
+        self._wrap_oauth_function_entrypoints()
 
     def _coerce_max_read_size(self, value: object) -> int | float | None:
         if value is None:
@@ -84,21 +85,3 @@ class GoogleDriveTools(ScopedOAuthClientMixin, AgnoGoogleDriveTools):
     def _should_fallback_to_original_auth(self) -> bool:
         """Prefer the upstream auth path when a service account is configured."""
         return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
-
-    def list_files(self, query: str | None = None, page_size: int = 10, page_token: str | None = None) -> str:
-        """List Drive files with structured OAuth connection failures."""
-        if result := self._ensure_structured_auth():
-            return result
-        return super().list_files(query=query, page_size=page_size, page_token=page_token)
-
-    def search_files(self, query: str | None = None, max_results: int = 10, page_token: str | None = None) -> str:
-        """Search Drive files with structured OAuth connection failures."""
-        if result := self._ensure_structured_auth():
-            return result
-        return super().search_files(query=query, max_results=max_results, page_token=page_token)
-
-    def read_file(self, file_id: str) -> str:
-        """Read one Drive file with structured OAuth connection failures."""
-        if result := self._ensure_structured_auth():
-            return result
-        return super().read_file(file_id=file_id)

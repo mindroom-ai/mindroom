@@ -69,13 +69,8 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, AgnoGoogleCalendarTools):
 
         # Store original auth method for fallback
         self._set_original_auth(AgnoGoogleCalendarTools._auth)
+        self._wrap_oauth_function_entrypoints()
 
     def _should_fallback_to_original_auth(self) -> bool:
         """Prefer the upstream auth path when a service account is configured."""
         return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
-
-    def list_calendars(self) -> str:
-        """List calendars with structured OAuth connection failures."""
-        if result := self._ensure_structured_auth():
-            return result
-        return super().list_calendars()
