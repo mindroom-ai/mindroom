@@ -17,7 +17,7 @@ Use these tools when you need Google Calendar access, Cal.com booking APIs, or M
 
 `google_calendar` is a per-service Google OAuth integration.
 It uses the `google_calendar` OAuth provider instead of an API key form.
-It can use scoped OAuth credentials for isolated worker scopes. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
+It always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
 `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
 Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
 MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.

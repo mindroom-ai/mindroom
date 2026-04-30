@@ -483,7 +483,7 @@ read_sheet(
 
 ### Notes
 
-- `google_sheets` uses the per-service `google_sheets` OAuth provider and can use scoped OAuth credentials for isolated worker scopes.
+- `google_sheets` uses the per-service `google_sheets` OAuth provider and always runs in the primary MindRoom runtime.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md).
 - The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
 

@@ -68,19 +68,16 @@ services:
     user: "1000:1000"
     volumes:
       - sandbox-workspace:/app/workspace
-      - ./mindroom_data/oauth_state:/app/shared/oauth_state:rw
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
-      - MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared
 
 volumes:
   sandbox-workspace:
 ```
 
-Mount only `mindroom_data/oauth_state` into the runner.
 Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
 
 > [!IMPORTANT] The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume: `bash docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace` Alternatively, omit the `user:` directive to run as root (less secure).
@@ -88,12 +85,10 @@ Do not mount the full `mindroom_data` tree into the runner because it contains c
 Key differences from the primary MindRoom runtime:
 
 - **No `env_file`** — runner has no API keys, no Matrix credentials
-- **Shared OAuth state only** — the runner can write scoped OAuth connect tokens without seeing the rest of `mindroom_data`
 - **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
-- **`MINDROOM_SANDBOX_SHARED_STORAGE_ROOT`** — pointed at the narrow shared root that contains only the `oauth_state` directory
 
-> [!WARNING] **Filesystem isolation depends on the worker backend.** Static shared-runner deployments should mount only the narrow `oauth_state` directory into the runner. Local in-process execution still shares the primary process filesystem. Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes). The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files. Use `user_agent` for per-agent filesystem isolation.
+> [!WARNING] **Filesystem isolation depends on the worker backend.** Static shared-runner deployments should not mount the primary MindRoom storage tree into the runner. Local in-process execution still shares the primary process filesystem. Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes). The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files. Use `user_agent` for per-agent filesystem isolation.
 
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
@@ -153,12 +148,10 @@ Run MindRoom directly on the host while isolating code-execution tools in a Dock
 docker run -d \
   --name mindroom-sandbox-runner \
   -p 8766:8766 \
-  -v "$PWD/mindroom_data/oauth_state:/app/shared/oauth_state:rw" \
   -e MINDROOM_WORKER_BACKEND=static_runner \
   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
-  -e MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared \
   ghcr.io/mindroom-ai/mindroom:latest \
   /app/run-sandbox-runner.sh
 
@@ -183,7 +176,7 @@ MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 
 This gives you the convenience of running MindRoom natively while keeping code-execution tools inside a container boundary.
 
-> [!TIP] If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them: `bash docker run -d \ --name mindroom-sandbox-runner \ -p 8766:8766 \ -v ./config.yaml:/app/config.yaml:ro \ -v "$PWD/mindroom_data/oauth_state:/app/shared/oauth_state:rw" \ -e MINDROOM_CONFIG_PATH=/app/config.yaml \ -e MINDROOM_SANDBOX_RUNNER_MODE=true \ -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \ -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \ -e MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared \ ghcr.io/mindroom-ai/mindroom:latest \ /app/run-sandbox-runner.sh`
+> [!TIP] If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them: `bash docker run -d \ --name mindroom-sandbox-runner \ -p 8766:8766 \ -v ./config.yaml:/app/config.yaml:ro \ -e MINDROOM_CONFIG_PATH=/app/config.yaml \ -e MINDROOM_SANDBOX_RUNNER_MODE=true \ -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \ -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \ ghcr.io/mindroom-ai/mindroom:latest \ /app/run-sandbox-runner.sh`
 
 ## Environment variable reference
 
@@ -206,16 +199,15 @@ The Helm chart sets the Kubernetes backend environment variables automatically. 
 
 ### Sandbox runner
 
-| Variable                                             | Description                                                                                                                        | Default                                                       |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `MINDROOM_SANDBOX_RUNNER_PORT`                       | Port the sandbox runner listens on                                                                                                 | `8766`                                                        |
-| `MINDROOM_SANDBOX_RUNNER_MODE`                       | Set to `true` to indicate runner mode                                                                                              | `false`                                                       |
-| `MINDROOM_SANDBOX_PROXY_TOKEN`                       | Runner bearer token. Static runners use the shared primary token; Kubernetes dedicated workers receive a per-worker derived token. | *(required)*                                                  |
-| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE`             | `inprocess` or `subprocess`                                                                                                        | `inprocess`                                                   |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout                                                                                                                 | `120`                                                         |
-| `MINDROOM_STORAGE_PATH`                              | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`)                               | `mindroom_data` next to config *(will fail if not writable)*  |
-| `MINDROOM_SANDBOX_SHARED_STORAGE_ROOT`               | Shared root containing only the `oauth_state` mount used for scoped OAuth connect tokens (e.g., `/app/shared`)                     | *(required for static runners that issue scoped OAuth links)* |
-| `MINDROOM_CONFIG_PATH`                               | Path to config.yaml (for plugin tool registration)                                                                                 | *(optional)*                                                  |
+| Variable                                             | Description                                                                                                                        | Default                                                      |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `MINDROOM_SANDBOX_RUNNER_PORT`                       | Port the sandbox runner listens on                                                                                                 | `8766`                                                       |
+| `MINDROOM_SANDBOX_RUNNER_MODE`                       | Set to `true` to indicate runner mode                                                                                              | `false`                                                      |
+| `MINDROOM_SANDBOX_PROXY_TOKEN`                       | Runner bearer token. Static runners use the shared primary token; Kubernetes dedicated workers receive a per-worker derived token. | *(required)*                                                 |
+| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE`             | `inprocess` or `subprocess`                                                                                                        | `inprocess`                                                  |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout                                                                                                                 | `120`                                                        |
+| `MINDROOM_STORAGE_PATH`                              | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`)                               | `mindroom_data` next to config *(will fail if not writable)* |
+| `MINDROOM_CONFIG_PATH`                               | Path to config.yaml (for plugin tool registration)                                                                                 | *(optional)*                                                 |
 
 ## Execution modes
 
@@ -376,7 +368,7 @@ With `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamic
 
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
-Some credential-backed tools always stay local regardless of `worker_tools`: `homeassistant`.
+Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
 Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 
 You can set `worker_scope` per agent or in `defaults`:
@@ -413,7 +405,7 @@ If `worker_scope` is unset, proxied tools still run in the sandbox, but each cal
 **Important notes:**
 
 - `worker_scope` does **not** change where agent data is stored. All scopes read and write the same agent storage directory (`agents/<name>/`).
-- The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`. OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception. For those providers, the dashboard can connect scoped `user` and `user_agent` credentials that land in the same worker credential target used at runtime. Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
+- The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`. OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception. For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime. Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files. Use `user_agent` for per-agent isolation.
 
 ## Without configured worker routing

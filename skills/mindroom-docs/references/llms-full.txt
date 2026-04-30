@@ -1524,7 +1524,7 @@ For per-workspace env that an agent can edit (PATH, package indexes, npm cache l
 
 Agents without `private` store all their data in one canonical directory: `agents/<name>/` (context files, workspace, memory, sessions, learning). Changing `worker_scope` changes how tool runtimes are isolated. It does **not** change where that non-private agent's data lives. All runtimes for the same non-private agent read and write the same storage directory. If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access. Agents that use `private` are different. They materialize one canonical state root per requester-scoped private instance under `private_instances/<scope-key>/<agent>/`. Workers mount those canonical private-instance roots. They do not own them.
 
-The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`. OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception. For those providers, the dashboard can connect scoped `user` and `user_agent` credentials that land in the same worker credential target used at runtime. Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
+The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`. OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception. For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime. Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md).
 
@@ -3273,7 +3273,7 @@ read_sheet(
 
 ### Notes
 
-- `google_sheets` uses the per-service `google_sheets` OAuth provider and can use scoped OAuth credentials for isolated worker scopes.
+- `google_sheets` uses the per-service `google_sheets` OAuth provider and always runs in the primary MindRoom runtime.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
 - The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
 
@@ -5756,7 +5756,7 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 
 - Connect Gmail through the `google_gmail` OAuth provider rather than storing a Gmail-specific API key.
 - The Gmail provider requests Gmail read, modify, and compose scopes.
-- `gmail` can use scoped OAuth credentials for isolated worker scopes.
+- `gmail` always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets.
 - Agno's Gmail constructor accepts per-method selector kwargs (`get_latest_emails`, `get_unread_emails`, `search_emails`, etc.), and the MindRoom wrapper forwards them via `**kwargs`.
 - Use those selector kwargs to disable specific methods you do not want the agent calling.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
@@ -6663,7 +6663,7 @@ This page documents the built-in tools in the `calendar-and-scheduling` group. U
 
 ## Common Setup Notes
 
-`google_calendar` is a per-service Google OAuth integration. It uses the `google_calendar` OAuth provider instead of an API key form. It can use scoped OAuth credentials for isolated worker scopes. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction. `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys. Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread. MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
+`google_calendar` is a per-service Google OAuth integration. It uses the `google_calendar` OAuth provider instead of an API key form. It always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction. `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys. Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread. MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
 
 ## \[`google_calendar`\]
 
@@ -8353,7 +8353,7 @@ def register_oauth_providers(settings, runtime_paths):
     ]
 ```
 
-OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`. Dashboard flows normally call `connect` and use the returned provider authorization URL. Conversation flows should show the browser-openable `authorize` URL, because that URL first authenticates the MindRoom user and then redirects to the external provider. Conversation-issued links include an opaque connect token so the callback stores credentials in the same worker target the tool was using. The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester. The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes. If the tool also has editable dashboard settings, declare `tool_config_service` and store those settings separately through the normal credentials API. For example, an Acme Drive provider can store OAuth tokens in `acme_drive_oauth` while the `acme_drive` tool settings document contains only options such as file-size limits or capability toggles. Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
+OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`. Dashboard flows normally call `connect` and use the returned provider authorization URL. Conversation flows should show the browser-openable `authorize` URL, because that URL first authenticates the MindRoom user and then redirects to the external provider. Conversation-issued links include an opaque connect token so the callback can verify the requester before storing scoped credentials. The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester. The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes. If the tool also has editable dashboard settings, declare `tool_config_service` and store those settings separately through the normal credentials API. For example, an Acme Drive provider can store OAuth tokens in `acme_drive_oauth` while the `acme_drive` tool settings document contains only options such as file-size limits or capability toggles. Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
 
 OAuth-backed tools should set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"` in `@register_tool_with_metadata`. When credentials are missing, return a concise instruction containing a browser-openable URL built with `mindroom.oauth.build_oauth_connect_instruction(provider, runtime_paths, worker_target=...)`. The user can complete OAuth and retry the same tool request.
 
@@ -8693,11 +8693,11 @@ plugins:
 
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account. Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client environment variables, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
-The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`. Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider. Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery. Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the exact worker credential target that produced the missing-credentials tool result. That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials. Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal.
+The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`. Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider. Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery. Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result. That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials. Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal.
 
 Plugins may declare an `oauth_module` in `mindroom.plugin.json`. That module exposes `register_oauth_providers(settings, runtime_paths)` and returns `OAuthProvider` objects. This keeps FastAPI routing and state handling in core while still letting plugin authors define provider IDs, scopes, token exchange details, optional claim validators, and tool metadata.
 
-OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`. For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime. If MindRoom cannot resolve the authenticated dashboard user to the requester carried by a conversation-issued link, the link fails closed and no credential is saved. Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent. OAuth token documents and editable tool setting documents should be separate services. The OAuth callback writes only the provider's `credential_service`, while dashboard configuration reads and writes the provider's `tool_config_service` when one is declared. Generic credentials endpoints do not return OAuth token fields and reject direct writes to OAuth token services.
+OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`. For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime. If MindRoom cannot resolve the authenticated dashboard user to the requester carried by a conversation-issued link, the link fails closed and no credential is saved. Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent. Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need Google OAuth client config or user refresh tokens. OAuth token documents and editable tool setting documents should be separate services. The OAuth callback writes only the provider's `credential_service`, while dashboard configuration reads and writes the provider's `tool_config_service` when one is declared. Generic credentials endpoints do not return OAuth token fields and reject direct writes to OAuth token services.
 
 Identity restrictions are provider settings, not MindRoom policy. Providers can enforce allowed email domains, allowed hosted-domain claims, and custom claim validators. If a configured restriction cannot be checked from verified provider claims, the callback fails closed and no credential is saved.
 
@@ -11860,31 +11860,27 @@ services:
     user: "1000:1000"
     volumes:
       - sandbox-workspace:/app/workspace
-      - ./mindroom_data/oauth_state:/app/shared/oauth_state:rw
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_CONFIG_PATH=/app/config.yaml
       - MINDROOM_STORAGE_PATH=/app/workspace/.mindroom
-      - MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared
 
 volumes:
   sandbox-workspace:
 ```
 
-Mount only `mindroom_data/oauth_state` into the runner. Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
+Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
 
 > [!IMPORTANT] The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume: `bash docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace` Alternatively, omit the `user:` directive to run as root (less secure).
 
 Key differences from the primary MindRoom runtime:
 
 - **No `env_file`** — runner has no API keys, no Matrix credentials
-- **Shared OAuth state only** — the runner can write scoped OAuth connect tokens without seeing the rest of `mindroom_data`
 - **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
-- **`MINDROOM_SANDBOX_SHARED_STORAGE_ROOT`** — pointed at the narrow shared root that contains only the `oauth_state` directory
 
-> [!WARNING] **Filesystem isolation depends on the worker backend.** Static shared-runner deployments should mount only the narrow `oauth_state` directory into the runner. Local in-process execution still shares the primary process filesystem. Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes). The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files. Use `user_agent` for per-agent filesystem isolation.
+> [!WARNING] **Filesystem isolation depends on the worker backend.** Static shared-runner deployments should not mount the primary MindRoom storage tree into the runner. Local in-process execution still shares the primary process filesystem. Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes). The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files. Use `user_agent` for per-agent filesystem isolation.
 
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
@@ -11935,12 +11931,10 @@ Run MindRoom directly on the host while isolating code-execution tools in a Dock
 docker run -d \
   --name mindroom-sandbox-runner \
   -p 8766:8766 \
-  -v "$PWD/mindroom_data/oauth_state:/app/shared/oauth_state:rw" \
   -e MINDROOM_WORKER_BACKEND=static_runner \
   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
-  -e MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared \
   ghcr.io/mindroom-ai/mindroom:latest \
   /app/run-sandbox-runner.sh
 
@@ -11965,7 +11959,7 @@ MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 
 This gives you the convenience of running MindRoom natively while keeping code-execution tools inside a container boundary.
 
-> [!TIP] If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them: `bash docker run -d \ --name mindroom-sandbox-runner \ -p 8766:8766 \ -v ./config.yaml:/app/config.yaml:ro \ -v "$PWD/mindroom_data/oauth_state:/app/shared/oauth_state:rw" \ -e MINDROOM_CONFIG_PATH=/app/config.yaml \ -e MINDROOM_SANDBOX_RUNNER_MODE=true \ -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \ -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \ -e MINDROOM_SANDBOX_SHARED_STORAGE_ROOT=/app/shared \ ghcr.io/mindroom-ai/mindroom:latest \ /app/run-sandbox-runner.sh`
+> [!TIP] If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them: `bash docker run -d \ --name mindroom-sandbox-runner \ -p 8766:8766 \ -v ./config.yaml:/app/config.yaml:ro \ -e MINDROOM_CONFIG_PATH=/app/config.yaml \ -e MINDROOM_SANDBOX_RUNNER_MODE=true \ -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \ -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \ ghcr.io/mindroom-ai/mindroom:latest \ /app/run-sandbox-runner.sh`
 
 ## Environment variable reference
 
@@ -11987,16 +11981,15 @@ When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker e
 
 ### Sandbox runner
 
-| Variable                                             | Description                                                                                                                        | Default                                                       |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `MINDROOM_SANDBOX_RUNNER_PORT`                       | Port the sandbox runner listens on                                                                                                 | `8766`                                                        |
-| `MINDROOM_SANDBOX_RUNNER_MODE`                       | Set to `true` to indicate runner mode                                                                                              | `false`                                                       |
-| `MINDROOM_SANDBOX_PROXY_TOKEN`                       | Runner bearer token. Static runners use the shared primary token; Kubernetes dedicated workers receive a per-worker derived token. | *(required)*                                                  |
-| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE`             | `inprocess` or `subprocess`                                                                                                        | `inprocess`                                                   |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout                                                                                                                 | `120`                                                         |
-| `MINDROOM_STORAGE_PATH`                              | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`)                               | `mindroom_data` next to config *(will fail if not writable)*  |
-| `MINDROOM_SANDBOX_SHARED_STORAGE_ROOT`               | Shared root containing only the `oauth_state` mount used for scoped OAuth connect tokens (e.g., `/app/shared`)                     | *(required for static runners that issue scoped OAuth links)* |
-| `MINDROOM_CONFIG_PATH`                               | Path to config.yaml (for plugin tool registration)                                                                                 | *(optional)*                                                  |
+| Variable                                             | Description                                                                                                                        | Default                                                      |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `MINDROOM_SANDBOX_RUNNER_PORT`                       | Port the sandbox runner listens on                                                                                                 | `8766`                                                       |
+| `MINDROOM_SANDBOX_RUNNER_MODE`                       | Set to `true` to indicate runner mode                                                                                              | `false`                                                      |
+| `MINDROOM_SANDBOX_PROXY_TOKEN`                       | Runner bearer token. Static runners use the shared primary token; Kubernetes dedicated workers receive a per-worker derived token. | *(required)*                                                 |
+| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE`             | `inprocess` or `subprocess`                                                                                                        | `inprocess`                                                  |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout                                                                                                                 | `120`                                                        |
+| `MINDROOM_STORAGE_PATH`                              | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`)                               | `mindroom_data` next to config *(will fail if not writable)* |
+| `MINDROOM_CONFIG_PATH`                               | Path to config.yaml (for plugin tool registration)                                                                                 | *(optional)*                                                 |
 
 ## Execution modes
 
@@ -12125,7 +12118,7 @@ Agent-level `worker_tools` overrides `defaults.worker_tools`. With `MINDROOM_WOR
 
 ## Worker Scope
 
-`worker_tools` controls which tools run in the sandbox proxy. `worker_scope` controls how those sandbox runtimes are shared between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `homeassistant`. Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
+`worker_tools` controls which tools run in the sandbox proxy. `worker_scope` controls how those sandbox runtimes are shared between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`. Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 
 You can set `worker_scope` per agent or in `defaults`:
 
@@ -12161,7 +12154,7 @@ If `worker_scope` is unset, proxied tools still run in the sandbox, but each cal
 **Important notes:**
 
 - `worker_scope` does **not** change where agent data is stored. All scopes read and write the same agent storage directory (`agents/<name>/`).
-- The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`. OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception. For those providers, the dashboard can connect scoped `user` and `user_agent` credentials that land in the same worker credential target used at runtime. Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
+- The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`. OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception. For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime. Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files. Use `user_agent` for per-agent isolation.
 
 ## Without configured worker routing
