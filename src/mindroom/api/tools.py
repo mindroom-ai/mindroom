@@ -100,8 +100,7 @@ def _check_standard_tool_configured(tool: dict[str, Any], credentials: dict[str,
 
 
 def _check_auth_provider_configured(
-    tool_name: str,
-    auth_provider: str,
+    tool: dict[str, Any],
     credentials: dict[str, Any] | None,
     *,
     provider: OAuthProvider | None,
@@ -110,9 +109,8 @@ def _check_auth_provider_configured(
     """Return whether a delegated auth provider has usable credentials for one tool."""
     if not credentials:
         return False
-    del tool_name, auth_provider
     if provider is None:
-        return False
+        return _check_standard_tool_configured(tool, credentials)
     return oauth_credentials_usable(provider, runtime_paths, credentials)
 
 
@@ -286,8 +284,7 @@ def _update_tools_statuses(
             credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
             provider_creds = get_credentials(credential_service)
             if _check_auth_provider_configured(
-                tool_name,
-                auth_provider,
+                tool,
                 provider_creds,
                 provider=context.oauth_providers.get(auth_provider),
                 runtime_paths=context.runtime_paths,

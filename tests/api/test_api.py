@@ -20,10 +20,11 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
 from mindroom.api import auth, config_lifecycle, frontend, main, runtime_reload
+from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
@@ -1349,6 +1350,41 @@ def test_get_tools(test_client: TestClient) -> None:
 
     calculator_tool = next(tool for tool in data["tools"] if tool["name"] == "calculator")
     assert calculator_tool["agent_override_fields"] is None
+
+
+def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path) -> None:
+    """Custom non-OAuth auth providers should still use ordinary credential presence."""
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "my_shared_creds",
+        {"api_key": "secret"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    context = tools_api._ResolvedToolAvailabilityContext(
+        execution_scope=None,
+        dashboard_configuration_supported=True,
+        status_authoritative=True,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        allowed_shared_services=None,
+        auth_provider_credential_services={},
+        oauth_providers={},
+        runtime_paths=runtime_paths,
+    )
+    tools = [
+        {
+            "name": "custom_shared_api",
+            "status": "requires_config",
+            "auth_provider": "my_shared_creds",
+            "config_fields": [{"name": "api_key", "required": True}],
+        },
+    ]
+
+    tools_api._update_tools_statuses(tools, context)
+
+    assert tools[0]["status"] == "available"
 
 
 def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_worker_scope(
