@@ -9,7 +9,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
+from google.oauth2 import credentials as google_credentials
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider
@@ -172,7 +172,7 @@ class ScopedOAuthClientMixin:
         scopes = token_data.get("scopes")
         if not isinstance(scopes, list):
             scopes = list(self._oauth_provider.scopes)
-        return Credentials(
+        return google_credentials.Credentials(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
             token_uri=token_data.get("token_uri") or self._oauth_provider.token_url,
