@@ -501,14 +501,14 @@ class TestCredentialsManager:
         """Worker credential mirroring should enforce the allowlist and drop stale skipped services."""
         manager = CredentialsManager(temp_credentials_dir)
         manager.save_credentials("openai", {"api_key": "openai-key", "_source": "env"})
-        manager.save_credentials("google_oauth_client", {"client_id": "client-id", "_source": "env"})
+        manager.save_credentials("google", {"api_key": "google-key", "_source": "env"})
         manager.save_credentials("github_private", {"token": "github-pat", "_source": "env"})
         worker_shared_manager = manager.for_worker("worker-a").shared_manager()
         worker_shared_manager.save_credentials("github_private", {"token": "stale-pat", "_source": "env"})
 
         sync_shared_credentials_to_worker(
             "worker-a",
-            allowed_services=frozenset({"openai", "google_oauth_client"}),
+            allowed_services=frozenset({"openai", "google"}),
             credentials_manager=manager,
         )
 
@@ -516,11 +516,47 @@ class TestCredentialsManager:
             "api_key": "openai-key",
             "_source": "env",
         }
-        assert worker_shared_manager.load_credentials("google_oauth_client") == {
-            "client_id": "client-id",
+        assert worker_shared_manager.load_credentials("google") == {
+            "api_key": "google-key",
             "_source": "env",
         }
         assert worker_shared_manager.load_credentials("github_private") is None
+
+    def test_load_primary_runtime_scoped_credentials_do_not_inherit_shared_credentials(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Private primary-runtime OAuth scopes must not fall back to shared deployment tokens."""
+        shared_path = tmp_path / "shared"
+        manager = CredentialsManager(
+            base_path=tmp_path / "credentials",
+            shared_base_path=shared_path,
+        )
+        manager.shared_manager().save_credentials(
+            "google_drive_oauth",
+            {
+                "token": "shared-token",
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+            },
+        )
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        )
+
+        loaded_credentials = load_scoped_credentials(
+            "google_drive_oauth",
+            credentials_manager=manager,
+            worker_target=_worker_target("user_agent", "general", execution_identity),
+        )
+
+        assert loaded_credentials is None
 
     def test_sync_shared_credentials_to_worker_disallows_ui_credentials_for_non_grantable_services(
         self,

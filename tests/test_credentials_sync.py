@@ -93,6 +93,25 @@ class TestCredentialsSync:
         assert ollama_creds["host"] == "http://test:11434"
         assert ollama_creds["_source"] == "env"
 
+    def test_sync_env_does_not_seed_legacy_google_oauth_client(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Generic Google OAuth client config should stay in runtime env, not shared credentials."""
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "client-id")
+        monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "client-secret")
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("google_oauth_client") is None
+
     def test_sync_env_does_not_overwrite_ui_credentials(
         self,
         temp_credentials_dir: Path,

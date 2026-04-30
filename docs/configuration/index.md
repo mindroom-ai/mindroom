@@ -275,7 +275,8 @@ Set it to `null` to omit the field and use provider defaults.
 MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
-Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, `google_oauth_client`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
+Use built-in names like `openai`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
+Google OAuth client config and Google OAuth token services stay in the primary runtime and cannot be mirrored into isolated workers.
 If a tool runs inside an isolated worker, only the services listed here are available to that worker.
 Leave this unset to keep isolated workers deny-by-default for shared credentials.
 This setting never injects provider env vars such as `OPENAI_API_KEY`.

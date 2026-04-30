@@ -519,7 +519,9 @@ def load_scoped_credentials(
     resolved_allowed_shared_services = allowed_shared_services
     if resolved_allowed_shared_services is None and manager.shared_base_path == manager.base_path:
         resolved_allowed_shared_services = frozenset()
-    if (
+    if primary_runtime_manager is not None:
+        shared_credentials = None
+    elif (
         uses_local_shared_credentials
         or manager.shared_base_path != manager.base_path
         or resolved_allowed_shared_services is None

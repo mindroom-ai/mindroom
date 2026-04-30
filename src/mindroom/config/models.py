@@ -354,7 +354,7 @@ class DefaultsConfig(BaseModel):
         description=(
             "Credential service names to make available inside isolated workers "
             "(None = deny by default). Use built-in names such as openai, anthropic, "
-            "google, google_oauth_client, github_private, and ollama, or custom shared "
+            "google, github_private, and ollama, or custom shared "
             "credential service names saved through the dashboard or API. This setting "
             "only affects tools that actually run inside isolated workers. It never "
             "injects provider env vars such as OPENAI_API_KEY. For worker-routed tools, "
@@ -362,8 +362,8 @@ class DefaultsConfig(BaseModel):
             "workers, and it does "
             "not affect local shared-only integrations such as homeassistant because "
             "those stay in the main runtime. "
-            "google_vertex_adc is intentionally unsupported in isolated workers and must "
-            "stay in the main runtime."
+            "Google OAuth client config, Google OAuth tokens, and google_vertex_adc are "
+            "intentionally unsupported in isolated workers and must stay in the main runtime."
         ),
     )
     allow_self_config: bool = Field(

@@ -458,6 +458,7 @@ Below is a representative selection:
 - **scheduler** - Schedule recurring tasks (included by default)
 - **gmail** - Gmail integration (requires Google OAuth)
 - **google_calendar** - Calendar management (requires Google OAuth)
+- **google_drive** - Google Drive file search and reading (requires Google OAuth)
 - **google_sheets** - Spreadsheet operations (requires Google OAuth)
 - **homeassistant** - Home Assistant device control (requires OAuth or long-lived access token)
 - **spotify** - Spotify playback and library (requires OAuth)
@@ -569,7 +570,7 @@ Some tools need additional setup:
 - **email** - Configure SMTP server details
 
 ### Tools requiring OAuth:
-- **gmail**, **google_calendar**, **google_sheets** - Google OAuth (configure via dashboard)
+- **gmail**, **google_calendar**, **google_drive**, **google_sheets** - Google OAuth (configure via dashboard)
 - **homeassistant** - Home Assistant OAuth or long-lived access token
 - **spotify** - Spotify OAuth (configure via dashboard)
 

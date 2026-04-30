@@ -62,6 +62,7 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, AgnoGoogleCalendarTools):
             worker_target=worker_target,
             provided_creds=provided_creds,
             logger=logger,
+            defer_to_original_auth=self._has_initial_service_account_auth(kwargs),
         )
 
         super().__init__(**kwargs)

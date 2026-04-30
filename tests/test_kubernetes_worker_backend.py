@@ -1225,7 +1225,7 @@ def test_kubernetes_backend_uses_configured_worker_grantable_credentials(
 ) -> None:
     """Dedicated workers should use the config-authored worker credential allowlist."""
     backend, _apps_api, _core_api = _backend(
-        worker_grantable_credentials=frozenset({"openai", "google_oauth_client"}),
+        worker_grantable_credentials=frozenset({"openai", "github_private"}),
     )
     sync_calls: list[frozenset[str] | None] = []
 
@@ -1245,7 +1245,7 @@ def test_kubernetes_backend_uses_configured_worker_grantable_credentials(
 
     backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
 
-    assert sync_calls == [frozenset({"openai", "google_oauth_client"})]
+    assert sync_calls == [frozenset({"openai", "github_private"})]
 
 
 def test_kubernetes_backend_uses_empty_worker_grantable_credentials_allowlist(

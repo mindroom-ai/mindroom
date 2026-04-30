@@ -49,8 +49,13 @@ class ScopedOAuthClientMixin:
     _creds_manager: CredentialsManager
     _worker_target: ResolvedWorkerTarget | None
     _provided_creds: bool
+    _defer_to_original_auth: bool
     _original_auth: Callable[[], None]
     creds: Any | None
+
+    def _has_initial_service_account_auth(self, kwargs: dict[str, Any]) -> bool:
+        """Return whether construction should skip stored OAuth credentials."""
+        return bool(kwargs.get("service_account_path") or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
 
     def _initialize_oauth_client(
         self,
@@ -58,13 +63,19 @@ class ScopedOAuthClientMixin:
         worker_target: ResolvedWorkerTarget | None,
         provided_creds: Any,  # noqa: ANN401
         logger: BoundLogger,
+        defer_to_original_auth: bool = False,
     ) -> Any:  # noqa: ANN401
         """Prepare OAuth state and initial credentials for the tool."""
         self._worker_target = worker_target
         self._provided_creds = provided_creds is not None
         self._oauth_logger = logger
         self.functions = {}
-        return provided_creds or self._load_stored_credentials()
+        self._defer_to_original_auth = defer_to_original_auth
+        if provided_creds is not None:
+            return provided_creds
+        if defer_to_original_auth:
+            return None
+        return self._load_stored_credentials()
 
     def _set_original_auth(self, auth_method: _AuthDescriptor) -> None:
         """Store the bound parent auth callable for fallback."""
@@ -137,6 +148,9 @@ class ScopedOAuthClientMixin:
         )
 
     def _ensure_structured_auth(self) -> str | None:
+        if self._should_fallback_to_original_auth():
+            self._auth()
+            return None
         if self.creds and self.creds.valid:
             return None
         try:
@@ -211,7 +225,7 @@ class ScopedOAuthClientMixin:
 
     def _should_fallback_to_original_auth(self) -> bool:
         """Return whether the tool should defer to its original auth flow."""
-        return False
+        return getattr(self, "_defer_to_original_auth", False)
 
     def _should_skip_auth(self) -> bool:
         """Return whether tool auth can return early with already-valid provided credentials."""
@@ -219,12 +233,12 @@ class ScopedOAuthClientMixin:
 
     def _auth(self) -> None:
         """Authenticate using MindRoom-scoped OAuth credentials."""
-        if self._should_skip_auth():
-            return
-
         if self._should_fallback_to_original_auth():
             self.creds = None
             self._original_auth()
+            return
+
+        if self._should_skip_auth():
             return
 
         token_data = self._load_token_data()
