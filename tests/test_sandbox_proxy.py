@@ -1066,6 +1066,48 @@ def test_save_attachment_to_worker_request_failure_does_not_record_worker_failur
     assert manager.touched == [worker_target.worker_key]
 
 
+@pytest.mark.parametrize("worker_tools_override", [["coding"], ["shell", "coding"]])
+def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_tools_override: list[str],
+) -> None:
+    """Attachment saves should follow coding/shell worker workspaces, not only file workspaces."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+
+    assert (
+        sandbox_proxy_module.attachment_save_uses_worker(
+            runtime_paths=runtime_paths,
+            worker_target=worker_target,
+            worker_tools_override=worker_tools_override,
+        )
+        is True
+    )
+    assert (
+        sandbox_proxy_module.attachment_save_uses_worker(
+            runtime_paths=runtime_paths,
+            worker_target=worker_target,
+            worker_tools_override=["calculator"],
+        )
+        is False
+    )
+
+
 def test_save_attachment_to_static_runner_posts_without_worker_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

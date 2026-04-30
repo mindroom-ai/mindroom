@@ -60,6 +60,7 @@ _EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 _SANDBOX_PROXY_SAVE_ATTACHMENT_PATH = "/api/sandbox-runner/save-attachment"
 _INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
 DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
+_ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS = frozenset({"file", "coding", "shell"})
 
 
 @dataclass(frozen=True)
@@ -527,12 +528,16 @@ def attachment_save_uses_worker(
     worker_target: ResolvedWorkerTarget | None,
     worker_tools_override: list[str] | None = None,
 ) -> bool:
-    """Return whether attachment saves should land where workspace file tools run."""
-    return _sandbox_proxy_enabled_for_tool(
-        "file",
-        runtime_paths=runtime_paths,
-        worker_tools_override=worker_tools_override,
-        worker_scope=worker_target.worker_scope if worker_target is not None else None,
+    """Return whether attachment saves should land where workspace consumers run."""
+    worker_scope = worker_target.worker_scope if worker_target is not None else None
+    return any(
+        _sandbox_proxy_enabled_for_tool(
+            tool_name,
+            runtime_paths=runtime_paths,
+            worker_tools_override=worker_tools_override,
+            worker_scope=worker_scope,
+        )
+        for tool_name in _ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS
     )
 
 

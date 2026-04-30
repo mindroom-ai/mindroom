@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import json
 import stat
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -327,15 +328,23 @@ async def test_attachments_tool_get_attachment_execution_mode_off_saves_primary_
 
 
 @pytest.mark.asyncio
-async def test_attachments_tool_get_attachment_selective_proxy_requires_file_tool_for_worker_save(
+@pytest.mark.parametrize(
+    "worker_tools_override",
+    [
+        ["coding"],
+        ["shell", "coding"],
+    ],
+)
+async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_workspace_consumers(
     tmp_path: Path,
+    worker_tools_override: list[str],
 ) -> None:
-    """Selective sandbox routing should only save attachments remotely when file tools also run remotely."""
+    """Attachment saves should land on the worker when coding or shell can consume the workspace."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     runtime_env = {
         "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-        "MINDROOM_SANDBOX_PROXY_TOOLS": "shell",
+        "MINDROOM_SANDBOX_PROXY_TOOLS": ",".join(worker_tools_override),
         "MINDROOM_WORKER_BACKEND": "kubernetes",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
     }
@@ -347,7 +356,7 @@ async def test_attachments_tool_get_attachment_selective_proxy_requires_file_too
     tool = AttachmentTools(
         runtime_paths=runtime_paths,
         worker_target=_shared_worker_target(),
-        worker_tools_override=["shell"],
+        worker_tools_override=worker_tools_override,
         tool_output_workspace_root=workspace,
     )
     sample_file = tmp_path / "sample.txt"
@@ -359,13 +368,23 @@ async def test_attachments_tool_get_attachment_selective_proxy_requires_file_too
         tool_runtime_context(
             _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=runtime_env),
         ),
-        patch("mindroom.custom_tools.attachments.save_attachment_to_worker") as mocked_save,
+        patch(
+            "mindroom.custom_tools.attachments.save_attachment_to_worker",
+            return_value=SimpleNamespace(
+                worker_path="inputs/sample.txt",
+                size_bytes=5,
+                sha256="sha256",
+            ),
+        ) as mocked_save,
     ):
         payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path="inputs/sample.txt"))
 
     assert payload["status"] == "ok"
-    assert (workspace / "inputs" / "sample.txt").read_bytes() == b"hello"
-    mocked_save.assert_not_called()
+    assert payload["attachment"]["save_path"] == "inputs/sample.txt"
+    assert payload["mindroom_tool_output"]["path"] == "inputs/sample.txt"
+    assert not any(workspace.rglob("*"))
+    mocked_save.assert_called_once()
+    assert mocked_save.call_args.kwargs["worker_tools_override"] == worker_tools_override
 
 
 @pytest.mark.asyncio
