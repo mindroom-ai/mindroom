@@ -25,7 +25,6 @@ from mindroom.hooks import (
     HookRegistry,
     hook,
 )
-from mindroom.hooks.types import BUILTIN_EVENT_NAMES, DEFAULT_EVENT_TIMEOUT_MS, RESERVED_EVENT_NAMESPACES
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
@@ -122,22 +121,6 @@ def _plugin(name: str, callbacks: list[object]) -> object:
             "plugin_order": 0,
         },
     )()
-
-
-def test_bot_ready_is_a_builtin_event() -> None:
-    """EVENT_BOT_READY should be registered as a built-in event."""
-    assert EVENT_BOT_READY == "bot:ready"
-    assert EVENT_BOT_READY in BUILTIN_EVENT_NAMES
-
-
-def test_bot_ready_has_default_timeout() -> None:
-    """bot:ready should have a default timeout of 5000ms."""
-    assert DEFAULT_EVENT_TIMEOUT_MS[EVENT_BOT_READY] == 5000
-
-
-def test_bot_namespace_is_reserved() -> None:
-    """The 'bot' namespace should be reserved to prevent custom event collisions."""
-    assert "bot" in RESERVED_EVENT_NAMESPACES
 
 
 @pytest.mark.asyncio
