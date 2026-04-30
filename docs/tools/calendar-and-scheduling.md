@@ -19,9 +19,9 @@ Use these tools when you need Google Calendar access, Cal.com booking APIs, or M
 
 ## Common Setup Notes
 
-`google_calendar` is a Google-backed shared-only integration.
-It uses the shared Google Services OAuth connection instead of its own API key form.
-Agents can only use it when `worker_scope` is unset or `shared`, and MindRoom keeps it local even when other tools are routed through the sandbox proxy.
+`google_calendar` is a Google-backed OAuth integration.
+It uses the `google_calendar` OAuth provider instead of an API key form.
+It can use scoped OAuth credentials for isolated worker scopes.
 Use [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md) to connect Google before enabling `google_calendar`.
 `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
 `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
@@ -74,8 +74,7 @@ create_event(
 ### Notes
 
 - `calendar_id` defaults to `primary`, and `list_calendars()` can return the other calendar IDs available to the connected account.
-- If the Google Services connection was authorized without calendar scopes, `google_calendar` stays unavailable until the user reconnects and grants the missing scopes.
-- `google_calendar` is both shared-only and local-only on this branch, so `worker_scope=user` and `worker_scope=user_agent` are unsupported and the tool is never proxied through sandbox workers.
+- If the Google Calendar connection was authorized without calendar scopes, `google_calendar` stays unavailable until the user reconnects and grants the missing scopes.
 - Use the Google Services OAuth guides for consent-screen setup, redirect URIs, and environment variables.
 
 ## [`cal_com`]

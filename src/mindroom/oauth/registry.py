@@ -2,24 +2,45 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.config.main import Config
 from mindroom.logging_config import get_logger
+from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.google_gmail import google_gmail_oauth_provider
+from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.plugins import _load_plugin_module
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+_provider_cache_lock = threading.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderCacheEntry:
+    key: tuple[object, ...]
+    providers: dict[str, OAuthProvider]
+
+
+_provider_cache: _ProviderCacheEntry | None = None
 
 
 def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
-    return (google_drive_oauth_provider(),)
+    return (
+        google_calendar_oauth_provider(),
+        google_drive_oauth_provider(),
+        google_gmail_oauth_provider(),
+        google_sheets_oauth_provider(),
+    )
 
 
 def _module_oauth_provider_callback(module: Any) -> Any:  # noqa: ANN401
@@ -101,6 +122,11 @@ def load_oauth_providers(
     skip_broken_plugins: bool = True,
 ) -> dict[str, OAuthProvider]:
     """Return all OAuth providers available for one runtime config."""
+    global _provider_cache
+    cache_key = ("config", id(config), runtime_paths, skip_broken_plugins)
+    with _provider_cache_lock:
+        if _provider_cache is not None and _provider_cache.key == cache_key:
+            return _provider_cache.providers
     plugin_providers = _load_plugin_oauth_providers(
         config,
         runtime_paths,
@@ -108,5 +134,36 @@ def load_oauth_providers(
     )
     providers = (*_builtin_oauth_providers(), *plugin_providers)
     registry = _provider_registry(providers)
+    with _provider_cache_lock:
+        _provider_cache = _ProviderCacheEntry(cache_key, registry)
+    logger.debug("Loaded OAuth providers", providers=sorted(registry))
+    return registry
+
+
+def load_oauth_providers_for_snapshot(
+    snapshot: ApiSnapshot,
+    *,
+    skip_broken_plugins: bool = True,
+) -> dict[str, OAuthProvider]:
+    """Return OAuth providers cached by one API config snapshot."""
+    global _provider_cache
+
+    cache_key = ("snapshot", snapshot.generation, id(snapshot), snapshot.runtime_paths, skip_broken_plugins)
+    with _provider_cache_lock:
+        if _provider_cache is not None and _provider_cache.key == cache_key:
+            return _provider_cache.providers
+    if snapshot.runtime_config is not None:
+        config = snapshot.runtime_config
+    else:
+        config = Config.model_validate(snapshot.config_data or {}, context={"runtime_paths": snapshot.runtime_paths})
+    plugin_providers = _load_plugin_oauth_providers(
+        config,
+        snapshot.runtime_paths,
+        skip_broken_plugins=skip_broken_plugins,
+    )
+    providers = (*_builtin_oauth_providers(), *plugin_providers)
+    registry = _provider_registry(providers)
+    with _provider_cache_lock:
+        _provider_cache = _ProviderCacheEntry(cache_key, registry)
     logger.debug("Loaded OAuth providers", providers=sorted(registry))
     return registry

@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import math
-import secrets
-import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode, urlparse
 
 from mindroom.oauth.providers import OAuthProviderError
+from mindroom.oauth.state import consume_signed_oauth_state, issue_signed_oauth_state, read_signed_oauth_state
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -18,7 +17,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
-_oauth_connect_token_lock = threading.Lock()
+_OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
 OAUTH_CREDENTIAL_FIELDS = frozenset(
     {
         "_id_token",
@@ -57,26 +56,15 @@ class OAuthConnectTarget:
     created_at: float
 
 
-_oauth_connect_targets: dict[str, OAuthConnectTarget] = {}
-
-
-def _prune_expired_connect_targets(now: float) -> None:
-    expired_keys = [
-        token
-        for token, target in _oauth_connect_targets.items()
-        if now - target.created_at > _OAUTH_CONNECT_TOKEN_TTL_SECONDS
-    ]
-    for token in expired_keys:
-        _oauth_connect_targets.pop(token, None)
-
-
-def issue_oauth_connect_token(provider: OAuthProvider, worker_target: ResolvedWorkerTarget) -> str | None:
-    """Create a short-lived token that binds an OAuth link to one worker target."""
+def issue_oauth_connect_token(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    worker_target: ResolvedWorkerTarget,
+) -> str | None:
+    """Create a signed token that binds an OAuth link to one worker target."""
     if not worker_target.worker_key:
         return None
 
-    token = secrets.token_urlsafe(24)
-    now = time.time()
     connect_target = OAuthConnectTarget(
         provider_id=provider.id,
         credential_service=provider.credential_service,
@@ -88,49 +76,56 @@ def issue_oauth_connect_token(provider: OAuthProvider, worker_target: ResolvedWo
         ),
         tenant_id=worker_target.tenant_id,
         account_id=worker_target.account_id,
-        created_at=now,
+        created_at=0,
     )
-    with _oauth_connect_token_lock:
-        _prune_expired_connect_targets(now)
-        _oauth_connect_targets[token] = connect_target
-    return token
+    return issue_signed_oauth_state(
+        runtime_paths,
+        kind=_OAUTH_CONNECT_TOKEN_KIND,
+        ttl_seconds=_OAUTH_CONNECT_TOKEN_TTL_SECONDS,
+        data=oauth_connect_target_payload(connect_target),
+    )
 
 
-def _validated_connect_target(provider: OAuthProvider, connect_target: OAuthConnectTarget | None) -> OAuthConnectTarget:
-    if connect_target is None:
-        msg = "OAuth connect link is invalid or expired"
-        raise OAuthProviderError(msg)
-    if connect_target.provider_id != provider.id:
+def _connect_target_from_payload(provider: OAuthProvider, payload: dict[str, object]) -> OAuthConnectTarget:
+    if payload.get("provider") != provider.id:
         msg = "OAuth connect link does not match this provider"
         raise OAuthProviderError(msg)
-    return connect_target
+    if payload.get("credential_service") != provider.credential_service:
+        msg = "OAuth connect link does not match this provider"
+        raise OAuthProviderError(msg)
+    return OAuthConnectTarget(
+        provider_id=provider.id,
+        credential_service=provider.credential_service,
+        agent_name=str(payload.get("agent_name") or "") or None,
+        worker_scope=str(payload.get("worker_scope") or "unscoped"),
+        worker_key=str(payload.get("worker_key") or ""),
+        requester_id=str(payload.get("requester_id") or "") or None,
+        tenant_id=str(payload.get("tenant_id") or "") or None,
+        account_id=str(payload.get("account_id") or "") or None,
+        created_at=0,
+    )
 
 
-def lookup_oauth_connect_token(provider: OAuthProvider, token: str) -> OAuthConnectTarget:
+def lookup_oauth_connect_token(provider: OAuthProvider, runtime_paths: RuntimePaths, token: str) -> OAuthConnectTarget:
     """Return one conversation-issued OAuth target token without consuming it."""
-    now = time.time()
-    with _oauth_connect_token_lock:
-        _prune_expired_connect_targets(now)
-        connect_target = _oauth_connect_targets.get(token)
-    return _validated_connect_target(provider, connect_target)
+    data = read_signed_oauth_state(runtime_paths, kind=_OAUTH_CONNECT_TOKEN_KIND, token=token)
+    return _connect_target_from_payload(provider, data)
 
 
 def consume_oauth_connect_token(
     provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
     token: str,
     *,
     expected_target: OAuthConnectTarget | None = None,
 ) -> OAuthConnectTarget:
     """Consume one conversation-issued OAuth target token for a provider authorize request."""
-    now = time.time()
-    with _oauth_connect_token_lock:
-        _prune_expired_connect_targets(now)
-        connect_target = _validated_connect_target(provider, _oauth_connect_targets.get(token))
-        if expected_target is not None and connect_target != expected_target:
-            msg = "OAuth connect link target changed"
-            raise OAuthProviderError(msg)
-        _oauth_connect_targets.pop(token, None)
-        return connect_target
+    data = consume_signed_oauth_state(runtime_paths, kind=_OAUTH_CONNECT_TOKEN_KIND, token=token)
+    connect_target = _connect_target_from_payload(provider, data)
+    if expected_target is not None and connect_target != expected_target:
+        msg = "OAuth connect link target changed"
+        raise OAuthProviderError(msg)
+    return connect_target
 
 
 def oauth_connect_target_payload(connect_target: OAuthConnectTarget) -> dict[str, str]:
@@ -217,6 +212,27 @@ def build_oauth_authorize_url(
     return f"{base_url}/api/oauth/{provider.id}/authorize{query}"
 
 
+def oauth_connect_url(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    worker_target: ResolvedWorkerTarget | None,
+) -> str:
+    """Return a browser-openable MindRoom OAuth link for one worker target."""
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    execution_scope = worker_target.worker_scope if worker_target is not None else None
+    connect_token = (
+        issue_oauth_connect_token(provider, runtime_paths, worker_target) if worker_target is not None else None
+    )
+    return build_oauth_authorize_url(
+        provider,
+        runtime_paths,
+        agent_name=agent_name,
+        execution_scope=execution_scope,
+        connect_token=connect_token,
+    )
+
+
 def build_oauth_connect_instruction(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
@@ -224,15 +240,10 @@ def build_oauth_connect_instruction(
     worker_target: ResolvedWorkerTarget | None,
 ) -> str:
     """Return a concise user-facing connection instruction for a tool result."""
-    agent_name = worker_target.routing_agent_name if worker_target is not None else None
-    execution_scope = worker_target.worker_scope if worker_target is not None else None
-    connect_token = issue_oauth_connect_token(provider, worker_target) if worker_target is not None else None
-    connect_url = build_oauth_authorize_url(
+    connect_url = oauth_connect_url(
         provider,
         runtime_paths,
-        agent_name=agent_name,
-        execution_scope=execution_scope,
-        connect_token=connect_token,
+        worker_target=worker_target,
     )
     return (
         f"{provider.display_name} is not connected for this agent. "

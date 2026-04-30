@@ -496,7 +496,7 @@ Expected outcome: Session continuity, streamed identity, and later turns all bin
 
 ## 14. Bundled Dashboard And Runtime API
 
-Source anchors: `frontend/src/App.tsx`, `frontend/src/store/configStore.ts`, `frontend/src/services/configService.ts`, `frontend/src/components/**`, `src/mindroom/api/main.py`, `src/mindroom/api/knowledge.py`, `src/mindroom/api/credentials.py`, `src/mindroom/api/matrix_operations.py`, `src/mindroom/api/integrations.py`, `src/mindroom/api/google_integration.py`, `src/mindroom/api/homeassistant_integration.py`.
+Source anchors: `frontend/src/App.tsx`, `frontend/src/store/configStore.ts`, `frontend/src/services/configService.ts`, `frontend/src/components/**`, `src/mindroom/api/main.py`, `src/mindroom/api/knowledge.py`, `src/mindroom/api/credentials.py`, `src/mindroom/api/matrix_operations.py`, `src/mindroom/api/integrations.py`, `src/mindroom/api/oauth.py`, `src/mindroom/api/homeassistant_integration.py`.
 
 - [ ] `UI-001` Load the bundled dashboard in the same runtime instance being tested.
 Expected outcome: The app shell loads, the selected tab matches the URL, and mobile and desktop navigation both reach every tab.
@@ -627,7 +627,7 @@ Expected outcome: Placeholder features remain explicitly placeholder and do not 
 
 ## 16. Representative Integration Buckets
 
-Source anchors: `src/mindroom/api/tools.py`, `src/mindroom/api/integrations.py`, `src/mindroom/api/google_integration.py`, `src/mindroom/api/homeassistant_integration.py`, `frontend/src/components/GoogleIntegration/GoogleIntegration.tsx`, `frontend/src/components/HomeAssistantIntegration/HomeAssistantIntegration.tsx`, `docs/tools/builtin.md`.
+Source anchors: `src/mindroom/api/tools.py`, `src/mindroom/api/integrations.py`, `src/mindroom/api/oauth.py`, `src/mindroom/api/homeassistant_integration.py`, `frontend/src/components/Integrations/**`, `docs/tools/builtin.md`.
 
 - [ ] `INT-001` Test a no-auth research tool bucket such as `duckduckgo`, `wikipedia`, or `website`.
 Expected outcome: The tool is callable without credential setup and its results appear correctly in normal agent responses.
@@ -653,8 +653,8 @@ Expected outcome: Attachment metadata survives the tool boundary and context sco
 - [ ] `INT-008` Compare runtime integration behavior with the dashboard catalog and metadata presentation.
 Expected outcome: UI availability, required credentials, and runtime capability do not contradict each other for the same integration.
 
-- [ ] `INT-009` Exercise Google integration admin bootstrap and reset through the bundled API or dashboard using `/api/google/configure` and `/api/google/reset`.
-Expected outcome: OAuth client credentials are written to the active runtime environment, config reload succeeds, and the dashboard state transitions between admin-setup-required and ready-to-connect without stale status.
+- [ ] `INT-009` Exercise Google provider connect, callback, status, and disconnect through `/api/oauth/google_drive/*`, `/api/oauth/google_calendar/*`, `/api/oauth/google_sheets/*`, or `/api/oauth/google_gmail/*`.
+Expected outcome: OAuth client credentials are read from the runtime environment, scoped tokens and settings stay separated, and disconnect clears both services for the selected scope.
 
 - [ ] `INT-010` Exercise Home Assistant via both OAuth and long-lived-token setup, then call `/api/homeassistant/entities` and `/api/homeassistant/service`.
 Expected outcome: Both connection modes persist usable credentials, entity listing reflects the live instance, and service calls succeed or fail clearly against the actual Home Assistant runtime.

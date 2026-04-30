@@ -2,92 +2,24 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
-
-from google.auth.transport.requests import Request as GoogleRequest
-from google.oauth2 import id_token as google_id_token
-
-from mindroom.oauth.providers import (
-    OAuthClaimValidationError,
-    OAuthClientConfig,
-    OAuthProvider,
-    OAuthTokenResult,
-    oauth_expires_at_from_response,
+from mindroom.oauth.google import (
+    GOOGLE_IDENTITY_SCOPES,
+    _google_domain_env_names,
+    _google_provider_env_names,
+    _google_redirect_env_names,
+    _google_token_parser,
 )
-from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.oauth.providers import OAuthProvider
 
-if TYPE_CHECKING:
-    from mindroom.constants import RuntimePaths
-
-_GOOGLE_ID_TOKEN_DEPS = ["google-auth"]
 GOOGLE_DRIVE_OAUTH_SCOPES = (
-    "openid",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
+    *GOOGLE_IDENTITY_SCOPES,
     "https://www.googleapis.com/auth/drive.readonly",
 )
 
 
-def _google_drive_token_parser(
-    provider: OAuthProvider,
-    token_response: Mapping[str, Any],
-    client_config: OAuthClientConfig,
-    runtime_paths: RuntimePaths,
-) -> OAuthTokenResult:
-    access_token = token_response.get("access_token")
-    refresh_token = token_response.get("refresh_token")
-    id_token = token_response.get("id_token")
-    if not isinstance(access_token, str) or not access_token:
-        msg = "Google did not return an access token"
-        raise OAuthClaimValidationError(msg)
-    existing_claims = token_response.get("_oauth_claims")
-    if (not isinstance(id_token, str) or not id_token) and isinstance(existing_claims, Mapping):
-        claims = dict(existing_claims)
-    elif not isinstance(id_token, str) or not id_token:
-        msg = "Google did not return a verifiable identity token"
-        raise OAuthClaimValidationError(msg)
-    else:
-        ensure_tool_deps(_GOOGLE_ID_TOKEN_DEPS, "google_drive", runtime_paths)
-
-        claims = google_id_token.verify_oauth2_token(
-            id_token,
-            GoogleRequest(),
-            client_config.client_id,
-        )
-        if not isinstance(claims, dict):
-            msg = "Google identity token verification did not return claims"
-            raise OAuthClaimValidationError(msg)
-
-    scopes = provider.scopes
-    response_scope = token_response.get("scope")
-    if isinstance(response_scope, str) and response_scope.strip():
-        scopes = tuple(response_scope.split())
-
-    token_data: dict[str, Any] = {
-        "token": access_token,
-        "token_uri": provider.token_url,
-        "client_id": client_config.client_id,
-        "scopes": list(scopes),
-        "_source": "oauth",
-        "_oauth_provider": provider.id,
-    }
-    if isinstance(id_token, str) and id_token:
-        token_data["_id_token"] = id_token
-    if isinstance(refresh_token, str) and refresh_token:
-        token_data["refresh_token"] = refresh_token
-    token_type = token_response.get("token_type")
-    if isinstance(token_type, str) and token_type:
-        token_data["token_type"] = token_type
-    expires_at = oauth_expires_at_from_response(token_response)
-    if expires_at is not None:
-        token_data["expires_at"] = expires_at
-
-    return OAuthTokenResult(token_data=token_data, claims=claims, claims_verified=True)
-
-
 def google_drive_oauth_provider() -> OAuthProvider:
     """Return the built-in Google Drive provider definition."""
+    client_id_env, client_secret_env = _google_provider_env_names("google_drive")
     return OAuthProvider(
         id="google_drive",
         display_name="Google Drive",
@@ -96,28 +28,11 @@ def google_drive_oauth_provider() -> OAuthProvider:
         scopes=GOOGLE_DRIVE_OAUTH_SCOPES,
         credential_service="google_drive_oauth",
         tool_config_service="google_drive",
-        client_id_env=(
-            "GOOGLE_DRIVE_CLIENT_ID",
-            "MINDROOM_OAUTH_GOOGLE_DRIVE_CLIENT_ID",
-            "GOOGLE_CLIENT_ID",
-        ),
-        client_secret_env=(
-            "GOOGLE_DRIVE_CLIENT_SECRET",
-            "MINDROOM_OAUTH_GOOGLE_DRIVE_CLIENT_SECRET",
-            "GOOGLE_CLIENT_SECRET",
-        ),
-        redirect_uri_env=(
-            "GOOGLE_DRIVE_REDIRECT_URI",
-            "MINDROOM_OAUTH_GOOGLE_DRIVE_REDIRECT_URI",
-        ),
-        allowed_email_domains_env=(
-            "GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS",
-            "MINDROOM_OAUTH_GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS",
-        ),
-        allowed_hosted_domains_env=(
-            "GOOGLE_DRIVE_ALLOWED_HOSTED_DOMAINS",
-            "MINDROOM_OAUTH_GOOGLE_DRIVE_ALLOWED_HOSTED_DOMAINS",
-        ),
+        client_id_env=client_id_env,
+        client_secret_env=client_secret_env,
+        redirect_uri_env=_google_redirect_env_names("google_drive"),
+        allowed_email_domains_env=_google_domain_env_names("google_drive", "ALLOWED_EMAIL_DOMAINS"),
+        allowed_hosted_domains_env=_google_domain_env_names("google_drive", "ALLOWED_HOSTED_DOMAINS"),
         extra_auth_params={
             "access_type": "offline",
             "include_granted_scopes": "true",
@@ -127,5 +42,5 @@ def google_drive_oauth_provider() -> OAuthProvider:
             "Drive file search",
             "Drive file read",
         ),
-        token_parser=_google_drive_token_parser,
+        token_parser=_google_token_parser,
     )

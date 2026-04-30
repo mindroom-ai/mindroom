@@ -16,7 +16,6 @@ from mindroom.api.credentials import (
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
-from mindroom.api.google_tools_helper import check_google_tool_configured
 from mindroom.config.main import Config
 from mindroom.credentials import (
     get_runtime_credentials_manager,
@@ -111,8 +110,7 @@ def _check_auth_provider_configured(
     """Return whether a delegated auth provider has usable credentials for one tool."""
     if not credentials:
         return False
-    if auth_provider == "google":
-        return check_google_tool_configured(tool_name, credentials)
+    del tool_name, auth_provider
     if provider is None:
         return False
     return oauth_credentials_usable(provider, runtime_paths, credentials)

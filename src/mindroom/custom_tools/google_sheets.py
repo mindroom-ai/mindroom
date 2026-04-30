@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.googlesheets import GoogleSheetsTools as AgnoGoogleSheetsTools
 
-from mindroom.custom_tools._google_oauth import ScopedGoogleOAuthMixin
 from mindroom.logging_config import get_logger
+from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -21,11 +22,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class GoogleSheetsTools(ScopedGoogleOAuthMixin, AgnoGoogleSheetsTools):
+class GoogleSheetsTools(ScopedOAuthClientMixin, AgnoGoogleSheetsTools):
     """Google Sheets tools wrapper that uses MindRoom's credential management."""
 
+    _oauth_provider = google_sheets_oauth_provider()
     _oauth_tool_name = "google_sheets"
-    _oauth_log_name = "Google Sheets"
 
     def __init__(
         self,
@@ -46,7 +47,7 @@ class GoogleSheetsTools(ScopedGoogleOAuthMixin, AgnoGoogleSheetsTools):
             raise RuntimeError(msg)
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
-        creds = self._initialize_google_oauth(
+        creds = self._initialize_oauth_client(
             worker_target=worker_target,
             provided_creds=provided_creds,
             logger=logger,

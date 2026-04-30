@@ -8,7 +8,6 @@ import pytest
 import mindroom.constants as constants_mod
 import mindroom.credentials
 from mindroom.api.credentials import RequestCredentialsTarget
-from mindroom.api.google_integration import _build_google_token_data
 from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials import (
     _DEDICATED_WORKER_KEY_ENV,
@@ -848,23 +847,6 @@ class TestGlobalCredentialsManager:
 
 class TestSharedIntegrationCredentialTagging:
     """Regression tests for shared-only integration credential saves."""
-
-    def test_google_token_data_is_tagged_as_ui_source(self) -> None:
-        """Google OAuth tokens saved through the dashboard should be tagged as UI-managed."""
-
-        class _FakeGoogleCredentials:
-            def __init__(self) -> None:
-                self.token = "access-token"  # noqa: S105
-                self.refresh_token = "refresh-token"  # noqa: S105
-                self.token_uri = "https://oauth2.googleapis.com/token"  # noqa: S105
-                self.client_id = "client-id"
-                self.client_secret = "client-secret"  # noqa: S105
-                self.scopes = ("scope-a", "scope-b")
-                self.id_token = None
-
-        token_data = _build_google_token_data(_FakeGoogleCredentials())
-
-        assert token_data["_source"] == "ui"
 
     def test_spotify_credentials_saved_from_dashboard_are_tagged_as_ui_source(
         self,

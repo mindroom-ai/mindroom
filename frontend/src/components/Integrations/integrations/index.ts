@@ -3,7 +3,12 @@
  */
 
 import { createElement } from "react";
-import { SiGoogledrive } from "react-icons/si";
+import {
+  SiGmail,
+  SiGooglecalendar,
+  SiGoogledrive,
+  SiGooglesheets,
+} from "react-icons/si";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 import type { WorkerScope } from "@/types/config";
 import {
@@ -12,7 +17,6 @@ import {
   IntegrationProvider,
   IntegrationScope,
 } from "./types";
-import { googleIntegration } from "./google";
 import { spotifyIntegration } from "./spotify";
 import { homeAssistantIntegration } from "./homeassistant";
 
@@ -185,10 +189,62 @@ const googleDriveIntegration = new GenericOAuthIntegrationProvider(
   "google_drive",
 );
 
+const googleCalendarIntegration = new GenericOAuthIntegrationProvider(
+  {
+    id: "google_calendar",
+    name: "Google Calendar",
+    description:
+      "View and schedule meetings with your connected Google Calendar",
+    category: "productivity",
+    icon: createElement(SiGooglecalendar, {
+      className: "h-5 w-5 text-blue-600",
+    }),
+    status: "available",
+    setup_type: "oauth",
+    connected: false,
+  },
+  "google_calendar",
+);
+
+const googleSheetsIntegration = new GenericOAuthIntegrationProvider(
+  {
+    id: "google_sheets",
+    name: "Google Sheets",
+    description:
+      "Read, create, update, and duplicate Google Sheets spreadsheets",
+    category: "development",
+    icon: createElement(SiGooglesheets, {
+      className: "h-5 w-5 text-green-600",
+    }),
+    status: "available",
+    setup_type: "oauth",
+    connected: false,
+  },
+  "google_sheets",
+);
+
+const googleGmailIntegration = new GenericOAuthIntegrationProvider(
+  {
+    id: "google_gmail",
+    name: "Gmail",
+    description: "Read, search, and manage Gmail emails",
+    category: "email",
+    icon: createElement(SiGmail, {
+      className: "h-5 w-5 text-red-500",
+    }),
+    status: "available",
+    setup_type: "oauth",
+    connected: false,
+  },
+  "google_gmail",
+);
+
 // Export all integration providers
 export const integrationProviders: Record<string, IntegrationProvider> = {
-  google: googleIntegration,
+  google_calendar: googleCalendarIntegration,
   google_drive: googleDriveIntegration,
+  google_gmail: googleGmailIntegration,
+  google_sheets: googleSheetsIntegration,
   spotify: spotifyIntegration,
   homeassistant: homeAssistantIntegration,
 };

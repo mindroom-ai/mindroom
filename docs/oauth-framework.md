@@ -30,6 +30,5 @@ Identity restrictions are provider settings, not MindRoom policy.
 Providers can enforce allowed email domains, allowed hosted-domain claims, and custom claim validators.
 If a configured restriction cannot be checked from verified provider claims, the callback fails closed and no credential is saved.
 
-Google Drive is the first built-in provider.
-It uses the generic framework with Drive read scopes for file search and read workflows, stores OAuth tokens under `google_drive_oauth`, stores editable tool settings under `google_drive`, and does not reuse the legacy all-Google `/api/google/*` scope bundle.
-The legacy Google Services routes remain available for the existing dashboard integration while new providers use `/api/oauth/*`.
+Built-in Google providers use the generic framework for Drive, Calendar, Sheets, and Gmail.
+Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.

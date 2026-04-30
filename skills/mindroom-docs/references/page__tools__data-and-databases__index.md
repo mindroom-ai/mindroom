@@ -29,8 +29,8 @@ Use these tools when you need database access, dataframe-style analysis, spreads
 MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML.
 Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`.
 Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields.
-`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, so the tools on this page are configured through standard tool credentials, environment-backed SDK auth, or the shared Google Services OAuth flow instead of dedicated per-tool integration routes.
-`google_sheets` is special because it declares `auth_provider="google"`, checks for Google Sheets OAuth scopes, is restricted to unscoped agents or `worker_scope=shared`, and always stays local instead of being proxied through worker sandbox routing.
+`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Sheets uses the generic `/api/oauth/google_sheets/*` flow.
+`google_sheets` declares `auth_provider="google_sheets"` and stores OAuth tokens separately from editable Sheets tool settings.
 `csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
@@ -481,11 +481,10 @@ read_sheet(
 
 ### Notes
 
-- `google_sheets` is a shared-only integration and is rejected for `worker_scope=user` and `worker_scope=user_agent`.
-- Even with `worker_scope=shared`, this tool stays local rather than being proxied to the sandbox worker.
+- `google_sheets` uses the `google_sheets` OAuth provider and can use scoped OAuth credentials for isolated worker scopes.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
 - The current metadata field names `read`, `create`, `update`, and `duplicate` do not match Agno's `enable_*` constructor args, so treat read access as the verified default behavior on this branch unless the tool is instantiated programmatically with the upstream names.
-- The dashboard marks the tool available only when stored Google credentials include the required Sheets scopes.
+- The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
 
 ## \[`openbb`\]
 

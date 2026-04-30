@@ -12,6 +12,7 @@ from mindroom.api import credentials as credentials_api
 from mindroom.api.main import initialize_api_app
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
+from mindroom.oauth.state import _reset_oauth_state_for_tests
 
 
 @pytest.fixture
@@ -50,9 +51,15 @@ def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestC
 @pytest.fixture(autouse=True)
 def clear_pending_oauth_state() -> Generator[None, None, None]:
     """Reset pending OAuth state between tests."""
-    credentials_api._pending_oauth_states.clear()
+    _reset_oauth_state_for_tests()
     yield
-    credentials_api._pending_oauth_states.clear()
+    _reset_oauth_state_for_tests()
+
+
+def _oauth_state_test_app(tmp_path: Path) -> FastAPI:
+    app = FastAPI()
+    initialize_api_app(app, resolve_runtime_paths(storage_path=tmp_path / "mindroom_data"))
+    return app
 
 
 class TestCredentialsAPI:
@@ -321,9 +328,9 @@ class TestCredentialsAPI:
         assert "Service name can only include" in response.json()["detail"]
 
 
-def test_pending_oauth_state_binds_agent_name_and_user() -> None:
+def test_pending_oauth_state_binds_agent_name_and_user(tmp_path: Path) -> None:
     """Pending OAuth state should resolve only for the issuing user and target."""
-    app = FastAPI()
+    app = _oauth_state_test_app(tmp_path)
 
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
@@ -345,9 +352,9 @@ def test_pending_oauth_state_binds_agent_name_and_user() -> None:
     assert consume_response.json() == {"agent_name": "general"}
 
 
-def test_pending_oauth_state_rejects_different_user() -> None:
+def test_pending_oauth_state_rejects_different_user(tmp_path: Path) -> None:
     """Pending OAuth state should stay valid for the issuer after a different user is rejected."""
-    app = FastAPI()
+    app = _oauth_state_test_app(tmp_path)
 
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
@@ -372,9 +379,9 @@ def test_pending_oauth_state_rejects_different_user() -> None:
     assert issuer_response.json() == {"agent_name": "general"}
 
 
-def test_pending_oauth_request_preserves_payload() -> None:
+def test_pending_oauth_request_preserves_payload(tmp_path: Path) -> None:
     """Pending OAuth state should round-trip service-specific callback payload."""
-    app = FastAPI()
+    app = _oauth_state_test_app(tmp_path)
 
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request) -> dict[str, str]:

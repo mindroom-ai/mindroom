@@ -28,7 +28,6 @@ _PLATFORM_AUTH_COOKIE_NAME = "mindroom_jwt"
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
-        "/api/google/callback",
         "/api/homeassistant/callback",
         "/api/integrations/spotify/callback",
     },
@@ -148,7 +147,7 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
 
 def _is_standalone_public_path(path: str) -> bool:
     """Return whether one unauthenticated standalone callback path may enter its handler."""
-    return path in _STANDALONE_PUBLIC_PATHS or (path.startswith("/api/oauth/") and path.endswith("/callback"))
+    return path in _STANDALONE_PUBLIC_PATHS
 
 
 def _get_request_token(

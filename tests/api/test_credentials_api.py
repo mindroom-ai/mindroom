@@ -789,32 +789,18 @@ class TestCredentialsAPI:
                 "_source": "ui",
             },
         )
-        manager.save_credentials(
-            "google",
-            {
-                "token": "token-value",
-                "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
-                "_source": "ui",
-            },
-        )
 
         _publish_committed_runtime_config(client.app, config)
 
         list_response = client.get("/api/credentials/list?agent_name=general")
         ha_status_response = client.get("/api/credentials/homeassistant/status?agent_name=general")
-        google_status_response = client.get("/api/credentials/google/status?agent_name=general")
 
         assert list_response.status_code == 200
         assert "homeassistant" in list_response.json()
-        assert "google" in list_response.json()
 
         assert ha_status_response.status_code == 200
         assert ha_status_response.json()["has_credentials"] is True
         assert set(ha_status_response.json()["key_names"]) == {"instance_url", "access_token"}
-
-        assert google_status_response.status_code == 200
-        assert google_status_response.json()["has_credentials"] is True
-        assert set(google_status_response.json()["key_names"]) == {"token", "scopes"}
 
     def test_rejects_raw_source_worker_key_query_param(
         self,

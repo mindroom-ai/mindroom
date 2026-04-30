@@ -20,7 +20,12 @@ from mindroom.api.credentials import (
     resolve_request_credentials_target,
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.oauth import OAuthClaimValidationError, OAuthProvider, OAuthProviderError, load_oauth_providers
+from mindroom.oauth import (
+    OAuthClaimValidationError,
+    OAuthProvider,
+    OAuthProviderError,
+    load_oauth_providers_for_snapshot,
+)
 from mindroom.oauth.service import (
     OAuthConnectTarget,
     consume_oauth_connect_token,
@@ -38,6 +43,8 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 _OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete"
+# OAuth callbacks intentionally verify the browser user inline instead of relying on
+# standalone-public-path bypasses, because callbacks write scoped credentials.
 
 
 class OAuthConnectResponse(BaseModel):
@@ -62,12 +69,12 @@ class OAuthStatusResponse(BaseModel):
 
 
 def _load_provider(request: Request, provider_id: str) -> tuple[OAuthProvider, RuntimePaths]:
-    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    providers = load_oauth_providers(config, runtime_paths)
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    providers = load_oauth_providers_for_snapshot(snapshot)
     provider = providers.get(provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail=f"Unknown OAuth provider: {provider_id}")
-    return provider, runtime_paths
+    return provider, snapshot.runtime_paths
 
 
 async def _require_oauth_api_user(request: Request) -> None:
@@ -96,7 +103,7 @@ def _issue_authorization_url(
 ) -> OAuthConnectResponse:
     if connect_token:
         try:
-            connect_target = lookup_oauth_connect_token(provider, connect_token)
+            connect_target = lookup_oauth_connect_token(provider, runtime_paths, connect_token)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _verify_connect_target_authorized(request, connect_target, runtime_paths)
@@ -111,7 +118,7 @@ def _issue_authorization_url(
         except OAuthProviderError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         try:
-            consume_oauth_connect_token(provider, connect_token, expected_target=connect_target)
+            consume_oauth_connect_token(provider, runtime_paths, connect_token, expected_target=connect_target)
         except OAuthProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return OAuthConnectResponse(provider=provider.id, auth_url=auth_url)
@@ -412,7 +419,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
 
 @router.post("/{provider_id}/disconnect")
 async def disconnect(provider_id: str, request: Request, agent_name: str | None = None) -> dict[str, str]:
-    """Remove scoped credentials for one provider."""
+    """Remove scoped OAuth credentials and provider tool settings for one provider."""
     await _require_oauth_api_user(request)
     provider, _runtime_paths = _load_provider(request, provider_id)
     target = resolve_request_credentials_target(
@@ -422,4 +429,6 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
         allow_private_scopes=True,
     )
     target.target_manager.delete_credentials(provider.credential_service)
+    if provider.tool_config_service is not None:
+        target.target_manager.delete_credentials(provider.tool_config_service)
     return {"status": "disconnected", "provider": provider.id}

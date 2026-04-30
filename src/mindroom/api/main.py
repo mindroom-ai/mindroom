@@ -22,7 +22,6 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResul
 # Import routers
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.frontend import router as frontend_router
-from mindroom.api.google_integration import router as google_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
 from mindroom.api.integrations import router as integrations_router
 from mindroom.api.knowledge import router as knowledge_router
@@ -447,7 +446,6 @@ def _set_config_generation_header(response: Response, generation: int) -> None:
 # Include routers
 app.include_router(auth_router)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
-app.include_router(google_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
 app.include_router(integrations_router, dependencies=[Depends(verify_user)])
 app.include_router(matrix_router, dependencies=[Depends(verify_user)])

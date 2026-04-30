@@ -1015,7 +1015,7 @@ If a tool runs inside an isolated worker, only the services listed here are avai
 Leave this unset to keep isolated workers deny-by-default for shared credentials.
 This setting never injects provider env vars such as `OPENAI_API_KEY`.
 For worker-routed tools, it only controls which shared credentials MindRoom may load inside isolated workers.
-This setting also does not control local shared-only integrations that stay in the main runtime, such as `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+This setting also does not control local shared-only integrations that stay in the main runtime, such as `homeassistant`.
 Those tools keep using normal shared credentials even when `worker_grantable_credentials` is empty.
 `google_vertex_adc` is intentionally not supported here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; use that auth path only in the main runtime.
 Sandbox-proxied execution is stricter than direct local execution: ordinary runtime `.env` values and provider env do not carry over unless they are explicitly passed through.
@@ -2319,7 +2319,7 @@ Some tools default to running in a sandboxed worker container instead of the pri
 
 ## Shared-Only Integrations
 
-Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes. The current shared-only integrations are `google`, `spotify`, `homeassistant`, `gmail`, `google_calendar`, `google_sheets`, and all configured `mcp_<server_id>` tools.
+Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes. The current shared-only integrations are `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
 
 ## Automatic Dependency Installation
 
@@ -2855,7 +2855,7 @@ This page documents the built-in tools in the `data-and-databases` group. Use th
 
 ## Common Setup Notes
 
-`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present. `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed. MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML. Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`. Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields. `src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, so the tools on this page are configured through standard tool credentials, environment-backed SDK auth, or the shared Google Services OAuth flow instead of dedicated per-tool integration routes. `google_sheets` is special because it declares `auth_provider="google"`, checks for Google Sheets OAuth scopes, is restricted to unscoped agents or `worker_scope=shared`, and always stays local instead of being proxied through worker sandbox routing. `csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present. `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed. MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML. Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`. Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields. `src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Sheets uses the generic `/api/oauth/google_sheets/*` flow. `google_sheets` declares `auth_provider="google_sheets"` and stores OAuth tokens separately from editable Sheets tool settings. `csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly. Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## \[`sql`\]
 
@@ -3274,11 +3274,10 @@ read_sheet(
 
 ### Notes
 
-- `google_sheets` is a shared-only integration and is rejected for `worker_scope=user` and `worker_scope=user_agent`.
-- Even with `worker_scope=shared`, this tool stays local rather than being proxied to the sandbox worker.
+- `google_sheets` uses the `google_sheets` OAuth provider and can use scoped OAuth credentials for isolated worker scopes.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
 - The current metadata field names `read`, `create`, `update`, and `duplicate` do not match Agno's `enable_*` constructor args, so treat read access as the verified default behavior on this branch unless the tool is instantiated programmatically with the upstream names.
-- The dashboard marks the tool available only when stored Google credentials include the required Sheets scopes.
+- The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
 
 ## \[`openbb`\]
 
@@ -5714,7 +5713,7 @@ This page documents the built-in tools in the `messaging-and-social` group. Use 
 
 ## Common Setup Notes
 
-`gmail` is the only tool on this page with `auth_provider="google"`. It uses the shared Google Services integration instead of standalone per-tool credentials. `gmail` is also a shared-only integration, so it is supported only for unscoped agents or agents with `worker_scope: shared`. Like `google_calendar`, `google_sheets`, and `homeassistant`, `gmail` stays local even when other tools are routed through the sandbox proxy. MindRoom enforces that restriction both at config-validation time and again during tool construction. On this branch, `src/mindroom/api/integrations.py` only exposes Spotify routes, while Google OAuth lives in `src/mindroom/api/google_integration.py`, so the rest of the tools on this page rely on ordinary stored tool credentials or SDK environment variables rather than a dedicated MindRoom OAuth flow. Password fields should be stored through the dashboard or credential store instead of inline YAML. Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice. Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`. The generic-looking `email` tool is not a fully configurable SMTP client on this branch. Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gmail.com:465` and does not expose SMTP host, port, or TLS configuration fields.
+`gmail` uses `auth_provider="google_gmail"` and connects through the generic `/api/oauth/google_gmail/*` flow. Its OAuth tokens are stored separately from editable Gmail tool settings. `homeassistant` stays local even when other tools are routed through the sandbox proxy. MindRoom enforces that restriction both at config-validation time and again during tool construction. Password fields should be stored through the dashboard or credential store instead of inline YAML. Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice. Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`. The generic-looking `email` tool is not a fully configurable SMTP client on this branch. Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gmail.com:465` and does not expose SMTP host, port, or TLS configuration fields.
 
 ## \[`gmail`\]
 
@@ -5757,9 +5756,9 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 
 ### Notes
 
-- Connect Google once through the shared Google Services integration rather than storing a Gmail-specific API key.
-- The Google integration on this branch requests Gmail read, modify, and compose scopes alongside Calendar, Sheets, Drive, and profile scopes.
-- `gmail` is both shared-only and local-only on this branch, so `worker_scope=user` and `worker_scope=user_agent` are unsupported and the tool is never proxied through sandbox workers.
+- Connect Gmail through the `google_gmail` OAuth provider rather than storing a Gmail-specific API key.
+- The Gmail provider requests Gmail read, modify, and compose scopes.
+- `gmail` can use scoped OAuth credentials for isolated worker scopes.
 - The current registry exposes the eight boolean fields above, but the installed `agno.tools.gmail.GmailTools` constructor does not consume those selector kwargs directly on this branch, so `- gmail` plus Google OAuth is the verified setup path.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
 
@@ -6665,7 +6664,7 @@ This page documents the built-in tools in the `calendar-and-scheduling` group. U
 
 ## Common Setup Notes
 
-`google_calendar` is a Google-backed shared-only integration. It uses the shared Google Services OAuth connection instead of its own API key form. Agents can only use it when `worker_scope` is unset or `shared`, and MindRoom keeps it local even when other tools are routed through the sandbox proxy. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction. `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys. Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread. MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
+`google_calendar` is a Google-backed OAuth integration. It uses the `google_calendar` OAuth provider instead of an API key form. It can use scoped OAuth credentials for isolated worker scopes. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction. `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys. Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread. MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
 
 ## \[`google_calendar`\]
 
@@ -6709,8 +6708,7 @@ create_event(
 ### Notes
 
 - `calendar_id` defaults to `primary`, and `list_calendars()` can return the other calendar IDs available to the connected account.
-- If the Google Services connection was authorized without calendar scopes, `google_calendar` stays unavailable until the user reconnects and grants the missing scopes.
-- `google_calendar` is both shared-only and local-only on this branch, so `worker_scope=user` and `worker_scope=user_agent` are unsupported and the tool is never proxied through sandbox workers.
+- If the Google Calendar connection was authorized without calendar scopes, `google_calendar` stays unavailable until the user reconnects and grants the missing scopes.
 - Use the Google Services OAuth guides for consent-screen setup, redirect URIs, and environment variables.
 
 ## \[`cal_com`\]
@@ -8704,7 +8702,7 @@ OAuth token writes always go through `resolve_request_credentials_target()` and 
 
 Identity restrictions are provider settings, not MindRoom policy. Providers can enforce allowed email domains, allowed hosted-domain claims, and custom claim validators. If a configured restriction cannot be checked from verified provider claims, the callback fails closed and no credential is saved.
 
-Google Drive is the first built-in provider. It uses the generic framework with Drive read scopes for file search and read workflows, stores OAuth tokens under `google_drive_oauth`, stores editable tool settings under `google_drive`, and does not reuse the legacy all-Google `/api/google/*` scope bundle. The legacy Google Services routes remain available for the existing dashboard integration while new providers use `/api/oauth/*`.
+Built-in Google providers use the generic framework for Drive, Calendar, Sheets, and Gmail. Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 
 # Knowledge Bases
 
@@ -11527,348 +11525,128 @@ Important data locations:
 - `telegram-bridge/registration.yaml` - Appservice registration
 - Telegram bridge data volume - SQLite database with session data
 
-# Google Services OAuth (Admin Setup)
+# Google Services OAuth
 
-This is the one-time setup for a shared Google OAuth app in MindRoom's legacy Google Services dashboard integration. After you finish these steps, users only click **Login with Google** in the frontend. For private personal-agent Google Drive access, use the generic `/api/oauth/google_drive/*` provider instead of this shared `/api/google/*` flow.
+MindRoom uses the generic OAuth framework for Google tools. Each Google service has its own provider ID, callback URL, token service, and editable tool settings service. There is no bundled `/api/google/*` OAuth flow.
 
-## Who This Is For
+## Providers
 
-Use this guide if you are running MindRoom for a team, organization, or hosted deployment.
+| Tool            | Provider ID       | Callback path                         | Token service           | Settings service  | Scopes                                                    |
+| --------------- | ----------------- | ------------------------------------- | ----------------------- | ----------------- | --------------------------------------------------------- |
+| Google Drive    | `google_drive`    | `/api/oauth/google_drive/callback`    | `google_drive_oauth`    | `google_drive`    | Drive read-only plus OpenID email/profile                 |
+| Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar` | Calendar read/write plus OpenID email/profile             |
+| Google Sheets   | `google_sheets`   | `/api/oauth/google_sheets/callback`   | `google_sheets_oauth`   | `google_sheets`   | Sheets read/write plus OpenID email/profile               |
+| Gmail           | `google_gmail`    | `/api/oauth/google_gmail/callback`    | `google_gmail_oauth`    | `gmail`           | Gmail readonly, modify, compose plus OpenID email/profile |
 
-If you are a single local user and want to bring your own Google OAuth app, see [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
+## Google Cloud Setup
 
-## What You Need Before Starting
+Create an OAuth client in Google Cloud Console. Enable only the APIs for the tools you plan to use. Add one authorized redirect URI for each provider you enable.
 
-- Your MindRoom URL (local example: `http://localhost:8765`, production example: `https://mindroom.example.com`)
-- Access to [Google Cloud Console](https://console.cloud.google.com/)
-- Access to set MindRoom environment variables
-
-The MindRoom callback path is always:
-
-```
-/api/google/callback
-```
-
-Your full callback URL is:
-
-```
-<your-mindroom-origin>/api/google/callback
-```
-
-The generic Google Drive provider uses `<your-mindroom-origin>/api/oauth/google_drive/callback` and its own `GOOGLE_DRIVE_*` environment variables. Do not mix that callback with the legacy Google Services callback.
-
-## Step 1: Create a Google Cloud Project
-
-1. Open [Google Cloud Console](https://console.cloud.google.com/).
-1. Create a new project (or select an existing one).
-1. Save the project ID. You will use it as `GOOGLE_PROJECT_ID`.
-
-## Step 2: Enable APIs
-
-1. In Google Cloud Console, go to **APIs & Services → Library**.
-1. Enable:
-1. Gmail API
-1. Google Calendar API
-1. Google Drive API
-1. Google Sheets API
-
-## Step 3: Configure OAuth Consent Screen
-
-1. Go to **APIs & Services → OAuth consent screen**.
-1. User type:
-1. `External` for public or mixed users
-1. `Internal` for Google Workspace-only
-1. Fill required app info and save.
-1. Add test users if app is still in testing mode.
-1. Add scopes:
-1. `https://www.googleapis.com/auth/gmail.readonly`
-1. `https://www.googleapis.com/auth/gmail.modify`
-1. `https://www.googleapis.com/auth/gmail.compose`
-1. `https://www.googleapis.com/auth/calendar`
-1. `https://www.googleapis.com/auth/spreadsheets`
-1. `https://www.googleapis.com/auth/drive.file`
-1. `openid`
-1. `https://www.googleapis.com/auth/userinfo.email`
-1. `https://www.googleapis.com/auth/userinfo.profile`
-
-## Step 4: Create OAuth Client ID
-
-1. Go to **APIs & Services → Credentials**.
-1. Click **Create Credentials → OAuth client ID**.
-1. Choose **Web application**.
-1. Under **Authorized redirect URIs**, add:
-1. Local: `http://localhost:8765/api/google/callback`
-1. Production: `https://<your-domain>/api/google/callback`
-1. Copy the generated client ID and client secret.
-
-## Step 5: Configure MindRoom Environment
-
-Set these env vars in your MindRoom deployment (`.env`, Kubernetes secret, or hosting config):
-
-```
-GOOGLE_CLIENT_ID=your-app-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-app-client-secret
-GOOGLE_PROJECT_ID=your-project-id
-GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
-```
-
-Notes:
-
-- `GOOGLE_REDIRECT_URI` must match one of your Google Console redirect URIs exactly.
-- If omitted, MindRoom defaults to `http://localhost:8765/api/google/callback`.
-
-Restart MindRoom after setting env vars.
-
-## Step 6: Verify MindRoom Is Configured
-
-Run:
-
-```
-curl -s http://localhost:8765/api/google/status
-```
-
-Expected result includes:
-
-- `"has_credentials": true`
-
-If `connected` is false at this point, that is normal until a user authorizes.
-
-## Step 7: Verify Frontend User Flow
-
-1. Open **Integrations → Google Services**.
-1. If setup is correct, the card shows **Ready to Connect**.
-1. Users can now click **Login with Google** and authorize access.
-
-## End User Steps (After Admin Setup)
-
-Each user does only this:
-
-1. Open **Integrations → Google Services**.
-1. Click **Login with Google**.
-1. Approve scopes.
-1. Confirm status shows **Connected**.
-
-## Production Notes
-
-- Apps in testing mode are limited to test users.
-- For broad public usage, complete Google OAuth verification (consent screen, policies, branding, etc.).
-- Never commit `GOOGLE_CLIENT_SECRET` to git.
-
-## Security Notes
-
-- OAuth access/refresh tokens are stored in MindRoom credentials storage, typically:
-- `mindroom_data/credentials/google_credentials.json`
-- Restrict filesystem access to your MindRoom data directory.
-- Revoke app access from Google account settings if needed.
-
-## Troubleshooting
-
-### "Google OAuth is not configured"
-
-`GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` is missing in the MindRoom environment.
-
-### "Redirect URI mismatch"
-
-Ensure all three are identical:
-
-- `GOOGLE_REDIRECT_URI` in the MindRoom environment
-- Redirect URI in Google Console
-- Actual MindRoom callback URL
-
-### Users cannot authorize while app is in testing mode
-
-Add those users to OAuth consent screen test users.
-
-# Google Services OAuth (Individual Setup)
-
-This guide is for one person running MindRoom and creating their own Google OAuth app for the legacy Google Services dashboard integration. For personal-agent Google Drive access through the generic OAuth framework, use the Google Drive section below.
-
-For team/shared deployments, use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md).
-
-## What You Need Before Starting
-
-- A Google account
-- Access to Google Cloud Console
-- A running MindRoom instance with the bundled dashboard (default URL: `http://localhost:8765`)
-
-The callback path is always:
-
-```
-/api/google/callback
-```
-
-So the default full callback URL is:
-
-```
-http://localhost:8765/api/google/callback
-```
-
-## Step 1: Create Google Cloud Project
-
-1. Open [Google Cloud Console](https://console.cloud.google.com/).
-1. Create or select a project.
-1. Save the project ID for `GOOGLE_PROJECT_ID`.
-
-## Step 2: Enable APIs
-
-1. Go to **APIs & Services → Library**.
-1. Enable:
-1. Gmail API
-1. Google Calendar API
-1. Google Drive API
-1. Google Sheets API
-
-## Step 3: Configure OAuth Consent Screen
-
-1. Go to **APIs & Services → OAuth consent screen**.
-1. Choose `External`.
-1. Fill required fields and save.
-1. Add your own email as a test user.
-1. Add scopes:
-1. `https://www.googleapis.com/auth/gmail.readonly`
-1. `https://www.googleapis.com/auth/gmail.modify`
-1. `https://www.googleapis.com/auth/gmail.compose`
-1. `https://www.googleapis.com/auth/calendar`
-1. `https://www.googleapis.com/auth/spreadsheets`
-1. `https://www.googleapis.com/auth/drive.file`
-1. `openid`
-1. `https://www.googleapis.com/auth/userinfo.email`
-1. `https://www.googleapis.com/auth/userinfo.profile`
-
-## Step 4: Create OAuth Client ID
-
-1. Go to **APIs & Services → Credentials**.
-1. Click **Create Credentials → OAuth client ID**.
-1. Choose **Web application**.
-1. Add redirect URI:
-1. `http://localhost:8765/api/google/callback`
-1. Copy client ID and client secret.
-
-## Step 5: Configure MindRoom
-
-Add this to `.env` (or export in your shell):
-
-```
-MINDROOM_PORT=8765
-GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-client-secret
-GOOGLE_PROJECT_ID=your-project-id
-GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
-```
-
-Restart MindRoom.
-
-## Step 6: Verify MindRoom Reads Credentials
-
-Run:
-
-```
-curl -s http://localhost:8765/api/google/status
-```
-
-Expected:
-
-- `"has_credentials": true`
-
-## Step 7: Connect in Frontend
-
-1. Open **Integrations → Google Services**.
-1. Click **Login with Google**.
-1. Sign in and approve requested scopes.
-1. You should see **Connected** and your available services.
-
-## Step 8: Enable Google Tools in `config.yaml`
-
-After OAuth is connected, add Google tools to your agent config:
-
-```
-agents:
-  email_assistant:
-    display_name: Email Assistant
-    role: Help manage and respond to emails
-    tools:
-      - gmail
-      - google_calendar
-      - google_sheets
-    instructions:
-      - Search important unread emails first.
-      - Draft replies and ask for confirmation before sending.
-```
-
-Gmail tool capabilities include:
-
-- `gmail_search`: Search emails with Gmail query syntax (for example `is:unread` or `from:boss@company.com`)
-- `gmail_latest`: Read latest inbox emails
-- `gmail_unread`: Read unread emails only
-
-After editing `config.yaml`, restart MindRoom to reload configuration.
-
-## Disconnect Later (Optional)
-
-1. In MindRoom frontend, click **Disconnect Google Account**.
-1. Optional: also revoke app access in [Google Account Permissions](https://myaccount.google.com/permissions).
-
-## Google Drive for Personal Agents
-
-The generic Google Drive OAuth provider is separate from the legacy `/api/google/*` Google Services integration. It stores OAuth tokens under the scoped `google_drive_oauth` service for the authenticated requester and selected agent. It stores editable tool settings, such as capability toggles and file-size limits, under the separate `google_drive` service. Use it when a private personal agent needs to search or read a user's Drive files without sharing that token with other users or agents.
-
-The generic callback path is:
-
-```
-/api/oauth/google_drive/callback
-```
-
-The default local callback URL is:
+For local development, the redirect URIs are:
 
 ```
 http://localhost:8765/api/oauth/google_drive/callback
+http://localhost:8765/api/oauth/google_calendar/callback
+http://localhost:8765/api/oauth/google_sheets/callback
+http://localhost:8765/api/oauth/google_gmail/callback
 ```
 
-Enable only the Google Drive API when the agent only needs Drive file search and read access. The built-in provider requests Drive read scopes plus OpenID email/profile scopes for identity validation. It does not request Gmail, Calendar, or Sheets scopes.
+For production, replace the origin with your public MindRoom origin.
 
-Configure MindRoom with these environment variables:
+## Environment Variables
 
-```
-MINDROOM_PORT=8765
-GOOGLE_DRIVE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-GOOGLE_DRIVE_CLIENT_SECRET=your-client-secret
-GOOGLE_DRIVE_REDIRECT_URI=http://localhost:8765/api/oauth/google_drive/callback
-```
-
-Optional deployment restrictions can be configured without changing MindRoom core:
+You can configure each provider independently:
 
 ```
-GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.com,example.org
-GOOGLE_DRIVE_ALLOWED_HOSTED_DOMAINS=example.com
+GOOGLE_DRIVE_CLIENT_ID=...
+GOOGLE_DRIVE_CLIENT_SECRET=...
+GOOGLE_DRIVE_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_drive/callback
+
+GOOGLE_CALENDAR_CLIENT_ID=...
+GOOGLE_CALENDAR_CLIENT_SECRET=...
+GOOGLE_CALENDAR_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_calendar/callback
+
+GOOGLE_SHEETS_CLIENT_ID=...
+GOOGLE_SHEETS_CLIENT_SECRET=...
+GOOGLE_SHEETS_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_sheets/callback
+
+GOOGLE_GMAIL_CLIENT_ID=...
+GOOGLE_GMAIL_CLIENT_SECRET=...
+GOOGLE_GMAIL_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_gmail/callback
 ```
 
-Add the tool to a private agent:
+The providers also accept shared `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` as a fallback. Use service-specific variables when different Google Cloud OAuth clients or restrictions are needed.
+
+Optional restrictions are service-specific:
+
+```
+GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.com
+GOOGLE_CALENDAR_ALLOWED_HOSTED_DOMAINS=example.com
+GOOGLE_SHEETS_ALLOWED_EMAIL_DOMAINS=example.com
+GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com
+```
+
+## Runtime Behavior
+
+Dashboard and agent-issued connect links use `/api/oauth/{provider}/connect` or `/api/oauth/{provider}/authorize`. OAuth callback state is signed and bound to the authenticated dashboard user and scoped credential target. Disconnecting a provider removes both the token service and that provider's settings service for the selected scope.
+
+# Google Services OAuth For Individuals
+
+This guide is for one person running MindRoom with their own Google OAuth client. MindRoom uses per-service generic OAuth providers instead of a legacy all-Google route.
+
+## Choose Providers
+
+Enable only the APIs your agents need. Add the matching tool to the agent config.
 
 ```
 agents:
-  drive_assistant:
-    display_name: Drive Assistant
-    role: Search and read my Drive files
+  personal:
+    display_name: Personal
+    role: Help with my Google workspace
     worker_scope: user_agent
     tools:
       - google_drive
+      - google_calendar
+      - google_sheets
+      - gmail
 ```
 
-If credentials are missing, the tool returns a MindRoom connect URL for the selected agent. That URL contains an opaque connect token for the current worker credential target instead of exposing the Matrix requester in the URL. MindRoom verifies that the authenticated dashboard user resolves to the same requester before it stores credentials. For standalone personal deployments, pairing normally sets `MINDROOM_OWNER_USER_ID`; set it manually if agent-issued links need to resolve to the owner Matrix user. The user opens that URL, completes Google OAuth, and retries the original request. Tokens are stored in MindRoom credential storage for the resolved requester and agent scope, not in `config.yaml`. Dashboard tool settings are stored separately so changing `google_drive` options cannot overwrite or expose OAuth token fields.
+## Create OAuth Credentials
 
-## Troubleshooting
+Open Google Cloud Console and create an OAuth client. Add one redirect URI per provider you use.
 
-### "Admin Setup Required" shown in frontend
+```
+http://localhost:8765/api/oauth/google_drive/callback
+http://localhost:8765/api/oauth/google_calendar/callback
+http://localhost:8765/api/oauth/google_sheets/callback
+http://localhost:8765/api/oauth/google_gmail/callback
+```
 
-MindRoom does not have valid Google OAuth env vars yet.
+## Configure MindRoom
 
-### "Failed to complete OAuth flow"
+For a single personal OAuth client, set the shared fallback client variables:
 
-Check redirect URI exact match between Google Cloud Console and MindRoom.
+```
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
+```
 
-### Access blocked by Google
+For explicit service-specific redirect URIs, set:
 
-If your app is in testing mode, ensure your account is listed as a test user.
+```
+GOOGLE_DRIVE_REDIRECT_URI=http://localhost:8765/api/oauth/google_drive/callback
+GOOGLE_CALENDAR_REDIRECT_URI=http://localhost:8765/api/oauth/google_calendar/callback
+GOOGLE_SHEETS_REDIRECT_URI=http://localhost:8765/api/oauth/google_sheets/callback
+GOOGLE_GMAIL_REDIRECT_URI=http://localhost:8765/api/oauth/google_gmail/callback
+```
+
+You may instead set `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_SHEETS_CLIENT_ID`, or `GOOGLE_GMAIL_CLIENT_ID` with matching secrets.
+
+## Connect
+
+Open the MindRoom dashboard and connect the integration required by each tool. If an agent tries a Google tool before it is connected, the tool result includes a MindRoom connect URL for that exact provider and agent scope. After the browser OAuth flow completes, retry the original request.
+
+OAuth tokens are stored under provider token services such as `google_drive_oauth`. Editable tool settings are stored separately under services such as `google_drive`, `google_calendar`, `google_sheets`, and `gmail`.
 
 # Docker Deployment
 

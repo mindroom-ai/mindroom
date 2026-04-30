@@ -25,24 +25,17 @@ _AGENT_WORKSPACE_DIRNAME = "workspace"
 _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
-        "google",
         "spotify",
         "homeassistant",
-        "gmail",
-        "google_calendar",
-        "google_sheets",
     },
 )
 LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
     {
         "attachments",
         "homeassistant",
-        "gmail",
-        "google_calendar",
-        "google_sheets",
     },
 )
-LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset({"google", "homeassistant"})
+LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset({"homeassistant"})
 
 
 @runtime_checkable

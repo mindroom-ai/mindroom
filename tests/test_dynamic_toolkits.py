@@ -223,11 +223,11 @@ def test_config_rejects_scope_incompatible_dynamic_toolkits_for_isolating_scope(
     """Agents with isolating worker scopes must not allow shared-only dynamic toolkits."""
     raw = _base_config_data()
     raw["defaults"] = {"tools": []}
-    raw["toolkits"] = {"mail": {"tools": ["gmail"]}}
+    raw["toolkits"] = {"mail": {"tools": ["homeassistant"]}}
     raw["agents"]["code"]["worker_scope"] = "user"
     raw["agents"]["code"]["allowed_toolkits"] = ["mail"]
 
-    with pytest.raises(ValueError, match=r"code -> toolkit 'mail' -> gmail \(worker_scope=user\)"):
+    with pytest.raises(ValueError, match=r"code -> toolkit 'mail' -> homeassistant \(worker_scope=user\)"):
         Config.validate_with_runtime(raw, _runtime_paths(tmp_path))
 
 
@@ -701,7 +701,7 @@ def test_dynamic_tools_manager_rejects_scope_incompatible_toolkit_loads(tmp_path
     raw = _base_config_data()
     raw["defaults"] = {"tools": []}
     raw["toolkits"] = {
-        "mail": {"tools": ["gmail"]},
+        "mail": {"tools": ["homeassistant"]},
     }
     raw["agents"]["code"]["allowed_toolkits"] = ["mail"]
     config = _validated_config(tmp_path, raw)
@@ -717,7 +717,7 @@ def test_dynamic_tools_manager_rejects_scope_incompatible_toolkit_loads(tmp_path
     assert payload["status"] == "scope_incompatible"
     assert payload["scope_label"] == "worker_scope=user_agent"
     assert payload["toolkit"] == "mail"
-    assert payload["unsupported_tools"] == ["gmail"]
+    assert payload["unsupported_tools"] == ["homeassistant"]
     assert get_loaded_toolkits_for_session(agent_name="code", config=config, session_id="session-1") == []
 
 

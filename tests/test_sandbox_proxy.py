@@ -3541,7 +3541,7 @@ class TestWorkerToolsOverride:
 
     @pytest.mark.parametrize(
         "tool_name",
-        ["gmail", "google_calendar", "google_sheets", "homeassistant"],
+        ["homeassistant"],
     )
     def test_local_only_tools_never_proxy(
         self,

@@ -1,154 +1,71 @@
-# Google Services OAuth (Admin Setup)
+# Google Services OAuth
 
-This is the one-time setup for a shared Google OAuth app in MindRoom's legacy Google Services dashboard integration.
-After you finish these steps, users only click **Login with Google** in the frontend.
-For private personal-agent Google Drive access, use the generic `/api/oauth/google_drive/*` provider instead of this shared `/api/google/*` flow.
+MindRoom uses the generic OAuth framework for Google tools.
+Each Google service has its own provider ID, callback URL, token service, and editable tool settings service.
+There is no bundled `/api/google/*` OAuth flow.
 
-## Who This Is For
+## Providers
 
-Use this guide if you are running MindRoom for a team, organization, or hosted deployment.
+| Tool            | Provider ID       | Callback path                         | Token service           | Settings service  | Scopes                                                    |
+| --------------- | ----------------- | ------------------------------------- | ----------------------- | ----------------- | --------------------------------------------------------- |
+| Google Drive    | `google_drive`    | `/api/oauth/google_drive/callback`    | `google_drive_oauth`    | `google_drive`    | Drive read-only plus OpenID email/profile                 |
+| Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar` | Calendar read/write plus OpenID email/profile             |
+| Google Sheets   | `google_sheets`   | `/api/oauth/google_sheets/callback`   | `google_sheets_oauth`   | `google_sheets`   | Sheets read/write plus OpenID email/profile               |
+| Gmail           | `google_gmail`    | `/api/oauth/google_gmail/callback`    | `google_gmail_oauth`    | `gmail`           | Gmail readonly, modify, compose plus OpenID email/profile |
 
-If you are a single local user and want to bring your own Google OAuth app, see [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
+## Google Cloud Setup
 
-## What You Need Before Starting
+Create an OAuth client in Google Cloud Console.
+Enable only the APIs for the tools you plan to use.
+Add one authorized redirect URI for each provider you enable.
 
-- Your MindRoom URL (local example: `http://localhost:8765`, production example: `https://mindroom.example.com`)
-- Access to [Google Cloud Console](https://console.cloud.google.com/)
-- Access to set MindRoom environment variables
-
-The MindRoom callback path is always:
-
-```
-/api/google/callback
-```
-
-Your full callback URL is:
+For local development, the redirect URIs are:
 
 ```
-<your-mindroom-origin>/api/google/callback
+http://localhost:8765/api/oauth/google_drive/callback
+http://localhost:8765/api/oauth/google_calendar/callback
+http://localhost:8765/api/oauth/google_sheets/callback
+http://localhost:8765/api/oauth/google_gmail/callback
 ```
 
-The generic Google Drive provider uses `<your-mindroom-origin>/api/oauth/google_drive/callback` and its own `GOOGLE_DRIVE_*` environment variables.
-Do not mix that callback with the legacy Google Services callback.
+For production, replace the origin with your public MindRoom origin.
 
-## Step 1: Create a Google Cloud Project
+## Environment Variables
 
-1. Open [Google Cloud Console](https://console.cloud.google.com/).
-1. Create a new project (or select an existing one).
-1. Save the project ID. You will use it as `GOOGLE_PROJECT_ID`.
-
-## Step 2: Enable APIs
-
-1. In Google Cloud Console, go to **APIs & Services → Library**.
-1. Enable:
-1. Gmail API
-1. Google Calendar API
-1. Google Drive API
-1. Google Sheets API
-
-## Step 3: Configure OAuth Consent Screen
-
-1. Go to **APIs & Services → OAuth consent screen**.
-1. User type:
-1. `External` for public or mixed users
-1. `Internal` for Google Workspace-only
-1. Fill required app info and save.
-1. Add test users if app is still in testing mode.
-1. Add scopes:
-1. `https://www.googleapis.com/auth/gmail.readonly`
-1. `https://www.googleapis.com/auth/gmail.modify`
-1. `https://www.googleapis.com/auth/gmail.compose`
-1. `https://www.googleapis.com/auth/calendar`
-1. `https://www.googleapis.com/auth/spreadsheets`
-1. `https://www.googleapis.com/auth/drive.file`
-1. `openid`
-1. `https://www.googleapis.com/auth/userinfo.email`
-1. `https://www.googleapis.com/auth/userinfo.profile`
-
-## Step 4: Create OAuth Client ID
-
-1. Go to **APIs & Services → Credentials**.
-1. Click **Create Credentials → OAuth client ID**.
-1. Choose **Web application**.
-1. Under **Authorized redirect URIs**, add:
-1. Local: `http://localhost:8765/api/google/callback`
-1. Production: `https://<your-domain>/api/google/callback`
-1. Copy the generated client ID and client secret.
-
-## Step 5: Configure MindRoom Environment
-
-Set these env vars in your MindRoom deployment (`.env`, Kubernetes secret, or hosting config):
+You can configure each provider independently:
 
 ```
-GOOGLE_CLIENT_ID=your-app-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-app-client-secret
-GOOGLE_PROJECT_ID=your-project-id
-GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
+GOOGLE_DRIVE_CLIENT_ID=...
+GOOGLE_DRIVE_CLIENT_SECRET=...
+GOOGLE_DRIVE_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_drive/callback
+
+GOOGLE_CALENDAR_CLIENT_ID=...
+GOOGLE_CALENDAR_CLIENT_SECRET=...
+GOOGLE_CALENDAR_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_calendar/callback
+
+GOOGLE_SHEETS_CLIENT_ID=...
+GOOGLE_SHEETS_CLIENT_SECRET=...
+GOOGLE_SHEETS_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_sheets/callback
+
+GOOGLE_GMAIL_CLIENT_ID=...
+GOOGLE_GMAIL_CLIENT_SECRET=...
+GOOGLE_GMAIL_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_gmail/callback
 ```
 
-Notes:
+The providers also accept shared `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` as a fallback.
+Use service-specific variables when different Google Cloud OAuth clients or restrictions are needed.
 
-- `GOOGLE_REDIRECT_URI` must match one of your Google Console redirect URIs exactly.
-- If omitted, MindRoom defaults to `http://localhost:8765/api/google/callback`.
-
-Restart MindRoom after setting env vars.
-
-## Step 6: Verify MindRoom Is Configured
-
-Run:
+Optional restrictions are service-specific:
 
 ```
-curl -s http://localhost:8765/api/google/status
+GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.com
+GOOGLE_CALENDAR_ALLOWED_HOSTED_DOMAINS=example.com
+GOOGLE_SHEETS_ALLOWED_EMAIL_DOMAINS=example.com
+GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com
 ```
 
-Expected result includes:
+## Runtime Behavior
 
-- `"has_credentials": true`
-
-If `connected` is false at this point, that is normal until a user authorizes.
-
-## Step 7: Verify Frontend User Flow
-
-1. Open **Integrations → Google Services**.
-1. If setup is correct, the card shows **Ready to Connect**.
-1. Users can now click **Login with Google** and authorize access.
-
-## End User Steps (After Admin Setup)
-
-Each user does only this:
-
-1. Open **Integrations → Google Services**.
-1. Click **Login with Google**.
-1. Approve scopes.
-1. Confirm status shows **Connected**.
-
-## Production Notes
-
-- Apps in testing mode are limited to test users.
-- For broad public usage, complete Google OAuth verification (consent screen, policies, branding, etc.).
-- Never commit `GOOGLE_CLIENT_SECRET` to git.
-
-## Security Notes
-
-- OAuth access/refresh tokens are stored in MindRoom credentials storage, typically:
-- `mindroom_data/credentials/google_credentials.json`
-- Restrict filesystem access to your MindRoom data directory.
-- Revoke app access from Google account settings if needed.
-
-## Troubleshooting
-
-### "Google OAuth is not configured"
-
-`GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` is missing in the MindRoom environment.
-
-### "Redirect URI mismatch"
-
-Ensure all three are identical:
-
-- `GOOGLE_REDIRECT_URI` in the MindRoom environment
-- Redirect URI in Google Console
-- Actual MindRoom callback URL
-
-### Users cannot authorize while app is in testing mode
-
-Add those users to OAuth consent screen test users.
+Dashboard and agent-issued connect links use `/api/oauth/{provider}/connect` or `/api/oauth/{provider}/authorize`.
+OAuth callback state is signed and bound to the authenticated dashboard user and scoped credential target.
+Disconnecting a provider removes both the token service and that provider's settings service for the selected scope.

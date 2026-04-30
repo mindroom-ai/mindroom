@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
-import threading
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -25,8 +22,10 @@ from mindroom.credentials import (
     load_worker_grantable_shared_credentials,
     validate_service_name,
 )
-from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.providers import OAuthProviderError
+from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import OAUTH_CREDENTIAL_FIELDS
+from mindroom.oauth.state import consume_signed_oauth_state, issue_signed_oauth_state, read_signed_oauth_state
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -45,7 +44,7 @@ router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
 _OAUTH_TOKEN_CREDENTIALS_ERROR = "OAuth token credentials must be managed through the OAuth connect flow."  # noqa: S105
-_pending_oauth_state_lock = threading.Lock()
+_PENDING_OAUTH_STATE_KIND = "dashboard_oauth_state"
 
 
 @dataclass(frozen=True)
@@ -59,9 +58,6 @@ class _PendingOAuthState:
     execution_scope_override: WorkerScope | None
     payload: dict[str, str] | None
     created_at: float
-
-
-_pending_oauth_states: dict[str, _PendingOAuthState] = {}
 
 
 def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
@@ -172,16 +168,6 @@ def _reject_unbound_private_dashboard_requester(
     )
 
 
-def _prune_expired_pending_oauth_states(now: float) -> None:
-    expired_keys = [
-        state
-        for state, pending in _pending_oauth_states.items()
-        if now - pending.created_at > _PENDING_OAUTH_STATE_TTL_SECONDS
-    ]
-    for state in expired_keys:
-        _pending_oauth_states.pop(state, None)
-
-
 def issue_pending_oauth_state(
     request: Request,
     service: str,
@@ -189,41 +175,53 @@ def issue_pending_oauth_state(
     *,
     payload: dict[str, str] | None = None,
 ) -> str:
-    """Create a short-lived server-side OAuth state bound to the current user and target."""
+    """Create a signed OAuth state bound to the current user and target."""
     user_id = _require_auth_user_id(request)
     execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
-    state = secrets.token_urlsafe(24)
-    now = time.time()
-    pending = _PendingOAuthState(
-        service=service,
-        user_id=user_id,
-        agent_name=agent_name,
-        execution_scope_override_provided=execution_scope_override_provided,
-        execution_scope_override=execution_scope_override,
-        payload=payload,
-        created_at=now,
+    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
+    return issue_signed_oauth_state(
+        runtime_paths,
+        kind=_PENDING_OAUTH_STATE_KIND,
+        ttl_seconds=_PENDING_OAUTH_STATE_TTL_SECONDS,
+        data={
+            "service": service,
+            "user_id": user_id,
+            "agent_name": agent_name or "",
+            "execution_scope_override_provided": execution_scope_override_provided,
+            "execution_scope_override": execution_scope_override or "",
+            "payload": payload or {},
+        },
     )
-    with _pending_oauth_state_lock:
-        _prune_expired_pending_oauth_states(now)
-        _pending_oauth_states[state] = pending
-    return state
 
 
 def _consume_pending_oauth_request(request: Request, service: str, state: str) -> _PendingOAuthState:
     """Consume and validate a previously issued dashboard OAuth state token."""
     user_id = _require_auth_user_id(request)
-    now = time.time()
-    with _pending_oauth_state_lock:
-        _prune_expired_pending_oauth_states(now)
-        pending = _pending_oauth_states.get(state)
-        if pending is None:
-            raise HTTPException(status_code=400, detail="OAuth state is invalid or expired")
-        if pending.service != service:
-            raise HTTPException(status_code=400, detail="OAuth state does not match this integration")
-        if pending.user_id != user_id:
-            raise HTTPException(status_code=403, detail="OAuth state does not belong to the current user")
-        _pending_oauth_states.pop(state, None)
-        return pending
+    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
+    try:
+        data = read_signed_oauth_state(runtime_paths, kind=_PENDING_OAUTH_STATE_KIND, token=state)
+    except OAuthProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if data.get("service") != service:
+        raise HTTPException(status_code=400, detail="OAuth state does not match this integration")
+    if data.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="OAuth state does not belong to the current user")
+    try:
+        consume_signed_oauth_state(runtime_paths, kind=_PENDING_OAUTH_STATE_KIND, token=state)
+    except OAuthProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    execution_scope_raw = data.get("execution_scope_override")
+    execution_scope_override = execution_scope_raw if execution_scope_raw in {"shared", "user", "user_agent"} else None
+    payload = data.get("payload")
+    return _PendingOAuthState(
+        service=service,
+        user_id=user_id,
+        agent_name=data.get("agent_name") or None,
+        execution_scope_override_provided=data.get("execution_scope_override_provided") is True,
+        execution_scope_override=cast("WorkerScope | None", execution_scope_override),
+        payload=payload if isinstance(payload, dict) else None,
+        created_at=0,
+    )
 
 
 def consume_pending_oauth_request(
@@ -515,11 +513,8 @@ def _request_may_target_scoped_credentials(request: Request, agent_name: str | N
 def _oauth_providers_for_request(request: Request) -> dict[str, OAuthProvider]:
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     if snapshot.runtime_config is None and not snapshot.config_data:
-        config = Config.model_validate({})
-        runtime_paths = snapshot.runtime_paths
-    else:
-        config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    return load_oauth_providers(config, runtime_paths)
+        snapshot.runtime_config = Config.model_validate({})
+    return load_oauth_providers_for_snapshot(snapshot)
 
 
 def _oauth_token_services_for_request(request: Request) -> frozenset[str]:

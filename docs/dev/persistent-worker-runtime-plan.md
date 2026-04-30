@@ -53,8 +53,9 @@ Dedicated Kubernetes workers now narrow mounts for `shared`, `user_agent`, and u
 Phase 3 is complete because the worker backend contract, lifecycle model, default routing policy, and observability surfaces all exist.
 Dedicated Kubernetes workers are provisioned today and rely on the same agent-owned state model while keeping worker-local runtime caches isolated by worker key.
 Phase 4 remains in progress as provider hardening, operator guidance, metrics, and broader rollout validation continue.
-Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
+Spotify and Home Assistant remain shared-only.
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
+The Google-backed `gmail`, `google_calendar`, and `google_sheets` tools now use per-provider OAuth credentials.
 Dashboard credential management is intentionally limited to unscoped agents and agents with `worker_scope=shared`.
 The dashboard does not manage credentials for `user` or `user_agent` workers.
 The `/v1` API remains intentionally restricted to unscoped agents and agents with `worker_scope=shared` until trusted requester identity is solved.

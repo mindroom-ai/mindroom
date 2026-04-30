@@ -23,8 +23,8 @@ if TYPE_CHECKING:
     description="Read, create, update, and duplicate Google Sheets spreadsheets",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.SPECIAL,
-    auth_provider="google",  # Authentication provided by Google Services integration
+    setup_type=SetupType.OAUTH,
+    auth_provider="google_sheets",
     icon="SiGooglesheets",
     icon_color="text-green-600",
     config_fields=[

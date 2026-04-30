@@ -360,8 +360,8 @@ class DefaultsConfig(BaseModel):
             "injects provider env vars such as OPENAI_API_KEY. For worker-routed tools, "
             "it only controls which shared credentials MindRoom may load inside isolated "
             "workers, and it does "
-            "not affect local shared-only integrations such as gmail, google_calendar, "
-            "google_sheets, and homeassistant because those stay in the main runtime. "
+            "not affect local shared-only integrations such as homeassistant because "
+            "those stay in the main runtime. "
             "google_vertex_adc is intentionally unsupported in isolated workers and must "
             "stay in the main runtime."
         ),

@@ -10,7 +10,7 @@ from mindroom.oauth.providers import (
     OAuthProviderNotConfiguredError,
     OAuthTokenResult,
 )
-from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.registry import load_oauth_providers, load_oauth_providers_for_snapshot
 from mindroom.oauth.service import build_oauth_authorize_url, build_oauth_connect_instruction
 
 __all__ = [
@@ -25,4 +25,5 @@ __all__ = [
     "build_oauth_authorize_url",
     "build_oauth_connect_instruction",
     "load_oauth_providers",
+    "load_oauth_providers_for_snapshot",
 ]

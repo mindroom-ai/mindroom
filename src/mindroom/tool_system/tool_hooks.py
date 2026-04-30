@@ -25,6 +25,7 @@ from mindroom.hooks import (
     emit_gate,
 )
 from mindroom.logging_config import get_logger
+from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.timing import emit_timing_event
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -384,6 +385,26 @@ async def _execute_bridge(
             tool_name=tool_name,
             agent_name=resolved_context.agent_name or None,
         )
+    except OAuthConnectionRequired as exc:
+        result = {
+            "error": str(exc),
+            "oauth_connection_required": True,
+            "provider": exc.provider_id,
+            "connect_url": exc.connect_url,
+        }
+        if has_after_hooks:
+            after_context = ToolAfterCallContext(
+                **resolved_context.hook_context_kwargs(
+                    hook_arguments if hook_arguments is not None else deepcopy(args),
+                ),
+                tool_name=tool_name,
+                result=result,
+                error=None,
+                blocked=False,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+            )
+            await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
+        return result
     except BaseException as exc:
         error = exc
         duration_ms = (time.perf_counter() - started_at) * 1000

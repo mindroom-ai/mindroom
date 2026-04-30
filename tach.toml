@@ -238,29 +238,12 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.api.google_integration"
-depends_on = [
-    "mindroom.api.auth",
-    "mindroom.api.config_lifecycle",
-    "mindroom.api.credentials",
-    "mindroom.api.runtime_reload",
-    "mindroom.constants",
-    "mindroom.credentials",
-    "mindroom.tool_system.dependencies",
-    "mindroom.tool_system.worker_routing",
-]
-
-[[modules]]
 path = "mindroom.api.runtime_reload"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.workers.runtime",
 ]
-
-[[modules]]
-path = "mindroom.api.google_tools_helper"
-depends_on = []
 
 [[modules]]
 path = "mindroom.api.homeassistant_integration"
@@ -339,7 +322,6 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.api.frontend",
-    "mindroom.api.google_integration",
     "mindroom.api.homeassistant_integration",
     "mindroom.api.integrations",
     "mindroom.api.knowledge",
@@ -380,7 +362,6 @@ depends_on = [
     "mindroom.agent_policy",
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
-    "mindroom.api.google_tools_helper",
     "mindroom.config.main",
     "mindroom.credentials",
     "mindroom.tool_system.catalog",
@@ -489,19 +470,6 @@ depends_on = []
 visibility = [
     "mindroom.custom_tools.matrix_message",
     "mindroom.custom_tools.matrix_room",
-]
-
-[[modules]]
-path = "mindroom.custom_tools._google_oauth"
-depends_on = [
-    "mindroom.credentials",
-    "mindroom.tool_system.dependencies",
-    "mindroom.tool_system.worker_routing",
-]
-visibility = [
-    "mindroom.custom_tools.gmail",
-    "mindroom.custom_tools.google_calendar",
-    "mindroom.custom_tools.google_sheets",
 ]
 
 [[modules]]

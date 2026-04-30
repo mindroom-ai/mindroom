@@ -178,6 +178,11 @@ class RuntimePaths:
     process_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     env_file_values: Mapping[str, str] = field(default_factory=dict, repr=False)
 
+    @classmethod
+    def from_env(cls) -> "RuntimePaths":
+        """Resolve runtime paths from the current process environment."""
+        return resolve_primary_runtime_paths()
+
     def env_value(self, name: str, *, default: str | None = None) -> str | None:
         """Resolve one env value against this runtime context."""
         if name == "MINDROOM_CONFIG_PATH":

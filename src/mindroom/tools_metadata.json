@@ -3731,7 +3731,7 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": "google",
+      "auth_provider": "google_sheets",
       "category": "development",
       "config_fields": [
         {
@@ -3826,7 +3826,7 @@
       "icon": "SiGooglesheets",
       "icon_color": "text-green-600",
       "name": "google_sheets",
-      "setup_type": "special",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {
@@ -6151,7 +6151,7 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": "google",
+      "auth_provider": "google_gmail",
       "category": "email",
       "config_fields": [
         {
@@ -6300,7 +6300,7 @@
       "icon": "SiGmail",
       "icon_color": "text-red-500",
       "name": "gmail",
-      "setup_type": "special",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {
@@ -7219,7 +7219,7 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": "google",
+      "auth_provider": "google_calendar",
       "category": "productivity",
       "config_fields": [
         {
@@ -7277,7 +7277,7 @@
       "icon": "SiGooglecalendar",
       "icon_color": "text-blue-600",
       "name": "google_calendar",
-      "setup_type": "special",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {

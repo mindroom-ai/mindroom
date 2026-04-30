@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.googlecalendar import GoogleCalendarTools as AgnoGoogleCalendarTools
 
-from mindroom.custom_tools._google_oauth import ScopedGoogleOAuthMixin
 from mindroom.logging_config import get_logger
+from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -21,11 +22,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class GoogleCalendarTools(ScopedGoogleOAuthMixin, AgnoGoogleCalendarTools):
+class GoogleCalendarTools(ScopedOAuthClientMixin, AgnoGoogleCalendarTools):
     """Google Calendar tools wrapper that uses MindRoom's credential management."""
 
+    _oauth_provider = google_calendar_oauth_provider()
     _oauth_tool_name = "google_calendar"
-    _oauth_log_name = "Google Calendar"
 
     def __init__(
         self,
@@ -46,7 +47,7 @@ class GoogleCalendarTools(ScopedGoogleOAuthMixin, AgnoGoogleCalendarTools):
             raise RuntimeError(msg)
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
-        creds = self._initialize_google_oauth(
+        creds = self._initialize_oauth_client(
             worker_target=worker_target,
             provided_creds=provided_creds,
             logger=logger,
@@ -57,3 +58,7 @@ class GoogleCalendarTools(ScopedGoogleOAuthMixin, AgnoGoogleCalendarTools):
 
         # Store original auth method for fallback
         self._set_original_auth(AgnoGoogleCalendarTools._auth)
+
+    def _should_fallback_to_original_auth(self) -> bool:
+        """Prefer the upstream auth path when a service account is configured."""
+        return bool(self.service_account_path)

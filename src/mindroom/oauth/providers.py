@@ -46,6 +46,17 @@ class OAuthClaimValidationError(OAuthProviderError):
 class OAuthConnectionRequired(OAuthProviderError):  # noqa: N818
     """Raised by tools when a user must connect an OAuth provider."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_id: str | None = None,
+        connect_url: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider_id = provider_id
+        self.connect_url = connect_url
+
 
 @dataclass(frozen=True, slots=True)
 class OAuthClientConfig:

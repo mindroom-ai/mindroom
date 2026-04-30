@@ -89,7 +89,7 @@ Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for deployment det
 ## Shared-Only Integrations
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
-The current shared-only integrations are `google`, `spotify`, `homeassistant`, `gmail`, `google_calendar`, `google_sheets`, and all configured `mcp_<server_id>` tools.
+The current shared-only integrations are `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
 
 ## Automatic Dependency Installation
 

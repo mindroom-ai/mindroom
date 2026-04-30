@@ -280,7 +280,7 @@ If a tool runs inside an isolated worker, only the services listed here are avai
 Leave this unset to keep isolated workers deny-by-default for shared credentials.
 This setting never injects provider env vars such as `OPENAI_API_KEY`.
 For worker-routed tools, it only controls which shared credentials MindRoom may load inside isolated workers.
-This setting also does not control local shared-only integrations that stay in the main runtime, such as `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+This setting also does not control local shared-only integrations that stay in the main runtime, such as `homeassistant`.
 Those tools keep using normal shared credentials even when `worker_grantable_credentials` is empty.
 `google_vertex_adc` is intentionally not supported here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; use that auth path only in the main runtime.
 Sandbox-proxied execution is stricter than direct local execution: ordinary runtime `.env` values and provider env do not carry over unless they are explicitly passed through.

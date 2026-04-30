@@ -463,7 +463,9 @@ ignore = [
   "ASYNC250", # Blocking input in async manual tests is intentional
   "B905",     # `zip()` without an explicit `strict=` parameter
   "BLE001",   # Do not catch blind exception
+  "D203",     # Incompatible with D211; prefer no blank line before class docstrings
   "D107",     # Missing docstring in `__init__`
+  "D213",     # Incompatible with D212; prefer multi-line summaries on the first line
   "D401",     # First line of docstring should be in imperative mood
   "D402",     # First line should not be the function's signature
   "E501",     # Line too long
