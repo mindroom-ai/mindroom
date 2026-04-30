@@ -285,17 +285,6 @@ def _request_runtime_overrides(
     return merged_runtime_overrides
 
 
-def _request_allowed_execution_secret_names(request: SandboxRunnerExecuteRequest) -> frozenset[str]:
-    """Return env names explicitly exposed through shell passthrough settings."""
-    if request.tool_name != "shell" or request.extra_env_passthrough is None:
-        return frozenset()
-    resolved = constants.shell_extra_env_values(
-        extra_env_passthrough=request.extra_env_passthrough,
-        process_env=request.execution_env,
-    )
-    return frozenset(resolved)
-
-
 class SandboxRunnerExecuteRequest(BaseModel):
     """Tool call payload forwarded from a primary runtime to the sandbox runtime.
 
@@ -899,6 +888,37 @@ def _workspace_env_overlay_base_env(
     return base_env
 
 
+def _uses_trusted_child_execution_env(
+    request: SandboxRunnerExecuteRequest,
+    *,
+    apply_workspace_env_hook: bool,
+) -> bool:
+    """Return whether a subprocess child should trust the parent's execution env."""
+    return (
+        not apply_workspace_env_hook
+        and bool(request.execution_env)
+        and request.tool_name in sandbox_exec.EXECUTION_ENV_TOOL_NAMES
+    )
+
+
+def _prepared_shell_execution_env(
+    request: SandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+) -> dict[str, str] | None:
+    """Return the worker shell env when shell execution is bound to a prepared worker."""
+    if request.tool_name != "shell" or prepared is None:
+        return None
+    worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
+    worker_execution_env.update(
+        constants.shell_extra_env_values(
+            extra_env_passthrough=request.extra_env_passthrough,
+            process_env=request.execution_env or runtime_paths.process_env,
+        ),
+    )
+    return worker_execution_env
+
+
 async def _execute_request_inprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
@@ -909,7 +929,19 @@ async def _execute_request_inprocess(
     apply_workspace_home_contract: bool = True,
     apply_workspace_env_hook: bool = True,
 ) -> SandboxRunnerExecuteResponse:
-    execution_env = sandbox_exec.request_execution_env(request.tool_name, request.execution_env, runtime_paths)
+    trusted_child_execution_env = _uses_trusted_child_execution_env(
+        request,
+        apply_workspace_env_hook=apply_workspace_env_hook,
+    )
+    if trusted_child_execution_env:
+        execution_env = dict(request.execution_env)
+    else:
+        execution_env = sandbox_exec.request_execution_env(
+            request.tool_name,
+            request.execution_env,
+            runtime_paths,
+            extra_env_passthrough=request.extra_env_passthrough,
+        )
     try:
         prepared = sandbox_worker_prep.resolve_prepared_worker_request(
             worker_key=request.worker_key,
@@ -925,10 +957,7 @@ async def _execute_request_inprocess(
             error=str(exc),
             failure_kind=("worker" if exc.failure_kind == "worker" else "tool"),
         )
-    if request.tool_name == "shell" and prepared is not None:
-        worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
-        worker_execution_env.update(execution_env)
-        execution_env = worker_execution_env
+    execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared) or execution_env
     _workspace_home, trusted_overlay, env_failure = _build_request_execution_env(
         request,
         prepared,
@@ -940,12 +969,20 @@ async def _execute_request_inprocess(
     )
     if env_failure is not None:
         return env_failure
+    trusted_env_overlay = (
+        _trusted_workspace_overlay_for_runtime_paths(
+            request.execution_env,
+            _protected_execution_env_names(workspace_home=_workspace_home, prepared=prepared),
+        )
+        if trusted_child_execution_env
+        else trusted_overlay
+    )
     runtime_overrides = _request_runtime_overrides(request, prepared)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
         execution_env,
-        allowed_execution_secret_names=_request_allowed_execution_secret_names(request),
-        trusted_env_overlay=trusted_overlay,
+        include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
+        trusted_env_overlay=trusted_env_overlay,
     )
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
@@ -1074,7 +1111,12 @@ def _execute_request_subprocess_sync(
     runner_token: str | None = None,
     apply_workspace_env_hook: bool = True,
 ) -> SandboxRunnerExecuteResponse:
-    execution_env = sandbox_exec.request_execution_env(request.tool_name, request.execution_env, runtime_paths)
+    execution_env = sandbox_exec.request_execution_env(
+        request.tool_name,
+        request.execution_env,
+        runtime_paths,
+        extra_env_passthrough=request.extra_env_passthrough,
+    )
     try:
         prepared = sandbox_worker_prep.resolve_prepared_worker_request(
             worker_key=request.worker_key,
@@ -1112,8 +1154,8 @@ def _execute_request_subprocess_sync(
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
         execution_env,
-        allowed_execution_secret_names=_request_allowed_execution_secret_names(request),
         trusted_env_overlay=trusted_overlay,
+        include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
     )
     subprocess_request = request.model_copy(update={"execution_env": execution_env})
     envelope = sandbox_protocol.serialize_subprocess_envelope(

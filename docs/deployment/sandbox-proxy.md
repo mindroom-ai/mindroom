@@ -250,8 +250,9 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 
 ## Shell env and PATH
 
-When `shell` runs through the sandbox proxy, it receives the stricter sandbox runtime env rather than the main process's ordinary committed runtime `.env`.
-Additional env is not forwarded implicitly: configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit.
+When `shell` runs through the sandbox proxy, it receives only a small non-secret system env by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale variables, proxy variables, and certificate path variables.
+Committed runtime `.env` values and provider credentials are not forwarded implicitly.
+Configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit.
 `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries.
 To prevent the runner from leaking its own control-plane credentials to tools, shell passthrough drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`.
 Everything else that matches your configured names or globs passes through, including service tokens and provider credentials.

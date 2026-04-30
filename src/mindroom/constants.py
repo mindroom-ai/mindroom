@@ -121,6 +121,38 @@ _RUNNER_CONTROL_ENV_EXCLUDED_NAMES = frozenset(
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
+_SANDBOX_SHELL_SYSTEM_ENV_NAMES = frozenset(
+    {
+        "CURL_CA_BUNDLE",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LD_LIBRARY_PATH",
+        "NIX_LD",
+        "NIX_LD_LIBRARY_PATH",
+        "NO_PROXY",
+        "PATH",
+        "PIP_CACHE_DIR",
+        "PYTHONPATH",
+        "PYTHONPYCACHEPREFIX",
+        "REQUESTS_CA_BUNDLE",
+        "SHELL",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TERM",
+        "TMPDIR",
+        "USER",
+        "UV_CACHE_DIR",
+        "VIRTUAL_ENV",
+        "XDG_CACHE_HOME",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    },
+)
 
 # Bash bookkeeping vars that change every time printenv runs and are never
 # meaningful overlay output from `.mindroom/worker-env.sh`.
@@ -663,6 +695,18 @@ def shell_extra_env_values(
     return cast("Mapping[str, str]", MappingProxyType(selected_env))
 
 
+def sandbox_shell_system_env_values(
+    *,
+    process_env: Mapping[str, str] | None = None,
+) -> Mapping[str, str]:
+    """Return the non-secret system env shell commands may receive by default."""
+    source_env = os.environ if process_env is None else process_env
+    return cast(
+        "Mapping[str, str]",
+        MappingProxyType({key: value for key, value in source_env.items() if key in _SANDBOX_SHELL_SYSTEM_ENV_NAMES}),
+    )
+
+
 def execution_runtime_env_values(
     runtime_paths: RuntimePaths,
 ) -> Mapping[str, str]:
@@ -722,19 +766,19 @@ def shell_execution_runtime_env_values(
 
 
 def sandbox_shell_execution_runtime_env_values(
-    runtime_paths: RuntimePaths,
+    _runtime_paths: RuntimePaths,
     *,
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied shell execution."""
-    merged_env = dict(
+    merged_env = dict(sandbox_shell_system_env_values(process_env=process_env))
+    merged_env.update(
         shell_extra_env_values(
             extra_env_passthrough=extra_env_passthrough,
             process_env=process_env,
         ),
     )
-    merged_env.update(sandbox_execution_runtime_env_values(runtime_paths))
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 

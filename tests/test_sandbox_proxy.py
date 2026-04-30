@@ -1842,7 +1842,7 @@ async def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild
         ],
     )
 
-    assert result == "visible-gitea-token|visible-in-shell"
+    assert result == "visible-gitea-token|"
 
 
 @pytest.mark.asyncio
@@ -1947,7 +1947,7 @@ async def test_inprocess_runner_shell_uses_request_scoped_extra_env_snapshot(
     )
 
     assert response.ok is True
-    assert response.result == "request-gitea-token|visible-in-shell"
+    assert response.result == "request-gitea-token|"
 
 
 def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_context(
