@@ -178,6 +178,20 @@ def test_runtime_images_include_headless_cli_utilities(dockerfile_path: Path) ->
         assert package_name in dockerfile
 
 
+@pytest.mark.parametrize(
+    "dockerfile_path",
+    [
+        Path("local/instances/deploy/Dockerfile.mindroom"),
+        Path("local/instances/deploy/Dockerfile.mindroom-minimal"),
+    ],
+)
+def test_runtime_images_keep_tmux_server_alive_without_sessions(dockerfile_path: Path) -> None:
+    """Worker tmux servers should survive short-lived single-session auth/setup flows."""
+    dockerfile = dockerfile_path.read_text(encoding="utf-8")
+
+    assert "set-option -g exit-empty off" in dockerfile
+
+
 def test_tools_requiring_config_metadata() -> None:
     """Test that tools marked REQUIRES_CONFIG have config_fields or auth_provider."""
     inconsistent = []
