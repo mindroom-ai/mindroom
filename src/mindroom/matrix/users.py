@@ -11,12 +11,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_homeserver, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix import provisioning
-from mindroom.matrix.client_session import (
-    login,
-    matrix_client,
-    matrix_startup_error,
-    restore_login,
-)
+from mindroom.matrix.client_session import login, matrix_client, matrix_startup_error, restore_login
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver

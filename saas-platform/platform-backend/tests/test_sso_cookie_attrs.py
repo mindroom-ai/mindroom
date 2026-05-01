@@ -28,11 +28,7 @@ def test_sso_cookie_has_security_flags() -> None:
     limiter.reset()
     client = TestClient(app)
     # Use a unique client IP to avoid interference with rate-limit tests
-    r = client.post(
-        "/my/sso-cookie",
-        headers={"authorization": "Bearer tok", "X-Forwarded-For": "10.1.2.3"},
-        data="x",
-    )
+    r = client.post("/my/sso-cookie", headers={"authorization": "Bearer tok", "X-Forwarded-For": "10.1.2.3"}, data="x")
     assert r.status_code == 200
     set_cookie = r.headers.get("set-cookie") or ""
     # Basic flags

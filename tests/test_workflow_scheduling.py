@@ -29,12 +29,7 @@ from mindroom.scheduling import (
     _WorkflowParseError,
     schedule_task,
 )
-from tests.conftest import (
-    bind_runtime_paths,
-    make_event_cache_mock,
-    runtime_paths_for,
-    test_runtime_paths,
-)
+from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 
 
 def _mid(name: str) -> MatrixID:
@@ -420,17 +415,15 @@ class TestExecuteScheduledWorkflow:
         )
 
         conversation_cache = _conversation_cache(latest_thread_event_id="$latest456")
-        with (
-            patch(
-                "mindroom.scheduling.send_message_result",
-                new=AsyncMock(
-                    return_value=DeliveredMatrixEvent(
-                        event_id="$event123",
-                        content_sent={"body": "sent"},
-                    ),
+        with patch(
+            "mindroom.scheduling.send_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$event123",
+                    content_sent={"body": "sent"},
                 ),
-            ) as mock_send,
-        ):
+            ),
+        ) as mock_send:
             await _execute_scheduled_workflow(
                 client,
                 workflow,
@@ -477,17 +470,15 @@ class TestExecuteScheduledWorkflow:
             new_thread=True,
         )
 
-        with (
-            patch(
-                "mindroom.scheduling.send_message_result",
-                new=AsyncMock(
-                    return_value=DeliveredMatrixEvent(
-                        event_id="$event456",
-                        content_sent={"body": "sent"},
-                    ),
+        with patch(
+            "mindroom.scheduling.send_message_result",
+            new=AsyncMock(
+                return_value=DeliveredMatrixEvent(
+                    event_id="$event456",
+                    content_sent={"body": "sent"},
                 ),
-            ) as mock_send,
-        ):
+            ),
+        ) as mock_send:
             conversation_cache = _conversation_cache()
             await _execute_scheduled_workflow(
                 client,

@@ -31,14 +31,8 @@ import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom import interactive
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
-from mindroom.bot import (
-    AgentBot,
-    TeamBot,
-)
-from mindroom.coalescing import (
-    COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
-    COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY,
-)
+from mindroom.bot import AgentBot, TeamBot
+from mindroom.coalescing import COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP, COALESCING_BYPASS_TRUSTED_INTERNAL_RELAY
 from mindroom.coalescing_batch import PendingEvent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -85,11 +79,7 @@ from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
 from mindroom.knowledge.utils import MultiKnowledgeVectorDb
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
-from mindroom.matrix.client import (
-    DeliveredMatrixEvent,
-    PermanentMatrixStartupError,
-    ResolvedVisibleMessage,
-)
+from mindroom.matrix.client import DeliveredMatrixEvent, PermanentMatrixStartupError, ResolvedVisibleMessage
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -150,9 +140,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.conftest import (
-    replace_turn_policy_deps as shared_replace_turn_policy_deps,
-)
+from tests.conftest import replace_turn_policy_deps as shared_replace_turn_policy_deps
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
@@ -3733,9 +3721,7 @@ class TestAgentBot:
             },
         }
 
-        with (
-            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)),
-        ):
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)):
             await bot._on_reaction(room, event)
 
         assert seen == [("👍", "$question", "$thread-root")]
@@ -6206,12 +6192,10 @@ class TestAgentBot:
         registry_stub.has_hooks.return_value = True
         bot._ingress_hook_runner.hook_context.hook_registry_state.registry = registry_stub
 
-        with (
-            patch(
-                "mindroom.turn_policy.emit_collect",
-                new=AsyncMock(
-                    return_value=[EnrichmentItem(key="extra", text="hook enrichment", cache_policy="volatile")],
-                ),
+        with patch(
+            "mindroom.turn_policy.emit_collect",
+            new=AsyncMock(
+                return_value=[EnrichmentItem(key="extra", text="hook enrichment", cache_policy="volatile")],
             ),
         ):
             prepared = await bot._ingress_hook_runner.apply_message_enrichment(

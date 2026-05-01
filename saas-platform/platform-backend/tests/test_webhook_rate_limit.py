@@ -72,10 +72,7 @@ def test_stripe_webhook_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Note: TestClient doesn't properly propagate the Stripe-Signature header,
     # so we'll get 400 errors but can still verify rate limiting
-    headers = {
-        "stripe-signature": "t=1,foo=bar",
-        "X-Forwarded-For": "10.22.33.44",
-    }
+    headers = {"stripe-signature": "t=1,foo=bar", "X-Forwarded-For": "10.22.33.44"}
     statuses: list[int] = []
     for _ in range(21):
         r = client.post("/webhooks/stripe", headers=headers, content=b"{}")

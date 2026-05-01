@@ -70,30 +70,21 @@ class TestInstancesEndpoints:
     def mock_start_instance(self):
         """Mock start_instance_provisioner function."""
         with patch("backend.routes.instances.start_instance_provisioner") as mock:
-            mock.return_value = {
-                "success": True,
-                "message": "Instance started successfully",
-            }
+            mock.return_value = {"success": True, "message": "Instance started successfully"}
             yield mock
 
     @pytest.fixture
     def mock_stop_instance(self):
         """Mock stop_instance_provisioner function."""
         with patch("backend.routes.instances.stop_instance_provisioner") as mock:
-            mock.return_value = {
-                "success": True,
-                "message": "Instance stopped successfully",
-            }
+            mock.return_value = {"success": True, "message": "Instance stopped successfully"}
             yield mock
 
     @pytest.fixture
     def mock_restart_instance(self):
         """Mock restart_instance_provisioner function."""
         with patch("backend.routes.instances.restart_instance_provisioner") as mock:
-            mock.return_value = {
-                "success": True,
-                "message": "Instance restarted successfully",
-            }
+            mock.return_value = {"success": True, "message": "Instance restarted successfully"}
             yield mock
 
     @pytest.fixture
@@ -102,12 +93,7 @@ class TestInstancesEndpoints:
         with patch("backend.routes.instances.PROVISIONER_API_KEY", "test-api-key"):
             yield
 
-    def test_list_user_instances_success(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_list_user_instances_success(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test listing user instances successfully."""
         # Setup
         now = datetime.now(UTC)
@@ -146,10 +132,7 @@ class TestInstancesEndpoints:
         assert data["instances"][0]["status"] == "running"
 
     def test_list_user_instances_triggers_background_sync(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test that stale instances trigger background sync."""
         # Setup - instance with stale sync time
@@ -174,10 +157,7 @@ class TestInstancesEndpoints:
         # Background task would be scheduled for stale instance
 
     def test_list_user_instances_no_instances(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test listing instances when user has none."""
         # Setup
@@ -201,11 +181,7 @@ class TestInstancesEndpoints:
     ):
         """Test provisioning a new instance for user."""
         # Setup
-        subscription = {
-            "id": "sub_123",
-            "account_id": "acc_test_123",
-            "tier": "starter",
-        }
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter"}
 
         # Setup mock chains for different queries
         subscription_mock = MagicMock()
@@ -248,19 +224,11 @@ class TestInstancesEndpoints:
         assert call_args["data"]["tier"] == "starter"
 
     def test_provision_user_instance_existing(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-        mock_provisioner_api_key,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock, mock_provisioner_api_key
     ):
         """Test provisioning when instance already exists."""
         # Setup
-        subscription = {
-            "id": "sub_123",
-            "account_id": "acc_test_123",
-            "tier": "starter",
-        }
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter"}
         existing_instance = {
             "id": 1,
             "instance_id": "456",
@@ -320,11 +288,7 @@ class TestInstancesEndpoints:
     ):
         """Test reprovisioning a deprovisioned instance."""
         # Setup
-        subscription = {
-            "id": "sub_123",
-            "account_id": "acc_test_123",
-            "tier": "professional",
-        }
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "professional"}
         deprovisioned_instance = {
             "id": 1,
             "instance_id": "789",
@@ -377,10 +341,7 @@ class TestInstancesEndpoints:
         assert call_args["data"]["instance_id"] == "789"  # Reusing same ID
 
     def test_provision_user_instance_no_subscription(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test provisioning when user has no subscription."""
         # Setup
@@ -417,12 +378,7 @@ class TestInstancesEndpoints:
         # Verify start_instance_provisioner was called
         mock_start_instance.assert_called_once_with(123, "Bearer test-api-key")
 
-    def test_start_user_instance_not_owned(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_start_user_instance_not_owned(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test starting instance not owned by user."""
         # Setup
         mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(data=[])
@@ -483,10 +439,7 @@ class TestInstancesEndpoints:
         mock_restart_instance.assert_called_once_with(456, "Bearer test-api-key")
 
     def test_background_sync_task(
-        self,
-        mock_supabase: MagicMock,
-        mock_check_deployment: AsyncMock,
-        mock_kubectl: AsyncMock,
+        self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock, mock_kubectl: AsyncMock
     ):
         """Test background sync task functionality."""
         import asyncio
@@ -507,9 +460,7 @@ class TestInstancesEndpoints:
         assert "kubernetes_synced_at" in update_call
 
     def test_background_sync_task_deployment_not_found(
-        self,
-        mock_supabase: MagicMock,
-        mock_check_deployment: AsyncMock,
+        self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock
     ):
         """Test background sync when deployment doesn't exist."""
         import asyncio
@@ -530,10 +481,7 @@ class TestInstancesEndpoints:
     def test_background_sync_prevents_duplicate(self):
         """Test that background sync prevents duplicate syncs."""
         import asyncio
-        from backend.routes.instances import (
-            _background_sync_instance_status,
-            _syncing_instances,
-        )
+        from backend.routes.instances import _background_sync_instance_status, _syncing_instances
 
         # Setup
         original_size = len(_syncing_instances)
@@ -566,19 +514,11 @@ class TestInstancesEndpoints:
             app.dependency_overrides.clear()
 
     def test_provision_with_existing_provisioning(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-        mock_provisioner_api_key,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock, mock_provisioner_api_key
     ):
         """Test provisioning when instance is already provisioning."""
         # Setup
-        subscription = {
-            "id": "sub_123",
-            "account_id": "acc_test_123",
-            "tier": "starter",
-        }
+        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "starter"}
         provisioning_instance = {
             "id": 1,
             "instance_id": "456",

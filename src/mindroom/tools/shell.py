@@ -19,11 +19,7 @@ from typing import Annotated, cast
 from agno.tools.toolkit import Toolkit
 from pydantic import BeforeValidator
 
-from mindroom.constants import (
-    WORKSPACE_HOME_CONTRACT_ENV_NAMES,
-    RuntimePaths,
-    shell_execution_runtime_env_values,
-)
+from mindroom.constants import WORKSPACE_HOME_CONTRACT_ENV_NAMES, RuntimePaths, shell_execution_runtime_env_values
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import (
     ConfigField,

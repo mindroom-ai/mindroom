@@ -89,11 +89,7 @@ class TestProvisionerEndpoints:
     def test_provision_invalid_auth(self, client: TestClient):
         """Test provision endpoint with invalid authorization."""
         with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "real-key"):
-            response = client.post(
-                "/system/provision",
-                json={},
-                headers={"Authorization": "Bearer wrong-key"},
-            )
+            response = client.post("/system/provision", json={}, headers={"Authorization": "Bearer wrong-key"})
             assert response.status_code == 401
             assert response.json()["detail"] == "Unauthorized"
 
@@ -112,11 +108,7 @@ class TestProvisionerEndpoints:
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
-        provision_data = {
-            "subscription_id": "sub_test_123",
-            "account_id": "acc_test_123",
-            "tier": "starter",
-        }
+        provision_data = {"subscription_id": "sub_test_123", "account_id": "acc_test_123", "tier": "starter"}
 
         # Make request
         response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
@@ -166,10 +158,7 @@ class TestProvisionerEndpoints:
         assert data["customer_id"] == "456"
 
     def test_provision_instance_not_found_for_reprovision(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_supabase: MagicMock, valid_auth_header: dict
     ):
         """Test re-provisioning with non-existent instance."""
         # Setup
@@ -185,21 +174,14 @@ class TestProvisionerEndpoints:
         assert response.json()["detail"] == "Instance 999 not found"
 
     def test_provision_kubectl_not_found(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: AsyncMock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: AsyncMock, valid_auth_header: dict
     ):
         """Test provisioning when kubectl is not available."""
         # Setup
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_kubectl.side_effect = FileNotFoundError()
 
-        provision_data = {
-            "subscription_id": "sub_test_123",
-            "account_id": "acc_test_123",
-        }
+        provision_data = {"subscription_id": "sub_test_123", "account_id": "acc_test_123"}
 
         # Make request
         response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
@@ -222,10 +204,7 @@ class TestProvisionerEndpoints:
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_helm.return_value = (1, "", "Helm error")  # Failure
 
-        provision_data = {
-            "subscription_id": "sub_test_123",
-            "account_id": "acc_test_123",
-        }
+        provision_data = {"subscription_id": "sub_test_123", "account_id": "acc_test_123"}
 
         # Make request
         response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
@@ -249,10 +228,7 @@ class TestProvisionerEndpoints:
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_wait_for_deployment.return_value = False  # Not ready
 
-        provision_data = {
-            "subscription_id": "sub_test_123",
-            "account_id": "acc_test_123",
-        }
+        provision_data = {"subscription_id": "sub_test_123", "account_id": "acc_test_123"}
 
         # Make request
         response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
@@ -283,16 +259,12 @@ class TestProvisionerEndpoints:
 
         # Verify kubectl was called with scale command
         mock_kubectl.assert_called_with(
-            ["scale", "deployment/mindroom-123", "--replicas=1"],
-            namespace="mindroom-instances",
+            ["scale", "deployment/mindroom-123", "--replicas=1"], namespace="mindroom-instances"
         )
         mock_update_status.assert_called_with(123, "running")
 
     def test_start_instance_not_found(
-        self,
-        client: TestClient,
-        mock_check_deployment: AsyncMock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_check_deployment: AsyncMock, valid_auth_header: dict
     ):
         """Test starting a non-existent instance."""
         # Setup
@@ -306,11 +278,7 @@ class TestProvisionerEndpoints:
         assert "not found" in response.json()["detail"]
 
     def test_start_instance_kubectl_failure(
-        self,
-        client: TestClient,
-        mock_kubectl: AsyncMock,
-        mock_check_deployment: AsyncMock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_kubectl: AsyncMock, mock_check_deployment: AsyncMock, valid_auth_header: dict
     ):
         """Test starting instance when kubectl fails."""
         # Setup
@@ -343,16 +311,12 @@ class TestProvisionerEndpoints:
 
         # Verify kubectl was called with scale command
         mock_kubectl.assert_called_with(
-            ["scale", "deployment/mindroom-123", "--replicas=0"],
-            namespace="mindroom-instances",
+            ["scale", "deployment/mindroom-123", "--replicas=0"], namespace="mindroom-instances"
         )
         mock_update_status.assert_called_with(123, "stopped")
 
     def test_stop_instance_not_found(
-        self,
-        client: TestClient,
-        mock_check_deployment: AsyncMock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_check_deployment: AsyncMock, valid_auth_header: dict
     ):
         """Test stopping a non-existent instance."""
         # Setup
@@ -366,11 +330,7 @@ class TestProvisionerEndpoints:
         assert "not found" in response.json()["detail"]
 
     def test_restart_instance_success(
-        self,
-        client: TestClient,
-        mock_kubectl: AsyncMock,
-        mock_check_deployment: AsyncMock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_kubectl: AsyncMock, mock_check_deployment: AsyncMock, valid_auth_header: dict
     ):
         """Test restarting an instance successfully."""
         # Make request
@@ -384,15 +344,11 @@ class TestProvisionerEndpoints:
 
         # Verify kubectl was called with rollout restart command
         mock_kubectl.assert_called_with(
-            ["rollout", "restart", "deployment/mindroom-123"],
-            namespace="mindroom-instances",
+            ["rollout", "restart", "deployment/mindroom-123"], namespace="mindroom-instances"
         )
 
     def test_restart_instance_not_found(
-        self,
-        client: TestClient,
-        mock_check_deployment: AsyncMock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_check_deployment: AsyncMock, valid_auth_header: dict
     ):
         """Test restarting a non-existent instance."""
         # Setup
@@ -406,11 +362,7 @@ class TestProvisionerEndpoints:
         assert "not found" in response.json()["detail"]
 
     def test_uninstall_instance_success(
-        self,
-        client: TestClient,
-        mock_helm: AsyncMock,
-        mock_update_status: Mock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_helm: AsyncMock, mock_update_status: Mock, valid_auth_header: dict
     ):
         """Test uninstalling an instance successfully."""
         # Make request
@@ -428,11 +380,7 @@ class TestProvisionerEndpoints:
         mock_update_status.assert_called_with(123, "deprovisioned")
 
     def test_uninstall_instance_already_uninstalled(
-        self,
-        client: TestClient,
-        mock_helm: AsyncMock,
-        mock_update_status: Mock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_helm: AsyncMock, mock_update_status: Mock, valid_auth_header: dict
     ):
         """Test uninstalling an already uninstalled instance."""
         # Setup
@@ -446,12 +394,7 @@ class TestProvisionerEndpoints:
         data = response.json()
         assert data["success"] is True
 
-    def test_uninstall_instance_failure(
-        self,
-        client: TestClient,
-        mock_helm: AsyncMock,
-        valid_auth_header: dict,
-    ):
+    def test_uninstall_instance_failure(self, client: TestClient, mock_helm: AsyncMock, valid_auth_header: dict):
         """Test uninstalling when helm fails."""
         # Setup
         mock_helm.return_value = (1, "", "some other error")
@@ -527,11 +470,7 @@ class TestProvisionerEndpoints:
         # Setup
         mock_supabase.table().select().execute.return_value = Mock(
             data=[
-                {
-                    "id": 1,
-                    "instance_id": "123",
-                    "status": "stopped",
-                },  # Actually running
+                {"id": 1, "instance_id": "123", "status": "stopped"}  # Actually running
             ]
         )
 
@@ -554,12 +493,7 @@ class TestProvisionerEndpoints:
         assert update["new_status"] == "running"
         assert update["reason"] == "status_mismatch"
 
-    def test_sync_instances_no_instances(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        valid_auth_header: dict,
-    ):
+    def test_sync_instances_no_instances(self, client: TestClient, mock_supabase: MagicMock, valid_auth_header: dict):
         """Test syncing with no instances."""
         # Setup
         mock_supabase.table().select().execute.return_value = Mock(data=[])
@@ -576,16 +510,13 @@ class TestProvisionerEndpoints:
         assert data["updates"] == []
 
     def test_sync_instances_missing_instance_id(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_supabase: MagicMock, valid_auth_header: dict
     ):
         """Test syncing with instance missing instance_id."""
         # Setup
         mock_supabase.table().select().execute.return_value = Mock(
             data=[
-                {"id": 1, "status": "running"},  # No instance_id or subdomain
+                {"id": 1, "status": "running"}  # No instance_id or subdomain
             ]
         )
 
@@ -610,9 +541,7 @@ class TestProvisionerEndpoints:
         """Test syncing when kubectl check fails."""
         # Setup
         mock_supabase.table().select().execute.return_value = Mock(
-            data=[
-                {"id": 1, "instance_id": "123", "status": "running"},
-            ]
+            data=[{"id": 1, "instance_id": "123", "status": "running"}]
         )
 
         mock_check_deployment.return_value = True
@@ -638,19 +567,13 @@ class TestProvisionerEndpoints:
         assert 429 in responses
 
     def test_provision_database_insert_failure(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        valid_auth_header: dict,
+        self, client: TestClient, mock_supabase: MagicMock, valid_auth_header: dict
     ):
         """Test provisioning when database insert fails."""
         # Setup
         mock_supabase.table().insert().execute.return_value = Mock(data=[])
 
-        provision_data = {
-            "subscription_id": "sub_test_123",
-            "account_id": "acc_test_123",
-        }
+        provision_data = {"subscription_id": "sub_test_123", "account_id": "acc_test_123"}
 
         # Make request
         response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)

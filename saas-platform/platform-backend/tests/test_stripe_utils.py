@@ -78,10 +78,7 @@ class TestStripeDebugUtils:
 
             # Check monthly price
             if error := self._check_price(
-                plan["name"],
-                plan.get("stripe_price_id_monthly"),
-                plan["price_monthly"],
-                "monthly",
+                plan["name"], plan.get("stripe_price_id_monthly"), plan["price_monthly"], "monthly"
             ):
                 errors.append(error)
             elif plan_key not in ["free", "enterprise"] and not plan.get("stripe_price_id_monthly"):
@@ -89,10 +86,7 @@ class TestStripeDebugUtils:
 
             # Check yearly price
             if error := self._check_price(
-                plan["name"],
-                plan.get("stripe_price_id_yearly"),
-                plan["price_yearly"],
-                "yearly",
+                plan["name"], plan.get("stripe_price_id_yearly"), plan["price_yearly"], "yearly"
             ):
                 errors.append(error)
             elif plan_key not in ["free", "enterprise"] and not plan.get("stripe_price_id_yearly"):

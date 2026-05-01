@@ -30,16 +30,8 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
-from mindroom.matrix.health import (
-    clear_matrix_sync_state,
-    mark_matrix_sync_loop_started,
-    mark_matrix_sync_success,
-)
-from mindroom.matrix.identity import (
-    MatrixID,
-    extract_agent_name,
-    is_agent_id,
-)
+from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
+from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
@@ -54,47 +46,24 @@ from mindroom.matrix.sync_certification import (
     sync_cache_write_diagnostics,
 )
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
-from mindroom.matrix.users import (
-    AgentMatrixUser,
-    create_agent_user,
-    login_agent_user,
-)
+from mindroom.matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
-from mindroom.post_response_effects import (
-    PostResponseEffectsSupport,
-)
+from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants, interactive
-from .agents import (
-    create_agent,
-    get_rooms_for_entity,
-    show_tool_calls_for_agent,
-)
-from .authorization import (
-    is_authorized_sender,
-)
+from .agents import create_agent, get_rooms_for_entity, show_tool_calls_for_agent
+from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
 from .commands import config_confirmation
-from .constants import (
-    ROUTER_AGENT_NAME,
-    RuntimePaths,
-    resolve_avatar_path,
-)
-from .conversation_resolver import (
-    ConversationResolver,
-    ConversationResolverDeps,
-    MessageContext,
-)
-from .conversation_state_writer import (
-    ConversationStateWriter,
-    ConversationStateWriterDeps,
-)
+from .constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_avatar_path
+from .conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
+from .conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from .delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
@@ -103,23 +72,14 @@ from .delivery_gateway import (
     SendTextRequest,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
-from .inbound_turn_normalizer import (
-    DispatchPayload,
-    InboundTurnNormalizer,
-    InboundTurnNormalizerDeps,
-)
+from .inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, InboundTurnNormalizerDeps
 from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .media_inputs import MediaInputs
-from .response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-    ResponseRunnerDeps,
-    prepare_memory_and_model_context,
-)
+from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
@@ -128,11 +88,7 @@ from .scheduling import (
     restore_scheduled_tasks,
 )
 from .turn_controller import TurnController, TurnControllerDeps
-from .turn_policy import (
-    IngressHookRunner,
-    TurnPolicy,
-    TurnPolicyDeps,
-)
+from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
 
 if TYPE_CHECKING:

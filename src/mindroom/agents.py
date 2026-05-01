@@ -40,10 +40,7 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
-from mindroom.tool_system.tool_hooks import (
-    build_tool_hook_bridge,
-    prepend_tool_hook_bridge,
-)
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_worker_target_from_runtime_env,
@@ -67,10 +64,7 @@ if TYPE_CHECKING:
     from mindroom.credentials import CredentialsManager
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.tool_system.worker_routing import (
-        ToolExecutionIdentity,
-        WorkerScope,
-    )
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
 

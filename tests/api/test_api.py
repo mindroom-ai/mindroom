@@ -25,11 +25,7 @@ from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.matrix.health import (
-    mark_matrix_sync_loop_started,
-    mark_matrix_sync_success,
-    reset_matrix_sync_health,
-)
+from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.models import WorkerHandle
@@ -1429,9 +1425,7 @@ def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_work
     config = _config_with_worker_scope("user")
     runtime_paths = main._app_runtime_paths(main.app)
 
-    with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
-    ):
+    with patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.get("/api/tools/?agent_name=general")
 
     assert response.status_code == 200

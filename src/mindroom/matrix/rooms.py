@@ -22,9 +22,7 @@ from mindroom.matrix.client_room_admin import (
     join_room,
     leave_room,
 )
-from mindroom.matrix.client_session import (
-    matrix_client,
-)
+from mindroom.matrix.client_session import matrix_client
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixRoom, MatrixState, matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY

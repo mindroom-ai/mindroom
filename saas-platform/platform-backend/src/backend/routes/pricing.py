@@ -33,9 +33,7 @@ async def get_pricing_config() -> dict[str, Any]:
             "days": config_model.trial.days,
             "applicable_plans": config_model.trial.applicable_plans,
         },
-        "discounts": {
-            "annual_percentage": config_model.discounts.annual_percentage,
-        },
+        "discounts": {"annual_percentage": config_model.discounts.annual_percentage},
     }
 
     # Process each plan
@@ -76,10 +74,7 @@ async def get_stripe_price(plan: str, billing_cycle: str) -> dict[str, Any]:
 
     """
     if billing_cycle not in ["monthly", "yearly"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid billing cycle. Must be 'monthly' or 'yearly'",
-        )
+        raise HTTPException(status_code=400, detail="Invalid billing cycle. Must be 'monthly' or 'yearly'")
 
     price_id = get_stripe_price_id(plan, billing_cycle)
     if not price_id:

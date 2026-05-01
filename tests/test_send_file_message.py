@@ -272,9 +272,7 @@ class TestSendFileMessage:
         file = tmp_path / "data.csv"
         file.write_text("a,b,c", encoding="utf-8")
 
-        with (
-            patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
-        ):
+        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
             event_id = await send_file_message(
                 client,
                 "!room:localhost",

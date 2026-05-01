@@ -11,10 +11,7 @@ router = APIRouter()
 
 
 @router.get("/my/usage", response_model=UsageResponse)
-async def get_user_usage(
-    user: Annotated[dict, Depends(verify_user)],
-    days: int = 30,
-) -> dict[str, Any]:
+async def get_user_usage(user: Annotated[dict, Depends(verify_user)], days: int = 30) -> dict[str, Any]:
     """Get usage metrics for current user."""
     sb = ensure_supabase()
 
@@ -22,8 +19,7 @@ async def get_user_usage(
     sub_result = sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
     if not sub_result.data:
         return UsageResponse(
-            usage=[],
-            aggregated=UsageAggregateOut(total_messages=0, total_agents=0, total_storage=0),
+            usage=[], aggregated=UsageAggregateOut(total_messages=0, total_agents=0, total_storage=0)
         ).model_dump(by_alias=True)
 
     subscription_id = sub_result.data[0]["id"]
@@ -40,14 +36,8 @@ async def get_user_usage(
 
     usage_data = usage_result.data or []
     total_messages = sum(d["messages_sent"] or 0 for d in usage_data)
-    total_agents = max(
-        (d["agents_used"] for d in usage_data if d["agents_used"] is not None),
-        default=0,
-    )
-    total_storage = max(
-        (d["storage_used_gb"] for d in usage_data if d["storage_used_gb"] is not None),
-        default=0,
-    )
+    total_agents = max((d["agents_used"] for d in usage_data if d["agents_used"] is not None), default=0)
+    total_storage = max((d["storage_used_gb"] for d in usage_data if d["storage_used_gb"] is not None), default=0)
 
     # Clean up None values in usage_data
     cleaned_usage = []

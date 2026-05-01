@@ -16,10 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.dependencies import (
-    auto_install_tool_extra,
-    check_deps_installed,
-)
+from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.registry_state import (
     _BUILTIN_TOOL_METADATA,

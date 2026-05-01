@@ -17,10 +17,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom.constants import (
-    sandbox_execution_runtime_env_values,
-    sandbox_shell_execution_runtime_env_values,
-)
+from mindroom.constants import sandbox_execution_runtime_env_values, sandbox_shell_execution_runtime_env_values
 from mindroom.credentials import load_scoped_credentials
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,

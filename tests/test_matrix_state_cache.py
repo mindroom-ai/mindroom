@@ -8,11 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom import constants
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.state import (
-    MatrixState,
-    _load_matrix_state_file_cached,
-    matrix_state_for_runtime,
-)
+from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached, matrix_state_for_runtime
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:

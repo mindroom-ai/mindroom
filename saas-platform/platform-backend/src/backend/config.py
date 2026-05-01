@@ -63,11 +63,7 @@ else:
 # Platform configuration
 PLATFORM_DOMAIN = os.getenv("PLATFORM_DOMAIN", "mindroom.chat")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
-ENABLE_CLEANUP_SCHEDULER = os.getenv("ENABLE_CLEANUP_SCHEDULER", "false").lower() in {
-    "1",
-    "true",
-    "yes",
-}
+ENABLE_CLEANUP_SCHEDULER = os.getenv("ENABLE_CLEANUP_SCHEDULER", "false").lower() in {"1", "true", "yes"}
 
 # Stripe configuration
 stripe.api_key = _get_secret("STRIPE_SECRET_KEY", "")
@@ -79,10 +75,7 @@ INSTANCE_BASE_DOMAIN = os.getenv("INSTANCE_BASE_DOMAIN", PLATFORM_DOMAIN)
 INSTANCE_STORAGE_CLASS_NAME = os.getenv("INSTANCE_STORAGE_CLASS_NAME", "")
 INSTANCE_MINDROOM_IMAGE = os.getenv("INSTANCE_MINDROOM_IMAGE", "")
 INSTANCE_MINDROOM_IMAGE_PULL_POLICY = os.getenv("INSTANCE_MINDROOM_IMAGE_PULL_POLICY", "")
-INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS = os.getenv(
-    "INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS",
-    "",
-)
+INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS = os.getenv("INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", "")
 INSTANCE_SYNAPSE_IMAGE = os.getenv("INSTANCE_SYNAPSE_IMAGE", "")
 INSTANCE_SYNAPSE_IMAGE_PULL_POLICY = os.getenv("INSTANCE_SYNAPSE_IMAGE_PULL_POLICY", "")
 INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED = os.getenv("INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED", "")
@@ -90,8 +83,7 @@ INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER = os.getenv("INSTANCE_TRUSTED_UPSTREAM_
 INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER = os.getenv("INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER", "")
 INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER = os.getenv("INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER", "")
 INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE = os.getenv(
-    "INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
-    "",
+    "INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE", ""
 )
 
 # API keys for MindRoom instances (shared across customers for now)
@@ -113,10 +105,7 @@ def _build_allowed_origins(domain: str, environment: str) -> list[str]:
     origins = [f"https://app.{domain}"]
 
     if environment != "production":
-        origins += [
-            "http://localhost:3000",
-            "http://localhost:3001",
-        ]
+        origins += ["http://localhost:3000", "http://localhost:3001"]
 
     extra = os.getenv("ALLOWED_ORIGINS", "").strip()
     if extra:

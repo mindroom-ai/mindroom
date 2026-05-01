@@ -31,17 +31,12 @@ _AUTH_EVENTS = Counter(
 
 # Counter for explicit admin verification attempts.
 _ADMIN_VERIFICATIONS = Counter(
-    "mindroom_admin_verifications_total",
-    "Admin verification outcomes by status.",
-    ("outcome",),
-    registry=REGISTRY,
+    "mindroom_admin_verifications_total", "Admin verification outcomes by status.", ("outcome",), registry=REGISTRY
 )
 
 # Gauge that tracks how many IPs are currently blocked by the in-memory guard.
 _BLOCKED_IPS = Gauge(
-    "mindroom_blocked_ips",
-    "Current number of IP addresses blocked due to auth failures.",
-    registry=REGISTRY,
+    "mindroom_blocked_ips", "Current number of IP addresses blocked due to auth failures.", registry=REGISTRY
 )
 
 

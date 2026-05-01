@@ -121,12 +121,7 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
         # Create new subscription
         sb.table("subscriptions").insert(subscription_data).execute()
 
-    logger.info(
-        "Subscription created for account %s: tier=%s, status=%s",
-        account_id,
-        tier,
-        subscription["status"],
-    )
+    logger.info("Subscription created for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
     return True, account_id
 
 
@@ -189,12 +184,7 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
     # Update subscription with tenant validation
     sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
 
-    logger.info(
-        "Subscription updated for account %s: tier=%s, status=%s",
-        account_id,
-        tier,
-        subscription["status"],
-    )
+    logger.info("Subscription updated for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
     return True, account_id
 
 
@@ -229,7 +219,7 @@ def handle_subscription_deleted(subscription: dict) -> tuple[bool, str | None]:
             "status": "cancelled",
             "cancelled_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
-        },
+        }
     ).eq("stripe_subscription_id", subscription["id"]).eq(
         "account_id",
         account_id,  # Double-check account ownership
@@ -288,7 +278,7 @@ def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
             "amount": invoice["amount_paid"] / 100,
             "currency": invoice["currency"],
             "status": "succeeded",
-        },
+        }
     ).execute()
 
     # Also record in usage table for metrics
@@ -304,7 +294,7 @@ def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
                 "billing_reason": invoice.get("billing_reason", "subscription_cycle"),
             },
             "timestamp": _timestamp_to_iso(invoice["created"]),
-        },
+        }
     ).execute()
 
     return True, account_id
@@ -341,12 +331,9 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
     account_id = sub_result.data["account_id"]
 
     # Update subscription status to past_due
-    sb.table("subscriptions").update(
-        {
-            "status": "past_due",
-            "updated_at": datetime.now(UTC).isoformat(),
-        },
-    ).eq("stripe_subscription_id", invoice["subscription"]).eq(
+    sb.table("subscriptions").update({"status": "past_due", "updated_at": datetime.now(UTC).isoformat()}).eq(
+        "stripe_subscription_id", invoice["subscription"]
+    ).eq(
         "account_id",
         account_id,  # Tenant validation
     ).execute()
@@ -357,8 +344,7 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
 @router.post("/webhooks/stripe", response_model=WebhookResponse)
 @limiter.limit("20/minute")
 async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
-    request: Request,
-    stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,
+    request: Request, stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None
 ) -> dict[str, Any]:
     """Handle incoming Stripe webhook events."""
     if not stripe_signature:

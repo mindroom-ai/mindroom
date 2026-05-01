@@ -11,10 +11,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.voice_handler import (
-    _process_transcription,
-    _sanitize_unavailable_mentions,
-)
+from mindroom.voice_handler import _process_transcription, _sanitize_unavailable_mentions
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 

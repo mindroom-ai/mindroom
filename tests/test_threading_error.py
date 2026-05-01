@@ -44,9 +44,7 @@ from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
-from mindroom.matrix.cache.thread_history_result import (
-    thread_history_result as _thread_history_result_impl,
-)
+from mindroom.matrix.cache.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import (
     _apply_thread_message_mutation,
@@ -54,11 +52,7 @@ from mindroom.matrix.cache.thread_writes import (
     _collect_sync_timeline_cache_updates,
 )
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
-from mindroom.matrix.client import (
-    DeliveredMatrixEvent,
-    PermanentMatrixStartupError,
-    ResolvedVisibleMessage,
-)
+from mindroom.matrix.client import DeliveredMatrixEvent, PermanentMatrixStartupError, ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
@@ -7630,9 +7624,7 @@ class TestThreadingBehavior:
         # Mock _generate_response to capture the call and send a test response
         bot._generate_response = AsyncMock()
         install_generate_response_mock(bot, bot._generate_response)
-        with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)),
-        ):
+        with patch("mindroom.turn_controller.interactive.handle_text_response", AsyncMock(return_value=None)):
             # Process the message
             await bot._on_message(room, event)
             await drain_coalescing(bot)

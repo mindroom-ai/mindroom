@@ -21,11 +21,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.thread_reads import ThreadReadPolicy
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
-from mindroom.matrix.cache.thread_writes import (
-    ThreadLiveWritePolicy,
-    ThreadOutboundWritePolicy,
-    ThreadSyncWritePolicy,
-)
+from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadOutboundWritePolicy, ThreadSyncWritePolicy
 from mindroom.matrix.client_thread_history import (
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,

@@ -14,25 +14,14 @@ from agno.db.base import SessionType
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
-from mindroom.ai import (
-    ai_response,
-    build_matrix_run_metadata,
-    stream_agent_response,
-)
+from mindroom.ai import ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.background_tasks import create_background_task
-from mindroom.constants import (
-    ATTACHMENT_IDS_KEY,
-    ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
-)
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import run_post_response_compaction_check
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.hooks import (
-    EnrichmentItem,
-    MessageEnvelope,
-)
+from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import should_use_streaming
@@ -44,10 +33,7 @@ from mindroom.memory import (
     strip_user_turn_time_prefix,
 )
 from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source
-from mindroom.post_response_effects import (
-    PostResponseEffectsSupport,
-    ResponseOutcome,
-)
+from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import (
     ResponseAttemptDeps,
     ResponseAttemptRequest,
@@ -65,14 +51,8 @@ from mindroom.streaming import (
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
-from mindroom.tool_system.runtime_context import (
-    ToolDispatchContext,
-    runtime_context_from_dispatch_context,
-)
-from mindroom.tool_system.worker_routing import (
-    run_with_tool_execution_identity,
-    stream_with_tool_execution_identity,
-)
+from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
+from mindroom.tool_system.worker_routing import run_with_tool_execution_identity, stream_with_tool_execution_identity
 
 from .delivery_gateway import (
     CancelledVisibleNoteRequest,

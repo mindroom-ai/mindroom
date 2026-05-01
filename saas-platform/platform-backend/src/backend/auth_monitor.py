@@ -53,11 +53,7 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
 
     # Log to database for audit and bump metrics
     create_audit_log(
-        action="auth_failed",
-        resource_type="authentication",
-        account_id=user_id,
-        ip_address=ip_address,
-        success=False,
+        action="auth_failed", resource_type="authentication", account_id=user_id, ip_address=ip_address, success=False
     )
     record_auth_event(actor="user", outcome="failure")
 
@@ -69,10 +65,7 @@ def record_failure(ip_address: str, user_id: str = None) -> bool:
         create_audit_log(
             action="ip_blocked",
             resource_type="security",
-            details={
-                "reason": "excessive_auth_failures",
-                "attempts": len(failed_attempts[ip_address]),
-            },
+            details={"reason": "excessive_auth_failures", "attempts": len(failed_attempts[ip_address])},
             ip_address=ip_address,
             success=True,
         )
@@ -91,11 +84,7 @@ def record_success(ip_address: str, user_id: str = None):
 
     # Log successful auth
     create_audit_log(
-        action="auth_success",
-        resource_type="authentication",
-        account_id=user_id,
-        ip_address=ip_address,
-        success=True,
+        action="auth_success", resource_type="authentication", account_id=user_id, ip_address=ip_address, success=True
     )
     record_auth_event(actor="user", outcome="success")
     set_blocked_ip_count(len(blocked_ips))

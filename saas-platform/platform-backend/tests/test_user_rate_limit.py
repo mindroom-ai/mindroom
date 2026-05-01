@@ -79,11 +79,7 @@ def test_setup_account_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
             for i in range(6):
                 # Use a unique IP for each iteration to test rate limiting per IP
                 r = client.post(
-                    "/my/account/setup",
-                    headers={
-                        "authorization": "Bearer tok",
-                        "X-Forwarded-For": "10.2.3.4",
-                    },
+                    "/my/account/setup", headers={"authorization": "Bearer tok", "X-Forwarded-For": "10.2.3.4"}
                 )
                 statuses.append(r.status_code)
                 if i == 0 and r.status_code not in (200, 201, 429):

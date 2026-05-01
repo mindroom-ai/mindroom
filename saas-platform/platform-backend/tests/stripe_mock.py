@@ -40,22 +40,15 @@ class MockProduct:
         mock_response = MagicMock()
         mock_response.data = [
             types.SimpleNamespace(
-                id="prod_test",
-                name="MindRoom Subscription",
-                metadata={"platform": "mindroom"},
-                active=True,
-            ),
+                id="prod_test", name="MindRoom Subscription", metadata={"platform": "mindroom"}, active=True
+            )
         ]
         return mock_response
 
     @staticmethod
     def retrieve(product_id: str) -> Any:  # noqa: ANN401
         """Mock retrieve method."""
-        return types.SimpleNamespace(
-            id=product_id,
-            name="MindRoom Subscription",
-            metadata={"platform": "mindroom"},
-        )
+        return types.SimpleNamespace(id=product_id, name="MindRoom Subscription", metadata={"platform": "mindroom"})
 
 
 class MockPrice:
@@ -147,8 +140,7 @@ class MockPrice:
                 product=data["product"],
                 unit_amount=data["amount"],
                 recurring=types.SimpleNamespace(
-                    interval=data["interval"],
-                    interval_count=data.get("interval_count", 1),
+                    interval=data["interval"], interval_count=data.get("interval_count", 1)
                 ),
                 metadata={"plan": data["plan"], "billing_cycle": data["billing_cycle"]},
                 active=True,
@@ -164,10 +156,7 @@ class MockWebhook:
     @staticmethod
     def construct_event(payload: bytes, sig_header: str, webhook_secret: str) -> dict[str, Any]:  # noqa: ARG004
         """Mock construct_event method."""
-        return {
-            "type": "payment_intent.succeeded",
-            "data": {"object": {"id": "pi_test_123"}},
-        }
+        return {"type": "payment_intent.succeeded", "data": {"object": {"id": "pi_test_123"}}}
 
 
 class MockCustomer:
@@ -177,9 +166,7 @@ class MockCustomer:
     def create(**kwargs: Any) -> Any:  # noqa: ANN401
         """Mock create method."""
         return types.SimpleNamespace(
-            id="cus_test_123",
-            email=kwargs.get("email", "test@example.com"),
-            metadata=kwargs.get("metadata", {}),
+            id="cus_test_123", email=kwargs.get("email", "test@example.com"), metadata=kwargs.get("metadata", {})
         )
 
 
@@ -200,9 +187,7 @@ class MockBillingPortalSession:
     @staticmethod
     def create(**kwargs: Any) -> Any:  # noqa: ANN401, ARG004
         """Mock create method."""
-        return types.SimpleNamespace(
-            url="https://billing.stripe.com/test_portal",
-        )
+        return types.SimpleNamespace(url="https://billing.stripe.com/test_portal")
 
 
 def create_stripe_mock() -> types.ModuleType:

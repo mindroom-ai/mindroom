@@ -58,10 +58,7 @@ class TestWebhookEndpoints:
                     {
                         "price": {
                             "id": f"price_{tier}_{billing_cycle}",
-                            "metadata": {
-                                "plan": tier,
-                                "billing_cycle": billing_cycle,
-                            },
+                            "metadata": {"plan": tier, "billing_cycle": billing_cycle},
                         },
                         "quantity": quantity,
                     }
@@ -101,19 +98,12 @@ class TestWebhookEndpoints:
         """Test webhook with invalid signature."""
         mock_stripe_signature.side_effect = stripe.error.SignatureVerificationError("Invalid signature", None)
 
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "invalid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "invalid_sig"})
         assert response.status_code == 400
         assert response.json()["detail"] == "Invalid signature"
 
     def test_subscription_created_success(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test successful subscription creation webhook."""
         # Setup
@@ -127,11 +117,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().insert().execute.return_value = Mock()
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
@@ -143,10 +129,7 @@ class TestWebhookEndpoints:
         assert mock_supabase.table.call_count >= 3  # accounts, subscriptions check, insert
 
     def test_subscription_created_no_account(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test subscription creation with no matching account."""
         # Setup
@@ -158,24 +141,14 @@ class TestWebhookEndpoints:
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
-        assert response.json() == {
-            "received": True,
-            "error": "Failed to process subscription creation",
-        }
+        assert response.json() == {"received": True, "error": "Failed to process subscription creation"}
 
     def test_subscription_updated_success(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test successful subscription update webhook."""
         # Setup
@@ -188,11 +161,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
@@ -201,10 +170,7 @@ class TestWebhookEndpoints:
         assert data["error"] is None
 
     def test_subscription_deleted_success(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test successful subscription deletion webhook."""
         # Setup
@@ -217,11 +183,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().update().eq().eq().execute.return_value = Mock()
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
@@ -230,10 +192,7 @@ class TestWebhookEndpoints:
         assert data["error"] is None
 
     def test_subscription_deleted_not_found(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test subscription deletion for non-existent subscription."""
         # Setup
@@ -245,25 +204,13 @@ class TestWebhookEndpoints:
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
-        assert response.json() == {
-            "received": True,
-            "error": "Failed to process subscription deletion",
-        }
+        assert response.json() == {"received": True, "error": "Failed to process subscription deletion"}
 
-    def test_payment_succeeded(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
-    ):
+    def test_payment_succeeded(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test successful payment webhook."""
         # Setup
         invoice_data = self._create_invoice_data()
@@ -275,11 +222,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().insert().execute.return_value = Mock()
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
@@ -292,10 +235,7 @@ class TestWebhookEndpoints:
         assert insert_calls >= 2  # payments + usage
 
     def test_payment_succeeded_no_subscription(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test payment webhook for one-time payment (no subscription)."""
         # Setup
@@ -305,25 +245,13 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify - should succeed but not process
         assert response.status_code == 200
-        assert response.json() == {
-            "received": True,
-            "error": "Failed to process payment",
-        }
+        assert response.json() == {"received": True, "error": "Failed to process payment"}
 
-    def test_payment_failed(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
-    ):
+    def test_payment_failed(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test failed payment webhook."""
         # Setup
         invoice_data = self._create_invoice_data()
@@ -335,11 +263,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().update().eq().eq().execute.return_value = Mock()
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
@@ -348,10 +272,7 @@ class TestWebhookEndpoints:
         assert data["error"] is None
 
     def test_payment_failed_no_subscription(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test failed payment webhook with no subscription found."""
         # Setup
@@ -363,25 +284,13 @@ class TestWebhookEndpoints:
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
-        assert response.json() == {
-            "received": True,
-            "error": "Failed to process payment failure",
-        }
+        assert response.json() == {"received": True, "error": "Failed to process payment failure"}
 
-    def test_trial_will_end(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
-    ):
+    def test_trial_will_end(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test trial ending webhook."""
         # Setup
         subscription_data = self._create_subscription_data()
@@ -397,11 +306,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
@@ -409,12 +314,7 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
-    def test_unhandled_event_type(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
-    ):
+    def test_unhandled_event_type(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test unhandled webhook event type."""
         # Setup
         data_obj = {"id": "obj_123", "customer": "cus_test_123"}
@@ -427,11 +327,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
@@ -440,10 +336,7 @@ class TestWebhookEndpoints:
         assert data["error"] is None
 
     def test_webhook_processing_exception(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test webhook with processing exception."""
         # Setup
@@ -455,21 +348,14 @@ class TestWebhookEndpoints:
         mock_supabase.table().select().eq().single().execute.side_effect = Exception("Database error")
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
         assert response.json() == {"received": True, "error": "Database error"}
 
     def test_webhook_event_recording_failure(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test webhook when event recording fails."""
         # Setup
@@ -501,11 +387,7 @@ class TestWebhookEndpoints:
         mock_supabase.table.side_effect = table_side_effect
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify - should still succeed despite recording failure
         assert response.status_code == 200
@@ -513,12 +395,7 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None  # No error despite recording failure
 
-    def test_subscription_with_trial(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
-    ):
+    def test_subscription_with_trial(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test subscription creation with trial period."""
         # Setup
         subscription_data = self._create_subscription_data()
@@ -532,11 +409,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().insert().execute.return_value = Mock()
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
@@ -544,12 +417,7 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
-    def test_professional_plan_scaling(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
-    ):
+    def test_professional_plan_scaling(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test professional plan with multiple users scales limits correctly."""
         # Setup
         subscription_data = self._create_subscription_data(tier="professional", quantity=10)
@@ -571,11 +439,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().insert = capture_insert
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
@@ -588,10 +452,7 @@ class TestWebhookEndpoints:
         assert insert_data is not None
 
     def test_subscription_update_with_cancellation(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
         """Test subscription update with cancellation timestamp."""
         # Setup
@@ -605,11 +466,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify
         assert response.status_code == 200
@@ -632,22 +489,13 @@ class TestWebhookEndpoints:
         # The limit is 20/minute, so 21 requests should trigger it
         responses = []
         for _ in range(25):
-            response = client.post(
-                "/webhooks/stripe",
-                content=b"test body",
-                headers={"Stripe-Signature": "valid_sig"},
-            )
+            response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
             responses.append(response.status_code)
 
         # At least one should be rate limited (429)
         assert 429 in responses
 
-    def test_legacy_tier_metadata(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
-    ):
+    def test_legacy_tier_metadata(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test handling of legacy 'tier' metadata field."""
         # Setup with legacy metadata format
         subscription_data = self._create_subscription_data()
@@ -665,11 +513,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().insert().execute.return_value = Mock()
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify - should handle legacy format successfully
         assert response.status_code == 200
@@ -677,12 +521,7 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
-    def test_missing_price_metadata(
-        self,
-        client: TestClient,
-        mock_stripe_signature: Mock,
-        mock_supabase: MagicMock,
-    ):
+    def test_missing_price_metadata(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test handling of missing price metadata."""
         # Setup with no metadata
         subscription_data = self._create_subscription_data()
@@ -694,11 +533,7 @@ class TestWebhookEndpoints:
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
 
         # Make request
-        response = client.post(
-            "/webhooks/stripe",
-            content=b"test body",
-            headers={"Stripe-Signature": "valid_sig"},
-        )
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
 
         # Verify - should fail gracefully
         assert response.status_code == 200

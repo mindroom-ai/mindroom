@@ -130,7 +130,7 @@ class TestPricingConfig:
         mock_path = MagicMock()
         mock_path.exists.return_value = False
         mock_path.open.side_effect = FileNotFoundError(
-            "Pricing configuration file not found. This file is required for the application to run.",
+            "Pricing configuration file not found. This file is required for the application to run."
         )
 
         with patch("backend.pricing.config_path", mock_path):

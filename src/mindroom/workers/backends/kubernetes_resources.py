@@ -17,10 +17,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from mindroom import constants
 from mindroom.constants import RuntimePaths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
-from mindroom.tool_system.worker_routing import (
-    resolved_worker_key_scope,
-    visible_state_roots_for_worker_key,
-)
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:

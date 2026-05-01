@@ -15,15 +15,9 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
-    ToolRuntimeContext,
-)
+from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolRuntimeContext
 from mindroom.tool_system.skills import build_agent_skills
-from mindroom.tool_system.worker_routing import (
-    ToolExecutionIdentity,
-    agent_workspace_root_path,
-)
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
 
 if TYPE_CHECKING:

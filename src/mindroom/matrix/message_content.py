@@ -11,10 +11,7 @@ import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.visible_body import (
-    has_trusted_stream_body_metadata,
-    visible_body_from_content,
-)
+from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
 if TYPE_CHECKING:
     from collections.abc import Collection

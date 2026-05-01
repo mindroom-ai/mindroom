@@ -18,11 +18,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import ai_response
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeContext,
-    get_tool_runtime_context,
-    tool_runtime_context,
-)
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

@@ -38,12 +38,7 @@ class TestAccountsEndpoints:
         yield
         app.dependency_overrides.clear()
 
-    def test_get_current_account_success(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_get_current_account_success(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting current account with relations successfully."""
         # Setup
         account_data = {
@@ -59,13 +54,7 @@ class TestAccountsEndpoints:
                     "account_id": "acc_test_123",
                     "tier": "professional",
                     "status": "active",
-                    "instances": [
-                        {
-                            "id": "inst_123",
-                            "instance_id": "123",
-                            "status": "running",
-                        }
-                    ],
+                    "instances": [{"id": "inst_123", "instance_id": "123", "status": "running"}],
                 }
             ],
         }
@@ -82,12 +71,7 @@ class TestAccountsEndpoints:
         assert len(data["subscriptions"]) == 1
         assert data["subscriptions"][0]["tier"] == "professional"
 
-    def test_get_current_account_not_found(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_get_current_account_not_found(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting account when it doesn't exist."""
         # Setup
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
@@ -115,12 +99,7 @@ class TestAccountsEndpoints:
         finally:
             app.dependency_overrides.clear()
 
-    def test_check_admin_status_true(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_check_admin_status_true(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test checking admin status when user is admin."""
         # Setup
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"is_admin": True})
@@ -133,12 +112,7 @@ class TestAccountsEndpoints:
         data = response.json()
         assert data["is_admin"] is True
 
-    def test_check_admin_status_false(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_check_admin_status_false(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test checking admin status when user is not admin."""
         # Setup
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"is_admin": False})
@@ -152,10 +126,7 @@ class TestAccountsEndpoints:
         assert data["is_admin"] is False
 
     def test_check_admin_status_account_not_found(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test checking admin status when account not found."""
         # Setup
@@ -169,12 +140,7 @@ class TestAccountsEndpoints:
         data = response.json()
         assert data["is_admin"] is False
 
-    def test_setup_account_new_user(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_setup_account_new_user(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test setting up free tier account for new user."""
         # Setup
         # No existing subscription
@@ -203,12 +169,7 @@ class TestAccountsEndpoints:
         assert data["account_id"] == "acc_test_123"
         assert data["subscription"]["tier"] == "free"
 
-    def test_setup_account_existing_user(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_setup_account_existing_user(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test setting up account when user already has subscription."""
         # Setup - existing subscription
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"id": "sub_existing_123"}])
@@ -222,12 +183,7 @@ class TestAccountsEndpoints:
         assert "Account already setup" in data["message"]
         assert data["account_id"] == "acc_test_123"
 
-    def test_setup_account_rate_limit(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_setup_account_rate_limit(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test rate limiting on account setup."""
         # Setup
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
@@ -257,10 +213,7 @@ class TestAccountsEndpoints:
                 assert "Rate limit exceeded" in response.json()["error"]
 
     def test_get_account_with_no_subscriptions(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test getting account with no subscriptions."""
         # Setup
@@ -285,10 +238,7 @@ class TestAccountsEndpoints:
         assert data["subscriptions"] == []
 
     def test_get_account_with_multiple_subscriptions(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test getting account with multiple subscriptions (edge case)."""
         # Setup
@@ -332,10 +282,7 @@ class TestAccountsEndpoints:
         assert len(data["subscriptions"][1]["instances"]) == 2
 
     def test_check_admin_status_missing_field(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test checking admin status when is_admin field is missing."""
         # Setup - data exists but no is_admin field
@@ -349,12 +296,7 @@ class TestAccountsEndpoints:
         data = response.json()
         assert data["is_admin"] is False
 
-    def test_setup_account_insert_failure(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_setup_account_insert_failure(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test handling database insert failure during account setup."""
         # Setup
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])

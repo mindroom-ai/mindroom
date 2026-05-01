@@ -99,19 +99,14 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
                 "purpose": "Payment processing",
                 "data_shared": "Email only (payment details go directly to Stripe)",
             },
-            {
-                "name": "Supabase",
-                "purpose": "Database hosting",
-                "data_shared": "Account and instance data",
-            },
+            {"name": "Supabase", "purpose": "Database hosting", "data_shared": "Account and instance data"},
         ],
     }
 
 
 @router.post("/my/gdpr/request-deletion")
 async def request_account_deletion(
-    user: Annotated[dict, Depends(verify_user)],
-    request: DeletionRequest,
+    user: Annotated[dict, Depends(verify_user)], request: DeletionRequest
 ) -> dict[str, Any]:
     """
     Request account and data deletion under GDPR Article 17.
@@ -143,8 +138,7 @@ async def request_account_deletion(
     # After grace period, ALL personal data is permanently deleted
     # Only anonymized invoice records kept for tax compliance
     sb.rpc(
-        "soft_delete_account",
-        {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id},
+        "soft_delete_account", {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id}
     ).execute()
 
     return {
@@ -159,10 +153,7 @@ async def request_account_deletion(
 
 
 @router.post("/my/gdpr/consent")
-async def update_consent(
-    user: Annotated[dict, Depends(verify_user)],
-    consent: ConsentUpdate,
-) -> dict[str, Any]:
+async def update_consent(user: Annotated[dict, Depends(verify_user)], consent: ConsentUpdate) -> dict[str, Any]:
     """
     Update user consent preferences for GDPR compliance.
     """
@@ -187,10 +178,7 @@ async def update_consent(
             "action": "consent_updated",
             "resource_type": "account",
             "resource_id": account_id,
-            "details": {
-                "marketing": consent.marketing,
-                "analytics": consent.analytics,
-            },
+            "details": {"marketing": consent.marketing, "analytics": consent.analytics},
             "success": True,
             "created_at": datetime.now(UTC).isoformat(),
         }
@@ -219,10 +207,7 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -
     # Check if account is soft-deleted
     account_result = sb.table("accounts").select("deleted_at").eq("id", account_id).execute()
     if not account_result.data or not account_result.data[0].get("deleted_at"):
-        return {
-            "status": "not_pending",
-            "message": "No deletion request found for this account",
-        }
+        return {"status": "not_pending", "message": "No deletion request found for this account"}
 
     # Restore the account
     sb.rpc("restore_account", {"target_account_id": account_id}).execute()
@@ -239,8 +224,4 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -
         }
     ).execute()
 
-    return {
-        "status": "success",
-        "message": "Account deletion request has been cancelled",
-        "account_status": "active",
-    }
+    return {"status": "success", "message": "Account deletion request has been cancelled", "account_status": "active"}

@@ -20,10 +20,7 @@ from mindroom.matrix.client_visible_messages import (
     thread_root_body_preview,
     trusted_visible_sender_ids,
 )
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeContext,
-    get_tool_runtime_context,
-)
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 
 @dataclass(frozen=True)

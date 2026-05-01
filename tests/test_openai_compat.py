@@ -4693,9 +4693,7 @@ class TestKnowledgeIntegration:
 
     def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is None when agent has no knowledge_bases."""
-        with (
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-        ):
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
             mock_ai.return_value = "Response"
 
             knowledge_app_client.post(

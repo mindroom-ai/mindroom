@@ -5,10 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from mindroom.mcp.errors import MCPError
-from mindroom.mcp.toolkit import (
-    MindRoomMCPToolkit,
-    require_mcp_server_manager,
-)
+from mindroom.mcp.toolkit import MindRoomMCPToolkit, require_mcp_server_manager
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ConfigField,

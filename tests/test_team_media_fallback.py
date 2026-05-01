@@ -13,18 +13,10 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
 from agno.models.response import ToolExecution
-from agno.run.agent import (
-    RunContentEvent as AgentRunContentEvent,
-)
-from agno.run.agent import (
-    RunOutput,
-)
-from agno.run.agent import (
-    ToolCallCompletedEvent as AgentToolCallCompletedEvent,
-)
-from agno.run.agent import (
-    ToolCallStartedEvent as AgentToolCallStartedEvent,
-)
+from agno.run.agent import RunContentEvent as AgentRunContentEvent
+from agno.run.agent import RunOutput
+from agno.run.agent import ToolCallCompletedEvent as AgentToolCallCompletedEvent
+from agno.run.agent import ToolCallStartedEvent as AgentToolCallStartedEvent
 from agno.run.base import RunStatus
 from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamRunContentEvent

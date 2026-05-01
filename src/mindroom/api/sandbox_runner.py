@@ -52,10 +52,7 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     write_bytes_to_output_path,
 )
-from mindroom.tool_system.sandbox_proxy import (
-    sandbox_proxy_config,
-    to_json_compatible,
-)
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -1003,10 +1000,8 @@ async def _execute_request_inprocess(
         if output_path is not None
         else None
     )
-    with (
-        tool_execution_identity(
-            execution_identity,
-        ),
+    with tool_execution_identity(
+        execution_identity,
     ):
         try:
             toolkit, entrypoint = _resolve_entrypoint(

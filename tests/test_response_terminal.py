@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.response_terminal import (
-    PendingVisibleResponse,
-    build_terminal_stream_transport_outcome,
-)
+from mindroom.response_terminal import PendingVisibleResponse, build_terminal_stream_transport_outcome
 
 
 @pytest.mark.parametrize(

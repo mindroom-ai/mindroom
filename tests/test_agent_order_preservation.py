@@ -12,11 +12,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.teams import TeamMode, TeamOutcome, decide_team_formation
-from mindroom.thread_utils import (
-    check_agent_mentioned,
-    get_agents_in_thread,
-    get_all_mentioned_agents_in_thread,
-)
+from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, get_all_mentioned_agents_in_thread
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 
 

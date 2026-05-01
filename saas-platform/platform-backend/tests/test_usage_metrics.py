@@ -135,21 +135,11 @@ class TestUsageMetrics:
 
         # Mock audit logs with various actions
         mock_audit_logs = Mock(
-            data=[
-                {"action": "create"},
-                {"action": "send_message"},
-                {"action": "api_call"},
-                {"action": "message_sent"},
-            ]
+            data=[{"action": "create"}, {"action": "send_message"}, {"action": "api_call"}, {"action": "message_sent"}]
         )
 
         # Mock instances
-        mock_instances = Mock(
-            data=[
-                {"agent_count": 2},
-                {"agent_count": 3},
-            ]
-        )
+        mock_instances = Mock(data=[{"agent_count": 2}, {"agent_count": 3}])
 
         # Configure mock
         mock_table = MagicMock()

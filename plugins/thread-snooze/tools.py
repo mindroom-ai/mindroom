@@ -10,19 +10,8 @@ from typing import TYPE_CHECKING, Any
 from agno.tools import Toolkit
 
 from mindroom.logging_config import get_logger
-from mindroom.thread_tags import (
-    ThreadTagRecord,
-    ThreadTagsError,
-    get_thread_tags,
-    remove_thread_tag,
-    set_thread_tag,
-)
-from mindroom.tool_system.metadata import (
-    SetupType,
-    ToolCategory,
-    ToolStatus,
-    register_tool_with_metadata,
-)
+from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, get_thread_tags, remove_thread_tag, set_thread_tag
+from mindroom.tool_system.metadata import SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,

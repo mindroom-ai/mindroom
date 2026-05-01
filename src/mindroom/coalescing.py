@@ -19,11 +19,7 @@ from .coalescing_batch import (
     close_pending_event_metadata,
 )
 from .commands.parsing import command_parser
-from .dispatch_handoff import (
-    DispatchEvent,
-    PreparedTextEvent,
-    is_media_dispatch_event,
-)
+from .dispatch_handoff import DispatchEvent, PreparedTextEvent, is_media_dispatch_event
 from .dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,

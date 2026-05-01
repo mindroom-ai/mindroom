@@ -21,12 +21,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.delivery_gateway import (
-    DeliveryGateway,
-    DeliveryGatewayDeps,
-    FinalDeliveryRequest,
-    ResponseHookService,
-)
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalDeliveryRequest, ResponseHookService
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_CANCELLED,

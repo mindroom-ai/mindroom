@@ -9,11 +9,7 @@ from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import (
-    ConfigRuntimeValidationError,
-    format_invalid_config_message,
-    load_config_or_user_error,
-)
+from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import (
     _preserve_tool_overrides,

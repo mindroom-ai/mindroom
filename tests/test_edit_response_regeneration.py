@@ -25,11 +25,7 @@ from mindroom.agents import remove_run_by_event_id
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
-from mindroom.constants import (
-    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
-    ROUTER_AGENT_NAME,
-    resolve_runtime_paths,
-)
+from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_state_writer import ConversationStateWriter
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
@@ -607,13 +603,11 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
     )
     edit_event.source = edit_event.__dict__["source"]
 
-    with (
-        patch.object(
-            bot._ingress_hook_runner,
-            "emit_message_received_hooks",
-            new_callable=AsyncMock,
-        ) as mock_emit_hooks,
-    ):
+    with patch.object(
+        bot._ingress_hook_runner,
+        "emit_message_received_hooks",
+        new_callable=AsyncMock,
+    ) as mock_emit_hooks:
         mock_emit_hooks.return_value = False
 
         await bot._on_message(room, edit_event)

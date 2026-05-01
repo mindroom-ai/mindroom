@@ -12,11 +12,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.cancellation import (
-    SYNC_RESTART_CANCEL_MSG,
-    USER_STOP_CANCEL_MSG,
-    cancel_failure_reason,
-)
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, cancel_failure_reason
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
@@ -32,11 +28,7 @@ from mindroom.orchestration.runtime import (
     sync_forever_with_restart,
 )
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import (
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
-    orchestrator_runtime_paths,
-)
+from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock, orchestrator_runtime_paths
 
 
 def _fake_runtime_paths(**env_overrides: str) -> RuntimePaths:

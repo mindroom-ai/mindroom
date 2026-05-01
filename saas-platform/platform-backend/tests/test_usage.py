@@ -37,12 +37,7 @@ class TestUsageEndpoints:
         yield
         app.dependency_overrides.clear()
 
-    def test_get_usage_success(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_get_usage_success(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting usage metrics successfully."""
         # Mock subscriptions table query
         sub_mock = MagicMock()
@@ -97,12 +92,7 @@ class TestUsageEndpoints:
         assert data["aggregated"]["totalAgents"] == 6  # max
         assert data["aggregated"]["totalStorage"] == 2.7  # max
 
-    def test_get_usage_with_days_parameter(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_get_usage_with_days_parameter(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting usage metrics with custom days parameter."""
         # Mock subscriptions table query
         sub_mock = MagicMock()
@@ -145,12 +135,7 @@ class TestUsageEndpoints:
         data = response.json()
         assert len(data["usage"]) == 1
 
-    def test_get_usage_no_subscription(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_get_usage_no_subscription(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting usage when user has no subscription."""
         # Setup - no subscription found
         sub_mock = MagicMock()
@@ -171,12 +156,7 @@ class TestUsageEndpoints:
         assert data["aggregated"]["totalAgents"] == 0
         assert data["aggregated"]["totalStorage"] == 0
 
-    def test_get_usage_no_metrics(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_get_usage_no_metrics(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting usage when no metrics exist."""
         # Mock subscriptions table query
         sub_mock = MagicMock()
@@ -228,12 +208,7 @@ class TestUsageEndpoints:
         finally:
             app.dependency_overrides.clear()
 
-    def test_get_usage_with_null_values(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_get_usage_with_null_values(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting usage with null values in metrics."""
         # Mock subscriptions table query
         sub_mock = MagicMock()
@@ -286,12 +261,7 @@ class TestUsageEndpoints:
         assert data["aggregated"]["totalAgents"] == 3
         assert data["aggregated"]["totalStorage"] == 1.5
 
-    def test_get_usage_large_dataset(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_get_usage_large_dataset(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting usage with large dataset."""
         # Setup - create 100 days of metrics
         metrics = []

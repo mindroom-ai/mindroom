@@ -44,11 +44,7 @@ class TestStripeRoutesEndpoints:
         app.dependency_overrides.clear()
 
     def test_create_checkout_session_success(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_stripe: Mock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
         """Test creating checkout session successfully."""
         # Setup
@@ -58,27 +54,15 @@ class TestStripeRoutesEndpoints:
 
         # Mock pricing functions
         with (
-            patch(
-                "backend.routes.stripe_routes.get_stripe_price_id",
-                return_value="price_test_123",
-            ),
-            patch(
-                "backend.routes.stripe_routes.is_trial_enabled_for_plan",
-                return_value=False,
-            ),
+            patch("backend.routes.stripe_routes.get_stripe_price_id", return_value="price_test_123"),
+            patch("backend.routes.stripe_routes.is_trial_enabled_for_plan", return_value=False),
         ):
             mock_checkout_session = Mock()
             mock_checkout_session.url = "https://checkout.stripe.com/pay/cs_test_123"
             mock_stripe.checkout.Session.create.return_value = mock_checkout_session
 
             # Make request
-            response = client.post(
-                "/stripe/checkout",
-                json={
-                    "tier": "starter",
-                    "billing_cycle": "monthly",
-                },
-            )
+            response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
 
             # Verify
             assert response.status_code == 200
@@ -86,11 +70,7 @@ class TestStripeRoutesEndpoints:
             assert data["url"] == "https://checkout.stripe.com/pay/cs_test_123"
 
     def test_create_customer_portal_session_success(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_stripe: Mock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
         """Test creating customer portal session successfully."""
         # Setup
@@ -111,10 +91,7 @@ class TestStripeRoutesEndpoints:
         assert data["url"] == "https://billing.stripe.com/session/test_123"
 
     def test_create_customer_portal_no_customer(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test creating portal session when no Stripe customer exists."""
         # Setup
@@ -128,11 +105,7 @@ class TestStripeRoutesEndpoints:
         assert "No Stripe customer" in response.json()["detail"]
 
     def test_create_customer_portal_stripe_error(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_stripe: Mock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
         """Test handling Stripe error when creating portal session."""
         # Setup
@@ -152,11 +125,7 @@ class TestStripeRoutesEndpoints:
         assert "Failed to create" in response.json()["detail"]
 
     def test_create_checkout_new_customer(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_stripe: Mock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
         """Test creating checkout for new customer."""
         # Setup - no existing customer
@@ -164,14 +133,8 @@ class TestStripeRoutesEndpoints:
 
         # Mock pricing functions
         with (
-            patch(
-                "backend.routes.stripe_routes.get_stripe_price_id",
-                return_value="price_test_123",
-            ),
-            patch(
-                "backend.routes.stripe_routes.is_trial_enabled_for_plan",
-                return_value=False,
-            ),
+            patch("backend.routes.stripe_routes.get_stripe_price_id", return_value="price_test_123"),
+            patch("backend.routes.stripe_routes.is_trial_enabled_for_plan", return_value=False),
         ):
             # Mock customer creation
             mock_customer = Mock()
@@ -187,13 +150,7 @@ class TestStripeRoutesEndpoints:
             mock_supabase.table().update().eq().execute.return_value = Mock()
 
             # Make request
-            response = client.post(
-                "/stripe/checkout",
-                json={
-                    "tier": "starter",
-                    "billing_cycle": "monthly",
-                },
-            )
+            response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
 
             # Verify
             assert response.status_code == 200
@@ -201,11 +158,7 @@ class TestStripeRoutesEndpoints:
             assert data["url"] == "https://checkout.stripe.com/pay/cs_test_123"
 
     def test_checkout_with_quantity(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_stripe: Mock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
         """Test creating checkout with quantity for professional plan."""
         # Setup
@@ -215,14 +168,8 @@ class TestStripeRoutesEndpoints:
 
         # Mock pricing functions
         with (
-            patch(
-                "backend.routes.stripe_routes.get_stripe_price_id",
-                return_value="price_test_123",
-            ),
-            patch(
-                "backend.routes.stripe_routes.is_trial_enabled_for_plan",
-                return_value=False,
-            ),
+            patch("backend.routes.stripe_routes.get_stripe_price_id", return_value="price_test_123"),
+            patch("backend.routes.stripe_routes.is_trial_enabled_for_plan", return_value=False),
         ):
             mock_checkout_session = Mock()
             mock_checkout_session.url = "https://checkout.stripe.com/pay/cs_test_123"
@@ -230,12 +177,7 @@ class TestStripeRoutesEndpoints:
 
             # Make request with quantity
             response = client.post(
-                "/stripe/checkout",
-                json={
-                    "tier": "professional",
-                    "billing_cycle": "monthly",
-                    "quantity": 5,
-                },
+                "/stripe/checkout", json={"tier": "professional", "billing_cycle": "monthly", "quantity": 5}
             )
 
             # Verify
@@ -244,11 +186,7 @@ class TestStripeRoutesEndpoints:
             assert data["url"] == "https://checkout.stripe.com/pay/cs_test_123"
 
     def test_checkout_stripe_error(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_stripe: Mock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
         """Test handling Stripe error during checkout."""
         # Setup
@@ -258,36 +196,19 @@ class TestStripeRoutesEndpoints:
 
         # Mock pricing functions
         with (
-            patch(
-                "backend.routes.stripe_routes.get_stripe_price_id",
-                return_value="price_test_123",
-            ),
-            patch(
-                "backend.routes.stripe_routes.is_trial_enabled_for_plan",
-                return_value=False,
-            ),
+            patch("backend.routes.stripe_routes.get_stripe_price_id", return_value="price_test_123"),
+            patch("backend.routes.stripe_routes.is_trial_enabled_for_plan", return_value=False),
         ):
             mock_stripe.checkout.Session.create.side_effect = Exception("Checkout error")
 
             # Make request
-            response = client.post(
-                "/stripe/checkout",
-                json={
-                    "tier": "starter",
-                    "billing_cycle": "monthly",
-                },
-            )
+            response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
 
             # Verify
             assert response.status_code == 500
             assert "Failed to create checkout" in response.json()["detail"]
 
-    def test_portal_account_not_found(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_portal_account_not_found(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test portal when account not found."""
         # Setup
         mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
@@ -306,14 +227,8 @@ class TestStripeRoutesEndpoints:
 
         # Mock pricing functions, user dependency, and Stripe
         with (
-            patch(
-                "backend.routes.stripe_routes.get_stripe_price_id",
-                return_value="price_test_123",
-            ),
-            patch(
-                "backend.routes.stripe_routes.is_trial_enabled_for_plan",
-                return_value=False,
-            ),
+            patch("backend.routes.stripe_routes.get_stripe_price_id", return_value="price_test_123"),
+            patch("backend.routes.stripe_routes.is_trial_enabled_for_plan", return_value=False),
             patch("backend.routes.stripe_routes.stripe") as mock_stripe,
         ):
             # Mock the checkout session creation
@@ -328,13 +243,7 @@ class TestStripeRoutesEndpoints:
             try:
                 # When there's no authenticated user, checkout should still work
                 # as stripe_routes allows optional user for checkout
-                response = client.post(
-                    "/stripe/checkout",
-                    json={
-                        "tier": "starter",
-                        "billing_cycle": "monthly",
-                    },
-                )
+                response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
                 # The route actually allows unauthenticated access
                 assert response.status_code == 200
                 assert response.json()["url"] == "https://checkout.stripe.com/pay/cs_test_123"

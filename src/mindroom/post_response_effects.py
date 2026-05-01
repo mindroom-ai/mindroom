@@ -11,9 +11,7 @@ from mindroom.delivery_gateway import MatrixCompactionLifecycle
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
-from mindroom.thread_summary import (
-    should_queue_thread_summary as should_queue_thread_summary_check,
-)
+from mindroom.thread_summary import should_queue_thread_summary as should_queue_thread_summary_check
 from mindroom.timing import timed
 
 if TYPE_CHECKING:

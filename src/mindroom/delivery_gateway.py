@@ -50,11 +50,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.history import (
-        CompactionLifecycleFailure,
-        CompactionLifecycleStart,
-        CompactionLifecycleSuccess,
-    )
+    from mindroom.history import CompactionLifecycleFailure, CompactionLifecycleStart, CompactionLifecycleSuccess
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.streaming_delivery import StreamInputChunk

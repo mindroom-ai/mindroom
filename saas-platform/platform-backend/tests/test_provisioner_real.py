@@ -81,11 +81,7 @@ class TestProvisionerCommandValidation:
                     # Run actual provisioning
                     await provision_instance(
                         None,  # request
-                        {
-                            "subscription_id": "sub-123",
-                            "account_id": "acc-123",
-                            "tier": "professional",
-                        },
+                        {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "professional"},
                         "Bearer test-key",  # authorization
                         None,  # background_tasks
                     )
@@ -158,11 +154,7 @@ class TestProvisionerCommandValidation:
 
             await provision_instance(
                 None,
-                {
-                    "subscription_id": "sub-123",
-                    "account_id": "acc-123",
-                    "tier": "starter",
-                },
+                {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
                 "Bearer test-key",
                 None,
             )
@@ -199,10 +191,7 @@ class TestProvisionerCommandValidation:
 
         with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
             with patch("backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl):
-                with patch(
-                    "backend.routes.provisioner.check_deployment_exists",
-                    return_value=True,
-                ):
+                with patch("backend.routes.provisioner.check_deployment_exists", return_value=True):
                     await stop_instance_provisioner(None, 123, "Bearer test-key")
 
         args, namespace = captured_kubectl_args[0]
@@ -241,11 +230,7 @@ class TestProvisionerStateTransitions:
             "start": {"stopped": "running"},
             "stop": {"running": "stopped"},
             "restart": {"running": "running", "stopped": "running"},
-            "uninstall": {
-                "running": "deprovisioned",
-                "stopped": "deprovisioned",
-                "error": "deprovisioned",
-            },
+            "uninstall": {"running": "deprovisioned", "stopped": "deprovisioned", "error": "deprovisioned"},
         }
 
         if action in expected_transitions and initial_state in expected_transitions[action]:
@@ -341,11 +326,7 @@ class TestProvisionerContractValidation:
         # Verify we don't use deprecated APIs
 
         # Check our kubectl commands don't use deprecated resources
-        test_commands = [
-            ["get", "deployments"],
-            ["scale", "deployment/test"],
-            ["create", "namespace", "test"],
-        ]
+        test_commands = [["get", "deployments"], ["scale", "deployment/test"], ["create", "namespace", "test"]]
 
         for cmd in test_commands:
             # Verify command uses stable API versions
@@ -385,10 +366,7 @@ class TestProvisionerErrorRecovery:
                         with pytest.raises(Exception):
                             await provision_instance(
                                 None,  # request
-                                {
-                                    "subscription_id": "sub-123",
-                                    "account_id": "acc-123",
-                                },
+                                {"subscription_id": "sub-123", "account_id": "acc-123"},
                                 "Bearer test-key",  # authorization
                                 None,  # background_tasks
                             )
@@ -410,10 +388,7 @@ class TestProvisionerErrorRecovery:
             return (0, "Success", "")
 
         with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch(
-                "backend.routes.provisioner.run_kubectl",
-                side_effect=track_namespace_operations,
-            ):
+            with patch("backend.routes.provisioner.run_kubectl", side_effect=track_namespace_operations):
                 with patch("backend.routes.provisioner.run_helm") as mock_helm:
                     # Make Helm fail after namespace creation
                     mock_helm.return_value = (1, "", "Deployment failed")
@@ -436,9 +411,7 @@ class TestProvisionerErrorRecovery:
 class TestProvisionerResourceValidation:
     """Test resource limits and quotas."""
 
-    @given(
-        tier=st.sampled_from(["free", "starter", "professional", "enterprise"]),
-    )
+    @given(tier=st.sampled_from(["free", "starter", "professional", "enterprise"]))
     def test_resource_limits_match_tier(self, tier: str):
         """Property: Resource limits must match tier specifications."""
         tier_limits = {
@@ -546,18 +519,10 @@ class TestProvisionerRealScenarios:
         # Real scenario: Registry credentials expired
         with patch("backend.k8s.run_kubectl") as mock_kubectl:
             # First call fails with auth error
-            mock_kubectl.return_value = (
-                1,
-                "",
-                "Error: failed to create secret: 401 Unauthorized",
-            )
+            mock_kubectl.return_value = (1, "", "Error: failed to create secret: 401 Unauthorized")
 
             result = await ensure_docker_registry_secret(
-                "test-secret",
-                "registry.example.com",
-                "user",
-                "expired-token",
-                "test-namespace",
+                "test-secret", "registry.example.com", "user", "expired-token", "test-namespace"
             )
 
             assert result is False, "Should handle registry auth failure"
@@ -619,10 +584,7 @@ class TestProvisionerRealScenarios:
             try:
                 result = await provision_instance(
                     None,  # request
-                    {
-                        "subscription_id": "sub-duplicate",
-                        "account_id": "acc-duplicate",
-                    },
+                    {"subscription_id": "sub-duplicate", "account_id": "acc-duplicate"},
                     "Bearer test-key",  # authorization
                     None,  # background_tasks
                 )
@@ -665,10 +627,7 @@ class TestProvisionerObservability:
 
                                 await provision_instance(
                                     None,  # request
-                                    {
-                                        "subscription_id": "sub-123",
-                                        "account_id": "acc-123",
-                                    },
+                                    {"subscription_id": "sub-123", "account_id": "acc-123"},
                                     "Bearer test-key",  # authorization
                                     None,  # background_tasks
                                 )
@@ -704,11 +663,7 @@ class TestProvisionerObservability:
                         with pytest.raises(Exception) as exc_info:
                             await provision_instance(
                                 None,  # request
-                                {
-                                    "subscription_id": "sub-123",
-                                    "account_id": "acc-123",
-                                    "tier": "professional",
-                                },
+                                {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "professional"},
                                 "Bearer test-key",  # authorization
                                 None,  # background_tasks
                             )

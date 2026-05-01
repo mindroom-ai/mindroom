@@ -22,10 +22,7 @@ from mindroom.coalescing import (
     CoalescingGate,
 )
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
-from mindroom.commands.handler import (
-    CommandHandlerContext,
-    handle_command,
-)
+from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -55,11 +52,7 @@ from mindroom.dispatch_handoff import (
 from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
-from mindroom.hooks import (
-    build_hook_matrix_admin,
-    hook_ingress_policy,
-    should_handle_interactive_text_response,
-)
+from mindroom.hooks import build_hook_matrix_admin, hook_ingress_policy, should_handle_interactive_text_response
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayload,

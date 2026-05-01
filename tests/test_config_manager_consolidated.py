@@ -17,11 +17,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
-from mindroom.constants import (
-    DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
-    RuntimePaths,
-    resolve_runtime_paths,
-)
+from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
 from mindroom.credential_policy import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.tool_system.metadata import AUTHORED_OVERRIDE_INHERIT
