@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import time
@@ -35,6 +36,7 @@ from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _Kuber
 from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_RUNNER_TOKEN_HASH,
     ANNOTATION_STARTUP_MANIFEST_HASH,
+    ANNOTATION_TEMPLATE_HASH,
     worker_auth_token,
 )
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
@@ -143,6 +145,10 @@ class _FakeApiError(Exception):
 _MAPPING_KEYS = {"annotations", "labels", "matchLabels", "selector", "stringData", "data"}
 
 
+def _encoded_secret_data(values: dict[str, str]) -> dict[str, str]:
+    return {key: base64.b64encode(value.encode("utf-8")).decode("ascii") for key, value in values.items()}
+
+
 def _to_namespace(value: object, *, key: str | None = None) -> object:
     if isinstance(value, dict):
         if key in _MAPPING_KEYS:
@@ -239,8 +245,9 @@ class _FakeCoreApi:
         self.pods: dict[str, object] = {}
         self.created_bodies: list[dict[str, object]] = []
         self.created_secret_bodies: list[dict[str, object]] = []
-        self.patched_secret_bodies: list[tuple[str, dict[str, object]]] = []
+        self.patched_secret_bodies: list[tuple[str, object]] = []
         self.deleted_secret_names: list[str] = []
+        self.api_client = _FakeApiClient(self)
 
     def read_namespaced_service(self, name: str, namespace: str) -> object:
         _ = namespace
@@ -276,7 +283,13 @@ class _FakeCoreApi:
     def create_namespaced_secret(self, namespace: str, body: dict[str, object]) -> object:
         _ = namespace
         self.created_secret_bodies.append(body)
+        string_data = body.get("stringData")
+        data = body.get("data")
         secret = _to_namespace(body)
+        secret.data = _encoded_secret_data(string_data) if isinstance(string_data, dict) else {}
+        if isinstance(data, dict):
+            secret.data.update(data)
+        secret.stringData = {}
         self.secrets[secret.metadata.name] = secret
         return secret
 
@@ -288,12 +301,13 @@ class _FakeCoreApi:
             raise _FakeApiError(404)
         string_data = body.get("stringData")
         if isinstance(string_data, dict):
-            current_string_data = dict(getattr(secret, "stringData", {}) or {})
-            current_string_data.update(string_data)
-            secret.stringData = current_string_data
+            current_data = dict(secret.data or {})
+            current_data.update(_encoded_secret_data(string_data))
+            secret.data = current_data
+            secret.stringData = {}
         data = body.get("data")
         if isinstance(data, dict):
-            current_data = dict(getattr(secret, "data", {}) or {})
+            current_data = dict(secret.data or {})
             for key, value in data.items():
                 if value is None:
                     current_data.pop(key, None)
@@ -313,6 +327,30 @@ class _FakeCoreApi:
         if pod is None:
             raise _FakeApiError(404)
         return pod
+
+
+class _FakeApiClient:
+    def __init__(self, core_api: _FakeCoreApi) -> None:
+        self._core_api = core_api
+
+    def select_header_accept(self, _content_types: list[str]) -> str:
+        return "application/json"
+
+    def call_api(
+        self,
+        _resource_path: str,
+        _method: str,
+        path_params: dict[str, str],
+        _query_params: list[object],
+        header_params: dict[str, str],
+        *,
+        body: object,
+        **_kwargs: object,
+    ) -> object:
+        assert header_params["Content-Type"] == "application/merge-patch+json"
+        name = path_params["name"]
+        namespace = path_params["namespace"]
+        return self._core_api.patch_namespaced_secret(name, namespace, body)
 
 
 def _backend(
@@ -610,9 +648,9 @@ def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -
     assert core_api.created_secret_bodies == []
     assert core_api.patched_secret_bodies[0] == (
         auth_secret_name,
-        {"stringData": {handle.worker_id: handle.auth_token}},
+        {"data": _encoded_secret_data({handle.worker_id: handle.auth_token})},
     )
-    assert core_api.secrets[auth_secret_name].stringData == {handle.worker_id: handle.auth_token}
+    assert core_api.secrets[auth_secret_name].data == _encoded_secret_data({handle.worker_id: handle.auth_token})
 
 
 def test_kubernetes_backend_evict_removes_only_own_key_from_tenant_auth_secret(tmp_path: Path) -> None:
@@ -662,6 +700,33 @@ def test_kubernetes_backend_startup_failure_removes_key_from_tenant_auth_secret(
     delete_patch = (auth_secret_name, {"data": {worker_id: None}})
     assert delete_patch in core_api.patched_secret_bodies
     assert worker_id not in core_api.secrets[auth_secret_name].data
+
+
+def test_kubernetes_backend_recreate_failure_removes_orphaned_tenant_auth_secret_key(tmp_path: Path) -> None:
+    """If recreate deletes the worker Deployment before failing, the shared Secret key must be released."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    auth_secret_name = "mindroom-worker-auth-demo"  # noqa: S105
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths, auth_secret_name=auth_secret_name)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    deployment = apps_api.deployments[handle.worker_id]
+    deployment.metadata.annotations[ANNOTATION_TEMPLATE_HASH] = "stale"
+
+    def recreate_with_failure(deployment_name: str, _manifest: dict[str, object], *, timeout_seconds: float) -> None:
+        _ = timeout_seconds
+        apps_api.delete_namespaced_deployment(deployment_name, backend.config.namespace)
+        msg = "deployment recreate failed"
+        raise WorkerBackendError(msg)
+
+    backend._resources._recreate_deployment = recreate_with_failure  # type: ignore[method-assign]
+
+    with pytest.raises(WorkerBackendError, match="deployment recreate failed"):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    assert handle.worker_id not in apps_api.deployments
+    assert handle.worker_id not in core_api.secrets[auth_secret_name].data
 
 
 def test_kubernetes_backend_shared_auth_secret_cleanup_ignores_missing_secret(tmp_path: Path) -> None:

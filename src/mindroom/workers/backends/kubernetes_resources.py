@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import importlib
@@ -130,7 +131,32 @@ class _AppsApiProtocol(Protocol):
     def list_namespaced_deployment(self, namespace: str, label_selector: str) -> _KubernetesDeploymentList: ...
 
 
+class _KubernetesApiClientProtocol(Protocol):
+    def select_header_accept(self, content_types: list[str]) -> str: ...
+
+    def call_api(
+        self,
+        resource_path: str,
+        method: str,
+        path_params: dict[str, str],
+        query_params: list[object],
+        header_params: dict[str, str],
+        *,
+        body: object,
+        post_params: list[object],
+        files: dict[str, object],
+        response_type: str,
+        auth_settings: list[str],
+        _return_http_data_only: bool,
+        _preload_content: bool,
+        _request_timeout: object | None,
+        collection_formats: dict[str, str],
+    ) -> object: ...
+
+
 class _CoreApiProtocol(Protocol):
+    api_client: _KubernetesApiClientProtocol
+
     def read_namespaced_service(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
@@ -142,8 +168,6 @@ class _CoreApiProtocol(Protocol):
     def read_namespaced_secret(self, name: str, namespace: str) -> object: ...
 
     def create_namespaced_secret(self, namespace: str, body: dict[str, object]) -> object: ...
-
-    def patch_namespaced_secret(self, name: str, namespace: str, body: object, **kwargs: object) -> object: ...
 
     def delete_namespaced_secret(self, name: str, namespace: str) -> None: ...
 
@@ -181,6 +205,10 @@ def worker_auth_token_hash(shared_token: str | None, worker_key: str) -> str | N
     if token is None:
         return None
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _secret_data_value(value: str) -> str:
+    return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
 
 def parse_annotation_float(annotations: dict[str, str], key: str, default: float) -> float:
@@ -338,19 +366,25 @@ class KubernetesResourceManager:
         """Create-or-patch one worker Secret containing its derived runner token."""
         worker_token = self._worker_auth_token(worker_key)
         if self.config.auth_secret_name is not None:
-            self._core.patch_namespaced_secret(
+            self._patch_secret_merge(
                 self.config.auth_secret_name,
-                self.config.namespace,
-                {"stringData": {worker_id: worker_token}},
+                {"data": {worker_id: _secret_data_value(worker_token)}},
             )
             return
-        self._apply_object(
-            read_fn=self._core.read_namespaced_secret,
-            create_fn=self._core.create_namespaced_secret,
-            patch_fn=self._core.patch_namespaced_secret,
-            resource_name=worker_id,
-            manifest=self._auth_secret_manifest(worker_key=worker_key, worker_id=worker_id),
-        )
+        manifest = self._auth_secret_manifest(worker_key=worker_key, worker_id=worker_id)
+        try:
+            self._core.read_namespaced_secret(worker_id, self.config.namespace)
+        except self._api_exception as exc:
+            if exc.status != 404:
+                raise
+            try:
+                self._core.create_namespaced_secret(self.config.namespace, manifest)
+            except self._api_exception as create_exc:
+                if create_exc.status != 409:
+                    raise
+                self._patch_secret_merge(worker_id, self._auth_secret_patch(worker_key=worker_key, worker_id=worker_id))
+            return
+        self._patch_secret_merge(worker_id, self._auth_secret_patch(worker_key=worker_key, worker_id=worker_id))
 
     def apply_deployment(
         self,
@@ -418,17 +452,39 @@ class KubernetesResourceManager:
         """Delete one worker auth Secret, ignoring 404s."""
         if self.config.auth_secret_name is not None:
             try:
-                self._core.patch_namespaced_secret(
+                self._patch_secret_merge(
                     self.config.auth_secret_name,
-                    self.config.namespace,
                     {"data": {secret_name: None}},
-                    _content_type="application/merge-patch+json",
                 )
             except self._api_exception as exc:
                 if exc.status != 404:
                     raise
             return
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
+
+    def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
+        api_client = self._core.api_client
+        api_client.call_api(
+            "/api/v1/namespaces/{namespace}/secrets/{name}",
+            "PATCH",
+            {"name": secret_name, "namespace": self.config.namespace},
+            [],
+            {
+                "Accept": api_client.select_header_accept(
+                    ["application/json", "application/yaml", "application/vnd.kubernetes.protobuf", "application/cbor"],
+                ),
+                "Content-Type": "application/merge-patch+json",
+            },
+            body=body,
+            post_params=[],
+            files={},
+            response_type="V1Secret",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
+            _preload_content=True,
+            _request_timeout=None,
+            collection_formats={},
+        )
 
     def _recreate_deployment(
         self,
@@ -589,6 +645,19 @@ class KubernetesResourceManager:
             "metadata": metadata,
             "type": "Opaque",
             "stringData": {_TOKEN_ENV_NAME: worker_token},
+        }
+
+    def _auth_secret_patch(self, *, worker_key: str, worker_id: str) -> dict[str, object]:
+        worker_token = self._worker_auth_token(worker_key)
+        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        metadata: dict[str, object] = {"labels": worker_labels}
+        owner_reference = self._owner_reference_or_none()
+        if owner_reference is not None:
+            metadata["ownerReferences"] = [owner_reference]
+        return {
+            "metadata": metadata,
+            "type": "Opaque",
+            "data": {_TOKEN_ENV_NAME: _secret_data_value(worker_token)},
         }
 
     def _deployment_manifest(
