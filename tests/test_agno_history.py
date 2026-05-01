@@ -4720,6 +4720,19 @@ def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None
     assert read_scope_seen_event_ids(session, scope) == {"event-1"}
 
 
+def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    run = _completed_run("run-1")
+    run.metadata = {
+        "matrix_seen_event_ids": ["question-1"],
+        "matrix_response_event_id": "answer-1",
+    }
+    session = _session("session-1", runs=[run])
+
+    assert read_scope_seen_event_ids(session, scope) == {"question-1", "answer-1"}
+
+
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -4806,25 +4819,37 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
                 run_id="run-1",
                 agent_id="test_agent",
                 status=RunStatus.completed,
-                metadata={"matrix_seen_event_ids": ["event-1", "event-2"]},
+                metadata={
+                    "matrix_seen_event_ids": ["event-1", "event-2"],
+                    "matrix_response_event_id": "response-1",
+                },
             ),
             RunOutput(
                 run_id="run-2",
                 agent_id="test_agent",
                 status=RunStatus.completed,
-                metadata={"matrix_seen_event_ids": ["event-3"]},
+                metadata={
+                    "matrix_seen_event_ids": ["event-3"],
+                    "matrix_response_event_id": "response-2",
+                },
             ),
             RunOutput(
                 run_id="run-3",
                 agent_id="test_agent",
                 status=RunStatus.completed,
-                metadata={"matrix_seen_event_ids": ["event-4"]},
+                metadata={
+                    "matrix_seen_event_ids": ["event-4"],
+                    "matrix_response_event_id": "response-3",
+                },
             ),
             RunOutput(
                 run_id="run-4",
                 agent_id="test_agent",
                 status=RunStatus.completed,
-                metadata={"matrix_seen_event_ids": ["event-5"]},
+                metadata={
+                    "matrix_seen_event_ids": ["event-5"],
+                    "matrix_response_event_id": "response-4",
+                },
             ),
         ],
     )
@@ -4864,6 +4889,10 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
         "event-3",
         "event-4",
         "event-5",
+        "response-1",
+        "response-2",
+        "response-3",
+        "response-4",
     }
 
 
