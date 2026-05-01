@@ -19,8 +19,6 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.tool_failures import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache.event_cache import ConversationEventCache
 
@@ -34,7 +32,6 @@ MatrixRoomEventScanner = Callable[[str, int, int], Awaitable[list[dict[str, Any]
 ApprovalRoomProvider = Callable[[], set[str]]
 TransportSenderProvider = Callable[[], str | None]
 
-_APPROVALS_DIRNAME = "approvals"
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
 _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
@@ -51,7 +48,7 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the displayed arguments are truncated. "
     "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
 )
-_STARTUP_AUTO_DENY_REASON = "Bot restarted before approval — original request was cancelled."
+_STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
 _CANCEL_RESOLUTION_RACE_GRACE_SECONDS = 0.01
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MANAGER: ApprovalManager | None = None
@@ -309,7 +306,6 @@ class ApprovalManager:
         self._resolved_card_event_ids: set[str] = set()
         self._cancelled_card_event_ids: set[str] = set()
         self._post_cancel_cleanup_tasks: set[asyncio.Task[None]] = set()
-        _purge_legacy_approval_files(runtime_paths.storage_root)
 
     async def request_approval(  # noqa: PLR0911
         self,
@@ -402,7 +398,7 @@ class ApprovalManager:
         if status == "denied":
             return await self._deny_matrix_only_card(
                 pending=pending,
-                reason=reason or _STARTUP_AUTO_DENY_REASON,
+                reason=reason or "Approval request is no longer live.",
                 resolved_by=resolved_by,
             )
         return ApprovalActionResult(consumed=False, resolved=False, thread_id=pending.thread_id)
@@ -478,12 +474,12 @@ class ApprovalManager:
             return pending, pending.card_sender_id == self._transport_sender_id()
         return None, False
 
-    async def auto_deny_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
-        """Auto-deny unresolved approval cards after startup using Matrix as source of truth."""
-        # AUTO-DENY MUST emit `m.replace` denied for same-router cards whose terminal state is
+    async def discard_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
+        """Discard unresolved approval cards after startup using Matrix as source of truth."""
+        # STARTUP DISCARD MUST emit `m.replace` expired for same-router cards whose terminal state is
         # PENDING_CONFIRMED: no cached terminal edit exists, because this router write-throughs every
         # terminal edit it sends.
-        # AUTO-DENY MUST NOT emit anything for other routers' cards or RESOLVED cards with a
+        # STARTUP DISCARD MUST NOT emit anything for other routers' cards or RESOLVED cards with a
         # cached or history-observed approved/denied/expired edit.
         # UNKNOWN means cross-router or history-discovered state cannot prove whether Matrix already
         # has a terminal edit. UNKNOWN is skipped: missing a cleanup is safer than false-denying a
@@ -493,7 +489,7 @@ class ApprovalManager:
             return 0
 
         cutoff_ts_ms = _lookback_cutoff_ms(lookback_hours)
-        denied = 0
+        discarded = 0
         for room_id in self._configured_approval_room_ids():
             (
                 candidates_by_event_id,
@@ -516,14 +512,14 @@ class ApprovalManager:
                 )
                 if state != _StartupTerminalState.PENDING_CONFIRMED:
                     continue
-                result = await self._deny_matrix_only_card(
+                result = await self._discard_matrix_only_card(
                     pending=pending,
-                    reason=_STARTUP_AUTO_DENY_REASON,
+                    reason=_STARTUP_DISCARD_REASON,
                     resolved_by=transport_sender,
                 )
                 if result.resolved:
-                    denied += 1
-        return denied
+                    discarded += 1
+        return discarded
 
     async def _startup_card_candidates(
         self,
@@ -926,6 +922,44 @@ class ApprovalManager:
             delivered = await self._emit_resolution(
                 pending,
                 status="denied",
+                reason=reason,
+                resolved_by=resolved_by,
+            )
+            with self._live_lock:
+                self._resolving_card_event_ids.discard(pending.card_event_id)
+                if delivered:
+                    self._resolved_card_event_ids.add(pending.card_event_id)
+            claim_released = True
+            return ApprovalActionResult(
+                consumed=True,
+                resolved=delivered,
+                thread_id=pending.thread_id,
+                card_event_id=pending.card_event_id,
+            )
+        finally:
+            if not claim_released:
+                with self._live_lock:
+                    self._resolving_card_event_ids.discard(pending.card_event_id)
+
+    async def _discard_matrix_only_card(
+        self,
+        *,
+        pending: PendingApproval,
+        reason: str,
+        resolved_by: str | None,
+    ) -> ApprovalActionResult:
+        if not self._claim_matrix_cleanup(pending.card_event_id):
+            return ApprovalActionResult(
+                consumed=True,
+                resolved=False,
+                thread_id=pending.thread_id,
+                card_event_id=pending.card_event_id,
+            )
+        claim_released = False
+        try:
+            delivered = await self._emit_resolution(
+                pending,
+                status="expired",
                 reason=reason,
                 resolved_by=resolved_by,
             )
@@ -1483,24 +1517,6 @@ def _event_timestamp_ms(event: dict[str, Any]) -> int:
 
 def _lookback_cutoff_ms(lookback_hours: int) -> int:
     return int((time.time() - max(lookback_hours, 0) * 3600) * 1000)
-
-
-def _purge_legacy_approval_files(storage_root: Path) -> int:
-    legacy_dir = storage_root / _APPROVALS_DIRNAME
-    if not legacy_dir.exists():
-        return 0
-    purged = 0
-    for json_file in legacy_dir.glob("*.json"):
-        try:
-            json_file.unlink()
-            purged += 1
-        except OSError as exc:
-            logger.warning("approval.legacy_purge.failed", path=str(json_file), error=str(exc))
-    with suppress(OSError):
-        legacy_dir.rmdir()
-    if purged:
-        logger.info("approval.legacy_purge", purged_count=purged)
-    return purged
 
 
 def get_approval_store() -> ApprovalManager | None:

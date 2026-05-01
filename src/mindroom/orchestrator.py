@@ -1492,7 +1492,7 @@ class MultiAgentOrchestrator:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
 
     async def _handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
-        """Auto-deny orphaned approval cards once the router finishes first sync."""
+        """Discard orphaned approval cards once the router finishes first sync."""
         if bot.agent_name != ROUTER_AGENT_NAME or not bot.running or bot.client is None:
             return
         config = self.config
@@ -1502,14 +1502,14 @@ class MultiAgentOrchestrator:
         if approval_manager is None:
             return
         try:
-            denied_count = await approval_manager.auto_deny_pending_on_startup(
+            discarded_count = await approval_manager.discard_pending_on_startup(
                 lookback_hours=_approval_startup_lookback_hours(config),
             )
         except Exception as exc:
-            logger.warning("tool_approval_startup_auto_deny_failed", error=str(exc))
+            logger.warning("tool_approval_startup_discard_failed", error=str(exc))
             return
-        if denied_count > 0:
-            logger.info("approval.auto_deny.startup", denied_count=denied_count)
+        if discarded_count > 0:
+            logger.info("approval.startup_discard", discarded_count=discarded_count)
 
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""

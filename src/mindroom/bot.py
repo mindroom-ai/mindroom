@@ -1446,11 +1446,7 @@ class AgentBot:
 
         raw_status = content.get("status")
         status: Literal["approved", "denied"] | None = None
-        if raw_status not in {"approved", "denied"}:
-            raw_approved = content.get("approved")
-            if isinstance(raw_approved, bool):
-                status = "approved" if raw_approved else "denied"
-        else:
+        if raw_status in {"approved", "denied"}:
             status = raw_status
 
         raw_reason = content.get("reason")

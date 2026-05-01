@@ -98,7 +98,7 @@ authorization:
 # Rules are evaluated in order and the first match wins.
 # React with `✅` to approve, or reply to the approval card to deny with a reason.
 # Only the original human requester can resolve a pending approval.
-# Pending approvals are live-only; a MindRoom restart cancels them and marks old cards denied.
+# Pending approvals are live-only; a MindRoom restart cancels them and marks old cards expired.
 # Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering approval flow.
 # OpenAI-compatible `/v1` requests hide tool functions that match required-approval rules.
 # Script-based rules are also hidden on `/v1` because approval cards need Matrix context.

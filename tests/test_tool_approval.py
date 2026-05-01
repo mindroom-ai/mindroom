@@ -481,9 +481,9 @@ async def test_handle_card_response_orphan_approval_falls_through_until_startup_
     assert result.resolved is False
     editor.assert_not_awaited()
 
-    assert await store.auto_deny_pending_on_startup() == 1
+    assert await store.discard_pending_on_startup() == 1
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
-    assert editor.await_args.args[2]["status"] == "denied"
+    assert editor.await_args.args[2]["status"] == "expired"
 
 
 @pytest.mark.asyncio
@@ -1014,7 +1014,7 @@ async def test_get_pending_approval_history_fallback_applies_replacement_edits(t
     )
 
     assert await store.get_pending_approval("!room:localhost", "approval-1") is None
-    assert await store.auto_deny_pending_on_startup() == 0
+    assert await store.discard_pending_on_startup() == 0
     editor.assert_not_awaited()
 
 
@@ -1415,7 +1415,7 @@ async def test_wrong_clicker_response_is_not_consumed_and_leaves_card_pending(tm
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_emits_replace_for_each_unresolved_card(tmp_path: Path) -> None:
+async def test_discard_pending_on_startup_emits_replace_for_each_unresolved_card(tmp_path: Path) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
 
@@ -1445,17 +1445,18 @@ async def test_auto_deny_pending_on_startup_emits_replace_for_each_unresolved_ca
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 1
-    assert await store.auto_deny_pending_on_startup() == 0
+    assert await store.discard_pending_on_startup() == 1
+    assert await store.discard_pending_on_startup() == 0
     latest_edit = await cache.get_latest_edit("!room:localhost", "$approval")
     assert latest_edit is not None
+    assert latest_edit["content"]["m.new_content"]["status"] == "expired"
     assert latest_edit["content"]["m.new_content"]["resolution_reason"] == (
         "Bot restarted before approval — original request was cancelled."
     )
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_merges_cached_and_history_cards(tmp_path: Path) -> None:
+async def test_discard_pending_on_startup_merges_cached_and_history_cards(tmp_path: Path) -> None:
     cache = FakeEventCache()
     cached_card = _approval_card(approval_id="cached-approval", event_id="$cached-approval")
     history_card = _approval_card(approval_id="history-approval", event_id="$history-approval")
@@ -1471,12 +1472,12 @@ async def test_auto_deny_pending_on_startup_merges_cached_and_history_cards(tmp_
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 2
+    assert await store.discard_pending_on_startup() == 2
     assert {call.args[1] for call in editor.await_args_list} == {"$cached-approval", "$history-approval"}
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_denies_same_router_cached_cards_when_history_scan_fails(
+async def test_discard_pending_on_startup_expires_same_router_cached_cards_when_history_scan_fails(
     tmp_path: Path,
 ) -> None:
     cache = FakeEventCache()
@@ -1492,16 +1493,16 @@ async def test_auto_deny_pending_on_startup_denies_same_router_cached_cards_when
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 1
+    assert await store.discard_pending_on_startup() == 1
     scanner.assert_awaited()
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
     replacement = editor.await_args.args[2]
-    assert replacement["status"] == "denied"
+    assert replacement["status"] == "expired"
     assert replacement["resolution_reason"] == "Bot restarted before approval — original request was cancelled."
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_preserves_same_router_cache_hit_when_history_scan_fails(
+async def test_discard_pending_on_startup_preserves_same_router_cache_hit_when_history_scan_fails(
     tmp_path: Path,
 ) -> None:
     cache = FakeEventCache()
@@ -1517,12 +1518,12 @@ async def test_auto_deny_pending_on_startup_preserves_same_router_cache_hit_when
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 1
+    assert await store.discard_pending_on_startup() == 1
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_skips_cross_router_cached_cards_when_history_scan_fails(
+async def test_discard_pending_on_startup_skips_cross_router_cached_cards_when_history_scan_fails(
     tmp_path: Path,
 ) -> None:
     cache = FakeEventCache()
@@ -1538,12 +1539,12 @@ async def test_auto_deny_pending_on_startup_skips_cross_router_cached_cards_when
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 0
+    assert await store.discard_pending_on_startup() == 0
     editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_skips_same_router_cached_terminal_edit_when_history_scan_fails(
+async def test_discard_pending_on_startup_skips_same_router_cached_terminal_edit_when_history_scan_fails(
     tmp_path: Path,
 ) -> None:
     cache = FakeEventCache()
@@ -1561,13 +1562,13 @@ async def test_auto_deny_pending_on_startup_skips_same_router_cached_terminal_ed
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 0
+    assert await store.discard_pending_on_startup() == 0
     scanner.assert_awaited_once()
     editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_auto_deny_pending_on_startup_skips_other_routers_cards(tmp_path: Path) -> None:
+async def test_discard_pending_on_startup_skips_other_routers_cards(tmp_path: Path) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card(sender="@other_router:localhost"))
     editor = AsyncMock(return_value=True)
@@ -1579,20 +1580,8 @@ async def test_auto_deny_pending_on_startup_skips_other_routers_cards(tmp_path: 
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.auto_deny_pending_on_startup() == 0
+    assert await store.discard_pending_on_startup() == 0
     editor.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_legacy_json_approval_files_are_purged(tmp_path: Path) -> None:
-    runtime_paths = test_runtime_paths(tmp_path)
-    legacy_dir = runtime_paths.storage_root / "approvals"
-    legacy_dir.mkdir(parents=True)
-    (legacy_dir / "old.json").write_text("{}", encoding="utf-8")
-
-    ApprovalManager(runtime_paths)
-
-    assert not (legacy_dir / "old.json").exists()
 
 
 def test_pending_approval_from_card_event_requires_approver_user_id() -> None:

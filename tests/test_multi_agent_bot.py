@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import itertools
-import json
 import os
 import signal
 import sys
@@ -4002,37 +4001,6 @@ class TestAgentBot:
         store.handle_card_response.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_approval_response_with_legacy_approved_payload_resolves_live_waiter(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Legacy custom approval responses should accept the approved boolean payload."""
-        config = self._config_for_storage(tmp_path)
-        runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        _store, pending, task, editor = await _start_live_approval(runtime_paths)
-
-        try:
-            event = SimpleNamespace(
-                type="io.mindroom.tool_approval_response",
-                sender="@user:localhost",
-                source={"content": {"approval_id": pending.approval_id, "approved": True}},
-            )
-            await bot._on_unknown_event(room, event)
-            decision = await task
-
-            assert decision.status == "approved"
-            assert editor.await_args.args[2]["status"] == "approved"
-        finally:
-            if not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            await shutdown_approval_store()
-
-    @pytest.mark.asyncio
     async def test_unknown_truncated_approval_id_response_sends_notice_with_card_event_id(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -4057,7 +4025,7 @@ class TestAgentBot:
             event = SimpleNamespace(
                 type="io.mindroom.tool_approval_response",
                 sender="@user:localhost",
-                source={"content": {"approval_id": pending.approval_id, "approved": True}},
+                source={"content": {"approval_id": pending.approval_id, "status": "approved"}},
             )
             await bot._on_unknown_event(room, event)
             decision = await task
@@ -12207,11 +12175,11 @@ class TestMultiAgentOrchestrator:
         sync_runtime_support_services.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_start_auto_denies_tool_approval_cards_on_router_ready(
+    async def test_orchestrator_start_discards_tool_approval_cards_on_router_ready(
         self,
         tmp_path: Path,
     ) -> None:
-        """Router readiness should trigger Matrix-backed startup auto-deny after room setup."""
+        """Router readiness should trigger Matrix-backed startup discard after room setup."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
         orchestrator.config.tool_approval.timeout_days = 7.0
@@ -12246,13 +12214,13 @@ class TestMultiAgentOrchestrator:
         async def _sync_runtime_support_services(*_: object, **__: object) -> None:
             call_order.append("support_services")
 
-        async def _auto_deny_pending_on_startup(*, lookback_hours: int) -> int:
+        async def _discard_pending_on_startup(*, lookback_hours: int) -> int:
             assert lookback_hours == 240
-            call_order.append("auto_deny")
+            call_order.append("startup_discard")
             return 2
 
         approval_manager = MagicMock()
-        approval_manager.auto_deny_pending_on_startup = AsyncMock(side_effect=_auto_deny_pending_on_startup)
+        approval_manager.discard_pending_on_startup = AsyncMock(side_effect=_discard_pending_on_startup)
 
         async def _sync_forever_with_restart(started_bot: object) -> None:
             await cast("Any", started_bot)._on_sync_response(MagicMock(spec=nio.SyncResponse))
@@ -12271,13 +12239,13 @@ class TestMultiAgentOrchestrator:
             "wait_for_homeserver",
             "setup_rooms",
             "support_services",
-            "auto_deny",
+            "startup_discard",
         ]
-        approval_manager.auto_deny_pending_on_startup.assert_awaited_once_with(lookback_hours=240)
+        approval_manager.discard_pending_on_startup.assert_awaited_once_with(lookback_hours=240)
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_handle_bot_ready_skips_startup_auto_deny_for_non_router_bots(
+    async def test_handle_bot_ready_skips_startup_discard_for_non_router_bots(
         self,
         tmp_path: Path,
     ) -> None:
@@ -12290,12 +12258,12 @@ class TestMultiAgentOrchestrator:
         bot.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
 
         approval_manager = MagicMock()
-        approval_manager.auto_deny_pending_on_startup = AsyncMock()
+        approval_manager.discard_pending_on_startup = AsyncMock()
 
         with patch("mindroom.orchestrator.get_approval_store", return_value=approval_manager):
             await orchestrator._handle_bot_ready(bot)
 
-        approval_manager.auto_deny_pending_on_startup.assert_not_awaited()
+        approval_manager.discard_pending_on_startup.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_orchestrator_waits_for_homeserver_before_initialize(self, tmp_path: Path) -> None:
@@ -12566,7 +12534,7 @@ class TestMultiAgentOrchestrator:
         self,
         tmp_path: Path,
     ) -> None:
-        """Shutdown no longer waits for approval sends that Matrix startup auto-deny will reconcile."""
+        """Shutdown no longer waits for approval sends that Matrix startup discard will reconcile."""
         runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
         orchestrator._capture_runtime_loop()
@@ -12903,27 +12871,6 @@ class TestMultiAgentOrchestrator:
 
             assert get_approval_store() is store
             assert store._event_cache is new_cache
-        finally:
-            await shutdown_approval_store()
-
-    @pytest.mark.asyncio
-    async def test_update_config_purges_legacy_approval_files_instead_of_replaying_them(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Matrix-backed approvals should discard legacy JSON replay state on initialization."""
-        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
-        request_path = runtime_paths.storage_root / "approvals" / "persisted-expired.json"
-        request_path.parent.mkdir(parents=True, exist_ok=True)
-        request_path.write_text(json.dumps({"id": "persisted-expired"}), encoding="utf-8")
-
-        await shutdown_approval_store()
-        editor = AsyncMock(return_value=True)
-        initialize_approval_store(runtime_paths, editor=editor)
-
-        try:
-            editor.assert_not_awaited()
-            assert request_path.exists() is False
         finally:
             await shutdown_approval_store()
 
