@@ -2,9 +2,9 @@
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol
 
 from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, limiter, verify_user
@@ -19,6 +19,13 @@ from backend.routes.provisioner import (
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 router = APIRouter()
+
+
+class InstanceActionProvisioner(Protocol):
+    """Provisioner action route callable used by user-owned instance proxies."""
+
+    def __call__(self, request: Request, instance_id: int, authorization: str) -> Awaitable[dict[str, Any]]: ...
+
 
 # Track instances being synced to prevent duplicates
 _syncing_instances: set[str] = set()
@@ -239,7 +246,10 @@ async def provision_user_instance(
 
 # Helper function for user instance actions
 async def _verify_instance_ownership_and_proxy(
-    instance_id: int, user: dict, provisioner_func: Callable
+    request: Request,
+    instance_id: int,
+    user: dict,
+    provisioner_func: InstanceActionProvisioner,
 ) -> dict[str, Any]:
     """Verify user owns instance and proxy to provisioner."""
     sb = ensure_supabase()
@@ -255,7 +265,11 @@ async def _verify_instance_ownership_and_proxy(
     if not result.data:
         raise HTTPException(status_code=404, detail="Instance not found or access denied")
 
-    return await provisioner_func(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+    return await provisioner_func(
+        request=request,
+        instance_id=instance_id,
+        authorization=f"Bearer {PROVISIONER_API_KEY}",
+    )
 
 
 @router.post("/my/instances/{instance_id}/start", response_model=ActionResult)
@@ -264,7 +278,7 @@ async def start_user_instance(
     request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
 ) -> dict[str, Any]:
     """Start user's instance."""
-    return await _verify_instance_ownership_and_proxy(instance_id, user, start_instance_provisioner)
+    return await _verify_instance_ownership_and_proxy(request, instance_id, user, start_instance_provisioner)
 
 
 @router.post("/my/instances/{instance_id}/stop", response_model=ActionResult)
@@ -273,7 +287,7 @@ async def stop_user_instance(
     request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
 ) -> dict[str, Any]:
     """Stop user's instance."""
-    return await _verify_instance_ownership_and_proxy(instance_id, user, stop_instance_provisioner)
+    return await _verify_instance_ownership_and_proxy(request, instance_id, user, stop_instance_provisioner)
 
 
 @router.post("/my/instances/{instance_id}/restart", response_model=ActionResult)
@@ -282,4 +296,4 @@ async def restart_user_instance(
     request: Request, instance_id: int, user: Annotated[dict, Depends(verify_user)]
 ) -> dict[str, Any]:
     """Restart user's instance."""
-    return await _verify_instance_ownership_and_proxy(instance_id, user, restart_instance_provisioner)
+    return await _verify_instance_ownership_and_proxy(request, instance_id, user, restart_instance_provisioner)

@@ -1,7 +1,7 @@
 """Comprehensive HTTP API tests for instances endpoints."""
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -376,7 +376,11 @@ class TestInstancesEndpoints:
         assert "started successfully" in data["message"]
 
         # Verify start_instance_provisioner was called
-        mock_start_instance.assert_called_once_with(123, "Bearer test-api-key")
+        mock_start_instance.assert_called_once_with(
+            request=ANY,
+            instance_id=123,
+            authorization="Bearer test-api-key",
+        )
 
     def test_start_user_instance_not_owned(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test starting instance not owned by user."""
@@ -412,7 +416,11 @@ class TestInstancesEndpoints:
         assert "stopped successfully" in data["message"]
 
         # Verify stop_instance_provisioner was called
-        mock_stop_instance.assert_called_once_with(123, "Bearer test-api-key")
+        mock_stop_instance.assert_called_once_with(
+            request=ANY,
+            instance_id=123,
+            authorization="Bearer test-api-key",
+        )
 
     def test_restart_user_instance_success(
         self,
@@ -436,7 +444,11 @@ class TestInstancesEndpoints:
         assert "restarted successfully" in data["message"]
 
         # Verify restart_instance_provisioner was called
-        mock_restart_instance.assert_called_once_with(456, "Bearer test-api-key")
+        mock_restart_instance.assert_called_once_with(
+            request=ANY,
+            instance_id=456,
+            authorization="Bearer test-api-key",
+        )
 
     def test_background_sync_task(
         self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock, mock_kubectl: AsyncMock
