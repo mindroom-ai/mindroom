@@ -12,6 +12,7 @@ from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.api import config_lifecycle
+from mindroom.authorization import get_available_agents_in_room
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import (
@@ -23,6 +24,7 @@ from mindroom.config.main import (
 from mindroom.config.models import AgentLearningMode, ToolConfigEntry
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus, resolved_tool_metadata_for_runtime
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -30,6 +32,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
+_AgentScope = Literal["current_room", "all"]
+_VALID_AGENT_SCOPES = {"current_room", "all"}
 
 
 def _is_known_tool_entry(tool_name: str, tool_metadata: dict[str, ToolMetadata]) -> bool:
@@ -129,6 +133,7 @@ class ConfigManagerTools(Toolkit):
         self,
         info_type: str,
         name: str | None = None,
+        agent_scope: _AgentScope = "current_room",
     ) -> str:
         """Get various types of information about MindRoom, agents, tools, and configuration.
 
@@ -137,13 +142,15 @@ class ConfigManagerTools(Toolkit):
                 - "mindroom_docs": MindRoom documentation and help
                 - "config_schema": Configuration schema for agents and teams
                 - "available_models": List of configured AI models
-                - "agents": List all configured agents
+                - "agents": List agents in the current room by default
                 - "teams": List all configured teams
                 - "available_tools": List all available tools by category
                 - "tool_details": Get details about a specific tool (requires name)
                 - "agent_config": Get configuration for a specific agent (requires name)
                 - "agent_template": Generate template for agent type (requires name as type)
             name: Optional name/identifier for specific queries (tool name, agent name, or template type)
+            agent_scope: Agent listing scope. Use "current_room" to show current room agents or
+                "all" for all configured agents.
 
         Returns:
             Requested information as formatted string
@@ -157,7 +164,7 @@ class ConfigManagerTools(Toolkit):
             if info_type == _InfoType.AVAILABLE_MODELS:
                 return self._get_available_models()
             if info_type == _InfoType.AGENTS:
-                return self._list_agents()
+                return self._list_agents(agent_scope=agent_scope)
             if info_type == _InfoType.TEAMS:
                 return self._list_teams()
             if info_type == _InfoType.AVAILABLE_TOOLS:
@@ -438,16 +445,46 @@ class ConfigManagerTools(Toolkit):
 - **Commands**: Special !commands for configuration and control
 """
 
-    def _list_agents(self) -> str:
-        """List all configured agents and their details."""
+    def _agent_entries_for_scope(
+        self,
+        config: Config,
+        agent_scope: str,
+    ) -> tuple[str, list[tuple[str, AgentConfig]]]:
+        """Return the heading and agent entries for one listing scope."""
+        all_agents = list(config.agents.items())
+        if agent_scope == "all":
+            return "Configured Agents", all_agents
+
+        runtime_context = get_tool_runtime_context()
+        if runtime_context is None:
+            return "Configured Agents", all_agents
+
+        room = runtime_context.room
+        if room is None:
+            return "Agents in This Room", []
+
+        available_agent_names = {
+            agent_name
+            for matrix_id in get_available_agents_in_room(room, config, self.runtime_paths)
+            if (agent_name := matrix_id.agent_name(config, self.runtime_paths)) is not None
+        }
+        agent_entries = [(name, agent) for name, agent in all_agents if name in available_agent_names]
+        return "Agents in This Room", agent_entries
+
+    def _list_agents(self, *, agent_scope: _AgentScope = "current_room") -> str:
+        """List agents and their details."""
         config, load_error = self._load_config_or_error()
         if load_error:
             return load_error
         assert config is not None
 
+        if agent_scope not in _VALID_AGENT_SCOPES:
+            return "Error: agent_scope must be 'current_room' or 'all'."
+
+        heading, agent_entries = self._agent_entries_for_scope(config, agent_scope)
         agents_info = []
 
-        for name, agent in config.agents.items():
+        for name, agent in agent_entries:
             tools_str = ", ".join(agent.tool_names) if agent.tools else "No tools"
             role_line = f"  - Role: {agent.role[:100]}..." if len(agent.role) > 100 else f"  - Role: {agent.role}"
             agents_info.append(
@@ -455,9 +492,11 @@ class ConfigManagerTools(Toolkit):
             )
 
         if not agents_info:
+            if heading == "Agents in This Room":
+                return "No agents are currently available in this room."
             return "No agents configured yet."
 
-        return "## Configured Agents:\n\n" + "\n".join(agents_info)
+        return f"## {heading}:\n\n" + "\n".join(agents_info)
 
     def _list_teams(self) -> str:
         """List all configured teams and their composition."""

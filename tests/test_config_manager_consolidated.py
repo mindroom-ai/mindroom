@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
+import nio
 import pytest
 import yaml
 from pydantic import ValidationError
@@ -23,6 +25,8 @@ from mindroom.constants import (
 from mindroom.credential_policy import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.tool_system.metadata import AUTHORED_OVERRIDE_INHERIT
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
 
 
 def _minimal_config_path(tmp_path: Path) -> Path:
@@ -149,6 +153,49 @@ class TestConsolidatedConfigManager:
             assert "googlesearch" in result
         finally:
             config_path.unlink(missing_ok=True)
+
+    def test_get_info_agents_defaults_to_current_room_members(self, tmp_path: Path) -> None:
+        """Agent listing should only show agents present in the current Matrix room."""
+        config = Config(
+            agents={
+                "present": AgentConfig(display_name="Present Agent", role="Here", model="default"),
+                "also_present": AgentConfig(display_name="Also Present", role="Also here", model="default"),
+                "elsewhere": AgentConfig(display_name="Elsewhere Agent", role="Not here", model="default"),
+            },
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        config.save_to_yaml(config_path)
+        cm = _config_manager(config_path)
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(cm.runtime_paths)["present"].full_id: None,
+            config.get_ids(cm.runtime_paths)["also_present"].full_id: None,
+        }
+        runtime_context = ToolRuntimeContext(
+            agent_name="present",
+            room_id=room.room_id,
+            thread_id=None,
+            resolved_thread_id=None,
+            requester_id="@user:localhost",
+            client=MagicMock(),
+            config=config,
+            runtime_paths=cm.runtime_paths,
+            event_cache=make_event_cache_mock(),
+            conversation_cache=make_conversation_cache_mock(),
+            room=room,
+        )
+
+        with tool_runtime_context(runtime_context):
+            current_room_result = cm.get_info(info_type="agents")
+            all_agents_result = cm.get_info(info_type="agents", agent_scope="all")
+
+        assert "Present Agent" in current_room_result
+        assert "Also Present" in current_room_result
+        assert "Elsewhere Agent" not in current_room_result
+        assert "Elsewhere Agent" in all_agents_result
 
     def test_get_info_agents_tolerates_invalid_plugin_manifest(self, tmp_path: Path) -> None:
         """Read-only config-manager info should keep working when runtime plugin loading degrades."""
