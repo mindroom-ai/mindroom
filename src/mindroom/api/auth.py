@@ -292,21 +292,6 @@ def _trusted_upstream_auth_user(
     return auth_user
 
 
-def trusted_upstream_matrix_user_id_for_request(request: Request) -> str | None:
-    """Return the trusted-upstream Matrix requester id attached to this request."""
-    auth_user = request.scope.get("auth_user")
-    if not isinstance(auth_user, dict) or auth_user.get("auth_source") != "trusted_upstream":
-        return None
-    matrix_user_id = auth_user.get("matrix_user_id")
-    return _parse_matrix_user_id(matrix_user_id) if isinstance(matrix_user_id, str) else None
-
-
-def request_uses_trusted_upstream_auth(request: Request) -> bool:
-    """Return whether this request authenticated through trusted upstream headers."""
-    auth_user = request.scope.get("auth_user")
-    return isinstance(auth_user, dict) and auth_user.get("auth_source") == "trusted_upstream"
-
-
 def _supabase_auth_error_class() -> type[Exception]:
     """Return Supabase's AuthError class for narrow exception handling at the auth boundary."""
     return cast("type[Exception]", importlib.import_module("supabase_auth.errors").AuthError)

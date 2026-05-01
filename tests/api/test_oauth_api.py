@@ -1286,7 +1286,9 @@ def test_agent_connect_token_rejects_trusted_upstream_requester_mismatch(tmp_pat
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
                 headers=_trusted_upstream_headers(
-                    user_id="bob", email="bob@example.com", matrix_user_id="@bob:example.org"
+                    user_id="bob",
+                    email="bob@example.com",
+                    matrix_user_id="@bob:example.org",
                 ),
                 follow_redirects=False,
             )

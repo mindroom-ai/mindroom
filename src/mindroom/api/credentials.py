@@ -14,7 +14,6 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
 )
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import request_uses_trusted_upstream_auth, trusted_upstream_matrix_user_id_for_request
 from mindroom.config.main import Config
 from mindroom.credential_policy import (
     OAUTH_CREDENTIAL_FIELDS,
@@ -165,6 +164,24 @@ def _request_auth_user(request: Request) -> dict[str, Any] | None:
     return auth_user if isinstance(auth_user, dict) else None
 
 
+def _request_uses_trusted_upstream_auth(request: Request) -> bool:
+    auth_user = _request_auth_user(request)
+    return auth_user is not None and auth_user.get("auth_source") == "trusted_upstream"
+
+
+def _trusted_upstream_matrix_user_id_for_request(request: Request) -> str | None:
+    auth_user = _request_auth_user(request)
+    if auth_user is None or auth_user.get("auth_source") != "trusted_upstream":
+        return None
+    matrix_user_id = auth_user.get("matrix_user_id")
+    if not isinstance(matrix_user_id, str):
+        return None
+    try:
+        return MatrixID.parse(matrix_user_id).full_id
+    except ValueError:
+        return None
+
+
 def _require_auth_user_id(request: Request) -> str:
     auth_user = _request_auth_user(request) or {}
     user_id = auth_user.get("user_id")
@@ -175,10 +192,10 @@ def _require_auth_user_id(request: Request) -> str:
 
 def dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
     """Return the requester identity dashboard-scoped worker credentials should use."""
-    trusted_matrix_user_id = trusted_upstream_matrix_user_id_for_request(request)
+    trusted_matrix_user_id = _trusted_upstream_matrix_user_id_for_request(request)
     if trusted_matrix_user_id:
         return trusted_matrix_user_id
-    if request_uses_trusted_upstream_auth(request):
+    if _request_uses_trusted_upstream_auth(request):
         return None
     owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
     if owner_user_id:
