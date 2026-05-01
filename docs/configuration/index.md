@@ -248,13 +248,12 @@ defaults:
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
   compress_tool_results: false     # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
-  # Auto-compaction stays off until you author defaults.compaction
-  # or a non-empty per-agent/per-team compaction override.
-  # A bare compaction: {} only inherits authored defaults.
-  # compaction:
-  #   enabled: true
-  #   threshold_percent: 0.8
-  #   reserve_tokens: 16384
+  # Auto-compaction is enabled by default.
+  # Set enabled: false to disable destructive compaction globally.
+  compaction:
+    enabled: true
+    threshold_percent: 0.8
+    reserve_tokens: 16384
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)

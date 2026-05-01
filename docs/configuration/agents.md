@@ -119,9 +119,8 @@ agents:
     compress_tool_results: false
     max_tool_calls_from_history: null
 
-    # Auto-compaction stays off until you author defaults.compaction
-    # or a non-empty per-agent compaction override.
-    # A bare per-agent compaction: {} only inherits authored defaults.
+    # Auto-compaction is enabled by default.
+    # Set enabled: false to disable destructive compaction for this agent.
     compaction:
       enabled: true
       threshold_percent: 0.8
@@ -155,7 +154,7 @@ agents:
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
 | `num_history_messages` | int | `null` | Max messages from history. Mutually exclusive with `num_history_runs` |
 | `compress_tool_results` | bool | `null` | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `false`). On Anthropic and Vertex Claude models, setting this to `true` can mutate replayed tool messages and invalidate prompt-cache prefixes |
-| `compaction` | object | `null` | Per-agent auto-compaction overrides. When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed. Authoring `defaults.compaction` enables the optional destructive compaction phase for inheriting agents and teams. A non-empty per-agent block also enables that destructive phase for the agent, but a bare `compaction: {}` is only a no-op override that inherits authored defaults. Use `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model` to change the destructive-compaction policy. Replay safety always uses the active runtime model window. If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass. Compaction is destructive inside the live session: it merges old history into `session.summary` and removes the compacted raw runs from `session.runs` |
+| `compaction` | object | `defaults.compaction` | Per-agent auto-compaction overrides. When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed. Destructive compaction is enabled by default through `defaults.compaction`. Use `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model` to change the destructive-compaction policy or set `enabled: false` to disable it for this agent. Replay safety always uses the active runtime model window. If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass. Compaction is destructive inside the live session: it merges old history into `session.summary` and removes the compacted raw runs from `session.runs` |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Routed tools may still show generic worker warmup text such as `Preparing isolated worker...`, but that copy never includes tool identifiers or tool-trace metadata. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](../deployment/sandbox-proxy.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
@@ -588,11 +587,10 @@ defaults:
     interval_ramp_seconds: 15.0         # Set 0 to disable interval ramping
     max_idle: 2.0                       # Event-driven idle ceiling before the next edit
   compress_tool_results: false          # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
-  # Auto-compaction is disabled until you author this block.
-  # compaction:
-  #   enabled: true
-  #   threshold_percent: 0.8
-  #   reserve_tokens: 16384
+  compaction:
+    enabled: true
+    threshold_percent: 0.8
+    reserve_tokens: 16384
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true                 # Show tool-call markers and trace metadata; hidden mode still allows generic worker warmup copy
   worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)
