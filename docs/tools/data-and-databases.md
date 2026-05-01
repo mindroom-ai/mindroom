@@ -445,10 +445,10 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ### What It Does
 
-MindRoom exposes `list_files()`, `search_files()`, and `read_file()` through the Google Drive OAuth provider.
-`list_files()` returns recent Drive files visible to the connected account.
-`search_files()` searches Drive metadata.
-`read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
+MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, and `google_drive_read_file()` through the Google Drive OAuth provider.
+`google_drive_list_files()` returns recent Drive files visible to the connected account.
+`google_drive_search_files()` searches Drive metadata.
+`google_drive_read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
 When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to a local token flow.
 
 ### Configuration
@@ -471,9 +471,9 @@ agents:
 ```
 
 ```python
-list_files()
-search_files("name contains 'budget'")
-read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
+google_drive_list_files()
+google_drive_search_files("name contains 'budget'")
+google_drive_read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
 ```
 
 ### Notes
