@@ -1,7 +1,7 @@
 """Matrix message content builder with proper threading support."""
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from html import escape, unescape
 from html.parser import HTMLParser
 from typing import Any
@@ -460,7 +460,7 @@ def markdown_to_html(text: str) -> str:
     return _sanitize_formatted_body_html(html_text)
 
 
-def _build_thread_relation(
+def build_thread_relation(
     thread_event_id: str,
     reply_to_event_id: str | None = None,
     latest_thread_event_id: str | None = None,
@@ -492,6 +492,16 @@ def _build_thread_relation(
         "event_id": thread_event_id,
         "is_falling_back": True,
         "m.in_reply_to": {"event_id": latest_thread_event_id},
+    }
+
+
+def build_matrix_edit_content(event_id: str, new_content: Mapping[str, Any]) -> dict[str, Any]:
+    """Wrap replacement content in one Matrix ``m.replace`` edit envelope."""
+    replacement_content = dict(new_content)
+    return {
+        **replacement_content,
+        "m.new_content": replacement_content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
     }
 
 
@@ -539,7 +549,7 @@ def build_message_content(
 
     # Add thread/reply relationship if specified
     if thread_event_id:
-        content["m.relates_to"] = _build_thread_relation(
+        content["m.relates_to"] = build_thread_relation(
             thread_event_id=thread_event_id,
             reply_to_event_id=reply_to_event_id,
             latest_thread_event_id=latest_thread_event_id,

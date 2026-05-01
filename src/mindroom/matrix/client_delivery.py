@@ -19,6 +19,7 @@ from nio.exceptions import OlmTrustError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
@@ -443,14 +444,15 @@ def build_edit_event_content(
     """Wrap replacement content in one Matrix m.replace edit envelope."""
     replacement_content = dict(new_content)
     replacement_content.pop("m.relates_to", None)
-    edit_content = {
-        "msgtype": "m.text",
-        "body": f"* {new_text}",
-        "format": "org.matrix.custom.html",
-        "formatted_body": new_content.get("formatted_body", new_text),
-        "m.new_content": replacement_content,
-        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
-    }
+    edit_content = build_matrix_edit_content(event_id, replacement_content)
+    edit_content.update(
+        {
+            "msgtype": "m.text",
+            "body": f"* {new_text}",
+            "format": "org.matrix.custom.html",
+            "formatted_body": new_content.get("formatted_body", new_text),
+        },
+    )
     if extra_content:
         replacement_content.update(extra_content)
         edit_content.update(extra_content)

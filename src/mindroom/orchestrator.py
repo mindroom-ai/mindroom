@@ -31,11 +31,12 @@ from mindroom.hooks import (
 )
 from mindroom.knowledge import KnowledgeRefreshScheduler
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.matrix.cache import normalize_nio_event_for_cache
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -57,13 +58,15 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
+from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
     _DEFAULT_ROUTER_MANAGED_ROOM_REASON,
+    ApprovalRuntimeBindings,
     SentApprovalEvent,
     ToolApprovalTransportError,
-    get_approval_store,
-    initialize_approval_store,
-    shutdown_approval_store,
+    expire_orphaned_approval_cards_on_startup,
+    initialize_approval_runtime,
+    shutdown_approval_runtime,
 )
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
@@ -260,21 +263,6 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         self.should_exit = True
 
 
-def _normalize_approval_nio_event(event: nio.Event, *, event_id: str | None = None) -> dict[str, Any]:
-    """Normalize one Matrix event source for approval cache and lookup paths."""
-    source = dict(event.source) if isinstance(event.source, dict) else {}
-    if "event_id" not in source and isinstance(event.event_id, str):
-        source["event_id"] = event.event_id
-    if "event_id" not in source and isinstance(event_id, str):
-        source["event_id"] = event_id
-    if "sender" not in source and isinstance(event.sender, str):
-        source["sender"] = event.sender
-    timestamp = event.server_timestamp
-    if "origin_server_ts" not in source and isinstance(timestamp, int) and not isinstance(timestamp, bool):
-        source["origin_server_ts"] = timestamp
-    return source
-
-
 @dataclass
 class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
@@ -396,6 +384,14 @@ class MultiAgentOrchestrator:
         if current_loop is runtime_loop:
             return await coroutine_factory()
 
+        if is_loop_blocked_by_sync_tool_bridge(runtime_loop):
+            msg = (
+                "Cannot perform Matrix approval transport while synchronous FunctionCall.execute() "
+                "is blocking the MindRoom runtime loop; use FunctionCall.aexecute() or run execute() "
+                "outside the runtime event loop."
+            )
+            raise ToolApprovalTransportError(msg)
+
         future = asyncio.run_coroutine_threadsafe(coroutine_factory(), runtime_loop)
         try:
             return await asyncio.wrap_future(future)
@@ -419,12 +415,10 @@ class MultiAgentOrchestrator:
             )
             if resolved_latest_event_id is not None:
                 latest_thread_event_id = resolved_latest_event_id
-        relation = build_message_content(
-            "",
+        return build_thread_relation(
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
-        )["m.relates_to"]
-        return cast("dict[str, object]", relation)
+        )
 
     async def _send_approval_event(
         self,
@@ -561,11 +555,7 @@ class MultiAgentOrchestrator:
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
-            content={
-                **replacement_content,
-                "m.new_content": replacement_content,
-                "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
-            },
+            content=build_matrix_edit_content(event_id, replacement_content),
         )
         if not isinstance(response, nio.RoomSendResponse):
             logger.warning(
@@ -612,7 +602,7 @@ class MultiAgentOrchestrator:
             await bot.event_cache.store_event(
                 event_id,
                 room_id,
-                _normalize_approval_nio_event(response.event, event_id=event_id),
+                normalize_nio_event_for_cache(response.event, event_id=event_id),
             )
         except Exception as exc:
             logger.warning(
@@ -705,13 +695,15 @@ class MultiAgentOrchestrator:
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
-        initialize_approval_store(
+        initialize_approval_runtime(
             self.runtime_paths,
-            sender=self._send_approval_event,
-            editor=self._edit_approval_event,
-            event_cache=self._runtime_support.event_cache,
-            approval_room_ids=self._configured_approval_room_ids,
-            transport_sender=self._approval_transport_sender_id,
+            bindings=ApprovalRuntimeBindings(
+                sender=self._send_approval_event,
+                editor=self._edit_approval_event,
+                event_cache=self._runtime_support.event_cache,
+                approval_room_ids=self._configured_approval_room_ids,
+                transport_sender=self._approval_transport_sender_id,
+            ),
         )
 
     async def _close_runtime_support_services(self) -> None:
@@ -1425,11 +1417,8 @@ class MultiAgentOrchestrator:
         config = self.config
         if config is None:
             return
-        approval_manager = get_approval_store()
-        if approval_manager is None:
-            return
         try:
-            discarded_count = await approval_manager.discard_pending_on_startup(
+            discarded_count = await expire_orphaned_approval_cards_on_startup(
                 lookback_hours=_approval_startup_lookback_hours(config),
             )
         except Exception as exc:
@@ -2019,7 +2008,7 @@ class MultiAgentOrchestrator:
         for entity_name in list(self._sync_tasks.keys()):
             await cancel_sync_task(entity_name, self._sync_tasks)
 
-        await shutdown_approval_store()
+        await shutdown_approval_runtime()
 
         for bot in self.agent_bots.values():
             bot.running = False

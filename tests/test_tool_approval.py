@@ -6,24 +6,32 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from pydantic import ValidationError
 
+from mindroom.approval_manager import (
+    ApprovalManager,
+    PendingApproval,
+    SentApprovalEvent,
+    get_approval_store,
+    initialize_approval_store,
+)
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.tool_approval import (
-    ApprovalManager,
-    PendingApproval,
-    SentApprovalEvent,
+    MatrixApprovalAction,
+    ToolApprovalCall,
     ToolApprovalScriptError,
     evaluate_tool_approval,
-    get_approval_store,
-    initialize_approval_store,
+    handle_matrix_approval_action,
+    is_process_approval_card,
+    request_tool_approval_for_call,
     resolve_tool_approval_approver,
     shutdown_approval_store,
 )
@@ -101,6 +109,42 @@ def _config(tmp_path: Path, *, requester_id: str = "@user:localhost") -> Config:
         ),
         test_runtime_paths(tmp_path),
     )
+
+
+def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:
+    """Pydantic should own normal numeric coercion for approval timeouts."""
+    config = Config.model_validate(
+        {
+            "tool_approval": {
+                "timeout_days": "7",
+                "rules": [{"match": "read_*", "action": "require_approval", "timeout_days": "3"}],
+            },
+        },
+    )
+
+    assert config.tool_approval.timeout_days == 7.0
+    assert config.tool_approval.rules[0].timeout_days == 3.0
+
+
+@pytest.mark.parametrize(
+    ("tool_approval", "expected_location"),
+    [
+        ({"timeout_days": True}, ("tool_approval", "timeout_days")),
+        (
+            {"rules": [{"match": "read_*", "action": "require_approval", "timeout_days": False}]},
+            ("tool_approval", "rules", 0, "timeout_days"),
+        ),
+    ],
+)
+def test_tool_approval_config_rejects_boolean_timeout_days_with_nested_location(
+    tool_approval: dict[str, object],
+    expected_location: tuple[object, ...],
+) -> None:
+    """Only the bool edge case needs custom validation around Pydantic numeric fields."""
+    with pytest.raises(ValidationError) as exc_info:
+        Config.model_validate({"tool_approval": tool_approval})
+
+    assert expected_location in {tuple(error["loc"]) for error in exc_info.value.errors(include_context=False)}
 
 
 def _approval_card(
@@ -331,6 +375,90 @@ async def test_handle_card_response_wrong_clicker_noops(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_tool_approval_facade_resolves_live_matrix_action(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+
+    approval_task = asyncio.create_task(
+        request_tool_approval_for_call(
+            ToolApprovalCall(
+                config=config,
+                runtime_paths=runtime_paths,
+                tool_name="read_file",
+                arguments={"path": "notes.txt"},
+                agent_name="code",
+                room_id="!room:localhost",
+                thread_id="$thread",
+                requester_id="@user:localhost",
+            ),
+        ),
+    )
+    for _ in range(20):
+        if is_process_approval_card("$approval"):
+            break
+        await asyncio.sleep(0)
+    else:
+        pytest.fail("approval card was not registered")
+
+    action_result = await handle_matrix_approval_action(
+        MatrixApprovalAction(
+            room_id="!room:localhost",
+            sender_id="@user:localhost",
+            card_event_id="$approval",
+            approval_id=None,
+            status="approved",
+            reason=None,
+        ),
+    )
+    decision = await asyncio.wait_for(approval_task, timeout=1)
+
+    assert action_result.consumed is True
+    assert action_result.resolved is True
+    assert decision is not None
+    assert decision.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_public_tool_approval_facade_missing_runtime_decision_uses_datetime(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=config,
+            runtime_paths=runtime_paths,
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is not None
+    assert decision.status == "expired"
+    assert isinstance(decision.resolved_at, datetime)
+
+
+@pytest.mark.asyncio
 async def test_handle_card_response_rejects_live_card_from_wrong_room(tmp_path: Path) -> None:
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
@@ -540,15 +668,14 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
     bot.orchestrator = MagicMock()
     bot.orchestrator.send_approval_notice = AsyncMock(return_value=True)
 
-    with patch("mindroom.bot.get_approval_store", return_value=store):
-        handled = await AgentBot._handle_tool_approval_action(
-            bot,
-            room=room,
-            sender_id="@user:localhost",
-            approval_event_id=pending.card_event_id,
-            status="approved",
-            reason=None,
-        )
+    handled = await AgentBot._handle_tool_approval_action(
+        bot,
+        room=room,
+        sender_id="@user:localhost",
+        approval_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
 
     decision = await task
     assert handled is True
@@ -776,6 +903,40 @@ async def test_shutdown_waits_for_cancelled_send_background_cleanup(tmp_path: Pa
 
     assert edits[0]["status"] == "expired"
     assert edits[0]["resolution_reason"] == "Tool approval request was cancelled."
+    assert not store._post_cancel_cleanup_tasks
+
+
+@pytest.mark.asyncio
+async def test_shutdown_bounds_cancelled_send_cleanup_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("mindroom.approval_manager._POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
+    send_started = asyncio.Event()
+    never_release_sender = asyncio.Event()
+
+    async def sender(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> SentApprovalEvent:
+        send_started.set()
+        await never_release_sender.wait()
+        return SentApprovalEvent("$approval")
+
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=AsyncMock())
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await asyncio.wait_for(send_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+    assert store._post_cancel_cleanup_tasks
+
+    await asyncio.wait_for(shutdown_approval_store(), timeout=1)
+
     assert not store._post_cancel_cleanup_tasks
 
 
@@ -1120,7 +1281,6 @@ async def test_get_pending_approval_ignores_cached_card_after_live_waiter_is_gon
     assert await store.get_pending_approval("!room:localhost", "approval-1") is None
 
 
-@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_startup_discard_ignores_cached_terminal_edit_from_different_sender(tmp_path: Path) -> None:
     cache = FakeEventCache()

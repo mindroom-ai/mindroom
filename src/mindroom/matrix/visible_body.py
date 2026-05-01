@@ -27,6 +27,26 @@ def _strip_explicit_warmup_suffix(body: str, *, warmup_suffix: str) -> str:
     return body
 
 
+def strip_matrix_rich_reply_fallback(body: str) -> str:
+    """Remove the quoted Matrix rich-reply fallback prefix from one body."""
+    lines = body.splitlines()
+    quoted_line_count = 0
+    while quoted_line_count < len(lines) and lines[quoted_line_count].startswith("> "):
+        quoted_line_count += 1
+    if quoted_line_count == 0 or quoted_line_count >= len(lines) or lines[quoted_line_count] != "":
+        return body
+    reply_body = "\n".join(lines[quoted_line_count + 1 :])
+    return reply_body or body
+
+
+def visible_content_from_content(content: Mapping[str, object]) -> dict[str, object]:
+    """Return the content layer that carries user-visible Matrix fields."""
+    new_content = content.get("m.new_content")
+    if isinstance(new_content, dict):
+        return {key: value for key, value in new_content.items() if isinstance(key, str)}
+    return dict(content)
+
+
 def visible_body_from_content(
     content: Mapping[str, object],
     fallback_body: str,
@@ -65,8 +85,7 @@ def visible_body_from_event_source(
     """Return the canonical visible body from one Matrix event source."""
     content = event_source.get("content")
     content_dict = cast("dict[str, object]", content) if isinstance(content, dict) else {}
-    new_content = content_dict.get("m.new_content")
-    visible_content = cast("dict[str, object]", new_content) if isinstance(new_content, dict) else content_dict
+    visible_content = visible_content_from_content(content_dict)
     return visible_body_from_content(
         visible_content,
         fallback_body,
@@ -85,10 +104,7 @@ def _visible_preview_content(event_source: object) -> tuple[object, dict[str, ob
     if not isinstance(content, dict):
         return sender_id, None
     content_dict = cast("dict[str, object]", content)
-    visible_content = (
-        content_dict.get("m.new_content") if isinstance(content_dict.get("m.new_content"), dict) else content_dict
-    )
-    return sender_id, cast("dict[str, object]", visible_content) if isinstance(visible_content, dict) else None
+    return sender_id, visible_content_from_content(content_dict)
 
 
 def bundled_visible_body_preview(

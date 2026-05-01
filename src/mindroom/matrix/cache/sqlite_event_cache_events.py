@@ -11,8 +11,6 @@ from mindroom.matrix.event_info import EventInfo
 if TYPE_CHECKING:
     import aiosqlite
 
-
-_RUNTIME_ONLY_EVENT_SOURCE_KEYS = frozenset({"com.mindroom.dispatch_pipeline_timing"})
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
 

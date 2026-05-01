@@ -26,12 +26,12 @@ from mindroom.hooks import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.sync_bridge_state import sync_tool_bridge_blocked_loop
 from mindroom.timing import emit_timing_event
 from mindroom.tool_approval import (
+    ToolApprovalCall,
     ToolApprovalScriptError,
-    evaluate_tool_approval,
-    get_approval_store,
-    resolve_tool_approval_approver,
+    request_tool_approval_for_call,
 )
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -261,7 +261,7 @@ def _run_coroutine_from_sync(coroutine: ToolHookResult) -> ToolHookResult:
 def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> ToolHookResult:
     """Run a deferred async hook result for Agno's synchronous execute() chain."""
     try:
-        asyncio.get_running_loop()
+        running_loop = asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(_await_result(deferred.awaitable))
 
@@ -275,9 +275,10 @@ def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> To
         except BaseException as exc:
             error_box.append(exc)
 
-    thread = threading.Thread(target=runner, name="mindroom-tool-hook-sync-bridge")
-    thread.start()
-    thread.join()
+    with sync_tool_bridge_blocked_loop(running_loop):
+        thread = threading.Thread(target=runner, name="mindroom-tool-hook-sync-bridge")
+        thread.start()
+        thread.join()
     if error_box:
         raise error_box[0]
     return result_box[0]
@@ -429,15 +430,18 @@ async def _maybe_block_for_tool_approval(
     if resolved_context.config is None or resolved_context.runtime_paths is None:
         return None
 
-    approval_arguments = deepcopy(args)
-    script_arguments = deepcopy(approval_arguments)
     try:
-        requires_approval, timeout_seconds = await evaluate_tool_approval(
-            resolved_context.config,
-            resolved_context.runtime_paths,
-            tool_name,
-            script_arguments,
-            resolved_context.agent_name,
+        approval_decision = await request_tool_approval_for_call(
+            ToolApprovalCall(
+                config=resolved_context.config,
+                runtime_paths=resolved_context.runtime_paths,
+                tool_name=tool_name,
+                arguments=args,
+                agent_name=resolved_context.agent_name,
+                room_id=resolved_context.room_id,
+                thread_id=resolved_context.thread_id,
+                requester_id=resolved_context.requester_id,
+            ),
         )
     except ToolApprovalScriptError:
         logger.warning("Tool approval policy failed", exc_info=True)
@@ -452,37 +456,7 @@ async def _maybe_block_for_tool_approval(
             started_at=started_at,
         )
 
-    if not requires_approval:
-        return None
-
-    store = get_approval_store()
-    if store is None:
-        return await _blocked_tool_result(
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            hook_arguments=hook_arguments,
-            args=args,
-            tool_name=tool_name,
-            reason="Tool approval is required but the approval store is not initialized.",
-            has_after_hooks=has_after_hooks,
-            started_at=started_at,
-        )
-
-    approval_decision = await store.request_approval(
-        tool_name=tool_name,
-        arguments=approval_arguments,
-        agent_name=resolved_context.agent_name,
-        room_id=resolved_context.room_id,
-        thread_id=resolved_context.thread_id,
-        requester_id=resolved_context.requester_id,
-        approver_user_id=resolve_tool_approval_approver(
-            resolved_context.config,
-            resolved_context.runtime_paths,
-            resolved_context.requester_id,
-        ),
-        timeout_seconds=timeout_seconds,
-    )
-    if approval_decision.status == "approved":
+    if approval_decision is None or approval_decision.status == "approved":
         return None
 
     return await _blocked_tool_result(

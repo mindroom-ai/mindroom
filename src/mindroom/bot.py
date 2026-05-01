@@ -31,6 +31,7 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
+from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
 from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
@@ -48,12 +49,13 @@ from mindroom.matrix.sync_certification import (
 )
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
+from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
-from mindroom.tool_approval import get_approval_store
+from mindroom.tool_approval import MatrixApprovalAction, handle_matrix_approval_action, is_process_approval_card
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -127,35 +129,6 @@ class _ApprovalResponsePayload:
     approval_id: str | None
     status: Literal["approved", "denied"] | None
     reason: str | None
-
-
-def _reply_to_event_id_from_event_source(event_source: dict[str, Any] | None) -> str | None:
-    """Return the reply target event ID from one raw Matrix event source."""
-    if not isinstance(event_source, dict):
-        return None
-    content = event_source.get("content")
-    if not isinstance(content, dict):
-        return None
-    relates_to = content.get("m.relates_to")
-    if not isinstance(relates_to, dict):
-        return None
-    in_reply_to = relates_to.get("m.in_reply_to")
-    if not isinstance(in_reply_to, dict):
-        return None
-    reply_to_event_id = in_reply_to.get("event_id")
-    return reply_to_event_id if isinstance(reply_to_event_id, str) else None
-
-
-def _strip_matrix_rich_reply_fallback(body: str) -> str:
-    """Remove the quoted fallback prefix from one Matrix rich-reply body."""
-    lines = body.splitlines()
-    quoted_line_count = 0
-    while quoted_line_count < len(lines) and lines[quoted_line_count].startswith("> "):
-        quoted_line_count += 1
-    if quoted_line_count == 0 or quoted_line_count >= len(lines) or lines[quoted_line_count] != "":
-        return body
-    reply_body = "\n".join(lines[quoted_line_count + 1 :])
-    return reply_body or body
 
 
 def _create_task_wrapper(
@@ -1368,17 +1341,6 @@ class AgentBot:
         """Delegate one flushed coalesced batch to the turn engine."""
         await self._turn_controller.handle_coalesced_batch(batch)
 
-    @staticmethod
-    def _origin_server_ts_from_source(source: object) -> int | float | None:
-        """Return a Matrix origin timestamp from a raw event source if present."""
-        if not isinstance(source, dict):
-            return None
-        source_dict = cast("dict[str, object]", source)
-        raw_timestamp = source_dict.get("origin_server_ts")
-        if isinstance(raw_timestamp, int | float) and not isinstance(raw_timestamp, bool):
-            return raw_timestamp
-        return None
-
     def _log_matrix_event_callback_started(
         self,
         room: nio.MatrixRoom,
@@ -1388,7 +1350,7 @@ class AgentBot:
     ) -> None:
         """Log Matrix ingress timing without message content."""
         receive_timestamp_ms = int(time.time() * 1000)
-        origin_server_ts = self._origin_server_ts_from_source(event.source)
+        origin_server_ts = origin_server_ts_from_event_source(event.source)
         log_context: dict[str, object] = {
             "callback": callback_name,
             "event_id": event.event_id,
@@ -1440,7 +1402,7 @@ class AgentBot:
         if not isinstance(content, dict):
             return _ApprovalResponsePayload(card_event_id=None, approval_id=None, status=None, reason=None)
 
-        card_event_id = _reply_to_event_id_from_event_source(event.source)
+        card_event_id = EventInfo.from_event(event.source).reply_to_event_id
         raw_approval_id = content.get("approval_id")
         approval_id = raw_approval_id if isinstance(raw_approval_id, str) and raw_approval_id else None
 
@@ -1466,14 +1428,10 @@ class AgentBot:
         event: nio.RoomMessageText,
     ) -> bool:
         """Consume reply-to-approval messages as denial actions."""
-        approval_manager = get_approval_store()
-        if approval_manager is None:
-            return False
-
-        reply_to_event_id = _reply_to_event_id_from_event_source(event.source)
+        reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
         if reply_to_event_id is None:
             return False
-        if not approval_manager.knows_in_memory_approval_card(reply_to_event_id):
+        if not is_process_approval_card(reply_to_event_id):
             return False
 
         return await self._handle_tool_approval_action(
@@ -1481,7 +1439,7 @@ class AgentBot:
             sender_id=event.sender,
             approval_event_id=reply_to_event_id,
             status="denied",
-            reason=_strip_matrix_rich_reply_fallback(event.body),
+            reason=strip_matrix_rich_reply_fallback(event.body),
         )
 
     async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
@@ -1586,30 +1544,19 @@ class AgentBot:
         """Resolve one approval action only when the sender still has access."""
         if approval_event_id is None and approval_id is None:
             return False
-        approval_manager = get_approval_store()
-        if approval_manager is None:
-            return False
         sender_can_resolve = self._sender_can_resolve_tool_approval(room, sender_id)
         if not sender_can_resolve:
             return False
-        sanitized_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
-        if approval_event_id is not None:
-            result = await approval_manager.handle_card_response(
+        result = await handle_matrix_approval_action(
+            MatrixApprovalAction(
                 room_id=room.room_id,
                 sender_id=sender_id,
                 card_event_id=approval_event_id,
-                status=status,
-                reason=sanitized_reason,
-            )
-        else:
-            assert approval_id is not None
-            result = await approval_manager.handle_live_approval_id_response(
-                room_id=room.room_id,
-                sender_id=sender_id,
                 approval_id=approval_id,
                 status=status,
-                reason=sanitized_reason,
-            )
+                reason=reason,
+            ),
+        )
         notice_event_id = approval_event_id or result.card_event_id
         if notice_event_id is not None and result.error_reason is not None:
             orchestrator = self.orchestrator

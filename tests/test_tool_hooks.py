@@ -18,6 +18,13 @@ from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import create_agent
+from mindroom.approval_manager import (
+    ApprovalManager,
+    PendingApproval,
+    SentApprovalEvent,
+    get_approval_store,
+    initialize_approval_store,
+)
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -40,14 +47,11 @@ from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_f
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
-    ApprovalManager,
-    PendingApproval,
-    SentApprovalEvent,
-    get_approval_store,
-    initialize_approval_store,
     shutdown_approval_store,
 )
+from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
@@ -1527,6 +1531,106 @@ async def test_sync_tool_approval_aexecute_resumes_on_runtime_loop(tmp_path: Pat
     assert result.result == "HI"
     client.room_send.assert_awaited_once()
     assert editor.await_args.args[2]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_deferred_sync_bridge_marks_runtime_loop_before_worker_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sync bridge deadlock guard must be active before the worker can run."""
+    runtime_loop = asyncio.get_running_loop()
+    worker_started = threading.Event()
+    marker_observed: list[bool] = []
+    original_start = threading.Thread.start
+
+    def start_and_wait_for_worker(self: threading.Thread) -> None:
+        original_start(self)
+        if self.name == "mindroom-tool-hook-sync-bridge":
+            assert worker_started.wait(timeout=1)
+
+    monkeypatch.setattr(tool_hooks.threading.Thread, "start", start_and_wait_for_worker)
+
+    async def awaitable_result() -> str:
+        marker_observed.append(is_loop_blocked_by_sync_tool_bridge(runtime_loop))
+        worker_started.set()
+        return "done"
+
+    deferred = tool_hooks._run_coroutine_from_sync(awaitable_result())
+    result = tool_hooks._resolve_deferred_sync_result(deferred)
+
+    assert result == "done"
+    assert marker_observed == [True]
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_approval_execute_on_runtime_loop_fails_fast(tmp_path: Path) -> None:
+    """Direct sync execute() on the runtime loop cannot wait for Matrix approval transport."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "rules": [{"match": "echo", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
+    )
+    client.rooms = {"!room:localhost": object()}
+    bot = MagicMock()
+    bot.agent_name = "router"
+    bot.running = True
+    bot.client = client
+    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
+    orchestrator.agent_bots = {"router": bot}
+    initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=AsyncMock())
+
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        def echo(self, text: str) -> str:
+            return text.upper()
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    result = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
+
+    assert result.status == "success"
+    assert result.result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: echo\n"
+        "Reason: Cannot perform Matrix approval transport while synchronous FunctionCall.execute() "
+        "is blocking the MindRoom runtime loop; use FunctionCall.aexecute() or run execute() "
+        "outside the runtime event loop.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

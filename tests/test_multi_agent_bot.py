@@ -29,6 +29,13 @@ from agno.run.team import TeamRunOutput
 
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom import interactive
+from mindroom.approval_manager import (
+    ApprovalManager,
+    PendingApproval,
+    SentApprovalEvent,
+    get_approval_store,
+    initialize_approval_store,
+)
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
@@ -115,11 +122,7 @@ from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, 
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_approval import (
     ApprovalActionResult,
-    ApprovalManager,
-    PendingApproval,
-    SentApprovalEvent,
-    get_approval_store,
-    initialize_approval_store,
+    MatrixApprovalAction,
     shutdown_approval_store,
 )
 from mindroom.tool_system.events import ToolTraceEntry
@@ -3981,23 +3984,22 @@ class TestAgentBot:
             sender="@user:localhost",
             source={"content": {"approval_id": "approval-1", "status": "approved"}},
         )
-        store = MagicMock()
-        store.handle_card_response = AsyncMock()
-        store.handle_live_approval_id_response = AsyncMock(
-            return_value=ApprovalActionResult(consumed=True, resolved=True, card_event_id="$approval"),
-        )
-
-        with patch("mindroom.bot.get_approval_store", return_value=store):
+        with patch(
+            "mindroom.bot.handle_matrix_approval_action",
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True, card_event_id="$approval")),
+        ) as handle_matrix_approval_action:
             await bot._on_unknown_event(room, event)
 
-        store.handle_live_approval_id_response.assert_awaited_once_with(
-            room_id="!test:localhost",
-            sender_id="@user:localhost",
-            approval_id="approval-1",
-            status="approved",
-            reason=None,
+        handle_matrix_approval_action.assert_awaited_once_with(
+            MatrixApprovalAction(
+                room_id="!test:localhost",
+                sender_id="@user:localhost",
+                card_event_id=None,
+                approval_id="approval-1",
+                status="approved",
+                reason=None,
+            ),
         )
-        store.handle_card_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_unknown_truncated_approval_id_response_sends_notice_with_card_event_id(
@@ -4314,21 +4316,22 @@ class TestAgentBot:
         event.reacts_to = "$approval"
         event.sender = "@user:localhost"
         event.event_id = "$reaction"
-        store = MagicMock()
-        store.handle_card_response = AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True))
-        store.handle_live_approval_id_response = AsyncMock()
-
-        with patch("mindroom.bot.get_approval_store", return_value=store):
+        with patch(
+            "mindroom.bot.handle_matrix_approval_action",
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True)),
+        ) as handle_matrix_approval_action:
             await bot._on_reaction(room, event)
 
-        store.handle_card_response.assert_awaited_once_with(
-            room_id="!test:localhost",
-            sender_id="@user:localhost",
-            card_event_id="$approval",
-            status="approved",
-            reason=None,
+        handle_matrix_approval_action.assert_awaited_once_with(
+            MatrixApprovalAction(
+                room_id="!test:localhost",
+                sender_id="@user:localhost",
+                card_event_id="$approval",
+                approval_id=None,
+                status="approved",
+                reason=None,
+            ),
         )
-        store.handle_live_approval_id_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_inherit_thread_for_promoted_plain_reply_target(
@@ -12138,16 +12141,16 @@ class TestMultiAgentOrchestrator:
             call_order.append("startup_discard")
             return 2
 
-        approval_manager = MagicMock()
-        approval_manager.discard_pending_on_startup = AsyncMock(side_effect=_discard_pending_on_startup)
-
         async def _sync_forever_with_restart(started_bot: object) -> None:
             await cast("Any", started_bot)._on_sync_response(MagicMock(spec=nio.SyncResponse))
 
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
-            patch("mindroom.orchestrator.get_approval_store", return_value=approval_manager),
+            patch(
+                "mindroom.orchestrator.expire_orphaned_approval_cards_on_startup",
+                new=AsyncMock(side_effect=_discard_pending_on_startup),
+            ) as expire_orphaned_approval_cards_on_startup,
             patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch("mindroom.orchestrator.sync_forever_with_restart", side_effect=_sync_forever_with_restart),
@@ -12160,7 +12163,7 @@ class TestMultiAgentOrchestrator:
             "support_services",
             "startup_discard",
         ]
-        approval_manager.discard_pending_on_startup.assert_awaited_once_with(lookback_hours=240)
+        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with(lookback_hours=240)
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -12176,13 +12179,13 @@ class TestMultiAgentOrchestrator:
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
 
-        approval_manager = MagicMock()
-        approval_manager.discard_pending_on_startup = AsyncMock()
-
-        with patch("mindroom.orchestrator.get_approval_store", return_value=approval_manager):
+        with patch(
+            "mindroom.orchestrator.expire_orphaned_approval_cards_on_startup",
+            new=AsyncMock(),
+        ) as expire_orphaned_approval_cards_on_startup:
             await orchestrator._handle_bot_ready(bot)
 
-        approval_manager.discard_pending_on_startup.assert_not_awaited()
+        expire_orphaned_approval_cards_on_startup.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_orchestrator_waits_for_homeserver_before_initialize(self, tmp_path: Path) -> None:

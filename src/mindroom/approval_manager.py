@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.tool_system.tool_failures import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
@@ -30,6 +32,7 @@ ApprovalRoomProvider = Callable[[], set[str]]
 TransportSenderProvider = Callable[[], str | None]
 
 _STARTUP_DISCARD_SCAN_LIMIT = 10_000
+_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
 _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
@@ -102,25 +105,9 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
     preview = {
         key: _truncate_event_argument_value(value, max_length=per_value_budget) for key, value in sanitized.items()
     }
-
-    while _json_preview_length(preview) > _MAX_ARGUMENTS_PREVIEW_CHARS:
-        shrink_key = max(preview, key=lambda candidate: len(_compact_preview_text(preview[candidate])))
-        current_value = preview[shrink_key]
-        current_text = _compact_preview_text(current_value)
-        if current_value is None or current_text == "[truncated]":
-            preview[shrink_key] = None
-        else:
-            overflow = _json_preview_length(preview) - _MAX_ARGUMENTS_PREVIEW_CHARS
-            next_max_length = max(len(current_text) - overflow - 8, len("[truncated]"))
-            next_value = sanitize_failure_text(current_text, max_length=next_max_length)
-            preview[shrink_key] = next_value if next_value != current_text else "[truncated]"
-        if all(value is None for value in preview.values()):
-            break
-
     while _json_preview_length(preview) > _MAX_ARGUMENTS_PREVIEW_CHARS and preview:
-        drop_key: str = max(preview, key=lambda candidate: len(candidate))
+        drop_key = max(preview, key=lambda k: len(_compact_preview_text(preview[k])))
         preview.pop(drop_key)
-
     if not preview:
         summary = {
             "_summary": sanitize_failure_text(
@@ -129,7 +116,6 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
             ),
         }
         return summary, True
-
     return preview, True
 
 
@@ -241,10 +227,7 @@ class PendingApproval:
         content = latest_edit.get("content")
         if not isinstance(content, dict):
             return "pending"
-        new_content = content.get("m.new_content")
-        if not isinstance(new_content, dict):
-            return "pending"
-        status = new_content.get("status")
+        status = visible_content_from_content(cast("dict[str, object]", content)).get("status")
         if status in {"pending", "approved", "denied", "expired"}:
             return cast("PendingApprovalStatus", status)
         return "pending"
@@ -257,6 +240,13 @@ class _LiveApprovalWaiter:
     room_id: str
     card_event: dict[str, Any]
     future: Future[ApprovalDecision]
+
+
+@dataclass(frozen=True, slots=True)
+class _PostCancelCleanupTask:
+    cleanup_future: Future[None]
+    owner_loop: asyncio.AbstractEventLoop
+    send_task: asyncio.Future[SentApprovalEvent | None]
 
 
 class ApprovalManager:
@@ -287,7 +277,7 @@ class ApprovalManager:
         self._resolving_card_event_ids: set[str] = set()
         self._resolved_card_event_ids: set[str] = set()
         self._cancelled_card_event_ids: set[str] = set()
-        self._post_cancel_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._post_cancel_cleanup_tasks: set[_PostCancelCleanupTask] = set()
 
     async def request_approval(  # noqa: PLR0911
         self,
@@ -534,7 +524,8 @@ class ApprovalManager:
         try:
             sent_event = await asyncio.shield(send_task)
         except asyncio.CancelledError:
-            cleanup_task = asyncio.create_task(
+            owner_loop = asyncio.get_running_loop()
+            cleanup_future = asyncio.run_coroutine_threadsafe(
                 self._cleanup_cancelled_send_when_event_arrives(
                     send_task=send_task,
                     room_id=room_id,
@@ -542,9 +533,16 @@ class ApprovalManager:
                     requested_at=requested_at,
                     approval_id=approval_id,
                 ),
+                owner_loop,
             )
-            self._post_cancel_cleanup_tasks.add(cleanup_task)
-            cleanup_task.add_done_callback(self._post_cancel_cleanup_tasks.discard)
+            cleanup_task = _PostCancelCleanupTask(
+                cleanup_future=cleanup_future,
+                owner_loop=owner_loop,
+                send_task=send_task,
+            )
+            with self._live_lock:
+                self._post_cancel_cleanup_tasks.add(cleanup_task)
+            cleanup_future.add_done_callback(lambda _future: self._discard_post_cancel_cleanup_task(cleanup_task))
             raise
 
         if sent_event is None:
@@ -905,14 +903,45 @@ class ApprovalManager:
         await self._drain_post_cancel_cleanup_tasks()
 
     async def _drain_post_cancel_cleanup_tasks(self) -> None:
-        while self._post_cancel_cleanup_tasks:
-            tasks = tuple(self._post_cancel_cleanup_tasks)
-            await asyncio.gather(*tasks, return_exceptions=True)
+        while True:
+            with self._live_lock:
+                futures = tuple(self._post_cancel_cleanup_tasks)
+            if not futures:
+                return
+
+            wrapped_by_cleanup = {asyncio.wrap_future(cleanup.cleanup_future): cleanup for cleanup in futures}
+            done, pending = await asyncio.wait(
+                wrapped_by_cleanup,
+                timeout=_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            for done_future in done:
+                with suppress(asyncio.CancelledError, Exception):
+                    done_future.result()
+
+            if pending:
+                pending_cleanups = [wrapped_by_cleanup[wrapped_future] for wrapped_future in pending]
+                for cleanup in pending_cleanups:
+                    cleanup.cleanup_future.cancel()
+                    if not cleanup.send_task.done() and not cleanup.owner_loop.is_closed():
+                        cleanup.owner_loop.call_soon_threadsafe(cleanup.send_task.cancel)
+                with self._live_lock:
+                    for cleanup in pending_cleanups:
+                        self._post_cancel_cleanup_tasks.discard(cleanup)
+                logger.warning(
+                    "Timed out waiting for cancelled approval send cleanup during shutdown",
+                    pending_cleanup_tasks=len(pending_cleanups),
+                )
+                return
+
+    def _discard_post_cancel_cleanup_task(self, cleanup_task: _PostCancelCleanupTask) -> None:
+        with self._live_lock:
+            self._post_cancel_cleanup_tasks.discard(cleanup_task)
 
     def _has_live_work(self) -> bool:
         with self._live_lock:
             has_waiters = bool(self._pending_by_card_event or self._resolving_card_event_ids)
-        return has_waiters or bool(self._post_cancel_cleanup_tasks)
+            has_cleanup_tasks = bool(self._post_cancel_cleanup_tasks)
+        return has_waiters or has_cleanup_tasks
 
     def _live_waiter_for_card(self, card_event_id: str) -> _LiveApprovalWaiter | None:
         with self._live_lock:
@@ -1151,8 +1180,7 @@ def _timeout_seconds(requested_at: str | None, expires_at: str | None) -> int:
 
 
 def _is_replace_content(content: dict[str, Any]) -> bool:
-    relates_to = content.get("m.relates_to")
-    return isinstance(relates_to, dict) and relates_to.get("rel_type") == "m.replace"
+    return EventInfo.from_event({"content": content}).is_edit
 
 
 def _is_original_approval_card(event: dict[str, Any]) -> bool:
