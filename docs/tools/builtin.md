@@ -13,7 +13,7 @@ icon: lucide/box
 | Category | Tools | Link |
 |----------|-------|------|
 | **Execution & Coding** | file, shell, python, coding, docker, calculator, reasoning, sleep | [→ execution-and-coding](execution-and-coding.md) |
-| **Data & Databases** | sql, postgres, neo4j, duckdb, csv, pandas, google_sheets, yfinance | [→ data-and-databases](data-and-databases.md) |
+| **Data & Databases** | sql, postgres, neo4j, duckdb, csv, pandas, google_drive, google_sheets, yfinance | [→ data-and-databases](data-and-databases.md) |
 | **Web Search** | duckduckgo, googlesearch, tavily, exa, serpapi, serper, searxng | [→ web-search](web-search.md) |
 | **Web Scraping & Browser** | firecrawl, crawl4ai, browser, jina, website, trafilatura | [→ web-scraping-and-browser](web-scraping-and-browser.md) |
 | **Research Sources** | arxiv, wikipedia, pubmed, hackernews | [→ research-sources](research-sources.md) |

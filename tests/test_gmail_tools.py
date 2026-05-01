@@ -1,5 +1,6 @@
 """Tests for the custom Gmail tools wrapper."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -9,6 +10,7 @@ from agno.tools.gmail import GmailTools as AgnoGmailTools
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.gmail import GmailTools
+from mindroom.oauth.providers import OAuthConnectionRequired
 
 
 @pytest.fixture
@@ -16,20 +18,22 @@ def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
     """Create a mock credentials manager with test data."""
     manager = CredentialsManager(base_path=tmp_path / "test_creds")
 
-    # Save test Google credentials
+    # Save test Gmail OAuth credentials
     test_creds = {
         "token": "test_access_token",
         "refresh_token": "test_refresh_token",
         "token_uri": "https://oauth2.googleapis.com/token",
-        "client_id": "test_client_id",
         "client_secret": "test_client_secret",
         "scopes": [
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/gmail.modify",
             "https://www.googleapis.com/auth/gmail.compose",
         ],
     }
-    manager.save_credentials("google", test_creds)
+    manager.save_credentials("google_gmail_oauth", test_creds)
     return manager
 
 
@@ -41,7 +45,10 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path,
-        process_env={},
+        process_env={
+            "GOOGLE_GMAIL_CLIENT_ID": "test_client_id",
+            "GOOGLE_GMAIL_CLIENT_SECRET": "test_client_secret",
+        },
     )
 
 
@@ -70,10 +77,14 @@ class TestGmailTools:
                 client_id="test_client_id",
                 client_secret="test_client_secret",  # noqa: S106
                 scopes=[
+                    "openid",
+                    "https://www.googleapis.com/auth/userinfo.email",
+                    "https://www.googleapis.com/auth/userinfo.profile",
                     "https://www.googleapis.com/auth/gmail.readonly",
                     "https://www.googleapis.com/auth/gmail.modify",
                     "https://www.googleapis.com/auth/gmail.compose",
                 ],
+                expiry=None,
             )
 
             # Verify parent class was initialized with credentials
@@ -97,6 +108,46 @@ class TestGmailTools:
             mock_logger.warning.assert_not_called()
             mock_parent_init.assert_called_once_with(creds=None)
 
+    def test_service_account_env_uses_upstream_auth(self, tmp_path: Path) -> None:
+        """Test env-only service account deployments bypass MindRoom OAuth."""
+        runtime_paths = resolve_runtime_paths(
+            storage_path=tmp_path / "mindroom_data",
+            process_env={
+                "GOOGLE_GMAIL_CLIENT_ID": "test_client_id",
+                "GOOGLE_GMAIL_CLIENT_SECRET": "test_client_secret",
+                "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "service-account.json"),
+            },
+        )
+
+        with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
+            mock_parent_init.return_value = None
+            gmail_tools = GmailTools(
+                runtime_paths=runtime_paths,
+                credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            )
+            gmail_tools.service_account_path = None
+
+        assert gmail_tools._should_fallback_to_original_auth() is True
+
+    def test_public_method_returns_structured_connect_instruction(self, runtime_paths: RuntimePaths) -> None:
+        """Test decorated public methods preserve structured OAuth connection details."""
+        gmail_tools = GmailTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=CredentialsManager(runtime_paths.storage_root / "credentials"),
+        )
+
+        result = json.loads(gmail_tools.get_latest_emails(1))
+
+        assert result["oauth_connection_required"] is True
+        assert result["provider"] == "google_gmail"
+        assert "/api/oauth/google_gmail/authorize" in result["connect_url"]
+
+        result = json.loads(gmail_tools.search_emails("invoice", 1))
+
+        assert result["oauth_connection_required"] is True
+        assert result["provider"] == "google_gmail"
+        assert "/api/oauth/google_gmail/authorize" in result["connect_url"]
+
     @patch("mindroom.custom_tools.gmail.logger")
     @patch("google.oauth2.credentials.Credentials")
     def test_initialization_with_invalid_credentials(
@@ -107,14 +158,19 @@ class TestGmailTools:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test initialization when credentials are invalid."""
-        mock_credentials_manager.save_credentials("google", {"invalid": "data"})
+        mock_credentials_manager.save_credentials("google_gmail_oauth", {"invalid": "data"})
         mock_credentials_class.side_effect = TypeError("Missing required fields")
 
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
 
-            mock_logger.exception.assert_called_once()
+            mock_credentials_class.assert_not_called()
+            mock_logger.warning.assert_called_once_with(
+                "oauth_credentials_missing_required_scopes",
+                tool_name="gmail",
+                provider_id="google_gmail",
+            )
             mock_parent_init.assert_called_once_with(creds=None)
 
     @patch("google.auth.transport.requests.Request")
@@ -128,9 +184,11 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+            gmail_tools.service_account_path = None
 
             gmail_tools.creds = MagicMock()
             gmail_tools.creds.valid = True
+            gmail_tools._provided_creds = True
 
             gmail_tools._auth()
 
@@ -147,6 +205,7 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+            gmail_tools.service_account_path = None
 
             gmail_tools.creds = None
 
@@ -154,6 +213,7 @@ class TestGmailTools:
             mock_creds.expired = True
             mock_creds.refresh_token = "refresh_token"  # noqa: S105
             mock_creds.token = "new_access_token"  # noqa: S105
+            mock_creds.expiry = None
             mock_credentials_class.return_value = mock_creds
 
             mock_request = MagicMock()
@@ -161,7 +221,7 @@ class TestGmailTools:
 
             gmail_tools._auth()
             mock_creds.refresh.assert_called_once_with(mock_request)
-            saved_creds = mock_credentials_manager.load_credentials("google")
+            saved_creds = mock_credentials_manager.load_credentials("google_gmail_oauth")
             assert saved_creds is not None
             assert saved_creds["token"] == "new_access_token"  # noqa: S105
 
@@ -180,20 +240,20 @@ class TestGmailTools:
             mock_parent_init.return_value = None
 
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_manager)
+            gmail_tools.service_account_path = None
             gmail_tools.creds = None
 
             mock_parent_auth = Mock()
             gmail_tools._original_auth = mock_parent_auth
 
-            gmail_tools._auth()
+            with pytest.raises(OAuthConnectionRequired):
+                gmail_tools._auth()
 
             # Verify warning was logged
-            mock_logger.warning.assert_called_with(
-                "No stored credentials found, initiating OAuth flow",
-            )
+            mock_logger.warning.assert_not_called()
 
             # Verify original auth was called
-            mock_parent_auth.assert_called_once()
+            mock_parent_auth.assert_not_called()
 
     def test_auth_error_handling(
         self,
@@ -204,14 +264,14 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
+            gmail_tools.service_account_path = None
             gmail_tools.creds = None
 
             # Mock Credentials to raise an exception
             with patch("google.oauth2.credentials.Credentials") as mock_creds:
                 mock_creds.side_effect = Exception("Test error")
 
-                # Should raise the exception
-                with pytest.raises(Exception, match="Test error"):
+                with pytest.raises(OAuthConnectionRequired):
                     gmail_tools._auth()
 
     def test_inheritance_from_agno_gmail_tools(self) -> None:

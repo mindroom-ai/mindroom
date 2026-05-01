@@ -33,6 +33,7 @@ class _PluginManifest:
     name: str
     tools_module: str | None
     hooks_module: str | None
+    oauth_module: str | None
     skills: list[str]
 
 
@@ -45,6 +46,7 @@ class _PluginBase:
     manifest_path: Path
     tools_module_path: Path | None
     hooks_module_path: Path | None
+    oauth_module_path: Path | None
     skill_dirs: list[Path]
 
 
@@ -242,6 +244,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
 
     tools_module_path = _resolve_module_path(root, manifest.tools_module, kind="tools")
     hooks_module_path = _resolve_module_path(root, manifest.hooks_module, kind="hooks")
+    oauth_module_path = _resolve_module_path(root, manifest.oauth_module, kind="oauth")
     skill_dirs = _resolve_skill_dirs(root, manifest.skills)
 
     return _PluginBase(
@@ -250,6 +253,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
         manifest_path=manifest_path,
         tools_module_path=tools_module_path,
         hooks_module_path=hooks_module_path,
+        oauth_module_path=oauth_module_path,
         skill_dirs=skill_dirs,
     )
 
@@ -291,6 +295,12 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         logger.error("Plugin hooks_module must be a string", path=str(path))
         raise PluginValidationError(msg)
 
+    oauth_module = data.get("oauth_module")
+    if oauth_module is not None and not isinstance(oauth_module, str):
+        msg = f"Plugin oauth_module must be a string: {path}"
+        logger.error("Plugin oauth_module must be a string", path=str(path))
+        raise PluginValidationError(msg)
+
     raw_skills = data.get("skills", [])
     if raw_skills is None:
         raw_skills = []
@@ -303,6 +313,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         name=normalized_name,
         tools_module=tools_module,
         hooks_module=hooks_module,
+        oauth_module=oauth_module,
         skills=raw_skills,
     )
 

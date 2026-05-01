@@ -19,17 +19,19 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
-from mindroom.api import auth, config_lifecycle, frontend, google_integration, main, runtime_reload
+from mindroom.api import auth, config_lifecycle, frontend, main, runtime_reload
+from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
     reset_matrix_sync_health,
 )
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.models import WorkerHandle
 
 TEST_WORKER_AUTH = "token"
@@ -1350,6 +1352,41 @@ def test_get_tools(test_client: TestClient) -> None:
     assert calculator_tool["agent_override_fields"] is None
 
 
+def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path) -> None:
+    """Custom non-OAuth auth providers should still use ordinary credential presence."""
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "my_shared_creds",
+        {"api_key": "secret"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    context = tools_api._ResolvedToolAvailabilityContext(
+        execution_scope=None,
+        dashboard_configuration_supported=True,
+        status_authoritative=True,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        allowed_shared_services=None,
+        auth_provider_credential_services={},
+        oauth_providers={},
+        runtime_paths=runtime_paths,
+    )
+    tools = [
+        {
+            "name": "custom_shared_api",
+            "status": "requires_config",
+            "auth_provider": "my_shared_creds",
+            "config_fields": [{"name": "api_key", "required": True}],
+        },
+    ]
+
+    tools_api._update_tools_statuses(tools, context)
+
+    assert tools[0]["status"] == "available"
+
+
 def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_worker_scope(
     test_client: TestClient,
 ) -> None:
@@ -1365,8 +1402,10 @@ def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_work
     assert response.status_code == 200
     tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
     assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
-    assert tools_by_name["gmail"]["execution_scope_supported"] is False
     assert tools_by_name["spotify"]["execution_scope_supported"] is False
+    assert tools_by_name["gmail"]["execution_scope_supported"] is True
+    assert tools_by_name["google_calendar"]["execution_scope_supported"] is True
+    assert tools_by_name["google_sheets"]["execution_scope_supported"] is True
     assert "calculator" in tools_by_name
     assert tools_by_name["calculator"]["execution_scope_supported"] is True
 
@@ -1540,19 +1579,11 @@ def test_get_tools_hides_non_allowlisted_shared_scoped_credentials(test_client: 
     assert tool["dashboard_configuration_supported"] is False
 
 
-def test_get_tools_shared_scope_local_only_integrations_ignore_worker_allowlist(test_client: TestClient) -> None:
+def test_get_tools_shared_scope_homeassistant_ignores_worker_allowlist(test_client: TestClient) -> None:
     """Shared-scope local integrations should reflect shared credentials without worker mirroring config."""
     config = _config_with_worker_scope("shared")
     runtime_paths = main._app_runtime_paths(main.app)
     manager = get_runtime_credentials_manager(runtime_paths)
-    manager.save_credentials(
-        "google",
-        {
-            "token": "token-value",
-            "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
-            "_source": "ui",
-        },
-    )
     manager.save_credentials(
         "homeassistant",
         {
@@ -1562,16 +1593,6 @@ def test_get_tools_shared_scope_local_only_integrations_ignore_worker_allowlist(
         },
     )
     tools = [
-        {
-            "name": "gmail",
-            "display_name": "Gmail",
-            "description": "Mailbox access",
-            "category": "email",
-            "status": "requires_config",
-            "setup_type": "special",
-            "auth_provider": "google",
-            "config_fields": [],
-        },
         {
             "name": "homeassistant",
             "display_name": "Home Assistant",
@@ -1593,8 +1614,133 @@ def test_get_tools_shared_scope_local_only_integrations_ignore_worker_allowlist(
     assert response.status_code == 200
     assert response.json()["status_authoritative"] is True
     tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
-    assert tools_by_name["gmail"]["status"] == "available"
     assert tools_by_name["homeassistant"]["status"] == "available"
+
+
+def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: TestClient) -> None:
+    """Generic OAuth-backed tools should not look connected from config-only credentials."""
+    config = _config_with_worker_scope("shared")
+    app_runtime_paths = main._app_runtime_paths(main.app)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=app_runtime_paths.config_path,
+        storage_path=app_runtime_paths.storage_root,
+        process_env={
+            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
+            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
+        },
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="standalone",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_key = resolve_worker_key("shared", identity, agent_name="general")
+    assert worker_key is not None
+    scoped_manager = manager.for_worker(worker_key)
+    scoped_manager.save_credentials(
+        "google_drive",
+        {
+            "list_files": True,
+            "max_read_size": 1048576,
+            "_source": "ui",
+        },
+    )
+    tools = [
+        {
+            "name": "google_drive",
+            "display_name": "Google Drive",
+            "description": "Drive access",
+            "category": "productivity",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "google_drive",
+            "config_fields": [
+                {
+                    "name": "max_read_size",
+                    "required": False,
+                },
+            ],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    tool = response.json()["tools"][0]
+    assert tool["name"] == "google_drive"
+    assert tool["status"] == "requires_config"
+
+    manager.save_credentials(
+        "google_drive_oauth",
+        {
+            "token": "drive-token",
+            "refresh_token": "drive-refresh-token",
+            "scopes": [
+                "openid",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+                "https://www.googleapis.com/auth/drive.readonly",
+            ],
+            "_source": "oauth",
+        },
+    )
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        connected_response = test_client.get("/api/tools/?agent_name=general")
+
+    assert connected_response.status_code == 200
+    connected_tool = connected_response.json()["tools"][0]
+    assert connected_tool["status"] == "available"
+
+
+def test_get_tools_marks_google_oauth_tool_available_with_service_account(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Google OAuth-backed tools should be available when service-account auth is configured."""
+    config = _config_with_worker_scope("shared")
+    app_runtime_paths = main._app_runtime_paths(main.app)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=app_runtime_paths.config_path,
+        storage_path=app_runtime_paths.storage_root,
+        process_env={
+            "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "google-service-account.json"),
+        },
+    )
+    tools = [
+        {
+            "name": "google_drive",
+            "display_name": "Google Drive",
+            "description": "Drive access",
+            "category": "productivity",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "google_drive",
+            "config_fields": [],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    tool = response.json()["tools"][0]
+    assert tool["name"] == "google_drive"
+    assert tool["status"] == "available"
 
 
 def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboard_truth(
@@ -1676,6 +1822,9 @@ def test_get_tools_uses_one_runtime_snapshot(
             credentials_manager=MagicMock(),
             worker_target=None,
             allowed_shared_services=None,
+            auth_provider_credential_services={},
+            oauth_providers={},
+            runtime_paths=runtime_paths,
         )
 
     with (
@@ -1707,425 +1856,6 @@ def test_get_tools_uses_one_runtime_snapshot(
 
     assert response.status_code == 200
     assert captured_runtime_paths == [first_runtime, first_runtime]
-
-
-def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClient) -> None:
-    """Google dashboard actions should reject unsupported worker scopes."""
-    config = _config_with_worker_scope("user")
-    with patch(
-        "mindroom.api.config_lifecycle.read_committed_runtime_config",
-        return_value=(config, main._app_runtime_paths(test_client.app)),
-    ):
-        response = test_client.post("/api/google/disconnect?agent_name=general")
-
-    assert response.status_code == 400
-    assert "worker_scope=user" in response.json()["detail"]
-
-
-def test_homeassistant_connect_oauth_rejects_isolating_worker_scope(test_client: TestClient) -> None:
-    """Home Assistant OAuth should reject unsupported worker scopes."""
-    config = _config_with_worker_scope("user")
-    with patch(
-        "mindroom.api.config_lifecycle.read_committed_runtime_config",
-        return_value=(config, main._app_runtime_paths(test_client.app)),
-    ):
-        response = test_client.post(
-            "/api/homeassistant/connect/oauth?agent_name=general",
-            json={
-                "instance_url": "https://ha.example.com",
-                "client_id": "client-id",
-            },
-        )
-
-    assert response.status_code == 400
-    assert "worker_scope=user" in response.json()["detail"]
-
-
-def test_google_connect_uses_pending_oauth_state(
-    api_key_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Google connect should issue an opaque server-bound state token."""
-    config = _config_with_worker_scope("shared")
-    issued_state: dict[str, str] = {}
-
-    class _FakeFlow:
-        def authorization_url(
-            self,
-            *,
-            access_type: str,
-            include_granted_scopes: str,
-            prompt: str,
-            state: str,
-        ) -> tuple[str, str]:
-            assert access_type == "offline"
-            assert include_granted_scopes == "true"
-            assert prompt == "consent"
-            issued_state["state"] = state
-            return ("https://accounts.google.test/o/oauth2/auth", "ignored")
-
-    class _FakeFlowFactory:
-        @staticmethod
-        def from_client_config(
-            client_config: object,
-            *,
-            scopes: list[str],
-            redirect_uri: str,
-        ) -> _FakeFlow:
-            assert client_config
-            assert scopes
-            assert redirect_uri
-            return _FakeFlow()
-
-    monkeypatch.setattr(
-        "mindroom.api.google_integration._get_oauth_credentials",
-        lambda _runtime_paths: {"web": {"client_id": "client-id", "client_secret": "client-secret"}},
-    )
-    monkeypatch.setattr(
-        "mindroom.api.google_integration._ensure_google_packages",
-        lambda _runtime_paths: (object, object, _FakeFlowFactory),
-    )
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    _publish_committed_runtime_config(
-        api_key_client.app,
-        main._app_runtime_paths(api_key_client.app),
-        config.model_dump(),
-    )
-    response = api_key_client.post("/api/google/connect?agent_name=general")
-
-    assert response.status_code == 200
-    assert response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
-    assert issued_state["state"]
-    assert issued_state["state"] != "general"
-
-
-def test_google_connect_rejects_draft_execution_scope_override(api_key_client: TestClient) -> None:
-    """Google connect must reject draft-only execution-scope overrides."""
-    config = _config_with_worker_scope("user")
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    with (
-        patch(
-            "mindroom.api.google_integration._get_oauth_credentials",
-            return_value={"web": {"client_id": "client-id", "client_secret": "client-secret"}},
-        ),
-        patch(
-            "mindroom.api.config_lifecycle.read_committed_runtime_config",
-            return_value=(config, main._app_runtime_paths(api_key_client.app)),
-        ),
-    ):
-        connect_response = api_key_client.post("/api/google/connect?agent_name=general&execution_scope=shared")
-    assert connect_response.status_code == 409
-    assert "Save the configuration before managing credentials" in connect_response.json()["detail"]
-    assert "execution_scope=shared" in connect_response.json()["detail"]
-
-
-def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
-    api_key_client: TestClient,
-    temp_config_file: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Google configure should write to the request runtime `.env` and refresh app runtime paths."""
-    config = _config_with_worker_scope("shared")
-    captured_client_config: dict[str, Any] = {}
-
-    class _FakeFlow:
-        def authorization_url(
-            self,
-            *,
-            access_type: str,
-            include_granted_scopes: str,
-            prompt: str,
-            state: str,
-        ) -> tuple[str, str]:
-            assert access_type == "offline"
-            assert include_granted_scopes == "true"
-            assert prompt == "consent"
-            assert state
-            return ("https://accounts.google.test/o/oauth2/auth", "ignored")
-
-    class _FakeFlowFactory:
-        @staticmethod
-        def from_client_config(
-            client_config: object,
-            *,
-            scopes: list[str],
-            redirect_uri: str,
-        ) -> _FakeFlow:
-            assert scopes
-            assert redirect_uri == "http://localhost:8765/api/google/callback"
-            captured_client_config.update(client_config["web"])
-            return _FakeFlow()
-
-    configured_client_secret = "configured-client-secret"  # noqa: S105
-    configure_response = api_key_client.post(
-        "/api/google/configure",
-        headers={"Authorization": "Bearer test-key"},
-        json={
-            "client_id": "configured-client-id",
-            "client_secret": configured_client_secret,
-            "project_id": "configured-project",
-        },
-    )
-    assert configure_response.status_code == 200
-
-    env_path = temp_config_file.parent / ".env"
-    env_contents = env_path.read_text(encoding="utf-8")
-    assert "GOOGLE_CLIENT_ID=configured-client-id" in env_contents
-    assert f"GOOGLE_CLIENT_SECRET={configured_client_secret}" in env_contents
-    assert "GOOGLE_PROJECT_ID=configured-project" in env_contents
-
-    monkeypatch.setattr(
-        "mindroom.api.google_integration._ensure_google_packages",
-        lambda _runtime_paths: (object, object, _FakeFlowFactory),
-    )
-    _publish_committed_runtime_config(
-        api_key_client.app,
-        main._app_runtime_paths(api_key_client.app),
-        config.model_dump(),
-    )
-    connect_response = api_key_client.post(
-        "/api/google/connect?agent_name=general",
-        headers={"Authorization": "Bearer test-key"},
-    )
-
-    assert connect_response.status_code == 200
-    assert connect_response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
-    assert captured_client_config["client_id"] == "configured-client-id"
-    assert captured_client_config["client_secret"] == configured_client_secret
-    assert captured_client_config["redirect_uris"] == ["http://localhost:8765/api/google/callback"]
-
-
-def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
-    api_key_client: TestClient,
-    temp_config_file: Path,
-) -> None:
-    """Google reset should clear the runtime `.env` and drop the refreshed runtime credentials."""
-    config = _config_with_worker_scope("shared")
-    env_path = temp_config_file.parent / ".env"
-
-    configure_response = api_key_client.post(
-        "/api/google/configure",
-        headers={"Authorization": "Bearer test-key"},
-        json={
-            "client_id": "configured-client-id",
-            "client_secret": "configured-client-secret",
-        },
-    )
-    assert configure_response.status_code == 200
-    env_path.write_text(env_path.read_text(encoding="utf-8") + "UNRELATED=value\n", encoding="utf-8")
-
-    with patch("mindroom.api.google_integration.get_runtime_credentials_manager") as mock_get_credentials_manager:
-        reset_response = api_key_client.post(
-            "/api/google/reset",
-            headers={"Authorization": "Bearer test-key"},
-        )
-
-    assert reset_response.status_code == 200
-    mock_get_credentials_manager.return_value.delete_credentials.assert_called_once_with("google")
-    env_contents = env_path.read_text(encoding="utf-8")
-    assert "GOOGLE_CLIENT_ID=" not in env_contents
-    assert "GOOGLE_CLIENT_SECRET=" not in env_contents
-    assert "GOOGLE_PROJECT_ID=" not in env_contents
-    assert "GOOGLE_REDIRECT_URI=" not in env_contents
-    assert "UNRELATED=value" in env_contents
-
-    _publish_committed_runtime_config(
-        api_key_client.app,
-        main._app_runtime_paths(api_key_client.app),
-        config.model_dump(),
-    )
-    connect_response = api_key_client.post(
-        "/api/google/connect?agent_name=general",
-        headers={"Authorization": "Bearer test-key"},
-    )
-
-    assert connect_response.status_code == 503
-    assert "GOOGLE_CLIENT_ID" in connect_response.json()["detail"]
-
-
-def test_google_runtime_refresh_keeps_config_cache_live(
-    api_key_client: TestClient,
-) -> None:
-    """Google configure/reset should reload config instead of leaving the dashboard cache empty."""
-    before_response = api_key_client.post(
-        "/api/config/load",
-        headers={"Authorization": "Bearer test-key"},
-    )
-    assert before_response.status_code == 200
-    assert "test_agent" in before_response.json()["agents"]
-
-    configure_response = api_key_client.post(
-        "/api/google/configure",
-        headers={"Authorization": "Bearer test-key"},
-        json={
-            "client_id": "configured-client-id",
-            "client_secret": "configured-client-secret",
-        },
-    )
-    assert configure_response.status_code == 200
-
-    after_configure = api_key_client.post(
-        "/api/config/load",
-        headers={"Authorization": "Bearer test-key"},
-    )
-    assert after_configure.status_code == 200
-    assert "test_agent" in after_configure.json()["agents"]
-
-    reset_response = api_key_client.post(
-        "/api/google/reset",
-        headers={"Authorization": "Bearer test-key"},
-    )
-    assert reset_response.status_code == 200
-
-    after_reset = api_key_client.post(
-        "/api/config/load",
-        headers={"Authorization": "Bearer test-key"},
-    )
-    assert after_reset.status_code == 200
-    assert "test_agent" in after_reset.json()["agents"]
-
-
-def test_google_configure_surfaces_runtime_validation_failures(
-    api_key_client: TestClient,
-    temp_config_file: Path,
-) -> None:
-    """Google configure should surface runtime config failures as 422 user errors."""
-    before_response = api_key_client.post(
-        "/api/config/load",
-        headers={"Authorization": "Bearer test-key"},
-    )
-    assert before_response.status_code == 200
-    assert "test_agent" in before_response.json()["agents"]
-
-    temp_config_file.write_text(
-        yaml.dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                "router": {"model": "default"},
-                "defaults": {"markdown": True},
-                "mindroom_user": {"username": "mindroom_router"},
-            },
-        ),
-        encoding="utf-8",
-    )
-
-    configure_response = api_key_client.post(
-        "/api/google/configure",
-        headers={"Authorization": "Bearer test-key"},
-        json={
-            "client_id": "configured-client-id",
-            "client_secret": "configured-client-secret",
-        },
-    )
-
-    assert configure_response.status_code == 422
-    assert "mindroom_user.username" in str(configure_response.json()["detail"])
-
-    after_response = api_key_client.post(
-        "/api/config/load",
-        headers={"Authorization": "Bearer test-key"},
-    )
-    assert after_response.status_code == 422
-    assert "mindroom_user.username" in str(after_response.json()["detail"])
-
-
-def test_google_configure_rejects_stale_runtime_refresh_after_runtime_swap(tmp_path: Path) -> None:
-    """Google configure should fail stale before mutating the older request-bound runtime."""
-    runtime_a = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "first.yaml",
-        storage_path=tmp_path / "first-store",
-        process_env={"MINDROOM_API_KEY": "key-a"},
-    )
-    runtime_b = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "second.yaml",
-        storage_path=tmp_path / "second-store",
-        process_env={"MINDROOM_API_KEY": "key-b"},
-    )
-    payload_a = _authored_config_payload("old")
-    payload_b = _authored_config_payload("new")
-
-    runtime_a.env_path.parent.mkdir(parents=True, exist_ok=True)
-    runtime_a.env_path.write_text("UNRELATED=value\n", encoding="utf-8")
-    original_require_request_snapshot = google_integration._require_request_snapshot
-
-    def _swap_after_request_snapshot(request: Request) -> config_lifecycle.ApiSnapshot:
-        snapshot = original_require_request_snapshot(request)
-        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
-        return snapshot
-
-    with (
-        patch(
-            "mindroom.api.google_integration._require_request_snapshot",
-            side_effect=_swap_after_request_snapshot,
-        ),
-        TestClient(main.app) as client,
-    ):
-        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
-        response = client.post(
-            "/api/google/configure",
-            headers={"Authorization": "Bearer key-a"},
-            json={
-                "client_id": "configured-client-id",
-                "client_secret": "configured-client-secret",
-            },
-        )
-
-    assert response.status_code == 409
-    assert main._app_runtime_paths(main.app) == runtime_b
-    assert main._app_context(main.app).config_data["agents"] == payload_b["agents"]
-    env_contents = runtime_a.env_path.read_text(encoding="utf-8")
-    assert env_contents == "UNRELATED=value\n"
-    assert "GOOGLE_CLIENT_ID=" not in env_contents
-
-
-def test_google_reset_rejects_stale_runtime_refresh_without_mutating_old_runtime(tmp_path: Path) -> None:
-    """Google reset should fail stale before deleting credentials or editing the older runtime `.env`."""
-    runtime_a = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "first.yaml",
-        storage_path=tmp_path / "first-store",
-        process_env={"MINDROOM_API_KEY": "key-a"},
-    )
-    runtime_b = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "second.yaml",
-        storage_path=tmp_path / "second-store",
-        process_env={"MINDROOM_API_KEY": "key-b"},
-    )
-    payload_a = _authored_config_payload("old")
-    payload_b = _authored_config_payload("new")
-    runtime_a.env_path.parent.mkdir(parents=True, exist_ok=True)
-    runtime_a.env_path.write_text(
-        "GOOGLE_CLIENT_ID=client-a\nGOOGLE_CLIENT_SECRET=secret-a\nUNRELATED=value\n",
-        encoding="utf-8",
-    )
-    original_require_request_snapshot = google_integration._require_request_snapshot
-
-    def _swap_after_request_snapshot(request: Request) -> config_lifecycle.ApiSnapshot:
-        snapshot = original_require_request_snapshot(request)
-        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
-        return snapshot
-
-    with (
-        patch(
-            "mindroom.api.google_integration._require_request_snapshot",
-            side_effect=_swap_after_request_snapshot,
-        ),
-        patch("mindroom.api.google_integration.get_runtime_credentials_manager") as mock_get_credentials_manager,
-        TestClient(main.app) as client,
-    ):
-        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
-        response = client.post(
-            "/api/google/reset",
-            headers={"Authorization": "Bearer key-a"},
-        )
-
-    assert response.status_code == 409
-    assert main._app_runtime_paths(main.app) == runtime_b
-    assert main._app_context(main.app).config_data["agents"] == payload_b["agents"]
-    env_contents = runtime_a.env_path.read_text(encoding="utf-8")
-    assert env_contents == "GOOGLE_CLIENT_ID=client-a\nGOOGLE_CLIENT_SECRET=secret-a\nUNRELATED=value\n"
-    mock_get_credentials_manager.assert_not_called()
 
 
 def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
@@ -3348,7 +3078,9 @@ def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
 
     response = api_key_client.get("/", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"] == "/login?next=/"
+    location = urlparse(response.headers["location"])
+    assert location.path == "/login"
+    assert parse_qs(location.query) == {"next": ["/"]}
 
 
 def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient) -> None:
@@ -3358,6 +3090,21 @@ def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient
     assert "Enter the dashboard API key to continue" in response.text
     assert "MINDROOM_API_KEY" in response.text
     assert ".env" in response.text
+
+
+def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
+    api_key_client: TestClient,
+) -> None:
+    """Standalone login must preserve OAuth query parameters in the JS redirect target."""
+    next_path = "/api/oauth/test_drive/authorize?agent_name=general&execution_scope=user"
+
+    response = api_key_client.get("/login", params={"next": next_path})
+
+    assert response.status_code == 200
+    next_path_line = next(line for line in response.text.splitlines() if "const nextPath =" in line)
+    next_path_literal = next_path_line.split("=", 1)[1].strip().removesuffix(";")
+    assert json.loads(next_path_literal) == next_path
+    assert "&amp;execution_scope" not in response.text
 
 
 def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClient) -> None:
@@ -4028,16 +3775,16 @@ def test_api_key_authenticated_teams_access(api_key_client: TestClient) -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/google/callback?code=test-code&state=missing",
         "/api/homeassistant/callback?code=test-code&state=missing",
         "/api/integrations/spotify/callback?code=test-code&state=missing",
+        "/api/oauth/google_drive/callback?code=test-code&state=missing",
     ],
 )
 def test_api_key_keeps_oauth_callbacks_open(
     api_key_client: TestClient,
     path: str,
 ) -> None:
-    """OAuth callbacks should stay reachable via the dashboard auth cookie."""
+    """Legacy public callbacks stay open, while generic OAuth callbacks require auth."""
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 

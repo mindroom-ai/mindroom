@@ -25,24 +25,34 @@ _AGENT_WORKSPACE_DIRNAME = "workspace"
 _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
-        "google",
         "spotify",
         "homeassistant",
-        "gmail",
-        "google_calendar",
-        "google_sheets",
     },
 )
 LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
     {
         "attachments",
-        "homeassistant",
         "gmail",
         "google_calendar",
+        "google_drive",
         "google_sheets",
+        "homeassistant",
     },
 )
-LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset({"google", "homeassistant"})
+LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
+    {
+        "google_calendar",
+        "google_calendar_oauth",
+        "google_drive",
+        "google_drive_oauth",
+        "google_gmail",
+        "google_gmail_oauth",
+        "google_sheets",
+        "google_sheets_oauth",
+        "gmail",
+        "homeassistant",
+    },
+)
 
 
 @runtime_checkable
@@ -361,6 +371,11 @@ def tool_stays_local(name: str) -> bool:
 def service_uses_local_shared_credentials(service: str, worker_scope: WorkerScope | None) -> bool:
     """Return whether one scoped service reads shared credentials locally instead of worker mirrors."""
     return worker_scope == "shared" and service in LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
+
+
+def service_uses_primary_runtime_scoped_credentials(service: str, worker_scope: WorkerScope | None) -> bool:
+    """Return whether one scoped service must stay outside worker-mounted storage."""
+    return worker_scope in {"user", "user_agent"} and service in LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
 
 
 def local_shared_credential_allowlist(

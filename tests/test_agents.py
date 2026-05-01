@@ -3008,13 +3008,13 @@ def test_config_rejects_shared_only_integrations_for_isolating_worker_scope() ->
     """Agents with isolating worker scope must not use shared-only integrations."""
     with pytest.raises(
         ValidationError,
-        match=r"general -> gmail \(worker_scope=user\)",
+        match=r"general -> homeassistant \(worker_scope=user\)",
     ):
         Config(
             agents={
                 "general": AgentConfig(
                     display_name="General",
-                    tools=["gmail"],
+                    tools=["homeassistant"],
                     worker_scope="user",
                 ),
             },

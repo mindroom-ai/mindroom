@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
-  ArrowRight,
   Settings,
   CheckCircle2,
   Circle,
@@ -35,24 +34,32 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useTools, mapToolToIntegration } from "@/hooks/useTools";
+import {
+  useTools,
+  mapToolToIntegration,
+  type ToolInfo,
+} from "@/hooks/useTools";
 import { useConfigStore } from "@/store/configStore";
 import { getIconForTool } from "./iconMapping";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
 import {
   Integration,
   IntegrationConfig,
+  GenericOAuthIntegrationProvider,
   integrationProviders,
   getAllIntegrations,
 } from "./integrations/index";
 import { EnhancedConfigDialog } from "./EnhancedConfigDialog";
 import { FilterSelector } from "@/components/shared/FilterSelector";
 
-const SHARED_ONLY_PROVIDER_IDS = new Set([
-  "google",
-  "spotify",
-  "homeassistant",
-]);
+const SHARED_ONLY_PROVIDER_IDS = new Set(["spotify", "homeassistant"]);
+
+const titleFromProviderId = (providerId: string) =>
+  providerId
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 
 export function Integrations() {
   const { agents, agentPoliciesByAgent } = useConfigStore();
@@ -124,6 +131,19 @@ export function Integrations() {
     currentScopeKeyRef.current === scopeKey;
   const isCurrentLoadRequest = (requestId: number, scopeKey: string) =>
     requestId === loadRequestIdRef.current && isCurrentScope(scopeKey);
+  const oauthProviderForIntegration = (integration: Integration) => {
+    const provider = integrationProviders[integration.id];
+    if (provider) {
+      return provider;
+    }
+    if (integration.setup_type !== "oauth" || !integration.oauth_provider_id) {
+      return null;
+    }
+    return new GenericOAuthIntegrationProvider(
+      integration,
+      integration.oauth_provider_id,
+    );
+  };
   const [activeDialog, setActiveDialog] = useState<{
     integrationId: string;
     config: IntegrationConfig;
@@ -181,10 +201,19 @@ export function Integrations() {
         agentName: effectiveScopeAgentName,
         executionScope: selectedExecutionScope,
       };
+      const providerIds = new Set(Object.keys(integrationProviders));
+      const backendToolsByName = new Map<string, ToolInfo>(
+        backendTools.map((tool) => [tool.name, tool]),
+      );
 
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
         const config = provider.getConfig(scope);
+        const providerTool =
+          backendToolsByName.get(config.integration.id) ??
+          backendTools.find(
+            (tool) => tool.auth_provider === config.integration.id,
+          );
         if (
           hidesSharedOnlyIntegrations &&
           SHARED_ONLY_PROVIDER_IDS.has(config.integration.id)
@@ -196,16 +225,89 @@ export function Integrations() {
           : {};
         loadedIntegrations.push({
           ...config.integration,
+          config_fields:
+            providerTool?.config_fields ?? config.integration.config_fields,
+          docs_url: providerTool?.docs_url ?? config.integration.docs_url,
+          helper_text:
+            providerTool?.helper_text ?? config.integration.helper_text,
+          dependencies:
+            providerTool?.dependencies ?? config.integration.dependencies,
+          icon_color: providerTool?.icon_color ?? config.integration.icon_color,
+          dashboard_configuration_supported:
+            providerTool?.dashboard_configuration_supported ??
+            config.integration.dashboard_configuration_supported,
+          execution_scope_supported:
+            providerTool?.execution_scope_supported ??
+            config.integration.execution_scope_supported,
           ...status,
+          config_service:
+            providerTool?.name ??
+            status.config_service ??
+            config.integration.config_service,
         });
+      }
+
+      const dynamicOAuthProviderIds = new Set(
+        backendTools
+          .map((tool) => tool.auth_provider)
+          .filter(
+            (providerId): providerId is string =>
+              typeof providerId === "string" &&
+              providerId.length > 0 &&
+              !providerIds.has(providerId),
+          ),
+      );
+      for (const providerId of dynamicOAuthProviderIds) {
+        const providerTool = backendTools.find(
+          (tool) => tool.auth_provider === providerId,
+        );
+        const integration: Integration = {
+          id: providerId,
+          name: titleFromProviderId(providerId),
+          description: `Connect ${titleFromProviderId(providerId)} OAuth for ${providerTool?.display_name ?? "this tool"}.`,
+          category: providerTool?.category ?? "productivity",
+          icon: getIconForTool(
+            providerTool?.icon ?? null,
+            providerTool?.icon_color ?? null,
+          ),
+          icon_color: providerTool?.icon_color ?? null,
+          status: "available",
+          setup_type: "oauth",
+          connected: false,
+          config_fields: providerTool?.config_fields ?? null,
+          docs_url: providerTool?.docs_url ?? null,
+          helper_text: providerTool?.helper_text ?? null,
+          dependencies: providerTool?.dependencies ?? null,
+          oauth_provider_id: providerId,
+          config_service: providerTool?.name,
+          dashboard_configuration_supported:
+            providerTool?.dashboard_configuration_supported,
+          execution_scope_supported: providerTool?.execution_scope_supported,
+        };
+        const provider = new GenericOAuthIntegrationProvider(
+          integration,
+          providerId,
+        );
+        const status = await provider.loadStatus?.(scope);
+        loadedIntegrations.push({
+          ...integration,
+          ...status,
+          config_service:
+            providerTool?.name ??
+            status?.config_service ??
+            integration.config_service,
+        });
+        providerIds.add(providerId);
       }
 
       // Load backend tools and map them to integrations
       // (excluding those already handled by providers)
-      const providerIds = Object.keys(integrationProviders);
-
       const backendIntegrations = backendTools
-        .filter((tool) => !providerIds.includes(tool.name))
+        .filter(
+          (tool) =>
+            !providerIds.has(tool.name) &&
+            !(tool.auth_provider && providerIds.has(tool.auth_provider)),
+        )
         .filter(
           (tool) =>
             !hidesSharedOnlyIntegrations ||
@@ -222,7 +324,8 @@ export function Integrations() {
               tool.auth_provider && tool.status === "available"
                 ? "connected"
                 : mapped.status,
-            auth_provider: tool.auth_provider, // Pass through auth_provider
+            auth_provider: tool.auth_provider ?? undefined,
+            config_service: tool.name,
           } as Integration & { auth_provider?: string };
         });
 
@@ -251,22 +354,44 @@ export function Integrations() {
     }
   };
 
-  const integrationNeedsDashboardCredentials = (
-    integration: Integration & { auth_provider?: string },
-  ) => {
-    const tool = integration as any;
+  const integrationNeedsDashboardCredentials = (integration: Integration) => {
     return (
       integration.setup_type !== "none" ||
-      Boolean(tool.auth_provider) ||
-      Boolean(tool.config_fields && tool.config_fields.length > 0)
+      Boolean(integration.auth_provider) ||
+      Boolean(integration.config_fields && integration.config_fields.length > 0)
     );
   };
 
+  const integrationHasScopedOAuthProvider = (integration: Integration) =>
+    integration.setup_type === "oauth" &&
+    oauthProviderForIntegration(integration) != null &&
+    !SHARED_ONLY_PROVIDER_IDS.has(integration.id);
+
+  const blocksScopedDashboardCredentials = (integration: Integration) =>
+    disablesDashboardCredentialManagement &&
+    integrationNeedsDashboardCredentials(integration) &&
+    !integrationHasScopedOAuthProvider(integration);
+
+  const openToolConfigDialog = (integration: Integration) => {
+    if (!integration.config_fields || integration.config_fields.length === 0) {
+      return false;
+    }
+    setConfigDialog({
+      service: integration.config_service ?? integration.id,
+      displayName: integration.name,
+      description: integration.description,
+      configFields: integration.config_fields,
+      isEditing: integration.status === "connected",
+      docsUrl: integration.docs_url || null,
+      helperText: integration.helper_text || null,
+      icon: null,
+      iconColor: integration.icon_color || integration.iconColor || undefined,
+    });
+    return true;
+  };
+
   const handleIntegrationAction = async (integration: Integration) => {
-    if (
-      disablesDashboardCredentialManagement &&
-      integrationNeedsDashboardCredentials(integration)
-    ) {
+    if (blocksScopedDashboardCredentials(integration)) {
       toast({
         title: "Shared-only dashboard configuration",
         description:
@@ -277,7 +402,7 @@ export function Integrations() {
     }
 
     // Check if we have a provider for this integration
-    const provider = integrationProviders[integration.id];
+    const provider = oauthProviderForIntegration(integration);
     const scope = {
       agentName: effectiveScopeAgentName,
       executionScope: selectedExecutionScope,
@@ -289,6 +414,13 @@ export function Integrations() {
       // If there's a custom config component, show it in a dialog
       if (config.ConfigComponent) {
         setActiveDialog({ integrationId: integration.id, config });
+        return;
+      }
+
+      if (
+        integration.status === "connected" &&
+        openToolConfigDialog(integration)
+      ) {
         return;
       }
 
@@ -318,20 +450,7 @@ export function Integrations() {
       integration.setup_type === "none"
     ) {
       // Show generic config dialog for tools with config_fields
-      const tool = integration as any; // Cast to access config_fields
-      if (tool.config_fields && tool.config_fields.length > 0) {
-        setConfigDialog({
-          service: integration.id,
-          displayName: integration.name,
-          description: integration.description,
-          configFields: tool.config_fields,
-          isEditing: integration.status === "connected",
-          docsUrl: tool.docs_url || null,
-          helperText: tool.helper_text || null,
-          icon: null, // Icon loaded from integration object or backend
-          iconColor: tool.icon_color || integration.iconColor,
-        });
-      } else {
+      if (!openToolConfigDialog(integration)) {
         toast({
           title: "Configuration Error",
           description: `${integration.name} requires configuration but no fields are specified.`,
@@ -349,10 +468,7 @@ export function Integrations() {
   };
 
   const handleDisconnect = async (integration: Integration) => {
-    if (
-      disablesDashboardCredentialManagement &&
-      integrationNeedsDashboardCredentials(integration)
-    ) {
+    if (blocksScopedDashboardCredentials(integration)) {
       toast({
         title: "Shared-only dashboard configuration",
         description:
@@ -362,7 +478,7 @@ export function Integrations() {
       return;
     }
 
-    const provider = integrationProviders[integration.id];
+    const provider = oauthProviderForIntegration(integration);
     const scope = {
       agentName: effectiveScopeAgentName,
       executionScope: selectedExecutionScope,
@@ -411,10 +527,7 @@ export function Integrations() {
   };
 
   const getActionButton = (integration: Integration) => {
-    if (
-      disablesDashboardCredentialManagement &&
-      integrationNeedsDashboardCredentials(integration)
-    ) {
+    if (blocksScopedDashboardCredentials(integration)) {
       return (
         <Button disabled variant="outline" size="sm">
           Shared-only config
@@ -423,7 +536,7 @@ export function Integrations() {
     }
 
     // Check if there's a custom action button
-    const provider = integrationProviders[integration.id];
+    const provider = oauthProviderForIntegration(integration);
     const config = provider?.getConfig({
       agentName: effectiveScopeAgentName,
       executionScope: selectedExecutionScope,
@@ -441,7 +554,7 @@ export function Integrations() {
     }
 
     // Handle tools with delegated authentication
-    const tool = integration as any;
+    const tool = integration;
     if (tool.auth_provider) {
       // Check if the auth provider is connected
       const authProvider = integrations.find(
@@ -512,9 +625,8 @@ export function Integrations() {
 
     // Tools with no setup required
     if (integration.setup_type === "none") {
-      const tool = integration as any;
       // Check if there are optional config fields
-      if (tool.config_fields && tool.config_fields.length > 0) {
+      if (integration.config_fields && integration.config_fields.length > 0) {
         // Check if any configuration has been saved
         const hasConfig = integration.status === "connected";
 
@@ -572,6 +684,36 @@ export function Integrations() {
       }
     }
 
+    if (integration.setup_type === "oauth" && integration.status_error) {
+      return (
+        <div className="flex gap-2 items-center">
+          <Button disabled variant="outline" size="sm">
+            Status unavailable
+          </Button>
+          <Button
+            onClick={() => void loadIntegrations(false)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Retry status
+          </Button>
+        </div>
+      );
+    }
+
+    if (
+      integration.setup_type === "oauth" &&
+      integration.oauth_client_configured === false &&
+      integration.oauth_service_account_configured !== true
+    ) {
+      return (
+        <Button disabled variant="outline" size="sm">
+          Needs client config
+        </Button>
+      );
+    }
+
     // For other connected tools, show Edit/Disconnect
     if (integration.status === "connected") {
       return (
@@ -625,53 +767,54 @@ export function Integrations() {
     );
   };
 
-  const IntegrationCard = ({
-    integration,
-  }: {
-    integration: Integration & { auth_provider?: string };
-  }) => (
-    <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            {integration.icon}
-            <CardTitle className="text-lg">{integration.name}</CardTitle>
-          </div>
-          {integration.status === "connected" ? (
-            <Badge className="bg-gradient-to-r from-green-500 to-emerald-500 text-white border-0">
-              <CheckCircle2 className="h-3 w-3 mr-1" />
-              Connected
-            </Badge>
-          ) : (
-            <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 backdrop-blur-md border-amber-500/20">
-              <Circle className="h-3 w-3 mr-1" />
-              Available
-            </Badge>
-          )}
-        </div>
-        <CardDescription>{integration.description}</CardDescription>
-      </CardHeader>
+  const IntegrationCard = ({ integration }: { integration: Integration }) => {
+    const isConnected = integration.status === "connected";
+    const statusLabel = integration.status_error
+      ? "Status error"
+      : integration.status === "not_connected"
+        ? "Needs setup"
+        : "Available";
 
-      <CardContent>
-        <div className="space-y-3">
-          <div className="flex gap-2">
-            {getActionButton(integration)}
-            {integration.id === "google" && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => handleIntegrationAction(integration)}
-                className="flex items-center gap-1"
-              >
-                <ArrowRight className="h-3 w-3" />
-                Details
-              </Button>
+    return (
+      <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {integration.icon}
+              <CardTitle className="text-lg">{integration.name}</CardTitle>
+            </div>
+            {isConnected ? (
+              <Badge className="bg-gradient-to-r from-green-500 to-emerald-500 text-white border-0">
+                <CheckCircle2 className="h-3 w-3 mr-1" />
+                Connected
+              </Badge>
+            ) : (
+              <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 backdrop-blur-md border-amber-500/20">
+                <Circle className="h-3 w-3 mr-1" />
+                {statusLabel}
+              </Badge>
             )}
           </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
+          <CardDescription>{integration.description}</CardDescription>
+          {integration.status_error ? (
+            <p className="text-xs text-muted-foreground">
+              Status error: {integration.status_error}
+            </p>
+          ) : integration.helper_text ? (
+            <p className="text-xs text-muted-foreground">
+              {integration.helper_text}
+            </p>
+          ) : null}
+        </CardHeader>
+
+        <CardContent>
+          <div className="space-y-3">
+            <div className="flex gap-2">{getActionButton(integration)}</div>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  };
 
   // Filter integrations
   const integrations =
@@ -862,14 +1005,14 @@ export function Integrations() {
           {hidesSharedOnlyIntegrations && (
             <Alert className="mt-3">
               <AlertDescription>
-                Dashboard credential setup, editing, and disconnect are only
-                supported for shared deployment credentials.
+                Legacy dashboard credential setup, editing, and disconnect are
+                only supported for shared deployment credentials.
               </AlertDescription>
               <AlertDescription className="mt-2">
-                Google Services, Home Assistant, Spotify, Gmail, Google
-                Calendar, and Google Sheets are only supported for shared
-                deployment credentials or agents with an effective shared
-                runtime scope (<code>worker_scope=shared</code>).
+                Home Assistant and Spotify remain shared-only unless the agent
+                has an effective shared runtime scope (
+                <code>worker_scope=shared</code>). OAuth-backed Google
+                integrations can be connected for this selected agent.
               </AlertDescription>
             </Alert>
           )}

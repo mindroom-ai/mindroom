@@ -28,7 +28,9 @@ describe("HomeAssistantIntegration", () => {
     });
 
     expect(
-      screen.getByText(`${window.location.origin}/api/homeassistant/callback`),
+      await screen.findByText(
+        `${window.location.origin}/api/homeassistant/callback`,
+      ),
     ).toBeInTheDocument();
   });
 });

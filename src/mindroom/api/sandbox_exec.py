@@ -162,28 +162,40 @@ def request_execution_env(
     tool_name: str,
     execution_env: dict[str, str] | None,
     runtime_paths: RuntimePaths,
+    *,
+    extra_env_passthrough: str | None = None,
 ) -> dict[str, str]:
     """Return the effective runtime-scoped execution env for one request."""
-    if execution_env:
-        return dict(execution_env)
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
-    return dict(constants.execution_runtime_env_values(runtime_paths))
+    if tool_name == "shell":
+        source_env = execution_env or runtime_paths.process_env
+        return dict(
+            constants.sandbox_shell_execution_runtime_env_values(
+                runtime_paths,
+                extra_env_passthrough=extra_env_passthrough,
+                process_env=source_env,
+            ),
+        )
+    if execution_env:
+        return dict(execution_env)
+    return dict(constants.sandbox_execution_runtime_env_values(runtime_paths))
 
 
 def runtime_paths_with_execution_env(
     runtime_paths: RuntimePaths,
     execution_env: dict[str, str],
     *,
+    include_base_execution_env: bool = True,
     trusted_env_overlay: Mapping[str, str] | None = None,
 ) -> RuntimePaths:
     """Return runtime paths overlaid with one execution env snapshot."""
-    if not execution_env and not trusted_env_overlay:
+    if include_base_execution_env and not execution_env and not trusted_env_overlay:
         return runtime_paths
 
-    process_env = dict(runtime_paths.process_env)
+    process_env = dict(constants.execution_runtime_env_values(runtime_paths)) if include_base_execution_env else {}
     process_env.update(execution_env)
-    env_file_values = dict(runtime_paths.env_file_values)
+    env_file_values = dict(runtime_paths.env_file_values) if include_base_execution_env else {}
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)

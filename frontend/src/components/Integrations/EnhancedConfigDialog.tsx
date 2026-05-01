@@ -43,6 +43,8 @@ interface ConfigField {
   };
 }
 
+type ConfigValue = string | boolean | number;
+
 interface EnhancedConfigDialogProps {
   open: boolean;
   onClose: () => void;
@@ -76,9 +78,9 @@ export function EnhancedConfigDialog({
   agentName,
   executionScope,
 }: EnhancedConfigDialogProps) {
-  const [configValues, setConfigValues] = useState<
-    Record<string, string | boolean>
-  >({});
+  const [configValues, setConfigValues] = useState<Record<string, ConfigValue>>(
+    {},
+  );
   const [loading, setLoading] = useState(false);
   const [loadingExisting, setLoadingExisting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -135,14 +137,18 @@ export function EnhancedConfigDialog({
           const data = await response.json();
           if (data.credentials) {
             // Merge existing credentials with defaults
-            const defaults: Record<string, string | boolean> = {};
+            const defaults: Record<string, ConfigValue> = {};
             fieldsToUse.forEach((field) => {
               if (data.credentials[field.name] !== undefined) {
-                // Keep boolean values as boolean, convert others to string
                 if (field.type === "boolean") {
                   defaults[field.name] =
                     data.credentials[field.name] === true ||
                     data.credentials[field.name] === "true";
+                } else if (field.type === "number") {
+                  const numericValue = Number(data.credentials[field.name]);
+                  defaults[field.name] = Number.isFinite(numericValue)
+                    ? numericValue
+                    : String(data.credentials[field.name]);
                 } else {
                   defaults[field.name] = String(data.credentials[field.name]);
                 }
@@ -154,6 +160,11 @@ export function EnhancedConfigDialog({
                 if (field.type === "boolean") {
                   defaults[field.name] =
                     field.default === true || field.default === "true";
+                } else if (field.type === "number") {
+                  const numericValue = Number(field.default);
+                  defaults[field.name] = Number.isFinite(numericValue)
+                    ? numericValue
+                    : String(field.default);
                 } else {
                   defaults[field.name] = String(field.default);
                 }
@@ -169,12 +180,17 @@ export function EnhancedConfigDialog({
       }
 
       // If no existing credentials, just use defaults
-      const defaults: Record<string, string | boolean> = {};
+      const defaults: Record<string, ConfigValue> = {};
       fieldsToUse.forEach((field) => {
         if (field.default !== undefined && field.default !== null) {
           if (field.type === "boolean") {
             defaults[field.name] =
               field.default === true || field.default === "true";
+          } else if (field.type === "number") {
+            const numericValue = Number(field.default);
+            defaults[field.name] = Number.isFinite(numericValue)
+              ? numericValue
+              : String(field.default);
           } else {
             defaults[field.name] = String(field.default);
           }
@@ -189,42 +205,40 @@ export function EnhancedConfigDialog({
 
   const validateField = (
     field: ConfigField,
-    value: string | boolean,
+    value: ConfigValue | undefined,
   ): string | null => {
     // Boolean fields don't need validation
     if (field.type === "boolean") {
       return null;
     }
 
-    if (field.required && !value) {
+    if (field.required && (value === undefined || value === "")) {
       return `${field.label} is required`;
     }
 
-    if (value && field.validation && typeof value === "string") {
-      if (field.type === "number") {
-        const numValue = Number(value);
-        if (isNaN(numValue)) {
-          return `${field.label} must be a number`;
-        }
-        if (
-          field.validation.min !== undefined &&
-          numValue < field.validation.min
-        ) {
-          return `${field.label} must be at least ${field.validation.min}`;
-        }
-        if (
-          field.validation.max !== undefined &&
-          numValue > field.validation.max
-        ) {
-          return `${field.label} must be at most ${field.validation.max}`;
-        }
+    if (value !== undefined && value !== "" && field.type === "number") {
+      const numValue = Number(value);
+      if (!Number.isFinite(numValue)) {
+        return `${field.label} must be a number`;
+      }
+      if (
+        field.validation?.min !== undefined &&
+        numValue < field.validation.min
+      ) {
+        return `${field.label} must be at least ${field.validation.min}`;
+      }
+      if (
+        field.validation?.max !== undefined &&
+        numValue > field.validation.max
+      ) {
+        return `${field.label} must be at most ${field.validation.max}`;
       }
     }
 
     return null;
   };
 
-  const handleFieldChange = (field: ConfigField, value: string | boolean) => {
+  const handleFieldChange = (field: ConfigField, value: ConfigValue) => {
     setConfigValues({ ...configValues, [field.name]: value });
 
     // Clear error when user starts typing or toggling
@@ -233,6 +247,24 @@ export function EnhancedConfigDialog({
       delete newErrors[field.name];
       setFieldErrors(newErrors);
     }
+  };
+
+  const normalizedConfigValuesForSave = (): Record<string, ConfigValue> => {
+    const normalized: Record<string, ConfigValue> = {};
+    filteredFields.forEach((field) => {
+      const value = configValues[field.name];
+      if (field.type === "number") {
+        if (value !== undefined && value !== "") {
+          const numericValue = Number(value);
+          if (Number.isFinite(numericValue)) {
+            normalized[field.name] = numericValue;
+          }
+        }
+      } else if (value !== undefined) {
+        normalized[field.name] = value;
+      }
+    });
+    return normalized;
   };
 
   const handleSave = async () => {
@@ -268,7 +300,7 @@ export function EnhancedConfigDialog({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            credentials: configValues,
+            credentials: normalizedConfigValuesForSave(),
           }),
         },
       );
@@ -481,7 +513,7 @@ export function EnhancedConfigDialog({
                                     : "text"
                               }
                               placeholder={field.placeholder}
-                              value={(configValues[field.name] as string) || ""}
+                              value={String(configValues[field.name] ?? "")}
                               onChange={(e) =>
                                 handleFieldChange(field, e.target.value)
                               }

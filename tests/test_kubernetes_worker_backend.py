@@ -525,7 +525,7 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     assert "MINDROOM_STORAGE_PATH" in env_names
     assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" in env_names
     assert "MINDROOM_SANDBOX_ALLOWED_TOOL_NAMES_JSON" not in env_names
-    assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT" in env_names
+    assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT" not in env_names
     assert "VIRTUAL_ENV" in env_names
     assert "PATH" in env_names
     assert "MINDROOM_SHARED_CREDENTIALS_PATH" in env_names
@@ -555,7 +555,6 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_dedicated_root
     assert env_values["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == expected_dedicated_root
-    assert env_values["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
     assert env_values["HOME"] == expected_dedicated_root
     assert env_values["VIRTUAL_ENV"] == f"{expected_dedicated_root}/venv"
     assert env_values["PATH"].startswith(f"{expected_dedicated_root}/venv/bin:")
@@ -1219,12 +1218,11 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_shared_workers() -
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     env_values = {env["name"]: env.get("value") for env in container["env"]}
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
-    assert env_values["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
     assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == f"{expected_worker_root}/.shared_credentials"
 
 
-def test_kubernetes_backend_keeps_shared_storage_root_for_custom_worker_prefix() -> None:
-    """Custom worker prefixes should not change the shared storage root env."""
+def test_kubernetes_backend_uses_custom_worker_prefix_for_storage_path() -> None:
+    """Custom worker prefixes should only affect the dedicated worker storage root."""
     backend, apps_api, _core_api = _backend(storage_subpath_prefix="sandbox-workers")
     worker_key = "v1:tenant-123:shared:code"
 
@@ -1237,7 +1235,6 @@ def test_kubernetes_backend_keeps_shared_storage_root_for_custom_worker_prefix()
     expected_worker_root = f"/app/worker/sandbox-workers/{worker_dir_name(worker_key)}"
 
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
-    assert env_values["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
 
 
 def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:
@@ -1477,7 +1474,7 @@ def test_kubernetes_backend_uses_configured_worker_grantable_credentials(
 ) -> None:
     """Dedicated workers should use the config-authored worker credential allowlist."""
     backend, _apps_api, _core_api = _backend(
-        worker_grantable_credentials=frozenset({"openai", "google_oauth_client"}),
+        worker_grantable_credentials=frozenset({"openai", "github_private"}),
     )
     sync_calls: list[frozenset[str] | None] = []
 
@@ -1497,7 +1494,7 @@ def test_kubernetes_backend_uses_configured_worker_grantable_credentials(
 
     backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
 
-    assert sync_calls == [frozenset({"openai", "google_oauth_client"})]
+    assert sync_calls == [frozenset({"openai", "github_private"})]
 
 
 def test_kubernetes_backend_uses_empty_worker_grantable_credentials_allowlist(

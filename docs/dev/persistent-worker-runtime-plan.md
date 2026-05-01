@@ -53,10 +53,11 @@ Dedicated Kubernetes workers now narrow mounts for `shared`, `user_agent`, and u
 Phase 3 is complete because the worker backend contract, lifecycle model, default routing policy, and observability surfaces all exist.
 Dedicated Kubernetes workers are provisioned today and rely on the same agent-owned state model while keeping worker-local runtime caches isolated by worker key.
 Phase 4 remains in progress as provider hardening, operator guidance, metrics, and broader rollout validation continue.
-Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
+Spotify and Home Assistant remain shared-only.
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
-Dashboard credential management is intentionally limited to unscoped agents and agents with `worker_scope=shared`.
-The dashboard does not manage credentials for `user` or `user_agent` workers.
+The Google-backed `gmail`, `google_calendar`, `google_drive`, and `google_sheets` tools now use per-provider OAuth credentials.
+The dashboard can manage scoped Google OAuth tokens and editable Google tool settings for selected `user` and `user_agent` agents when a trusted Matrix requester identity is available.
+Generic dashboard credential management remains limited to unscoped agents and agents with `worker_scope=shared`.
 The `/v1` API remains intentionally restricted to unscoped agents and agents with `worker_scope=shared` until trusted requester identity is solved.
 
 ## Product Boundary
@@ -293,14 +294,16 @@ The target credentials model is:
 - Credential leases are created on the target worker and are short-lived and single-use by default.
 - Leased credentials never become part of the model prompt or normal tool arguments.
 
-OAuth-heavy dashboard integrations are an explicit exception to isolated worker scopes.
-Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools are intentionally unsupported for `user` and `user_agent`.
-They only support unscoped agents and agents with `worker_scope=shared`.
-The credential-backed `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` tools also stay local even for `worker_scope=shared` rather than being routed through the sandbox runner.
-This keeps the generic worker-routing model clean while the dashboard OAuth connect and callback model remains shared-scope only.
+OAuth-heavy dashboard integrations used to be an explicit exception to isolated worker scopes.
+Spotify and Home Assistant remain shared-only.
+The Google-backed `gmail`, `google_calendar`, `google_drive`, and `google_sheets` tools now use scoped per-provider OAuth credentials.
+The credential-backed `homeassistant` tool also stays local even for `worker_scope=shared` rather than being routed through the sandbox runner.
+Google-backed `gmail`, `google_calendar`, `google_drive`, and `google_sheets` tools use scoped per-provider OAuth credentials and stay in the primary runtime rather than running through the sandbox runner.
+This keeps worker runtimes from needing Google OAuth client secrets while Google OAuth stays on the scoped provider model.
 Dashboard credential management follows the same product boundary more generally.
-The dashboard may only read, write, test, or disconnect credentials for unscoped agents and agents with `worker_scope=shared`.
-Isolated worker scopes remain runtime-owned state rather than dashboard-managed state.
+The dashboard may read, write, and disconnect scoped Google OAuth token services and editable Google tool settings for selected `user` and `user_agent` agents when the request is bound to a Matrix requester identity.
+Other dashboard credential management remains limited to unscoped agents and agents with `worker_scope=shared`.
+Non-Google isolated worker credentials remain runtime-owned state rather than dashboard-managed state.
 
 ## Dashboard Credential Boundary
 
@@ -308,14 +311,15 @@ The runtime and the dashboard do not currently resolve requester identity from t
 Matrix worker routing resolves `user` and `user_agent` workers from the Matrix sender.
 The dashboard resolves from its own authenticated dashboard principal.
 Those identities are not interchangeable and are not guaranteed to map to the same worker namespace.
-Because of that, the dashboard must not present itself as a management surface for isolated worker-scoped credentials.
+Because of that, the dashboard must not present itself as a generic management surface for isolated worker-scoped credentials.
 The current product rule is:
 
 - Unscoped agents can use the dashboard credential UI.
 - Agents with `worker_scope=shared` can use the dashboard credential UI.
-- Agents with `worker_scope=user` or `worker_scope=user_agent` must treat credentials as runtime-owned state.
+- Agents with `worker_scope=user` or `worker_scope=user_agent` can use dashboard-scoped Google OAuth management only when the dashboard request is bound to a Matrix requester identity.
+- Other credentials for agents with `worker_scope=user` or `worker_scope=user_agent` remain runtime-owned state.
 - Shared-only integrations are hidden or disabled for unsupported worker scopes.
-- `/api/tools` may still render a read-only view for unsupported scopes, but it must not imply that dashboard edits will affect the live runtime worker.
+- `/api/tools` may still render a read-only view for unsupported scopes, but it must not imply that generic dashboard edits will affect the live runtime worker.
 
 ## Provider Model
 
@@ -521,8 +525,9 @@ Phase 2 remaining work is:
 - Ensure `shared`, `user_agent`, and unscoped dedicated execution only expose the addressed agent root plus the worker runtime root.
 - Treat `user` as a deliberate multi-agent workstation mode if it remains supported for filesystem-capable worker tools.
 - Add explicit concurrent-writer handling for sensitive agent-owned artifacts.
-- Keep Google Services, Spotify, Home Assistant, and the Google-backed tools shared-only until there is a dedicated scoped OAuth binding model.
-- Keep dashboard credential management limited to unscoped and `shared` agents until there is a trusted identity-linking model between dashboard users and runtime worker requesters.
+- Keep Spotify and Home Assistant shared-only until there is a dedicated scoped credential binding model for them.
+- Keep generic dashboard credential management limited to unscoped and `shared` agents until there is a trusted identity-linking model between dashboard users and runtime worker requesters.
+- Keep the scoped Google OAuth dashboard path tied to Matrix requester identity so Google tokens and tool settings stay in the primary runtime.
 
 ### Phase 3: Backend Contract, Policy, And Observability
 

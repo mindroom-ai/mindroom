@@ -52,6 +52,17 @@ def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     context.config_load_result = main.ConfigLoadResult(success=True)
 
 
+def _use_owner_runtime(api_app: object, matrix_user_id: str = "@alice:example.org") -> constants.RuntimePaths:
+    runtime_paths = main._app_runtime_paths(api_app)
+    owner_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=runtime_paths.config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env={constants.OWNER_MATRIX_USER_ID_ENV: matrix_user_id},
+    )
+    initialize_api_app(api_app, owner_runtime_paths)
+    return owner_runtime_paths
+
+
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
     """Create a test client for the API."""
@@ -248,17 +259,18 @@ class TestCredentialsAPI:
         assert response.status_code == 400
         assert "worker_scope=user" in response.json()["detail"]
 
-    def test_list_services_rejects_unsupported_isolating_scope(
+    def test_list_services_allows_empty_isolating_scope(
         self,
         client: TestClient,
     ) -> None:
-        """Dashboard service listing should reject unsupported worker scopes."""
+        """Dashboard service listing should support private scoped OAuth services."""
+        _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user")
         _publish_committed_runtime_config(client.app, config)
         response = client.get("/api/credentials/list?agent_name=general")
 
-        assert response.status_code == 400
-        assert "worker_scope=user" in response.json()["detail"]
+        assert response.status_code == 200
+        assert response.json() == []
 
     def test_execution_scope_override_rejects_draft_isolating_scope(
         self,
@@ -287,6 +299,419 @@ class TestCredentialsAPI:
         assert response.status_code == 409
         assert "execution_scope=unscoped" in response.json()["detail"]
         assert "Persisted scope is worker_scope=shared" in response.json()["detail"]
+
+    def test_oauth_tool_settings_do_not_touch_global_token_service(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Saving OAuth-backed tool options should not write or overwrite OAuth tokens."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        expected_access_value = "drive-access-value"
+        expected_refresh_value = "drive-refresh-value"
+        manager.save_credentials(
+            "google_drive_oauth",
+            {
+                "token": expected_access_value,
+                "refresh_token": expected_refresh_value,
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+            },
+        )
+
+        response = client.post(
+            "/api/credentials/google_drive",
+            json={
+                "credentials": {
+                    "token": "posted-token",
+                    "list_files": False,
+                    "max_read_size": 42,
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        saved_tokens = manager.load_credentials("google_drive_oauth")
+        saved_settings = manager.load_credentials("google_drive")
+        assert saved_tokens["token"] == expected_access_value
+        assert saved_tokens["refresh_token"] == expected_refresh_value
+        assert saved_tokens["_oauth_provider"] == "google_drive"
+        assert saved_tokens["_source"] == "oauth"
+        assert saved_settings == {
+            "list_files": False,
+            "max_read_size": 42,
+            "_source": "ui",
+        }
+
+    def test_get_oauth_credentials_filters_token_fields(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth-backed config reads should expose editable tool settings only."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "google_drive_oauth",
+            {
+                "token": "drive-access-value",
+                "refresh_token": "drive-refresh-value",
+                "client_id": "client-id",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": ["https://www.googleapis.com/auth/drive.metadata.readonly"],
+                "expires_at": 1234.0,
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+            },
+        )
+        manager.save_credentials(
+            "google_drive",
+            {
+                "list_files": False,
+                "max_read_size": 42,
+                "_source": "ui",
+            },
+        )
+
+        response = client.get("/api/credentials/google_drive")
+        status_response = client.get("/api/credentials/google_drive/status")
+        token_response = client.get("/api/credentials/google_drive_oauth")
+        token_status_response = client.get("/api/credentials/google_drive_oauth/status")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "service": "google_drive",
+            "credentials": {
+                "list_files": False,
+                "max_read_size": 42,
+            },
+        }
+        assert status_response.status_code == 200
+        assert status_response.json()["has_credentials"] is True
+        assert set(status_response.json()["key_names"]) == {"list_files", "max_read_size"}
+        assert token_response.status_code == 400
+        assert "OAuth token credentials" in token_response.json()["detail"]
+        assert token_status_response.status_code == 400
+        assert "OAuth token credentials" in token_status_response.json()["detail"]
+
+    def test_orphaned_oauth_credentials_reject_generic_routes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth-shaped credentials should stay opaque even if their provider is no longer registered."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "removed_oauth_provider",
+            {
+                "access_token": "orphaned-access-token-value",
+                "token": "orphaned-access-value",
+                "refresh_token": "orphaned-refresh-value",
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "id_token": "id-token",
+                "provider_session_secret": "provider-secret",
+                "token_uri": "https://oauth.example.test/token",
+                "scopes": ["drive.read"],
+                "expires_at": 1234.0,
+                "_oauth_provider": "removed_provider",
+                "_source": "oauth",
+            },
+        )
+        manager.save_credentials("normal_source", {"api_key": "normal-key", "_source": "ui"})
+        manager.save_credentials(
+            "removed_oauth_destination",
+            {
+                "token": "orphaned-destination-token",
+                "_oauth_provider": "removed_provider",
+                "_source": "oauth",
+            },
+        )
+
+        response = client.get("/api/credentials/removed_oauth_provider")
+        status_response = client.get("/api/credentials/removed_oauth_provider/status")
+        set_response = client.post(
+            "/api/credentials/removed_oauth_provider",
+            json={"credentials": {"api_key": "replacement"}},
+        )
+        api_key_response = client.get(
+            "/api/credentials/removed_oauth_provider/api-key?key_name=access_token&include_value=true",
+        )
+        delete_response = client.delete("/api/credentials/removed_oauth_provider")
+        copy_response = client.post("/api/credentials/copied_service/copy-from/removed_oauth_provider")
+        copy_destination_response = client.post(
+            "/api/credentials/removed_oauth_destination/copy-from/normal_source",
+        )
+        test_response = client.post("/api/credentials/removed_oauth_provider/test")
+
+        responses = [
+            response,
+            status_response,
+            set_response,
+            api_key_response,
+            delete_response,
+            copy_response,
+            copy_destination_response,
+            test_response,
+        ]
+        for route_response in responses:
+            assert route_response.status_code == 400
+            assert "OAuth token credentials" in route_response.json()["detail"]
+        assert manager.load_credentials("removed_oauth_provider")["token"] == "orphaned-access-value"  # noqa: S105
+        assert manager.load_credentials("removed_oauth_destination")["token"] == "orphaned-destination-token"  # noqa: S105
+
+    def test_oauth_token_service_rejects_generic_credential_writes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth token services should only be written by the OAuth callback path."""
+        response = client.post(
+            "/api/credentials/google_drive_oauth",
+            json={"credentials": {"token": "posted-token"}},
+        )
+
+        assert response.status_code == 400
+        assert "OAuth token credentials" in response.json()["detail"]
+
+    def test_oauth_token_service_rejects_legacy_credential_routes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth token services should not be manageable through generic credential routes."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials("google_drive", {"list_files": True, "_source": "ui"})
+        manager.save_credentials(
+            "google_drive_oauth",
+            {
+                "token": "drive-access-value",
+                "refresh_token": "drive-refresh-value",
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+            },
+        )
+
+        responses = [
+            client.post(
+                "/api/credentials/google_drive_oauth/api-key",
+                json={"service": "google_drive_oauth", "api_key": "posted-token", "key_name": "token"},
+            ),
+            client.get("/api/credentials/google_drive_oauth/api-key?key_name=token&include_value=true"),
+            client.delete("/api/credentials/google_drive_oauth"),
+            client.post("/api/credentials/copied_service/copy-from/google_drive_oauth"),
+            client.post("/api/credentials/google_drive_oauth/copy-from/google_drive"),
+            client.post("/api/credentials/google_drive_oauth/test"),
+        ]
+
+        for response in responses:
+            assert response.status_code == 400
+            assert "OAuth token credentials" in response.json()["detail"]
+
+    def test_oauth_tool_settings_reject_oauth_reserved_api_key_fields(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth tool settings should not accept token-shaped fields through the api-key helper."""
+        post_response = client.post(
+            "/api/credentials/google_drive/api-key",
+            json={"service": "google_drive", "api_key": "drive-token", "key_name": "token"},
+        )
+        get_response = client.get("/api/credentials/google_drive/api-key?key_name=token&include_value=true")
+
+        assert post_response.status_code == 400
+        assert "OAuth field 'token'" in post_response.json()["detail"]
+        assert get_response.status_code == 400
+        assert "OAuth field 'token'" in get_response.json()["detail"]
+
+    def test_non_oauth_services_can_use_access_token_api_key_field(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Reserved OAuth field names remain valid for unrelated non-OAuth integrations."""
+        post_response = client.post(
+            "/api/credentials/homeassistant/api-key",
+            json={"service": "homeassistant", "api_key": "ha-token", "key_name": "access_token"},
+        )
+        get_response = client.get(
+            "/api/credentials/homeassistant/api-key?key_name=access_token&include_value=true",
+        )
+        status_response = client.get("/api/credentials/homeassistant/status")
+
+        assert post_response.status_code == 200
+        assert get_response.status_code == 200
+        assert get_response.json()["api_key"] == "ha-token"
+        assert status_response.status_code == 200
+        assert status_response.json()["key_names"] == ["access_token"]
+
+    def test_oauth_tool_settings_do_not_touch_private_token_service(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth-backed tool options may save in private scopes without replacing tokens."""
+        _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("user_agent")
+        _publish_committed_runtime_config(client.app, config)
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        )
+        worker_key = resolve_worker_key("user_agent", identity, agent_name="general")
+        assert worker_key is not None
+        worker_manager = manager.for_worker(worker_key)
+        scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+        expected_access_value = "scoped-drive-access-value"
+        expected_refresh_value = "scoped-drive-refresh-value"
+        scoped_manager.save_credentials(
+            "google_drive_oauth",
+            {
+                "token": expected_access_value,
+                "refresh_token": expected_refresh_value,
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+            },
+        )
+
+        response = client.post(
+            "/api/credentials/google_drive?agent_name=general",
+            json={"credentials": {"list_files": False, "max_read_size": 42}},
+        )
+
+        assert response.status_code == 200
+        saved_tokens = scoped_manager.load_credentials("google_drive_oauth")
+        saved_settings = scoped_manager.load_credentials("google_drive")
+        assert saved_tokens["token"] == expected_access_value
+        assert saved_tokens["refresh_token"] == expected_refresh_value
+        assert saved_tokens["_oauth_provider"] == "google_drive"
+        assert saved_tokens["_source"] == "oauth"
+        assert saved_settings == {
+            "list_files": False,
+            "max_read_size": 42,
+            "_source": "ui",
+        }
+        assert worker_manager.load_credentials("google_drive_oauth") is None
+        assert worker_manager.load_credentials("google_drive") is None
+
+    def test_get_private_oauth_credentials_filters_token_fields(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Private-scope OAuth config reads should not return stored OAuth tokens."""
+        _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("user_agent")
+        _publish_committed_runtime_config(client.app, config)
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        )
+        worker_key = resolve_worker_key("user_agent", identity, agent_name="general")
+        assert worker_key is not None
+        worker_manager = manager.for_worker(worker_key)
+        scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+        scoped_manager.save_credentials(
+            "google_drive_oauth",
+            {
+                "token": "scoped-drive-access-value",
+                "refresh_token": "scoped-drive-refresh-value",
+                "client_id": "client-id",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": ["https://www.googleapis.com/auth/drive.metadata.readonly"],
+                "expires_at": 1234.0,
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+            },
+        )
+        scoped_manager.save_credentials(
+            "google_drive",
+            {
+                "list_files": False,
+                "max_read_size": 42,
+                "_source": "ui",
+            },
+        )
+
+        response = client.get("/api/credentials/google_drive?agent_name=general")
+        status_response = client.get("/api/credentials/google_drive/status?agent_name=general")
+        token_response = client.get("/api/credentials/google_drive_oauth?agent_name=general")
+
+        assert response.status_code == 200
+        assert response.json()["credentials"] == {"list_files": False, "max_read_size": 42}
+        assert status_response.status_code == 200
+        assert status_response.json()["has_credentials"] is True
+        assert set(status_response.json()["key_names"]) == {"list_files", "max_read_size"}
+        assert token_response.status_code == 400
+        assert "OAuth token credentials" in token_response.json()["detail"]
+        assert worker_manager.load_credentials("google_drive_oauth") is None
+        assert worker_manager.load_credentials("google_drive") is None
+
+    def test_list_services_includes_private_oauth_tool_settings(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Private-scope OAuth tool settings should appear in service listings."""
+        _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("user_agent")
+        _publish_committed_runtime_config(client.app, config)
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+        scoped_manager.save_credentials(
+            "google_drive_oauth",
+            {
+                "token": "scoped-drive-access-value",
+                "refresh_token": "scoped-drive-refresh-value",
+                "_oauth_provider": "google_drive",
+                "_source": "oauth",
+            },
+        )
+        scoped_manager.save_credentials(
+            "google_drive",
+            {
+                "list_files": False,
+                "max_read_size": 42,
+                "_source": "ui",
+            },
+        )
+
+        response = client.get("/api/credentials/list?agent_name=general")
+        delete_response = client.delete("/api/credentials/google_drive?agent_name=general")
+        deleted_list_response = client.get("/api/credentials/list?agent_name=general")
+
+        assert response.status_code == 200
+        assert response.json() == ["google_drive"]
+        assert delete_response.status_code == 200
+        assert scoped_manager.load_credentials("google_drive") is None
+        assert scoped_manager.load_credentials("google_drive_oauth") is not None
+        assert deleted_list_response.status_code == 200
+        assert deleted_list_response.json() == []
+
+    def test_non_oauth_tool_settings_still_reject_private_scopes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Private-scope writes stay limited to registered OAuth credential services."""
+        config = _config_with_worker_scope("user_agent")
+        _publish_committed_runtime_config(client.app, config)
+
+        response = client.post(
+            "/api/credentials/weather?agent_name=general",
+            json={"credentials": {"api_key": "weather-key"}},
+        )
+
+        assert response.status_code == 400
+        assert "worker_scope=user_agent" in response.json()["detail"]
 
     def test_resolve_request_credentials_target_keeps_one_runtime_for_identity(
         self,
@@ -412,32 +837,18 @@ class TestCredentialsAPI:
                 "_source": "ui",
             },
         )
-        manager.save_credentials(
-            "google",
-            {
-                "token": "token-value",
-                "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
-                "_source": "ui",
-            },
-        )
 
         _publish_committed_runtime_config(client.app, config)
 
         list_response = client.get("/api/credentials/list?agent_name=general")
         ha_status_response = client.get("/api/credentials/homeassistant/status?agent_name=general")
-        google_status_response = client.get("/api/credentials/google/status?agent_name=general")
 
         assert list_response.status_code == 200
         assert "homeassistant" in list_response.json()
-        assert "google" in list_response.json()
 
         assert ha_status_response.status_code == 200
         assert ha_status_response.json()["has_credentials"] is True
         assert set(ha_status_response.json()["key_names"]) == {"instance_url", "access_token"}
-
-        assert google_status_response.status_code == 200
-        assert google_status_response.json()["has_credentials"] is True
-        assert set(google_status_response.json()["key_names"]) == {"token", "scopes"}
 
     def test_rejects_raw_source_worker_key_query_param(
         self,

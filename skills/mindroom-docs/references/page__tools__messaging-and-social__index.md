@@ -9,7 +9,7 @@ Use these tools when you need outbound communication, mailbox access, team-chat 
 
 ## Tools On This Page
 
-- \[`gmail`\] - Gmail mailbox access and message composition through the shared Google OAuth integration.
+- \[`gmail`\] - Gmail mailbox access and message composition through the Google Gmail OAuth provider.
 - \[`slack`\] - Slack channel messaging, threaded replies, channel listing, and history reads.
 - \[`discord`\] - Discord bot messaging, channel inspection, history reads, and message deletion.
 - \[`telegram`\] - Telegram bot delivery to one configured chat.
@@ -24,12 +24,10 @@ Use these tools when you need outbound communication, mailbox access, team-chat 
 
 ## Common Setup Notes
 
-`gmail` is the only tool on this page with `auth_provider="google"`.
-It uses the shared Google Services integration instead of standalone per-tool credentials.
-`gmail` is also a shared-only integration, so it is supported only for unscoped agents or agents with `worker_scope: shared`.
-Like `google_calendar`, `google_sheets`, and `homeassistant`, `gmail` stays local even when other tools are routed through the sandbox proxy.
+`gmail` uses `auth_provider="google_gmail"` and connects through the generic `/api/oauth/google_gmail/*` flow.
+Its OAuth tokens are stored separately from editable Gmail tool settings.
+`homeassistant` stays local even when other tools are routed through the sandbox proxy.
 MindRoom enforces that restriction both at config-validation time and again during tool construction.
-On this branch, `src/mindroom/api/integrations.py` only exposes Spotify routes, while Google OAuth lives in `src/mindroom/api/google_integration.py`, so the rest of the tools on this page rely on ordinary stored tool credentials or SDK environment variables rather than a dedicated MindRoom OAuth flow.
 Password fields should be stored through the dashboard or credential store instead of inline YAML.
 Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice.
 Useful environment fallbacks on this page include `SLACK_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
@@ -38,12 +36,14 @@ Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gma
 
 ## \[`gmail`\]
 
-`gmail` is the mailbox-oriented tool for reading, searching, drafting, sending, and labeling Gmail messages through the shared Google integration.
+`gmail` is the mailbox-oriented tool for reading, searching, drafting, sending, and labeling Gmail messages through the Google Gmail OAuth provider.
 
 ### What It Does
 
-MindRoom wraps Agno's `GmailTools` with `ScopedGoogleOAuthMixin`, so Gmail credentials are loaded from MindRoom's unified Google credential store instead of a local `token.json` file.
-The wrapper refreshes stored Google tokens when needed and falls back to the upstream auth flow only when no stored credentials are available.
+MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail credentials are loaded from MindRoom's scoped OAuth credential store instead of a local `token.json` file.
+The wrapper refreshes stored Google tokens when needed and raises `OAuthConnectionRequired` with a connect URL when no usable stored OAuth credentials are available.
+It does not fall back to Agno's local OAuth flow when MindRoom credentials are missing.
+It only bypasses MindRoom OAuth when configured for Google service-account auth.
 The current installed Gmail toolkit exposes `get_latest_emails()`, `get_emails_from_user()`, `get_unread_emails()`, `get_starred_emails()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `search_emails()`, `create_draft_email()`, `send_email()`, `send_email_reply()`, `mark_email_as_read()`, `mark_email_as_unread()`, `list_custom_labels()`, `apply_label()`, `remove_label()`, and `delete_custom_label()`.
 Draft and send operations accept local file-system paths for attachments.
 
@@ -80,10 +80,11 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 
 ### Notes
 
-- Connect Google once through the shared Google Services integration rather than storing a Gmail-specific API key.
-- The Google integration on this branch requests Gmail read, modify, and compose scopes alongside Calendar, Sheets, Drive, and profile scopes.
-- `gmail` is both shared-only and local-only on this branch, so `worker_scope=user` and `worker_scope=user_agent` are unsupported and the tool is never proxied through sandbox workers.
-- The current registry exposes the eight boolean fields above, but the installed `agno.tools.gmail.GmailTools` constructor does not consume those selector kwargs directly on this branch, so `- gmail` plus Google OAuth is the verified setup path.
+- Connect Gmail through the `google_gmail` OAuth provider rather than storing a Gmail-specific API key.
+- The Gmail provider requests Gmail read, modify, and compose scopes.
+- `gmail` always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets.
+- Agno's Gmail constructor accepts per-method selector kwargs (`get_latest_emails`, `get_unread_emails`, `search_emails`, etc.), and the MindRoom wrapper forwards them via `**kwargs`.
+- Use those selector kwargs to disable specific methods you do not want the agent calling.
 - Attachment arguments are local file paths in the current runtime, not Matrix attachment IDs.
 
 ## \[`slack`\]

@@ -103,6 +103,7 @@ def deactivate_plugins() -> PluginReloadResult:
     with _locked_tool_registry_state():
         _sync_loaded_plugin_tools([])
         set_plugin_skill_roots([])
+        _clear_oauth_provider_cache_after_plugin_change()
     return PluginReloadResult(
         hook_registry=HookRegistry.empty(),
         active_plugin_names=(),
@@ -206,6 +207,13 @@ def _configured_plugin_root_cache_key(
 def _clear_configured_plugin_roots_cache() -> None:
     """Drop cached configured plugin roots after plugin runtime invalidation."""
     _CONFIGURED_PLUGIN_ROOT_CACHE.clear()
+
+
+def _clear_oauth_provider_cache_after_plugin_change() -> None:
+    """Drop cached OAuth providers without creating an import cycle at module load."""
+    from mindroom.oauth.registry import clear_oauth_provider_cache  # noqa: PLC0415
+
+    clear_oauth_provider_cache()
 
 
 def prepare_plugin_reload(
@@ -314,6 +322,7 @@ def _clear_plugin_reload_caches() -> None:
     _clear_configured_plugin_roots_cache()
     plugin_imports._PLUGIN_CACHE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.clear()
+    _clear_oauth_provider_cache_after_plugin_change()
 
 
 def _evict_synthetic_plugin_subtrees(package_roots: set[str]) -> None:

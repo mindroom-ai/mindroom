@@ -155,7 +155,8 @@ mindroom run
 - [OpenClaw Import](openclaw.md) - Reuse OpenClaw workspace files in MindRoom
 - [MCP](mcp.md) - Configure native MCP client servers and expose their tools to agents
 - [Skills](skills.md) - OpenClaw-compatible skills system
-- [Plugins](plugins.md) - Extend with custom tools and skills
+- [Plugins](plugins.md) - Extend with custom tools, OAuth providers, and skills
+- [OAuth Framework](oauth-framework.md) - Build scoped OAuth-backed tool integrations
 - [Knowledge Bases](knowledge.md) - Configure RAG-backed document indexing
 - [Memory System](memory.md) - How agent memory works
 - [Scheduling](scheduling.md) - Schedule tasks with cron or natural language

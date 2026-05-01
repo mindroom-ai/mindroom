@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import html
 import importlib
+import json
 import secrets
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -26,7 +28,6 @@ _PLATFORM_AUTH_COOKIE_NAME = "mindroom_jwt"
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
-        "/api/google/callback",
         "/api/homeassistant/callback",
         "/api/integrations/spotify/callback",
     },
@@ -142,6 +143,11 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
         return None
     token = authorization.removeprefix("Bearer ").strip()
     return token or None
+
+
+def _is_standalone_public_path(path: str) -> bool:
+    """Return whether one unauthenticated standalone callback path may enter its handler."""
+    return path in _STANDALONE_PUBLIC_PATHS
 
 
 def _get_request_token(
@@ -263,12 +269,37 @@ def sanitize_next_path(next_path: str | None) -> str:
     return next_path
 
 
+def _request_path_with_query(request: Request) -> str:
+    path = request.url.path
+    query = request.url.query
+    return f"{path}?{query}" if query else path
+
+
+def login_redirect_for_request(request: Request, *, next_path: str | None = None) -> RedirectResponse | None:
+    """Return the dashboard login redirect for one browser request when configured."""
+    auth_settings = request_auth_state(request).settings
+    if auth_settings.supabase_url and auth_settings.supabase_anon_key and auth_settings.platform_login_url:
+        redirect_to = quote(str(request.url), safe="")
+        return RedirectResponse(f"{auth_settings.platform_login_url}?redirect_to={redirect_to}")
+    if auth_settings.mindroom_api_key:
+        login_target = sanitize_next_path(next_path or _request_path_with_query(request))
+        return RedirectResponse(f"/login?{urlencode({'next': login_target})}")
+    return None
+
+
 def _render_standalone_login_page(
     next_path: str,
     runtime_paths: RuntimePaths,
 ) -> str:
     """Return the standalone dashboard login page."""
-    escaped_next_path = html.escape(next_path, quote=True)
+    next_path_js = (
+        json.dumps(next_path)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
     env_path = html.escape(str(runtime_paths.env_path))
     return f"""<!doctype html>
 <html lang="en">
@@ -344,7 +375,7 @@ def _render_standalone_login_page(
     <div id="error" role="alert"></div>
   </form>
   <script>
-    const nextPath = {escaped_next_path!r};
+    const nextPath = {next_path_js};
     const form = document.getElementById("login-form");
     const input = document.getElementById("api-key");
     const error = document.getElementById("error");
@@ -381,7 +412,7 @@ async def verify_user(
     mindroom_api_key = auth_state.settings.mindroom_api_key
 
     if auth_state.supabase_auth is None:
-        if allow_public_paths and request.url.path in _STANDALONE_PUBLIC_PATHS:
+        if allow_public_paths and _is_standalone_public_path(request.url.path):
             auth_user = {"user_id": "standalone", "email": None}
             request.scope["auth_user"] = auth_user
             return auth_user

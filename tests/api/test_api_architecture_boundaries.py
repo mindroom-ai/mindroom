@@ -6,9 +6,9 @@ import ast
 from pathlib import Path
 
 
-def test_google_integration_does_not_import_api_app_entrypoint() -> None:
-    """Google route handlers must not import the FastAPI app entrypoint."""
-    source_path = Path("src/mindroom/api/google_integration.py")
+def test_oauth_routes_do_not_import_api_app_entrypoint() -> None:
+    """OAuth route handlers must not import the FastAPI app entrypoint."""
+    source_path = Path("src/mindroom/api/oauth.py")
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
 
     forbidden_imports = [

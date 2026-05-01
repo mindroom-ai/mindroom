@@ -34,6 +34,7 @@ from mindroom.constants import (
     serialize_runtime_paths,
 )
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -433,6 +434,7 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
     assert startup_runtime.env_value("OPENAI_BASE_URL") is None
     assert startup_runtime.env_value("CUSTOM_API_TOKEN") is None
     assert startup_runtime.env_value("TEST_EXECUTION_ENV") is None
+    assert "MINDROOM_NAMESPACE" not in execution_env
     assert "OPENAI_API_KEY" not in execution_env
     assert "OPENAI_BASE_URL" not in execution_env
     assert "CUSTOM_API_TOKEN" not in execution_env
@@ -491,7 +493,7 @@ async def test_dedicated_worker_inprocess_shell_does_not_see_runner_local_env(
     )
 
     assert response.ok is True
-    assert response.result == "|||alpha1234"
+    assert response.result == "|||"
 
 
 def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) -> None:
@@ -611,6 +613,95 @@ async def test_execute_request_inprocess_marks_tool_failures(
     assert response.ok is False
     assert response.error == "Sandbox tool execution failed: FileNotFoundError: missing.txt"
     assert response.failure_kind == "tool"
+
+
+@pytest.mark.asyncio
+async def test_execute_request_inprocess_serializes_oauth_connection_required(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OAuth connection prompts should survive the sandbox response boundary."""
+    runtime_paths = resolve_runtime_paths(
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    class _FakeToolkit:
+        requires_connect = False
+
+    def _raising_entrypoint(*_args: object, **_kwargs: object) -> object:
+        message = "Google Drive is not connected for this agent."
+        raise OAuthConnectionRequired(
+            message,
+            provider_id="google_drive",
+            connect_url="/api/oauth/google_drive/connect?agent_name=general",
+        )
+
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_resolve_entrypoint",
+        lambda **_kwargs: (_FakeToolkit(), _raising_entrypoint),
+    )
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="google_drive",
+            function_name="search_files",
+            args=[],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+    )
+
+    assert response.ok is True
+    assert response.result == {
+        "error": "Google Drive is not connected for this agent.",
+        "oauth_connection_required": True,
+        "provider": "google_drive",
+        "connect_url": "/api/oauth/google_drive/connect?agent_name=general",
+    }
+
+
+@pytest.mark.asyncio
+async def test_execute_request_inprocess_serializes_oauth_connection_required_from_tool_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """OAuth connection prompts from toolkit construction should survive the sandbox boundary."""
+    runtime_paths = resolve_runtime_paths(
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    def _raising_resolve_entrypoint(**_kwargs: object) -> object:
+        message = "Google Drive is not connected for this agent."
+        raise OAuthConnectionRequired(
+            message,
+            provider_id="google_drive",
+            connect_url="/api/oauth/google_drive/connect?agent_name=general",
+        )
+
+    monkeypatch.setattr(sandbox_runner_module, "_resolve_entrypoint", _raising_resolve_entrypoint)
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="google_drive",
+            function_name="search_files",
+            args=[],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+    )
+
+    assert response.ok is True
+    assert response.result == {
+        "error": "Google Drive is not connected for this agent.",
+        "oauth_connection_required": True,
+        "provider": "google_drive",
+        "connect_url": "/api/oauth/google_drive/connect?agent_name=general",
+    }
 
 
 @pytest.mark.asyncio
@@ -894,11 +985,11 @@ def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_
     assert entrypoint is not None
 
 
-def test_sandbox_runner_subprocess_python_sees_runtime_env(
+def test_sandbox_runner_subprocess_python_sees_sandbox_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Sandbox subprocess execution should expose runtime-scoped env values to the child tool."""
+    """Sandbox subprocess execution should expose only sandbox-scoped runtime env values to the child tool."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_dir = tmp_path / "cfg"
@@ -932,17 +1023,17 @@ def test_sandbox_runner_subprocess_python_sees_runtime_env(
 
     assert response.ok is True
     assert ast.literal_eval(str(response.result)) == {
-        "openai_base_url": "http://example.invalid/v1",
+        "openai_base_url": None,
         "namespace": "alpha1234",
         "storage": str((tmp_path / "storage").resolve()),
     }
 
 
-def test_sandbox_runner_subprocess_shell_sees_runtime_env(
+def test_sandbox_runner_subprocess_shell_excludes_dotenv_by_default(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Sandbox subprocess shell execution should inherit committed runtime env values without tool-env fallback logic."""
+    """Sandbox subprocess shell execution should not inherit committed runtime env values by default."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
@@ -950,7 +1041,10 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
-    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "TEST_EXECUTION_ENV=visible-in-shell\nOPENAI_API_KEY=dotenv-secret\n",
+        encoding="utf-8",
+    )
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -961,7 +1055,7 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
             tool_name="shell",
             function_name="run_shell_command",
-            args=[["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""]],
+            args=[["bash", "-lc", 'printf \'%s|%s\' "$TEST_EXECUTION_ENV" "$OPENAI_API_KEY"']],
             kwargs={},
         ),
         runtime_paths,
@@ -970,14 +1064,49 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
     )
 
     assert response.ok is True
-    assert response.result == "visible-in-shell"
+    assert response.result == "|"
+
+
+def test_sandbox_execution_env_passes_through_extra_env_passthrough_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shell passthrough should expose only matched exported process env values."""
+    monkeypatch.setenv("MY_SAFE_VAR", "safe")
+    monkeypatch.setenv("MY_SECRET", "secret")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[["bash", "-lc", 'printf "%s|%s" "$MY_SAFE_VAR" "$MY_SECRET"']],
+            kwargs={},
+            extra_env_passthrough="MY_SAFE_VAR",
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+
+    assert response.ok is True
+    assert response.result == "safe|"
 
 
 def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Execution env should carry committed runtime values without leaking control secrets or arbitrary host env."""
+    """Shell execution env should deny committed runtime values unless explicitly passed through."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("MINDROOM_API_KEY", "dashboard-secret")
@@ -1009,13 +1138,35 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
         runtime_paths,
     )
 
-    assert execution_env["OPENAI_API_KEY"] == "dotenv-secret"
-    assert execution_env["TEST_EXECUTION_ENV"] == "visible-in-shell"
-    assert execution_env["MINDROOM_STORAGE_PATH"] == str((tmp_path / "storage").resolve())
+    assert "TEST_EXECUTION_ENV" not in execution_env
+    assert "MINDROOM_STORAGE_PATH" not in execution_env
+    assert "OPENAI_API_KEY" not in execution_env
     assert "MINDROOM_EVENT_CACHE_DATABASE_URL" not in execution_env
     assert "MINDROOM_CACHE_DATABASE_URL" not in execution_env
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in execution_env
     assert "MINDROOM_API_KEY" not in execution_env
+
+
+def test_sandbox_execution_env_excludes_arbitrary_runner_env_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Arbitrary runner env values should not reach sandboxed shell without passthrough."""
+    monkeypatch.setenv("MY_SECRET", "runner-secret")
+    runtime_paths = resolve_runtime_paths(
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+
+    execution_env = sandbox_exec_module.request_execution_env("shell", None, runtime_paths)
+    effective_runtime_paths = sandbox_exec_module.runtime_paths_with_execution_env(
+        runtime_paths,
+        execution_env,
+        include_base_execution_env=False,
+    )
+
+    assert "MY_SECRET" not in execution_env
+    assert effective_runtime_paths.env_value("MY_SECRET") is None
 
 
 @pytest.mark.asyncio
@@ -1037,7 +1188,7 @@ async def test_execute_request_inprocess_reuses_passed_config_without_execution_
         kwargs={},
     )
 
-    monkeypatch.setattr(sandbox_runner_module.sandbox_exec, "request_execution_env", lambda *_args: {})
+    monkeypatch.setattr(sandbox_runner_module.sandbox_exec, "request_execution_env", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         sandbox_runner_module,
         "_runtime_config_or_empty",
@@ -2925,8 +3076,8 @@ def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
         ToolExecutionIdentity(
             channel="matrix",
             agent_name="persistent_worker_lab",
-            requester_id="@smoketest_a:chat-internal.example.com",
-            room_id="!persistent-workers:chat-internal.example.com",
+            requester_id="@smoketest_a:example.org",
+            room_id="!persistent-workers:example.org",
             thread_id="$thread",
             resolved_thread_id="$thread",
             session_id="session-1",

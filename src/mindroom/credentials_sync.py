@@ -143,20 +143,6 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     else:
         logger.debug("No GOOGLE_APPLICATION_CREDENTIALS path found for google_vertex_adc")
 
-    client_id = get_secret_from_env("GOOGLE_CLIENT_ID", runtime_paths=runtime_paths)
-    client_secret = get_secret_from_env("GOOGLE_CLIENT_SECRET", runtime_paths=runtime_paths)
-    if (
-        client_id
-        and client_secret
-        and _sync_service_credentials(
-            service="google_oauth_client",
-            credentials={"client_id": client_id, "client_secret": client_secret},
-            runtime_paths=runtime_paths,
-            env_var="GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET",
-        )
-    ):
-        synced_count += 1
-
     if _sync_github_private_credentials(runtime_paths=runtime_paths):
         synced_count += 1
 

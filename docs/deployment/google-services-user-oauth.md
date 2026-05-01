@@ -2,143 +2,68 @@
 icon: lucide/user-round
 ---
 
-# Google Services OAuth (Individual Setup)
+# Google Services OAuth For Individuals
 
-This guide is for one person running MindRoom and creating their own Google OAuth app.
+This guide is for one person running MindRoom with their own Google OAuth client.
+MindRoom uses per-service generic OAuth providers instead of a legacy all-Google route.
 
-For team/shared deployments, use [Google Services OAuth (Admin Setup)](google-services-oauth.md).
+## Choose Providers
 
-## What You Need Before Starting
-
-- A Google account
-- Access to Google Cloud Console
-- A running MindRoom instance with the bundled dashboard (default URL: `http://localhost:8765`)
-
-The callback path is always:
-
-```text
-/api/google/callback
-```
-
-So the default full callback URL is:
-
-```text
-http://localhost:8765/api/google/callback
-```
-
-## Step 1: Create Google Cloud Project
-
-1. Open [Google Cloud Console](https://console.cloud.google.com/).
-2. Create or select a project.
-3. Save the project ID for `GOOGLE_PROJECT_ID`.
-
-## Step 2: Enable APIs
-
-1. Go to **APIs & Services → Library**.
-2. Enable:
-   - Gmail API
-   - Google Calendar API
-   - Google Drive API
-   - Google Sheets API
-
-## Step 3: Configure OAuth Consent Screen
-
-1. Go to **APIs & Services → OAuth consent screen**.
-2. Choose `External`.
-3. Fill required fields and save.
-4. Add your own email as a test user.
-5. Add scopes:
-   - `https://www.googleapis.com/auth/gmail.readonly`
-   - `https://www.googleapis.com/auth/gmail.modify`
-   - `https://www.googleapis.com/auth/gmail.compose`
-   - `https://www.googleapis.com/auth/calendar`
-   - `https://www.googleapis.com/auth/spreadsheets`
-   - `https://www.googleapis.com/auth/drive.file`
-   - `openid`
-   - `https://www.googleapis.com/auth/userinfo.email`
-   - `https://www.googleapis.com/auth/userinfo.profile`
-
-## Step 4: Create OAuth Client ID
-
-1. Go to **APIs & Services → Credentials**.
-2. Click **Create Credentials → OAuth client ID**.
-3. Choose **Web application**.
-4. Add redirect URI:
-   - `http://localhost:8765/api/google/callback`
-5. Copy client ID and client secret.
-
-## Step 5: Configure MindRoom
-
-Add this to `.env` (or export in your shell):
-
-```bash
-MINDROOM_PORT=8765
-GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-client-secret
-GOOGLE_PROJECT_ID=your-project-id
-GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
-```
-
-Restart MindRoom.
-
-## Step 6: Verify MindRoom Reads Credentials
-
-Run:
-
-```bash
-curl -s http://localhost:8765/api/google/status
-```
-
-Expected:
-- `"has_credentials": true`
-
-## Step 7: Connect in Frontend
-
-1. Open **Integrations → Google Services**.
-2. Click **Login with Google**.
-3. Sign in and approve requested scopes.
-4. You should see **Connected** and your available services.
-
-## Step 8: Enable Google Tools in `config.yaml`
-
-After OAuth is connected, add Google tools to your agent config:
+Enable only the APIs your agents need.
+Add the matching tool to the agent config.
 
 ```yaml
 agents:
-  email_assistant:
-    display_name: Email Assistant
-    role: Help manage and respond to emails
+  personal:
+    display_name: Personal
+    role: Help with my Google workspace
+    worker_scope: user_agent
     tools:
-      - gmail
+      - google_drive
       - google_calendar
       - google_sheets
-    instructions:
-      - Search important unread emails first.
-      - Draft replies and ask for confirmation before sending.
+      - gmail
 ```
 
-Gmail tool capabilities include:
-- `gmail_search`: Search emails with Gmail query syntax (for example `is:unread` or `from:boss@company.com`)
-- `gmail_latest`: Read latest inbox emails
-- `gmail_unread`: Read unread emails only
+## Create OAuth Credentials
 
-After editing `config.yaml`, restart MindRoom to reload configuration.
+Open Google Cloud Console and create an OAuth client.
+Add one redirect URI per provider you use.
 
-## Disconnect Later (Optional)
+```text
+http://localhost:8765/api/oauth/google_drive/callback
+http://localhost:8765/api/oauth/google_calendar/callback
+http://localhost:8765/api/oauth/google_sheets/callback
+http://localhost:8765/api/oauth/google_gmail/callback
+```
 
-1. In MindRoom frontend, click **Disconnect Google Account**.
-2. Optional: also revoke app access in [Google Account Permissions](https://myaccount.google.com/permissions).
+## Configure MindRoom
 
-## Troubleshooting
+For a single personal OAuth client, set the shared fallback client variables:
 
-### "Admin Setup Required" shown in frontend
+```bash
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
+```
 
-MindRoom does not have valid Google OAuth env vars yet.
+When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
 
-### "Failed to complete OAuth flow"
+For explicit service-specific redirect URIs, set:
 
-Check redirect URI exact match between Google Cloud Console and MindRoom.
+```bash
+GOOGLE_DRIVE_REDIRECT_URI=http://localhost:8765/api/oauth/google_drive/callback
+GOOGLE_CALENDAR_REDIRECT_URI=http://localhost:8765/api/oauth/google_calendar/callback
+GOOGLE_SHEETS_REDIRECT_URI=http://localhost:8765/api/oauth/google_sheets/callback
+GOOGLE_GMAIL_REDIRECT_URI=http://localhost:8765/api/oauth/google_gmail/callback
+```
 
-### Access blocked by Google
+You may instead set `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_SHEETS_CLIENT_ID`, or `GOOGLE_GMAIL_CLIENT_ID` with matching secrets.
 
-If your app is in testing mode, ensure your account is listed as a test user.
+## Connect
+
+Open the MindRoom dashboard and connect the integration required by each tool.
+If an agent tries a Google tool before it is connected, the tool result includes a MindRoom connect URL for that exact provider and agent scope.
+After the browser OAuth flow completes, retry the original request.
+
+OAuth tokens are stored under provider token services such as `google_drive_oauth`.
+Editable tool settings are stored separately under services such as `google_drive`, `google_calendar`, `google_sheets`, and `gmail`.

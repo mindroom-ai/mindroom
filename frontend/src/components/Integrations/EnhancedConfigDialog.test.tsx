@@ -82,4 +82,172 @@ describe("EnhancedConfigDialog", () => {
       expect(onClose).toHaveBeenCalled();
     });
   });
+
+  it("rejects untouched required fields without defaults", async () => {
+    const onClose = vi.fn();
+    const onSuccess = vi.fn();
+
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ credentials: {} }),
+    });
+
+    render(
+      <EnhancedConfigDialog
+        open={true}
+        onClose={onClose}
+        service="weather"
+        displayName="Weather"
+        description="Weather integration"
+        configFields={[
+          {
+            name: "api_key",
+            label: "API Key",
+            type: "password",
+            required: true,
+          },
+        ]}
+        onSuccess={onSuccess}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith("/api/credentials/weather");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Configuration" }));
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Validation Error",
+          variant: "destructive",
+        }),
+      );
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("omits cleared optional number fields when saving", async () => {
+    const onClose = vi.fn();
+    const onSuccess = vi.fn();
+
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          credentials: {
+            max_read_size: 10485760,
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: "success" }),
+      });
+
+    render(
+      <EnhancedConfigDialog
+        open={true}
+        onClose={onClose}
+        service="google_drive"
+        displayName="Google Drive"
+        description="Drive integration"
+        configFields={[
+          {
+            name: "max_read_size",
+            label: "Max Read Size",
+            type: "number",
+            required: false,
+            default: 10485760,
+          },
+        ]}
+        onSuccess={onSuccess}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/credentials/google_drive",
+      );
+    });
+
+    fireEvent.change(
+      document.getElementById("max_read_size") as HTMLInputElement,
+      {
+        target: { value: "" },
+      },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save Configuration" }));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/credentials/google_drive",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            credentials: {},
+          }),
+        },
+      );
+      expect(onSuccess).toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalled();
+    });
+  });
+
+  it("rejects non-finite number values without explicit min or max validation", async () => {
+    const onClose = vi.fn();
+    const onSuccess = vi.fn();
+
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ credentials: { max_read_size: "1e309" } }),
+    });
+
+    render(
+      <EnhancedConfigDialog
+        open={true}
+        onClose={onClose}
+        service="google_drive"
+        displayName="Google Drive"
+        description="Drive integration"
+        configFields={[
+          {
+            name: "max_read_size",
+            label: "Max Read Size",
+            type: "number",
+            required: false,
+            default: 10485760,
+          },
+        ]}
+        onSuccess={onSuccess}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/credentials/google_drive",
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Configuration" }));
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Validation Error",
+          variant: "destructive",
+        }),
+      );
+    });
+    expect(
+      screen.getByText("Max Read Size must be a number"),
+    ).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

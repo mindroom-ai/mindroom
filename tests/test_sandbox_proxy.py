@@ -36,7 +36,9 @@ from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     VENDOR_TELEMETRY_ENV_VALUES,
     RuntimePaths,
+    isolated_runtime_paths,
     resolve_runtime_paths,
+    sandbox_shell_execution_runtime_env_values,
     shell_execution_runtime_env_values,
     shell_extra_env_values,
 )
@@ -1575,6 +1577,54 @@ def test_execution_env_payload_keeps_provider_env_denied_even_with_worker_creden
     assert "OPENAI_BASE_URL" not in execution_env
 
 
+def test_worker_env_excludes_openai_api_key_unless_extra_env_passthrough(
+    tmp_path: Path,
+) -> None:
+    """Isolated worker startup env should not inherit provider API keys by default."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "OPENAI_API_KEY": "sk-primary",
+            "ANTHROPIC_API_KEY": "sk-ant-primary",
+        },
+    )
+
+    worker_paths = isolated_runtime_paths(runtime_paths)
+    shell_env = sandbox_shell_execution_runtime_env_values(
+        worker_paths,
+        extra_env_passthrough="OPENAI_API_KEY",
+        process_env=runtime_paths.process_env,
+    )
+
+    assert worker_paths.env_value("OPENAI_API_KEY") is None
+    assert worker_paths.env_value("ANTHROPIC_API_KEY") is None
+    assert shell_env["OPENAI_API_KEY"] == "sk-primary"
+
+
+def test_worker_env_includes_extra_env_passthrough(tmp_path: Path) -> None:
+    """Explicit shell passthrough should still expose selected process env values."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MY_VAR": "visible",
+            "OTHER_VAR": "hidden",
+        },
+    )
+
+    worker_paths = isolated_runtime_paths(runtime_paths)
+    shell_env = sandbox_shell_execution_runtime_env_values(
+        worker_paths,
+        extra_env_passthrough="MY_VAR",
+        process_env=runtime_paths.process_env,
+    )
+
+    assert worker_paths.env_value("MY_VAR") is None
+    assert shell_env["MY_VAR"] == "visible"
+    assert "OTHER_VAR" not in shell_env
+
+
 @pytest.mark.asyncio
 async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
     """Direct shell execution should inherit committed runtime env values from the runtime `.env`."""
@@ -1842,7 +1892,7 @@ async def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild
         ],
     )
 
-    assert result == "visible-gitea-token|visible-in-shell"
+    assert result == "visible-gitea-token|"
 
 
 @pytest.mark.asyncio
@@ -1947,7 +1997,7 @@ async def test_inprocess_runner_shell_uses_request_scoped_extra_env_snapshot(
     )
 
     assert response.ok is True
-    assert response.result == "request-gitea-token|visible-in-shell"
+    assert response.result == "request-gitea-token|"
 
 
 def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_context(
@@ -3170,6 +3220,71 @@ def test_worker_routed_tool_error_does_not_record_worker_failure(
     assert manager.failures == []
 
 
+def test_worker_routed_oauth_connection_result_survives_proxy_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Structured OAuth prompts returned by the runner should stay tool-visible."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    manager = _TrackingWorkerManager()
+    expected_result = {
+        "error": "Google Drive is not connected for this agent.",
+        "oauth_connection_required": True,
+        "provider": "google_drive",
+        "connect_url": "/api/oauth/google_drive/connect?agent_name=general",
+    }
+
+    class _OAuthResultClient:
+        def __init__(self, *, timeout: float) -> None:
+            del timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            del json, headers
+            assert url == "http://worker/api/sandbox-runner/execute"
+            return _FakeResponse({"ok": True, "result": expected_result})
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_tools_override=["file"],
+        worker_target=worker_target,
+    )
+    entrypoint = tool.functions["read_file"].entrypoint
+    assert entrypoint is not None
+
+    with (
+        patch.object(sandbox_proxy_module, "_get_worker_manager", return_value=manager),
+        patch("mindroom.tool_system.sandbox_proxy.httpx.Client", _OAuthResultClient),
+    ):
+        result = entrypoint("missing.txt")
+
+    assert result == expected_result
+    assert manager.touched == [worker_target.worker_key]
+    assert manager.failures == []
+
+
 def test_worker_routed_worker_failure_records_worker_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3541,7 +3656,7 @@ class TestWorkerToolsOverride:
 
     @pytest.mark.parametrize(
         "tool_name",
-        ["gmail", "google_calendar", "google_sheets", "homeassistant"],
+        ["gmail", "google_calendar", "google_drive", "google_sheets", "homeassistant"],
     )
     def test_local_only_tools_never_proxy(
         self,

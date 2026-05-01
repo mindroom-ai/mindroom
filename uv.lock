@@ -419,6 +419,19 @@ wheels = [
 ]
 
 [[package]]
+name = "authlib"
+version = "1.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "joserfc" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d9/82/4d0603f30c1b4629b1f091bb266b0d7986434891d6940a8c87f8098db24e/authlib-1.7.0.tar.gz", hash = "sha256:b3e326c9aa9cc3ea95fe7d89fd880722d3608da4d00e8a27e061e64b48d801d5", size = 175890, upload-time = "2026-04-18T11:00:28.559Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/48/c954218b2a250e23f178f10167c4173fecb5a75d2c206f0a67ba58006c26/authlib-1.7.0-py2.py3-none-any.whl", hash = "sha256:e36817afb02f6f0b6bf55f150782499ddd6ddf44b402bb055d3263cc65ac9ae0", size = 258779, upload-time = "2026-04-18T11:00:26.64Z" },
+]
+
+[[package]]
 name = "babel"
 version = "2.18.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3086,6 +3099,18 @@ wheels = [
 ]
 
 [[package]]
+name = "joserfc"
+version = "1.6.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/de/c6/de8fdbdfa75c8ca04fead38a82d573df8a82906e984c349d58665f459558/joserfc-1.6.4.tar.gz", hash = "sha256:34ce5f499bfcc5e9ad4cc75077f9278ab3227b71da9aaf28f9ab705f8a560d3c", size = 231866, upload-time = "2026-04-13T13:15:40.632Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/f7/210b27752e972edb36d239315b08d3eb6b14824cc4a590da2337d195260b/joserfc-1.6.4-py3-none-any.whl", hash = "sha256:3e4a22b509b41908989237a045e25c8308d5fd47ab96bdae2dd8057c6451003a", size = 70464, upload-time = "2026-04-13T13:15:39.259Z" },
+]
+
+[[package]]
 name = "json5"
 version = "0.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3675,6 +3700,7 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "anthropic" },
     { name = "anyio" },
+    { name = "authlib" },
     { name = "cerebras-cloud-sdk" },
     { name = "chromadb" },
     { name = "cron-descriptor" },
@@ -3838,6 +3864,12 @@ google-bigquery = [
     { name = "google-cloud-bigquery" },
 ]
 google-calendar = [
+    { name = "google-api-python-client" },
+    { name = "google-auth" },
+    { name = "google-auth-httplib2" },
+    { name = "google-auth-oauthlib" },
+]
+google-drive = [
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
@@ -4052,6 +4084,7 @@ requires-dist = [
     { name = "apify-client", marker = "platform_machine != 'aarch64' and extra == 'apify'", specifier = ">=1.12.2" },
     { name = "arxiv", marker = "extra == 'arxiv'" },
     { name = "atlassian-python-api", marker = "extra == 'confluence'" },
+    { name = "authlib", specifier = ">=1.6.0" },
     { name = "baidusearch", marker = "extra == 'baidusearch'" },
     { name = "beautifulsoup4", marker = "extra == 'website'" },
     { name = "boto3", marker = "extra == 'aws-lambda'", specifier = ">=1.40.8" },
@@ -4080,15 +4113,19 @@ requires-dist = [
     { name = "firecrawl-py", marker = "extra == 'firecrawl'", specifier = ">=3" },
     { name = "google-api-python-client", marker = "extra == 'gmail'", specifier = ">=2.178" },
     { name = "google-api-python-client", marker = "extra == 'google-calendar'", specifier = ">=2.178" },
+    { name = "google-api-python-client", marker = "extra == 'google-drive'", specifier = ">=2.178" },
     { name = "google-api-python-client", marker = "extra == 'google-sheets'", specifier = ">=2.178" },
     { name = "google-auth", specifier = ">=2.40.3" },
     { name = "google-auth", marker = "extra == 'gmail'", specifier = ">=2.40.3" },
     { name = "google-auth", marker = "extra == 'google-calendar'", specifier = ">=2.40.3" },
+    { name = "google-auth", marker = "extra == 'google-drive'", specifier = ">=2.40.3" },
     { name = "google-auth-httplib2", marker = "extra == 'gmail'", specifier = ">=0.2" },
     { name = "google-auth-httplib2", marker = "extra == 'google-calendar'", specifier = ">=0.2" },
+    { name = "google-auth-httplib2", marker = "extra == 'google-drive'", specifier = ">=0.2" },
     { name = "google-auth-httplib2", marker = "extra == 'google-sheets'", specifier = ">=0.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'gmail'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-calendar'", specifier = ">=1.2.2" },
+    { name = "google-auth-oauthlib", marker = "extra == 'google-drive'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-sheets'", specifier = ">=1.2.2" },
     { name = "google-cloud-bigquery", marker = "extra == 'google-bigquery'" },
     { name = "google-genai" },
@@ -4196,7 +4233,7 @@ requires-dist = [
     { name = "youtube-transcript-api", marker = "extra == 'youtube'" },
     { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=3.3" },
 ]
-provides-extras = ["agentql", "airflow", "apify", "arxiv", "attachments", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "delegate", "desi-vocal", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "e2b", "eleven-labs", "email", "exa", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-maps", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-e2ee", "matrix-message", "matrix-room", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "resend", "scheduler", "scrapegraph", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "subagents", "supabase", "tavily", "telegram", "thread-summary", "thread-tags", "todoist", "trafilatura", "trello", "twilio", "unsplash", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
+provides-extras = ["agentql", "airflow", "apify", "arxiv", "attachments", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "cartesia", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "dalle", "daytona", "delegate", "desi-vocal", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "e2b", "eleven-labs", "email", "exa", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-drive", "google-maps", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-e2ee", "matrix-message", "matrix-room", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "resend", "scheduler", "scrapegraph", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "subagents", "supabase", "tavily", "telegram", "thread-summary", "thread-tags", "todoist", "trafilatura", "trello", "twilio", "unsplash", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
 [package.metadata.requires-dev]
 dev = [

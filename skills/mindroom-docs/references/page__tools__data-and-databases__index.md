@@ -1,11 +1,11 @@
 # Data & Databases
 
-Use these tools to query SQL and graph databases, analyze tabular files, work with Google datasets and spreadsheets, and fetch financial or business data.
+Use these tools to query SQL and graph databases, analyze tabular files, work with Google datasets, Drive files, and spreadsheets, and fetch financial or business data.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `data-and-databases` group.
-Use these tools when you need database access, dataframe-style analysis, spreadsheet automation, or market and company data.
+Use these tools when you need database access, dataframe-style analysis, Google Drive file lookup, spreadsheet automation, or market and company data.
 
 ## Tools On This Page
 
@@ -17,20 +17,21 @@ Use these tools when you need database access, dataframe-style analysis, spreads
 - \[`csv`\] - Pre-registered CSV reading and DuckDB-backed SQL queries over CSV files.
 - \[`pandas`\] - In-memory dataframe creation and dataframe method execution.
 - \[`google_bigquery`\] - BigQuery dataset inspection and SQL queries.
-- \[`google_sheets`\] - Google Sheets access through Google OAuth, with read support verified by default and upstream support for create, update, and duplicate operations.
+- \[`google_drive`\] - Google Drive file listing, metadata search, and file reading through the per-service Google Drive OAuth provider.
+- \[`google_sheets`\] - Google Sheets access through the per-service Google Sheets OAuth provider, with read support verified by default and create/update support when enabled.
 - \[`openbb`\] - Stock prices, company search, news, profiles, and price targets through OpenBB.
 - \[`yfinance`\] - Yahoo Finance market data, fundamentals, news, and history.
 - \[`financial_datasets_api`\] - Structured financial statements, filings, ownership, and crypto data from Financial Datasets.
 
 ## Common Setup Notes
 
-`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
+`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
 `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed.
 MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML.
 Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`.
 Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields.
-`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, so the tools on this page are configured through standard tool credentials, environment-backed SDK auth, or the shared Google Services OAuth flow instead of dedicated per-tool integration routes.
-`google_sheets` is special because it declares `auth_provider="google"`, checks for Google Sheets OAuth scopes, is restricted to unscoped agents or `worker_scope=shared`, and always stays local instead of being proxied through worker sandbox routing.
+`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive and Google Sheets use the generic `/api/oauth/google_drive/*` and `/api/oauth/google_sheets/*` flows.
+`google_drive` and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
 `csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
@@ -431,22 +432,64 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 ### Notes
 
 - Configure `dataset`, `project`, and `location` explicitly in MindRoom, because that is the documented and validated path in the live metadata.
-- `google_bigquery` does not use the shared Google Services OAuth integration.
+- `google_bigquery` does not use a MindRoom Google OAuth provider.
 - If `credentials` is unset, the BigQuery SDK falls back to the process's default Google Cloud authentication behavior.
 
-## \[`google_sheets`\]
+## \[`google_drive`\]
 
-`google_sheets` is the Google Sheets toolkit for spreadsheet access through MindRoom's shared Google OAuth credentials.
+`google_drive` is the Google Drive toolkit for listing, searching, and reading files from the connected user's Drive account.
 
 ### What It Does
 
-The underlying Agno toolkit supports `read_sheet()`, `create_sheet()`, `update_sheet()`, and `create_duplicate_sheet()`.
-MindRoom wraps Agno's Google Sheets toolkit with `ScopedGoogleOAuthMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files.
-The upstream toolkit selects read-only Sheets scope when only reads are enabled, and it selects write scope when create, update, or duplicate operations are enabled.
-`create_duplicate_sheet()` uses the Google Drive copy API under the hood, so duplication depends on Google Drive scope in addition to Sheets access.
+MindRoom exposes `list_files()`, `search_files()`, and `read_file()` through the Google Drive OAuth provider.
+`list_files()` returns recent Drive files visible to the connected account.
+`search_files()` searches Drive metadata.
+`read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
+When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to a local token flow.
+
+### Configuration
+
+| Option          | Type      | Required | Default    | Notes                                                    |
+| --------------- | --------- | -------- | ---------- | -------------------------------------------------------- |
+| `list_files`    | `boolean` | `no`     | `true`     | Enable recent file listing.                              |
+| `search_files`  | `boolean` | `no`     | `true`     | Enable Drive metadata search.                            |
+| `read_file`     | `boolean` | `no`     | `true`     | Enable file content reads.                               |
+| `max_read_size` | `number`  | `no`     | `10485760` | Maximum non-Google-Workspace file size to read in bytes. |
+
+### Example
+
+```
+agents:
+  assistant:
+    tools:
+      - google_drive:
+          max_read_size: 10485760
+```
+
+```
+list_files()
+search_files("name contains 'budget'")
+read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
+```
+
+### Notes
+
+- `google_drive` uses the per-service `google_drive` OAuth provider and always runs in the primary MindRoom runtime.
+- The provider requests Drive read-only access plus OpenID email/profile scopes.
+- Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
+
+## \[`google_sheets`\]
+
+`google_sheets` is the Google Sheets toolkit for spreadsheet access through the Google Sheets OAuth provider.
+
+### What It Does
+
+MindRoom exposes Agno's `read_sheet()`, `create_sheet()`, and `update_sheet()` operations.
+MindRoom wraps Agno's Google Sheets toolkit with `ScopedOAuthClientMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files.
+MindRoom's `google_sheets` OAuth provider requests Sheets access, and dashboard flags only gate which Agno methods are exposed.
 If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call.
-On this branch, the declared MindRoom config fields are `read`, `create`, `update`, and `duplicate`, while the upstream constructor consumes `enable_read_sheet`, `enable_create_sheet`, `enable_update_sheet`, and `enable_create_duplicate_sheet`.
-That means the read path is the verified default behavior here, while the write toggles should be treated as intended metadata until the field names are aligned with the upstream constructor.
+MindRoom maps the dashboard config fields `read`, `create`, and `update` onto Agno's constructor flags.
+When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to Agno's local token flow.
 
 ### Configuration
 
@@ -457,7 +500,6 @@ That means the read path is the verified default behavior here, while the write 
 | `read`              | `boolean` | `no`     | `true`  | Enable read operations.                                                                         |
 | `create`            | `boolean` | `no`     | `false` | Enable spreadsheet creation.                                                                    |
 | `update`            | `boolean` | `no`     | `false` | Enable sheet updates.                                                                           |
-| `duplicate`         | `boolean` | `no`     | `false` | Enable spreadsheet duplication.                                                                 |
 
 ### Example
 
@@ -481,11 +523,9 @@ read_sheet(
 
 ### Notes
 
-- `google_sheets` is a shared-only integration and is rejected for `worker_scope=user` and `worker_scope=user_agent`.
-- Even with `worker_scope=shared`, this tool stays local rather than being proxied to the sandbox worker.
+- `google_sheets` uses the per-service `google_sheets` OAuth provider and always runs in the primary MindRoom runtime.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md).
-- The current metadata field names `read`, `create`, `update`, and `duplicate` do not match Agno's `enable_*` constructor args, so treat read access as the verified default behavior on this branch unless the tool is instantiated programmatically with the upstream names.
-- The dashboard marks the tool available only when stored Google credentials include the required Sheets scopes.
+- The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
 
 ## \[`openbb`\]
 

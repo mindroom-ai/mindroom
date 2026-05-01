@@ -3731,7 +3731,7 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": "google",
+      "auth_provider": "google_sheets",
       "category": "development",
       "config_fields": [
         {
@@ -3793,18 +3793,6 @@
           "required": false,
           "type": "boolean",
           "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": "Allow duplicating spreadsheets",
-          "label": "Enable Duplicate Operations",
-          "name": "duplicate",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
         }
       ],
       "default_execution_target": "primary",
@@ -3813,11 +3801,10 @@
         "google-auth-httplib2",
         "google-auth-oauthlib"
       ],
-      "description": "Read, create, update, and duplicate Google Sheets spreadsheets",
+      "description": "Read, create, and update Google Sheets spreadsheets",
       "display_name": "Google Sheets",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_sheets",
       "function_names": [
-        "create_duplicate_sheet",
         "create_sheet",
         "read_sheet",
         "update_sheet"
@@ -3826,7 +3813,7 @@
       "icon": "SiGooglesheets",
       "icon_color": "text-green-600",
       "name": "google_sheets",
-      "setup_type": "special",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {
@@ -6151,7 +6138,7 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": "google",
+      "auth_provider": "google_gmail",
       "category": "email",
       "config_fields": [
         {
@@ -6300,7 +6287,7 @@
       "icon": "SiGmail",
       "icon_color": "text-red-500",
       "name": "gmail",
-      "setup_type": "special",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {
@@ -7219,7 +7206,7 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": "google",
+      "auth_provider": "google_calendar",
       "category": "productivity",
       "config_fields": [
         {
@@ -7277,7 +7264,83 @@
       "icon": "SiGooglecalendar",
       "icon_color": "text-blue-600",
       "name": "google_calendar",
-      "setup_type": "special",
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": "google_drive",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow listing recent Google Drive files.",
+          "label": "List Files",
+          "name": "list_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow searching Google Drive metadata.",
+          "label": "Search Files",
+          "name": "search_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow reading Google Drive file contents.",
+          "label": "Read Files",
+          "name": "read_file",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 10485760,
+          "description": "Maximum non-Google-Workspace file size to read in bytes.",
+          "label": "Max Read Size",
+          "name": "max_read_size",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "default_execution_target": "primary",
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
+      ],
+      "description": "Search and read files from the connected user's Google Drive",
+      "display_name": "Google Drive",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/google_drive",
+      "function_names": [
+        "list_files",
+        "search_files",
+        "read_file"
+      ],
+      "helper_text": null,
+      "icon": "SiGoogledrive",
+      "icon_color": "text-green-600",
+      "name": "google_drive",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {

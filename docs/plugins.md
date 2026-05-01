@@ -21,14 +21,16 @@ A plugin is a directory containing `mindroom.plugin.json`:
 my-plugin/
 ├── mindroom.plugin.json   # Required manifest
 ├── tools.py               # Tool factories (optional)
+├── oauth.py               # OAuth providers (optional)
 ├── hooks.py               # Event hooks (optional)
 └── skills/                # Skill directories (optional)
     └── my-skill/
         └── SKILL.md
 ```
 
-A plugin must have at least one of `tools_module`, `hooks_module`, or `skills`.
+A plugin must have at least one of `tools_module`, `hooks_module`, `oauth_module`, or `skills`.
 A tools-only plugin exposes callable functions to agents.
+A plugin with `oauth_module` registers OAuth providers whose state, callbacks, and scoped credential storage are handled by MindRoom core.
 A hooks-only plugin observes or transforms events without adding agent-facing tools.
 Many plugins combine both.
 
@@ -40,6 +42,7 @@ The manifest is a JSON file named `mindroom.plugin.json` at the plugin root:
 {
   "name": "my-plugin",
   "tools_module": "tools.py",
+  "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
   "skills": ["skills"]
 }
@@ -49,6 +52,7 @@ The manifest is a JSON file named `mindroom.plugin.json` at the plugin root:
 | --- | --- | --- | --- |
 | `name` | string | **yes** | Plugin identifier. Must be lowercase ASCII letters, digits, `-`, and `_` only (pattern: `^[a-z0-9_-]+$`). Must be unique across all configured plugins. Invalid or duplicate names abort plugin loading entirely. |
 | `tools_module` | string | no | Relative path to the Python module containing `@register_tool_with_metadata` factories. Must exist on disk if declared. |
+| `oauth_module` | string | no | Relative path to the Python module containing `register_oauth_providers(settings, runtime_paths)`. Must exist on disk if declared. |
 | `hooks_module` | string | no | Relative path to the Python module containing `@hook`-decorated functions. Must exist on disk if declared. |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories (each with a `SKILL.md`). Each directory must exist on disk. |
 
@@ -152,6 +156,69 @@ MindRoom resolves the package location via `importlib` and looks for `mindroom.p
 A tools module is a Python file that registers one or more tool factories using the `@register_tool_with_metadata` decorator.
 Each factory function returns a **Toolkit class** (not an instance).
 MindRoom instantiates the class when building agents.
+
+## OAuth providers
+
+An OAuth module registers provider definitions without registering FastAPI routes.
+MindRoom core owns state generation, callback consumption, authenticated requester binding, scoped OAuth token writes, status checks, and disconnect handling.
+The provider module supplies only provider-specific details such as endpoint URLs, scopes, token credential service names, optional tool config service names, token parsing, optional claim validators, and display metadata.
+
+Declare the module in the manifest:
+
+```json
+{
+  "name": "drive-plugin",
+  "tools_module": "tools.py",
+  "oauth_module": "oauth.py"
+}
+```
+
+Then expose `register_oauth_providers(settings, runtime_paths)`:
+
+```python
+from __future__ import annotations
+
+from mindroom.oauth import OAuthProvider
+
+
+def register_oauth_providers(settings, runtime_paths):
+    del runtime_paths
+    return [
+        OAuthProvider(
+            id="acme_drive",
+            display_name="Acme Drive",
+            authorization_url="https://accounts.acme.example/oauth/authorize",
+            token_url="https://accounts.acme.example/oauth/token",
+            scopes=("files.read",),
+            credential_service="acme_drive_oauth",
+            tool_config_service="acme_drive",
+            client_id_env=settings.get("client_id_env", "ACME_DRIVE_CLIENT_ID"),
+            client_secret_env=settings.get("client_secret_env", "ACME_DRIVE_CLIENT_SECRET"),
+            redirect_uri_env=settings.get("redirect_uri_env", "ACME_DRIVE_REDIRECT_URI"),
+            allowed_email_domains=tuple(settings.get("allowed_email_domains", [])),
+            allowed_hosted_domains=tuple(settings.get("allowed_hosted_domains", [])),
+        ),
+    ]
+```
+
+OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
+Dashboard flows normally call `connect` and use the returned provider authorization URL.
+Conversation flows should show the browser-openable `authorize` URL, because that URL first authenticates the MindRoom user and then redirects to the external provider.
+Conversation-issued links include an opaque connect token so the callback can verify the requester before storing scoped credentials.
+The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester.
+The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes.
+If the tool also has editable dashboard settings, declare `tool_config_service` and store those settings separately through the normal credentials API.
+For example, an Acme Drive provider can store OAuth tokens in `acme_drive_oauth` while the `acme_drive` tool settings document contains only options such as file-size limits or capability toggles.
+Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
+
+OAuth-backed tools should set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"` in `@register_tool_with_metadata`.
+When credentials are missing, return a concise instruction containing a browser-openable URL built with `mindroom.oauth.build_oauth_connect_instruction(provider, runtime_paths, worker_target=...)`.
+The user can complete OAuth and retry the same tool request.
+
+Deployment restrictions belong in plugin settings.
+Use `allowed_email_domains` to restrict verified email claims by domain.
+Use `allowed_hosted_domains` when the provider supplies a verified hosted-domain claim.
+If a configured restriction cannot be checked from verified claims, MindRoom fails the callback closed and does not save credentials.
 
 ### Minimal example
 

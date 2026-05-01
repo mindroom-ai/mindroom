@@ -20,11 +20,11 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="google_sheets",
     display_name="Google Sheets",
-    description="Read, create, update, and duplicate Google Sheets spreadsheets",
+    description="Read, create, and update Google Sheets spreadsheets",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.SPECIAL,
-    auth_provider="google",  # Authentication provided by Google Services integration
+    setup_type=SetupType.OAUTH,
+    auth_provider="google_sheets",
     icon="SiGooglesheets",
     icon_color="text-green-600",
     config_fields=[
@@ -68,14 +68,6 @@ if TYPE_CHECKING:
             default=False,
             description="Allow updating existing spreadsheets",
         ),
-        ConfigField(
-            name="duplicate",
-            label="Enable Duplicate Operations",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Allow duplicating spreadsheets",
-        ),
     ],
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
@@ -85,7 +77,6 @@ if TYPE_CHECKING:
     dependencies=["google-api-python-client", "google-auth-httplib2", "google-auth-oauthlib"],
     docs_url="https://docs.agno.com/tools/toolkits/others/google_sheets",
     function_names=(
-        "create_duplicate_sheet",
         "create_sheet",
         "read_sheet",
         "update_sheet",

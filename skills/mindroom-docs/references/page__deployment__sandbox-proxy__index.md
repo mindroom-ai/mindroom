@@ -67,7 +67,6 @@ services:
     command: ["/app/run-sandbox-runner.sh"]
     user: "1000:1000"
     volumes:
-      - ./mindroom_data:/app/mindroom_data:rw
       - sandbox-workspace:/app/workspace
     environment:
       - MINDROOM_SANDBOX_RUNNER_MODE=true
@@ -79,19 +78,17 @@ volumes:
   sandbox-workspace:
 ```
 
-Add a shared volume or bind mount for agent storage that both the main process and the runner can access.
-Keep secrets and other main-process-only files on separate mounts that are not exposed to the runner.
+Do not mount the full `mindroom_data` tree into the runner because it contains credentials, Matrix encryption keys, sessions, and logs.
 
 > [!IMPORTANT] The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume: `bash docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace` Alternatively, omit the `user:` directive to run as root (less secure).
 
 Key differences from the primary MindRoom runtime:
 
 - **No `env_file`** — runner has no API keys, no Matrix credentials
-- **Shared agent data** — the runner reads and writes the same agent storage directories used by the main process
 - **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
 
-> [!WARNING] **Filesystem isolation depends on the worker backend.** Shared-runner and local backends expose all agent storage to the runner process — there is no per-agent filesystem boundary. Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes). The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files. Use `user_agent` for per-agent filesystem isolation.
+> [!WARNING] **Filesystem isolation depends on the worker backend.** Static shared-runner deployments should not mount the primary MindRoom storage tree into the runner. Local in-process execution still shares the primary process filesystem. Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes). The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files. Use `user_agent` for per-agent filesystem isolation.
 
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
@@ -230,8 +227,10 @@ The Helm chart sets the Kubernetes backend environment variables automatically. 
 
 ## Shell env and PATH
 
-When `shell` runs through the sandbox proxy, it receives the stricter sandbox runtime env rather than the main process's ordinary committed runtime `.env`.
-Additional env is not forwarded implicitly: configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit.
+When `shell` runs through the sandbox proxy, it receives only a small non-secret system env by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale variables, proxy variables, and certificate path variables.
+Committed runtime `.env` values and provider credentials are not forwarded implicitly.
+Worker startup env also denies provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` by default.
+Configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit.
 `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries.
 To prevent the runner from leaking its own control-plane credentials to tools, shell passthrough drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`.
 Everything else that matches your configured names or globs passes through, including service tokens and provider credentials.
@@ -379,8 +378,8 @@ With `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamic
 
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
-Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
-Additionally, `google` and `spotify` are shared-only integrations that require `worker_scope` unset or `shared` but can still be proxied through the sandbox.
+Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
+Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 
 You can set `worker_scope` per agent or in `defaults`:
 
@@ -416,7 +415,7 @@ If `worker_scope` is unset, proxied tools still run in the sandbox, but each cal
 **Important notes:**
 
 - `worker_scope` does **not** change where agent data is stored. All scopes read and write the same agent storage directory (`agents/<name>/`).
-- The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` manage credentials through their worker runtime.
+- The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`. OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception. For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime. Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files. Use `user_agent` for per-agent isolation.
 
 ## Without configured worker routing

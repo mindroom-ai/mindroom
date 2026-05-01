@@ -43,7 +43,7 @@ See [MCP](../mcp.md) for the `mcp_servers` config and naming rules.
 ## Browse By Topic
 
 - [Execution & Coding](execution-and-coding.md) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
-- [Data & Databases](data-and-databases.md) - SQL, databases, spreadsheets, tabular analysis, and financial/business datasets.
+- [Data & Databases](data-and-databases.md) - SQL, databases, Google Drive files, spreadsheets, tabular analysis, and financial/business datasets.
 - [Web Search](web-search.md) - Search engines and search APIs.
 - [Web Scraping & Browser](web-scraping-and-browser.md) - Crawlers, extractors, browser automation, and page-reading tools.
 - [Research Sources](research-sources.md) - ArXiv, Wikipedia, PubMed, and Hacker News.
@@ -89,7 +89,7 @@ Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for deployment det
 ## Shared-Only Integrations
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
-The current shared-only integrations are `google`, `spotify`, `homeassistant`, `gmail`, `google_calendar`, `google_sheets`, and all configured `mcp_<server_id>` tools.
+The current shared-only integrations are `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
 
 ## Automatic Dependency Installation
 

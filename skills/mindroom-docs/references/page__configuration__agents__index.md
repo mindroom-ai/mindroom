@@ -256,6 +256,8 @@ agents:
 ```
 
 `research` still inherits `enable_run_shell_command: true`, but `extra_env_passthrough` falls back to the lower layer (persisted tool config if set, otherwise the tool's normal default).
+For sandboxed `shell`, provider API keys and other committed runtime credentials are denied by default in both worker startup env and command env.
+Use `extra_env_passthrough` when a specific exported process env value must be visible to shell commands.
 
 Required non-secret field example:
 
@@ -309,9 +311,9 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 The shared-only integrations require `worker_scope` unset or `shared`.
-That list includes `google`, `spotify`, `gmail`, `google_calendar`, `google_sheets`, `homeassistant`, and all configured `mcp_<server_id>` tools.
-Of those, `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` also always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
-`google` and `spotify` can still be proxied through the sandbox.
+That list includes `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
+Separately, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant` always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
+`spotify` can still be proxied through the sandbox.
 
 The supported `worker_scope` values are:
 
@@ -353,8 +355,10 @@ They materialize one canonical state root per requester-scoped private instance 
 Workers mount those canonical private-instance roots.
 They do not own them.
 
-The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`.
-Agents using `user` or `user_agent` manage credentials through their worker runtime instead.
+The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
+OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception.
+For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime.
+Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md).
 

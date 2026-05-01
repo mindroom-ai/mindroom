@@ -23,8 +23,8 @@ if TYPE_CHECKING:
     description="Read, search, and manage Gmail emails",
     category=ToolCategory.EMAIL,
     status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.SPECIAL,
-    auth_provider="google",  # Authentication provided by Google Services integration
+    setup_type=SetupType.OAUTH,
+    auth_provider="google_gmail",
     icon="SiGmail",
     icon_color="text-red-500",
     config_fields=[

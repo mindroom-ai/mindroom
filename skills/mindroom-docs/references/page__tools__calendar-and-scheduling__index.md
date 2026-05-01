@@ -15,9 +15,9 @@ Use these tools when you need Google Calendar access, Cal.com booking APIs, or M
 
 ## Common Setup Notes
 
-`google_calendar` is a Google-backed shared-only integration.
-It uses the shared Google Services OAuth connection instead of its own API key form.
-Agents can only use it when `worker_scope` is unset or `shared`, and MindRoom keeps it local even when other tools are routed through the sandbox proxy. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
+`google_calendar` is a per-service Google OAuth integration.
+It uses the `google_calendar` OAuth provider instead of an API key form.
+It always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets. Use [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) to connect Google before enabling `google_calendar`. `cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
 `scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
 Unlike the two calendar API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
 MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
@@ -30,16 +30,17 @@ MindRoom also includes `scheduler` in `defaults.tools` by default on this branch
 
 `google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`.
 MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`.
-Read-oriented calls work with calendar read scopes.
-Write calls are still part of the tool surface, but they only succeed when `allow_update: true` is configured and the connected Google account has granted calendar write scope.
+The OAuth provider requests a consistent Google Calendar scope, while MindRoom gates write methods with the `allow_update` setting.
+Write calls are still part of the tool surface, but they are only exposed when `allow_update: true` is configured.
+When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to Agno's local token flow.
 `find_available_slots()` derives openings from the user's current calendar events plus working-hours settings inferred from Google Calendar settings and locale.
 
 ### Configuration
 
-| Option         | Type      | Required | Default   | Notes                                                                     |
-| -------------- | --------- | -------- | --------- | ------------------------------------------------------------------------- |
-| `calendar_id`  | `text`    | `no`     | `primary` | Google Calendar ID to query or update.                                    |
-| `allow_update` | `boolean` | `no`     | `false`   | Request write-capable behavior for create, update, and delete operations. |
+| Option         | Type      | Required | Default   | Notes                                         |
+| -------------- | --------- | -------- | --------- | --------------------------------------------- |
+| `calendar_id`  | `text`    | `no`     | `primary` | Google Calendar ID to query or update.        |
+| `allow_update` | `boolean` | `no`     | `false`   | Expose create, update, and delete operations. |
 
 ### Example
 
@@ -68,8 +69,7 @@ create_event(
 ### Notes
 
 - `calendar_id` defaults to `primary`, and `list_calendars()` can return the other calendar IDs available to the connected account.
-- If the Google Services connection was authorized without calendar scopes, `google_calendar` stays unavailable until the user reconnects and grants the missing scopes.
-- `google_calendar` is both shared-only and local-only on this branch, so `worker_scope=user` and `worker_scope=user_agent` are unsupported and the tool is never proxied through sandbox workers.
+- If the Google Calendar connection is missing the required calendar scope, `google_calendar` stays unavailable until the user reconnects and grants it.
 - Use the Google Services OAuth guides for consent-screen setup, redirect URIs, and environment variables.
 
 ## \[`cal_com`\]

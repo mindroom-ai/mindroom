@@ -61,7 +61,7 @@ _TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
-_SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
+_KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
 
@@ -790,7 +790,6 @@ class KubernetesResourceManager:
             },
             {"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path},
             {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
-            {"name": _SHARED_STORAGE_ROOT_ENV, "value": self.config.storage_mount_path},
             {"name": "VIRTUAL_ENV", "value": venv_path},
             {"name": "PATH", "value": f"{venv_path}/bin:{_DEFAULT_CONTAINER_PATH}"},
             {
@@ -875,7 +874,7 @@ class KubernetesResourceManager:
                 _RUNNER_PORT_ENV_NAME: str(self.config.worker_port),
                 "MINDROOM_CONFIG_PATH": str(config_path),
                 "MINDROOM_STORAGE_PATH": str(dedicated_root),
-                _SHARED_STORAGE_ROOT_ENV: self.config.storage_mount_path,
+                _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV: self.config.storage_subpath_prefix,
                 SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
                 _DEDICATED_WORKER_KEY_ENV: worker_key,
                 _DEDICATED_WORKER_ROOT_ENV: str(dedicated_root),

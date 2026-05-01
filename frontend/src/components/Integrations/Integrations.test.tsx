@@ -65,22 +65,38 @@ const scopedMockTools = [
 let mockStatusAuthoritative = true;
 const {
   mockUseTools,
-  mockGoogleOnAction,
+  mockGoogleDriveOnAction,
+  mockGoogleDriveOnDisconnect,
+  mockGoogleGmailOnAction,
+  mockGoogleGmailOnDisconnect,
   mockSpotifyOnAction,
   mockSpotifyOnDisconnect,
   mockPlexOnAction,
   mockPlexOnDisconnect,
-  mockGoogleLoadStatus,
+  mockGenericOAuthOnAction,
+  mockGenericOAuthLoadStatus,
+  mockGoogleDriveLoadStatus,
+  mockGoogleGmailLoadStatus,
   mockSpotifyLoadStatus,
   mockPlexLoadStatus,
 } = vi.hoisted(() => ({
   mockUseTools: vi.fn(),
-  mockGoogleOnAction: vi.fn(),
+  mockGoogleDriveOnAction: vi.fn(),
+  mockGoogleDriveOnDisconnect: vi.fn(),
+  mockGoogleGmailOnAction: vi.fn(),
+  mockGoogleGmailOnDisconnect: vi.fn(),
   mockSpotifyOnAction: vi.fn(),
   mockSpotifyOnDisconnect: vi.fn(),
   mockPlexOnAction: vi.fn(),
   mockPlexOnDisconnect: vi.fn(),
-  mockGoogleLoadStatus: vi
+  mockGenericOAuthOnAction: vi.fn(),
+  mockGenericOAuthLoadStatus: vi
+    .fn()
+    .mockResolvedValue({ status: "available", connected: false }),
+  mockGoogleDriveLoadStatus: vi
+    .fn()
+    .mockResolvedValue({ status: "available", connected: false }),
+  mockGoogleGmailLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
   mockSpotifyLoadStatus: vi
@@ -154,32 +170,74 @@ vi.mock("@/lib/api", () => ({
 
 // Mock EnhancedConfigDialog
 vi.mock("./EnhancedConfigDialog", () => ({
-  EnhancedConfigDialog: ({ onSuccess }: any) => {
+  EnhancedConfigDialog: ({ onSuccess, service }: any) => {
     // Auto-call success when dialog opens
     setTimeout(() => onSuccess?.(), 0);
-    return <div>Enhanced Config Dialog</div>;
+    return (
+      <>
+        <div>Enhanced Config Dialog</div>
+        <div>Service: {service}</div>
+      </>
+    );
   },
 }));
 
 // Mock integration providers
 vi.mock("./integrations/index", () => ({
+  GenericOAuthIntegrationProvider: class {
+    integration: any;
+    providerId: string;
+
+    constructor(integration: any, providerId: string) {
+      this.integration = integration;
+      this.providerId = providerId;
+    }
+
+    getConfig() {
+      return {
+        integration: this.integration,
+        onAction: () => mockGenericOAuthOnAction(this.providerId),
+      };
+    }
+
+    loadStatus() {
+      return mockGenericOAuthLoadStatus(this.providerId);
+    }
+  },
   integrationProviders: {
-    google: {
+    google_drive: {
       getConfig: () => ({
         integration: {
-          id: "google",
-          name: "Google Services",
-          description: "Gmail, Calendar, and Drive integration",
-          category: "email",
-          icon: <span>Google Icon</span>,
+          id: "google_drive",
+          name: "Google Drive",
+          description: "Search and read files from your connected Google Drive",
+          category: "productivity",
+          icon: <span>Google Drive Icon</span>,
           status: "available",
-          setup_type: "special",
+          setup_type: "oauth",
           connected: false,
         },
-        onAction: mockGoogleOnAction,
-        ConfigComponent: () => <div>Google Config Component</div>,
+        onAction: mockGoogleDriveOnAction,
+        onDisconnect: mockGoogleDriveOnDisconnect,
       }),
-      loadStatus: mockGoogleLoadStatus,
+      loadStatus: mockGoogleDriveLoadStatus,
+    },
+    google_gmail: {
+      getConfig: () => ({
+        integration: {
+          id: "google_gmail",
+          name: "Gmail",
+          description: "Read, search, and manage Gmail emails",
+          category: "email",
+          icon: <span>Gmail Icon</span>,
+          status: "available",
+          setup_type: "oauth",
+          connected: false,
+        },
+        onAction: mockGoogleGmailOnAction,
+        onDisconnect: mockGoogleGmailOnDisconnect,
+      }),
+      loadStatus: mockGoogleGmailLoadStatus,
     },
     spotify: {
       getConfig: () => ({
@@ -221,19 +279,36 @@ vi.mock("./integrations/index", () => ({
     {
       getConfig: () => ({
         integration: {
-          id: "google",
-          name: "Google Services",
-          description: "Gmail, Calendar, and Drive integration",
-          category: "email",
-          icon: <span>Google Icon</span>,
+          id: "google_drive",
+          name: "Google Drive",
+          description: "Search and read files from your connected Google Drive",
+          category: "productivity",
+          icon: <span>Google Drive Icon</span>,
           status: "available",
-          setup_type: "special",
+          setup_type: "oauth",
           connected: false,
         },
-        onAction: mockGoogleOnAction,
-        ConfigComponent: () => <div>Google Config Component</div>,
+        onAction: mockGoogleDriveOnAction,
+        onDisconnect: mockGoogleDriveOnDisconnect,
       }),
-      loadStatus: mockGoogleLoadStatus,
+      loadStatus: mockGoogleDriveLoadStatus,
+    },
+    {
+      getConfig: () => ({
+        integration: {
+          id: "google_gmail",
+          name: "Gmail",
+          description: "Read, search, and manage Gmail emails",
+          category: "email",
+          icon: <span>Gmail Icon</span>,
+          status: "available",
+          setup_type: "oauth",
+          connected: false,
+        },
+        onAction: mockGoogleGmailOnAction,
+        onDisconnect: mockGoogleGmailOnDisconnect,
+      }),
+      loadStatus: mockGoogleGmailLoadStatus,
     },
     {
       getConfig: () => ({
@@ -278,12 +353,24 @@ describe("Integrations", () => {
     vi.clearAllMocks();
     mockToast.mockReset();
     mockStatusAuthoritative = true;
-    mockGoogleOnAction.mockResolvedValue(undefined);
+    mockGoogleDriveOnAction.mockResolvedValue(undefined);
+    mockGoogleDriveOnDisconnect.mockResolvedValue(undefined);
+    mockGoogleGmailOnAction.mockResolvedValue(undefined);
+    mockGoogleGmailOnDisconnect.mockResolvedValue(undefined);
     mockSpotifyOnAction.mockResolvedValue(undefined);
     mockSpotifyOnDisconnect.mockResolvedValue(undefined);
     mockPlexOnAction.mockResolvedValue(undefined);
     mockPlexOnDisconnect.mockResolvedValue(undefined);
-    mockGoogleLoadStatus.mockResolvedValue({
+    mockGenericOAuthOnAction.mockResolvedValue(undefined);
+    mockGenericOAuthLoadStatus.mockResolvedValue({
+      status: "available",
+      connected: false,
+    });
+    mockGoogleDriveLoadStatus.mockResolvedValue({
+      status: "available",
+      connected: false,
+    });
+    mockGoogleGmailLoadStatus.mockResolvedValue({
       status: "available",
       connected: false,
     });
@@ -331,9 +418,11 @@ describe("Integrations", () => {
 
     await waitFor(() => {
       // Provider integrations
-      expect(screen.getByText("Google Services")).toBeInTheDocument();
+      expect(screen.getByText("Google Drive")).toBeInTheDocument();
       expect(
-        screen.getByText("Gmail, Calendar, and Drive integration"),
+        screen.getByText(
+          "Search and read files from your connected Google Drive",
+        ),
       ).toBeInTheDocument();
       expect(screen.getByText("Spotify")).toBeInTheDocument();
       expect(screen.getByText("Music streaming service")).toBeInTheDocument();
@@ -352,12 +441,34 @@ describe("Integrations", () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      // Available integrations (Google, Spotify, and Weather)
+      // Available integrations (Google Drive, Spotify, and Weather)
       const availableBadges = screen.getAllByText("Available");
-      expect(availableBadges.length).toBeGreaterThanOrEqual(2); // At least Google and Spotify
+      expect(availableBadges.length).toBeGreaterThanOrEqual(2); // At least Google Drive and Spotify
 
       // Connected integration
       expect(screen.getByText("Connected")).toBeInTheDocument(); // Plex
+    });
+  });
+
+  it("shows OAuth status errors without client-config wording", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: false,
+      status_error: "Requester binding failed.",
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Status error: Requester binding failed."),
+      ).toBeInTheDocument();
+      expect(screen.getByText("Status error")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Retry status" }),
+      ).toBeInTheDocument();
+      expect(screen.queryByText("Needs client config")).not.toBeInTheDocument();
     });
   });
 
@@ -365,7 +476,7 @@ describe("Integrations", () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      expect(screen.getByText("Google Services")).toBeInTheDocument();
+      expect(screen.getByText("Google Drive")).toBeInTheDocument();
     });
 
     const searchInput = screen.getByPlaceholderText("Search tools...");
@@ -373,7 +484,7 @@ describe("Integrations", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Spotify")).toBeInTheDocument();
-      expect(screen.queryByText("Google Services")).not.toBeInTheDocument();
+      expect(screen.queryByText("Google Drive")).not.toBeInTheDocument();
       expect(screen.queryByText("Plex")).not.toBeInTheDocument();
     });
   });
@@ -390,7 +501,7 @@ describe("Integrations", () => {
     fireEvent.click(availableButton);
 
     await waitFor(() => {
-      expect(screen.getByText("Google Services")).toBeInTheDocument(); // Available
+      expect(screen.getByText("Google Drive")).toBeInTheDocument(); // Available
     });
   });
 
@@ -440,7 +551,7 @@ describe("Integrations", () => {
 
     // Wait for initial render
     await waitFor(() => {
-      expect(screen.getByText("Google Services")).toBeInTheDocument();
+      expect(screen.getByText("Google Drive")).toBeInTheDocument();
       expect(screen.getByText("Spotify")).toBeInTheDocument();
     });
 
@@ -459,7 +570,7 @@ describe("Integrations", () => {
     // But the elements might still be in the DOM, just hidden
     // So let's check for visibility instead
     const googleElement = screen.queryByText(
-      "Gmail, Calendar, and Drive integration",
+      "Search and read files from your connected Google Drive",
     );
     if (googleElement) {
       // Check if it's hidden (parent tab panel might be hidden)
@@ -474,10 +585,6 @@ describe("Integrations", () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      // Special setup type
-      const setupButtons = screen.getAllByRole("button", { name: /Setup/ });
-      expect(setupButtons.length).toBeGreaterThan(0);
-
       // OAuth type
       const connectButtons = screen.getAllByRole("button", { name: /Connect/ });
       expect(connectButtons.length).toBeGreaterThan(0);
@@ -507,27 +614,6 @@ describe("Integrations", () => {
       await waitFor(() => {
         // Should show the Enhanced Config Dialog
         expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
-      });
-    }
-  });
-
-  it("should open dialog for integrations with ConfigComponent", async () => {
-    render(<Integrations />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Google Services")).toBeInTheDocument();
-    });
-
-    // Find and click the Google Setup button
-    const googleCard = screen.getByText("Google Services").closest(".h-full");
-    const setupButton = googleCard?.querySelector("button");
-
-    if (setupButton) {
-      fireEvent.click(setupButton);
-
-      await waitFor(() => {
-        expect(screen.getByText("Google Services Setup")).toBeInTheDocument();
-        expect(screen.getByText("Google Config Component")).toBeInTheDocument();
       });
     }
   });
@@ -795,14 +881,12 @@ describe("Integrations", () => {
     });
 
     expect(
-      screen.getByText(
-        /google services, home assistant, spotify, gmail, google calendar, and google sheets/i,
-      ),
+      screen.getByText(/home assistant and spotify remain shared-only/i),
     ).toBeInTheDocument();
     expect(
       screen.getByText("worker_scope=shared", { selector: "code" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Google Services")).not.toBeInTheDocument();
+    expect(screen.getByText("Google Drive")).toBeInTheDocument();
     expect(screen.queryByText("Spotify")).not.toBeInTheDocument();
     expect(screen.queryByText("Weather")).toBeInTheDocument();
     expect(
@@ -867,10 +951,243 @@ describe("Integrations", () => {
       ).toBeInTheDocument();
     });
 
-    expect(screen.queryByText("Google Services")).not.toBeInTheDocument();
+    expect(screen.getByText("Google Drive")).toBeInTheDocument();
     expect(screen.queryByText("Spotify")).not.toBeInTheDocument();
     expect(screen.queryByText("Weather")).not.toBeInTheDocument();
     expect(screen.getByText("Private Mail")).toBeInTheDocument();
+  });
+
+  it("allows scoped OAuth providers to connect for private agents", async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: "mind",
+          display_name: "Private Agent",
+          role: "test",
+          tools: ["google_drive"],
+          skills: [],
+          instructions: [],
+          rooms: ["personal"],
+          private: {
+            per: "user",
+          },
+        },
+      ],
+      agentPoliciesByAgent: {
+        mind: makeAgentPolicy("mind", {
+          is_private: true,
+          effective_execution_scope: "user",
+          scope_label: "private.per=user",
+          scope_source: "private.per",
+          dashboard_credentials_supported: false,
+          private_workspace_enabled: true,
+        }),
+      },
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole("combobox");
+    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
+
+    await waitFor(() => {
+      expect(screen.getByText("Private Agent")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Private Agent"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Google Drive")).toBeInTheDocument();
+    });
+
+    const driveCard = screen.getByText("Google Drive").closest(".h-full");
+    expect(driveCard).toBeInstanceOf(HTMLElement);
+    fireEvent.click(
+      within(driveCard as HTMLElement).getByRole("button", {
+        name: /connect/i,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(mockGoogleDriveOnAction).toHaveBeenCalledTimes(1);
+    });
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Shared-only dashboard configuration",
+      }),
+    );
+  });
+
+  it("opens Google Drive tool configuration from the OAuth provider card", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValue({
+      status: "connected",
+      connected: true,
+    });
+    const googleDriveTools = [
+      ...mockTools,
+      {
+        name: "google_drive",
+        display_name: "Google Drive",
+        description: "Search and read files from Google Drive",
+        icon: "SiGoogledrive",
+        icon_color: "text-green-600",
+        category: "productivity",
+        status: "available",
+        setup_type: "oauth",
+        auth_provider: "google_drive",
+        config_fields: [
+          {
+            name: "max_read_size",
+            label: "Max Read Size",
+            type: "number",
+            required: false,
+            default: 10485760,
+            description: "Maximum file size to read in bytes.",
+          },
+        ],
+        helper_text: null,
+        docs_url: null,
+        dependencies: null,
+      },
+    ];
+    mockUseTools.mockImplementation(() => ({
+      tools: googleDriveTools,
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    }));
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Google Drive")).toBeInTheDocument();
+    });
+
+    const driveCard = screen.getByText("Google Drive").closest(".h-full");
+    expect(driveCard).toBeInstanceOf(HTMLElement);
+    const editButton = await waitFor(() => {
+      const button = within(driveCard as HTMLElement).getByRole("button", {
+        name: /edit/i,
+      });
+      expect(button).not.toBeDisabled();
+      return button;
+    });
+    fireEvent.click(editButton);
+
+    await waitFor(() => {
+      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+    });
+    expect(mockGoogleDriveOnAction).not.toHaveBeenCalled();
+  });
+
+  it("opens Gmail OAuth provider configuration using the Gmail tool service", async () => {
+    mockGoogleGmailLoadStatus.mockResolvedValue({
+      status: "connected",
+      connected: true,
+    });
+    const gmailTools = [
+      ...mockTools,
+      {
+        name: "gmail",
+        display_name: "Gmail",
+        description: "Read and manage Gmail emails",
+        icon: "SiGmail",
+        icon_color: "text-red-500",
+        category: "email",
+        status: "available",
+        setup_type: "oauth",
+        auth_provider: "google_gmail",
+        config_fields: [
+          {
+            name: "max_results",
+            label: "Max Results",
+            type: "number",
+            required: false,
+            default: 10,
+            description: "Maximum emails to return.",
+          },
+        ],
+        helper_text: null,
+        docs_url: null,
+        dependencies: null,
+      },
+    ];
+    mockUseTools.mockImplementation(() => ({
+      tools: gmailTools,
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    }));
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Gmail")).toBeInTheDocument();
+    });
+
+    const gmailCard = screen.getByText("Gmail").closest(".h-full");
+    expect(gmailCard).toBeInstanceOf(HTMLElement);
+    const editButton = await waitFor(() => {
+      const button = within(gmailCard as HTMLElement).getByRole("button", {
+        name: /edit/i,
+      });
+      expect(button).not.toBeDisabled();
+      return button;
+    });
+    fireEvent.click(editButton);
+
+    await waitFor(() => {
+      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+      expect(screen.getByText("Service: gmail")).toBeInTheDocument();
+    });
+    expect(mockGoogleGmailOnAction).not.toHaveBeenCalled();
+  });
+
+  it("connects plugin OAuth providers discovered from backend tool metadata", async () => {
+    const pluginTools = [
+      {
+        name: "acme_drive",
+        display_name: "Acme Drive",
+        description: "Search Acme Drive files",
+        icon: "AcmeIcon",
+        icon_color: "text-cyan-600",
+        category: "productivity",
+        status: "requires_config",
+        setup_type: "oauth",
+        auth_provider: "acme_drive",
+        config_fields: null,
+        helper_text: null,
+        docs_url: null,
+        dependencies: null,
+      },
+    ];
+    mockUseTools.mockImplementation(() => ({
+      tools: pluginTools,
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    }));
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Acme Drive")).toBeInTheDocument();
+    });
+
+    const acmeCard = screen.getByText("Acme Drive").closest(".h-full");
+    expect(acmeCard).toBeInstanceOf(HTMLElement);
+    fireEvent.click(
+      within(acmeCard as HTMLElement).getByRole("button", {
+        name: /connect/i,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(mockGenericOAuthOnAction).toHaveBeenCalledWith("acme_drive");
+    });
+    expect(
+      screen.queryByText(/Connect acme_drive first/i),
+    ).not.toBeInTheDocument();
   });
 
   it("ignores stale shared-scope reloads after switching scope mid-action", async () => {

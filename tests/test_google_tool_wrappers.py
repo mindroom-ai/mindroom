@@ -2,27 +2,23 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
 
 import pytest
 
-import mindroom.custom_tools._google_oauth as google_oauth_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
+from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
+from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.worker_routing import resolve_worker_target
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def _default_scope_urls(tool_class: type[Any]) -> list[str]:
-    default_scopes = tool_class.DEFAULT_SCOPES
-    return list(default_scopes.values()) if isinstance(default_scopes, dict) else default_scopes
 
 
 @pytest.fixture
@@ -33,30 +29,44 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path,
-        process_env={},
+        process_env={
+            "GOOGLE_CLIENT_ID": "client-id",
+            "GOOGLE_CLIENT_SECRET": "client-secret",
+        },
     )
 
 
 @pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
-@pytest.mark.parametrize("tool_class", [GmailTools, GoogleCalendarTools, GoogleSheetsTools])
-def test_google_wrappers_reject_isolating_worker_scopes(
+@pytest.mark.parametrize("tool_class", [GmailTools, GoogleCalendarTools, GoogleDriveTools, GoogleSheetsTools])
+def test_google_wrappers_allow_isolating_worker_scopes(
     worker_scope: str,
     tool_class: type[Any],
     runtime_paths: RuntimePaths,
+    tmp_path: Path,
 ) -> None:
-    """Google-backed tools are intentionally unsupported for isolating worker scopes."""
-    with pytest.raises(ValueError, match="worker_scope=shared"):
-        tool_class(
-            runtime_paths=runtime_paths,
-            credentials_manager=MagicMock(),
-            worker_target=resolve_worker_target(
-                worker_scope,
-                "general",
-                execution_identity=None,
-                tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-                account_id=runtime_paths.env_value("ACCOUNT_ID"),
-            ),
-        )
+    """Google OAuth-backed tools can use requester-isolated credential scopes."""
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    tool = tool_class(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=resolve_worker_target(
+            worker_scope,
+            "general",
+            execution_identity=identity,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        ),
+    )
+
+    assert isinstance(tool, tool_class)
 
 
 @pytest.mark.parametrize(
@@ -64,27 +74,28 @@ def test_google_wrappers_reject_isolating_worker_scopes(
     [
         (
             GoogleCalendarTools,
-            _default_scope_urls(GoogleCalendarTools),
+            list(GoogleCalendarTools._oauth_provider.scopes),
         ),
         (
             GoogleSheetsTools,
-            _default_scope_urls(GoogleSheetsTools),
+            list(GoogleSheetsTools._oauth_provider.scopes),
         ),
     ],
 )
-def test_google_wrapper_build_credentials_uses_scope_urls_for_default_scopes(
+def test_google_wrapper_build_credentials_uses_provider_scopes(
     monkeypatch: pytest.MonkeyPatch,
     tool_class: type[Any],
     expected_scopes: list[str],
     runtime_paths: RuntimePaths,
 ) -> None:
-    """Agno DEFAULT_SCOPES should normalize to a list of scope URLs."""
-    monkeypatch.setattr(google_oauth_module, "ensure_tool_deps", lambda *_args, **_kwargs: None)
+    """Stored tokens without a scope list should fall back to the provider scopes."""
+    monkeypatch.setattr("mindroom.oauth.client.ensure_tool_deps", lambda *_args, **_kwargs: None)
 
     tool = object.__new__(tool_class)
-    tool._oauth_tool_name = "google"
+    tool._oauth_tool_name = tool_class._oauth_tool_name
+    tool._oauth_provider = tool_class._oauth_provider
     tool._runtime_paths = runtime_paths
-    creds = tool._build_credentials(
+    creds = tool._credentials_from_token_data(
         {
             "token": "token",
             "refresh_token": "refresh",
@@ -97,24 +108,32 @@ def test_google_wrapper_build_credentials_uses_scope_urls_for_default_scopes(
     assert creds.scopes == expected_scopes
 
 
-@pytest.mark.parametrize("tool_name", ["gmail", "google_calendar", "google_sheets"])
-def test_google_wrappers_keep_shared_credentials_on_internal_reload_with_default_worker_allowlist(
+@pytest.mark.parametrize(
+    ("tool_name", "credential_service"),
+    [
+        ("gmail", "google_gmail_oauth"),
+        ("google_calendar", "google_calendar_oauth"),
+        ("google_drive", "google_drive_oauth"),
+        ("google_sheets", "google_sheets_oauth"),
+    ],
+)
+def test_google_wrappers_load_provider_oauth_credentials(
     tool_name: str,
+    credential_service: str,
     runtime_paths: RuntimePaths,
     tmp_path: Path,
 ) -> None:
-    """Shared-scope Google wrappers should keep shared credentials without worker mirroring config."""
+    """Google wrappers should load each provider's OAuth token service."""
     credentials_manager = CredentialsManager(base_path=tmp_path / "credentials")
     credentials_manager.save_credentials(
-        "google",
+        credential_service,
         {
             "token": "token",
             "refresh_token": "refresh",
             "token_uri": "https://oauth2.googleapis.com/token",
             "client_id": "client-id",
-            "client_secret": "client-secret",
             "scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
-            "_source": "ui",
+            "_source": "oauth",
         },
     )
 
@@ -122,14 +141,135 @@ def test_google_wrappers_keep_shared_credentials_on_internal_reload_with_default
         tool_name,
         runtime_paths,
         credentials_manager=credentials_manager,
-        worker_target=resolve_worker_target(
-            "shared",
-            "general",
-            execution_identity=None,
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
-        ),
+        worker_target=None,
     )
 
-    assert isinstance(tool, (GmailTools, GoogleCalendarTools, GoogleSheetsTools))
+    assert isinstance(tool, (GmailTools, GoogleCalendarTools, GoogleDriveTools, GoogleSheetsTools))
     assert tool._load_token_data() is not None
+
+
+def test_google_wrapper_skips_stored_oauth_when_service_account_env_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Service-account deployments should not load stored user OAuth tokens at construction."""
+    runtime_paths = replace(
+        runtime_paths,
+        process_env={
+            **runtime_paths.process_env,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "service-account.json"),
+        },
+    )
+
+    def fail_load_stored_credentials(_self: ScopedOAuthClientMixin) -> None:
+        raise AssertionError
+
+    monkeypatch.setattr(
+        ScopedOAuthClientMixin,
+        "_load_stored_credentials",
+        fail_load_stored_credentials,
+    )
+
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+    )
+
+    assert tool.creds is None
+
+
+def test_google_wrapper_applies_env_file_service_account_to_upstream_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Service-account values from RuntimePaths must be visible to Agno auth."""
+    service_account_path = tmp_path / "service-account.json"
+    runtime_paths = replace(
+        runtime_paths,
+        env_file_values={
+            **runtime_paths.env_file_values,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": str(service_account_path),
+            "GOOGLE_DELEGATED_USER": "alice@example.com",
+        },
+    )
+
+    def fail_load_stored_credentials(_self: ScopedOAuthClientMixin) -> None:
+        raise AssertionError
+
+    monkeypatch.setattr(
+        ScopedOAuthClientMixin,
+        "_load_stored_credentials",
+        fail_load_stored_credentials,
+    )
+
+    tool = GmailTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+    )
+
+    assert tool.creds is None
+    assert tool.service_account_path == str(service_account_path)
+    assert tool.delegated_user == "alice@example.com"
+    assert tool._should_fallback_to_original_auth() is True
+
+
+def test_google_wrapper_service_account_fallback_wins_over_valid_cached_oauth(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """A valid cached OAuth credential must not bypass service-account auth."""
+
+    class ValidOAuthCreds:
+        valid = True
+
+    class ValidServiceAccountCreds:
+        valid = True
+
+    tool = object.__new__(GoogleDriveTools)
+    tool._runtime_paths = runtime_paths
+    tool._provided_creds = False
+    tool._defer_to_original_auth = True
+    tool._original_auth_completed = False
+    tool.service_account_path = str(tmp_path / "service-account.json")
+    tool.creds = ValidOAuthCreds()
+    calls: list[str] = []
+
+    def original_auth() -> None:
+        calls.append("original")
+        tool.creds = ValidServiceAccountCreds()
+
+    tool._original_auth = original_auth
+
+    assert tool._ensure_structured_auth() is None
+    assert calls == ["original"]
+    assert tool._ensure_structured_auth() is None
+    assert calls == ["original"]
+
+
+def test_google_wrapper_valid_provided_creds_skip_service_account_fallback(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Explicit valid credentials should keep Agno's no-auth constructor contract."""
+
+    class ValidProvidedCreds:
+        valid = True
+
+    tool = object.__new__(GoogleDriveTools)
+    tool._runtime_paths = runtime_paths
+    tool._provided_creds = True
+    tool._defer_to_original_auth = True
+    tool._original_auth_completed = False
+    tool.service_account_path = str(tmp_path / "service-account.json")
+    tool.creds = ValidProvidedCreds()
+    calls: list[str] = []
+
+    def original_auth() -> None:
+        calls.append("original")
+
+    tool._original_auth = original_auth
+
+    assert tool._ensure_structured_auth() is None
+    assert calls == []

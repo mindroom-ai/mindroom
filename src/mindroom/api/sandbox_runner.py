@@ -31,6 +31,7 @@ from mindroom.attachments import _normalize_attachment_id
 from mindroom.config.main import Config, _normalized_config_data, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -477,6 +478,22 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
+async def _run_toolkit_entrypoint(
+    toolkit: Toolkit,
+    entrypoint: Callable[..., object],
+    args: list[Any],
+    kwargs: dict[str, Any],
+) -> object:
+    if not toolkit.requires_connect:
+        return await _maybe_await(entrypoint(*args, **kwargs))
+
+    await _maybe_await(toolkit.connect())
+    try:
+        return await _maybe_await(entrypoint(*args, **kwargs))
+    finally:
+        await _maybe_await(toolkit.close())
+
+
 def _runtime_paths_for_runner_agent_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Return runtime paths rooted at the shared storage visible to this runner."""
     shared_storage_root = sandbox_exec.runner_storage_root(runtime_paths)
@@ -871,6 +888,37 @@ def _workspace_env_overlay_base_env(
     return base_env
 
 
+def _uses_trusted_child_execution_env(
+    request: SandboxRunnerExecuteRequest,
+    *,
+    apply_workspace_env_hook: bool,
+) -> bool:
+    """Return whether a subprocess child should trust the parent's execution env."""
+    return (
+        not apply_workspace_env_hook
+        and bool(request.execution_env)
+        and request.tool_name in sandbox_exec.EXECUTION_ENV_TOOL_NAMES
+    )
+
+
+def _prepared_shell_execution_env(
+    request: SandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+) -> dict[str, str] | None:
+    """Return the worker shell env when shell execution is bound to a prepared worker."""
+    if request.tool_name != "shell" or prepared is None:
+        return None
+    worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
+    worker_execution_env.update(
+        constants.shell_extra_env_values(
+            extra_env_passthrough=request.extra_env_passthrough,
+            process_env=request.execution_env or runtime_paths.process_env,
+        ),
+    )
+    return worker_execution_env
+
+
 async def _execute_request_inprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
@@ -881,7 +929,19 @@ async def _execute_request_inprocess(
     apply_workspace_home_contract: bool = True,
     apply_workspace_env_hook: bool = True,
 ) -> SandboxRunnerExecuteResponse:
-    execution_env = sandbox_exec.request_execution_env(request.tool_name, request.execution_env, runtime_paths)
+    trusted_child_execution_env = _uses_trusted_child_execution_env(
+        request,
+        apply_workspace_env_hook=apply_workspace_env_hook,
+    )
+    if trusted_child_execution_env:
+        execution_env = dict(request.execution_env)
+    else:
+        execution_env = sandbox_exec.request_execution_env(
+            request.tool_name,
+            request.execution_env,
+            runtime_paths,
+            extra_env_passthrough=request.extra_env_passthrough,
+        )
     try:
         prepared = sandbox_worker_prep.resolve_prepared_worker_request(
             worker_key=request.worker_key,
@@ -897,10 +957,7 @@ async def _execute_request_inprocess(
             error=str(exc),
             failure_kind=("worker" if exc.failure_kind == "worker" else "tool"),
         )
-    if request.tool_name == "shell" and prepared is not None:
-        worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
-        worker_execution_env.update(execution_env)
-        execution_env = worker_execution_env
+    execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared) or execution_env
     _workspace_home, trusted_overlay, env_failure = _build_request_execution_env(
         request,
         prepared,
@@ -912,11 +969,20 @@ async def _execute_request_inprocess(
     )
     if env_failure is not None:
         return env_failure
+    trusted_env_overlay = (
+        _trusted_workspace_overlay_for_runtime_paths(
+            request.execution_env,
+            _protected_execution_env_names(workspace_home=_workspace_home, prepared=prepared),
+        )
+        if trusted_child_execution_env
+        else trusted_overlay
+    )
     runtime_overrides = _request_runtime_overrides(request, prepared)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
         execution_env,
-        trusted_env_overlay=trusted_overlay,
+        include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
+        trusted_env_overlay=trusted_env_overlay,
     )
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
@@ -942,31 +1008,41 @@ async def _execute_request_inprocess(
             execution_identity,
         ),
     ):
-        toolkit, entrypoint = _resolve_entrypoint(
-            runtime_paths=effective_runtime_paths,
-            config=config,
-            tool_name=request.tool_name,
-            function_name=request.function_name,
-            execution_identity=execution_identity,
-            credential_overrides=request.credential_overrides or None,
-            tool_config_overrides=request.tool_config_overrides or None,
-            tool_init_overrides=request.tool_init_overrides or None,
-            runtime_overrides=runtime_overrides,
-            worker_scope=request.worker_scope,
-            routing_agent_name=request.routing_agent_name,
-            private_agent_names=_request_private_agent_names(request),
-            tool_output_workspace_root=tool_output_workspace_root,
-        )
+        try:
+            toolkit, entrypoint = _resolve_entrypoint(
+                runtime_paths=effective_runtime_paths,
+                config=config,
+                tool_name=request.tool_name,
+                function_name=request.function_name,
+                execution_identity=execution_identity,
+                credential_overrides=request.credential_overrides or None,
+                tool_config_overrides=request.tool_config_overrides or None,
+                tool_init_overrides=request.tool_init_overrides or None,
+                runtime_overrides=runtime_overrides,
+                worker_scope=request.worker_scope,
+                routing_agent_name=request.routing_agent_name,
+                private_agent_names=_request_private_agent_names(request),
+                tool_output_workspace_root=tool_output_workspace_root,
+            )
+        except OAuthConnectionRequired as exc:
+            logger.info(
+                "sandbox_tool_oauth_connection_required",
+                tool_name=request.tool_name,
+                function_name=request.function_name,
+                provider_id=exc.provider_id,
+            )
+            return SandboxRunnerExecuteResponse(ok=True, result=_oauth_connection_required_result(exc))
 
         try:
-            if toolkit.requires_connect:
-                await _maybe_await(toolkit.connect())
-                try:
-                    result = await _maybe_await(entrypoint(*request.args, **kwargs))
-                finally:
-                    await _maybe_await(toolkit.close())
-            else:
-                result = await _maybe_await(entrypoint(*request.args, **kwargs))
+            result = await _run_toolkit_entrypoint(toolkit, entrypoint, request.args, kwargs)
+        except OAuthConnectionRequired as exc:
+            logger.info(
+                "sandbox_tool_oauth_connection_required",
+                tool_name=request.tool_name,
+                function_name=request.function_name,
+                provider_id=exc.provider_id,
+            )
+            return SandboxRunnerExecuteResponse(ok=True, result=_oauth_connection_required_result(exc))
         except Exception as exc:
             logger.warning(
                 "sandbox_tool_execution_failed",
@@ -981,6 +1057,16 @@ async def _execute_request_inprocess(
             )
 
     return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
+
+
+def _oauth_connection_required_result(exc: OAuthConnectionRequired) -> dict[str, object]:
+    """Serialize OAuthConnectionRequired as the same structured tool result used in-process."""
+    return {
+        "error": str(exc),
+        "oauth_connection_required": True,
+        "provider": exc.provider_id,
+        "connect_url": exc.connect_url,
+    }
 
 
 def _subprocess_failure_response(
@@ -1025,7 +1111,12 @@ def _execute_request_subprocess_sync(
     runner_token: str | None = None,
     apply_workspace_env_hook: bool = True,
 ) -> SandboxRunnerExecuteResponse:
-    execution_env = sandbox_exec.request_execution_env(request.tool_name, request.execution_env, runtime_paths)
+    execution_env = sandbox_exec.request_execution_env(
+        request.tool_name,
+        request.execution_env,
+        runtime_paths,
+        extra_env_passthrough=request.extra_env_passthrough,
+    )
     try:
         prepared = sandbox_worker_prep.resolve_prepared_worker_request(
             worker_key=request.worker_key,
@@ -1065,6 +1156,7 @@ def _execute_request_subprocess_sync(
         runtime_paths,
         execution_env,
         trusted_env_overlay=trusted_overlay,
+        include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
     )
     subprocess_request = request.model_copy(update={"execution_env": execution_env})
     envelope = sandbox_protocol.serialize_subprocess_envelope(

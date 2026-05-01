@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.gmail import GmailTools as AgnoGmailTools
 
-from mindroom.custom_tools._google_oauth import ScopedGoogleOAuthMixin
 from mindroom.logging_config import get_logger
+from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -21,11 +22,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class GmailTools(ScopedGoogleOAuthMixin, AgnoGmailTools):
+class GmailTools(ScopedOAuthClientMixin, AgnoGmailTools):
     """Gmail tools wrapper that uses MindRoom's credential management."""
 
+    _oauth_provider = google_gmail_oauth_provider()
     _oauth_tool_name = "gmail"
-    _oauth_log_name = "Gmail"
 
     def __init__(
         self,
@@ -46,10 +47,12 @@ class GmailTools(ScopedGoogleOAuthMixin, AgnoGmailTools):
             raise RuntimeError(msg)
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
-        creds = self._initialize_google_oauth(
+        defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
+        creds = self._initialize_oauth_client(
             worker_target=worker_target,
             provided_creds=provided_creds,
             logger=logger,
+            defer_to_original_auth=defer_to_original_auth,
         )
 
         # Pass credentials to parent class
@@ -57,3 +60,8 @@ class GmailTools(ScopedGoogleOAuthMixin, AgnoGmailTools):
 
         # Store original auth method for fallback
         self._set_original_auth(AgnoGmailTools._auth)
+        self._wrap_oauth_function_entrypoints()
+
+    def _should_fallback_to_original_auth(self) -> bool:
+        """Prefer the upstream auth path when a service account is configured."""
+        return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))

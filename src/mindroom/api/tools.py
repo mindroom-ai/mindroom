@@ -16,13 +16,14 @@ from mindroom.api.credentials import (
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
-from mindroom.api.google_tools_helper import check_google_tool_configured
 from mindroom.config.main import Config
 from mindroom.credentials import (
     get_runtime_credentials_manager,
     load_scoped_credentials,
     load_worker_grantable_shared_credentials,
 )
+from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.service import oauth_credentials_usable, oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import export_tools_metadata, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
@@ -34,6 +35,7 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
+    from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
@@ -56,6 +58,9 @@ class _ResolvedToolAvailabilityContext:
     credentials_manager: CredentialsManager
     worker_target: ResolvedWorkerTarget | None
     allowed_shared_services: frozenset[str] | None
+    auth_provider_credential_services: dict[str, str]
+    oauth_providers: dict[str, OAuthProvider]
+    runtime_paths: RuntimePaths
 
 
 def _effective_allowed_shared_services(
@@ -92,6 +97,25 @@ def _check_standard_tool_configured(tool: dict[str, Any], credentials: dict[str,
     # Check if all required fields are present
     required_fields = [field["name"] for field in tool.get("config_fields", []) if field.get("required", True)]
     return all(field in credentials for field in required_fields)
+
+
+def _check_auth_provider_configured(
+    tool: dict[str, Any],
+    credentials: dict[str, Any] | None,
+    *,
+    provider: OAuthProvider | None,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether a delegated auth provider has usable credentials for one tool."""
+    if provider is None:
+        if not credentials:
+            return False
+        return _check_standard_tool_configured(tool, credentials)
+    if oauth_provider_service_account_configured(provider, runtime_paths):
+        return True
+    if not credentials:
+        return False
+    return oauth_credentials_usable(provider, runtime_paths, credentials)
 
 
 def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
@@ -208,6 +232,7 @@ def _resolve_tool_availability_context(
         if status_authoritative and (scope_request.agent_name is not None or execution_scope is not None)
         else None
     )
+    oauth_providers = load_oauth_providers(config, runtime_paths)
     return _ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
         dashboard_configuration_supported=status_authoritative,
@@ -215,6 +240,11 @@ def _resolve_tool_availability_context(
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,
         allowed_shared_services=(config.get_worker_grantable_credentials() if execution_scope is not None else None),
+        auth_provider_credential_services={
+            provider_id: provider.credential_service for provider_id, provider in oauth_providers.items()
+        },
+        oauth_providers=oauth_providers,
+        runtime_paths=runtime_paths,
     )
 
 
@@ -255,10 +285,13 @@ def _update_tools_statuses(
 
         auth_provider = tool.get("auth_provider")
         if auth_provider:
-            provider_creds = get_credentials(auth_provider)
-            if provider_creds and (
-                (auth_provider == "google" and check_google_tool_configured(tool_name, provider_creds))
-                or auth_provider != "google"
+            credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
+            provider_creds = get_credentials(credential_service)
+            if _check_auth_provider_configured(
+                tool,
+                provider_creds,
+                provider=context.oauth_providers.get(auth_provider),
+                runtime_paths=context.runtime_paths,
             ):
                 tool["status"] = "available"
             continue

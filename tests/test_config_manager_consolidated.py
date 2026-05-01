@@ -1130,13 +1130,13 @@ class TestWorkerGrantableCredentials:
         config_path = tmp_path / "config.yaml"
         Config(
             models={"default": {"provider": "openai", "id": "gpt-4o"}},
-            defaults=DefaultsConfig(worker_grantable_credentials=["openai", "google_oauth_client"]),
+            defaults=DefaultsConfig(worker_grantable_credentials=["openai", "github_private"]),
         ).save_to_yaml(config_path)
 
         reloaded = Config.from_yaml(config_path)
 
-        assert reloaded.defaults.worker_grantable_credentials == ["openai", "google_oauth_client"]
-        assert reloaded.get_worker_grantable_credentials() == frozenset({"openai", "google_oauth_client"})
+        assert reloaded.defaults.worker_grantable_credentials == ["openai", "github_private"]
+        assert reloaded.get_worker_grantable_credentials() == frozenset({"openai", "github_private"})
 
     def test_worker_grantable_credentials_empty_list_denies_all(self) -> None:
         """An explicit empty worker_grantable_credentials list should deny all worker credential mirroring."""
@@ -1150,6 +1150,9 @@ class TestWorkerGrantableCredentials:
             DefaultsConfig(worker_grantable_credentials=["bad name"])
 
     def test_worker_grantable_credentials_reject_google_vertex_adc(self) -> None:
-        """Worker credential mirroring should reject google_vertex_adc until workers support ADC safely."""
+        """Worker credential mirroring should reject Google credentials that must stay local."""
         with pytest.raises(ValidationError, match="google_vertex_adc"):
             DefaultsConfig(worker_grantable_credentials=["google_vertex_adc"])
+
+        with pytest.raises(ValidationError, match="google_oauth_client"):
+            DefaultsConfig(worker_grantable_credentials=["google_oauth_client"])

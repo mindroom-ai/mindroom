@@ -18,6 +18,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
+from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
@@ -1874,6 +1875,66 @@ async def test_reload_plugins_invalidates_helper_modules_under_plugin_root(tmp_p
 
         assert await reloaded.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)[0].callback(None) == "after"
     finally:
+        plugin_module._PLUGIN_CACHE.clear()
+        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
+        plugin_module._MODULE_IMPORT_CACHE.clear()
+        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
+        set_plugin_skill_roots(original_plugin_roots)
+        for module_name in set(sys.modules) - original_modules:
+            if module_name.startswith("mindroom_plugin_"):
+                sys.modules.pop(module_name, None)
+
+
+def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> None:
+    """Plugin reloads should refresh OAuth providers loaded through the registry."""
+    plugin_root = tmp_path / "plugins" / "oauth-reload"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "oauth-reload", "oauth_module": "oauth_provider.py", "skills": []}),
+        encoding="utf-8",
+    )
+    display_path = plugin_root / "display.txt"
+    display_path.write_text("before\n", encoding="utf-8")
+    (plugin_root / "oauth_provider.py").write_text(
+        "from pathlib import Path\n"
+        "from mindroom.oauth import OAuthProvider\n"
+        "\n"
+        "def register_oauth_providers(settings, runtime_paths):\n"
+        "    del settings, runtime_paths\n"
+        "    display_name = Path(__file__).with_name('display.txt').read_text(encoding='utf-8').strip()\n"
+        "    return [OAuthProvider(\n"
+        "        id='plugin_oauth_reload',\n"
+        "        display_name=display_name,\n"
+        "        authorization_url='https://auth.example.test/authorize',\n"
+        "        token_url='https://auth.example.test/token',\n"
+        "        scopes=('plugin.read',),\n"
+        "        credential_service='plugin_oauth_reload',\n"
+        "        client_id_env='PLUGIN_CLIENT_ID',\n"
+        "        client_secret_env='PLUGIN_CLIENT_SECRET',\n"
+        "    )]\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/oauth-reload"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    original_plugin_roots = _get_plugin_skill_roots()
+    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
+    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
+    original_modules = set(sys.modules)
+    try:
+        clear_oauth_provider_cache()
+        initial = load_oauth_providers(config, runtime_paths)
+        assert initial["plugin_oauth_reload"].display_name == "before"
+
+        display_path.write_text("after\n", encoding="utf-8")
+        reload_plugins(config, runtime_paths)
+        reloaded = load_oauth_providers(config, runtime_paths)
+
+        assert reloaded["plugin_oauth_reload"].display_name == "after"
+    finally:
+        clear_oauth_provider_cache()
         plugin_module._PLUGIN_CACHE.clear()
         plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
         plugin_module._MODULE_IMPORT_CACHE.clear()

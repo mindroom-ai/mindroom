@@ -41,6 +41,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | OpenClaw Import | `openclaw.md` | `openclaw/index.md` | `page__openclaw__index.md` |
 | Skills | `skills.md` | `skills/index.md` | `page__skills__index.md` |
 | Plugins | `plugins.md` | `plugins/index.md` | `page__plugins__index.md` |
+| OAuth Framework | `oauth-framework.md` | `oauth-framework/index.md` | `page__oauth-framework__index.md` |
 | Knowledge Bases | `knowledge.md` | `knowledge/index.md` | `page__knowledge__index.md` |
 | Memory System | `memory.md` | `memory/index.md` | `page__memory__index.md` |
 | Voice Messages | `voice.md` | `voice/index.md` | `page__voice__index.md` |

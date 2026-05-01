@@ -115,6 +115,38 @@ _RUNNER_CONTROL_ENV_EXCLUDED_NAMES = frozenset(
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
+_SANDBOX_SHELL_SYSTEM_ENV_NAMES = frozenset(
+    {
+        "CURL_CA_BUNDLE",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LD_LIBRARY_PATH",
+        "NIX_LD",
+        "NIX_LD_LIBRARY_PATH",
+        "NO_PROXY",
+        "PATH",
+        "PIP_CACHE_DIR",
+        "PYTHONPATH",
+        "PYTHONPYCACHEPREFIX",
+        "REQUESTS_CA_BUNDLE",
+        "SHELL",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TERM",
+        "TMPDIR",
+        "USER",
+        "UV_CACHE_DIR",
+        "VIRTUAL_ENV",
+        "XDG_CACHE_HOME",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    },
+)
 
 # Bash bookkeeping vars that change every time printenv runs and are never
 # meaningful overlay output from `.mindroom/worker-env.sh`.
@@ -361,6 +393,16 @@ def _is_isolated_runtime_public_env_name(name: str) -> bool:
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
 
 
+def _is_sandbox_execution_runtime_env_name(name: str) -> bool:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+        return False
+    if is_runtime_database_url_env_name(name):
+        return False
+    if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _ISOLATED_RUNTIME_ENV_EXTRA_KEYS):
+        return False
+    return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
+
+
 def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
     process_env = {
@@ -384,11 +426,10 @@ def serialize_startup_manifest(
     public_runtime: bool = False,
 ) -> dict[str, object]:
     """Return one JSON-compatible startup manifest for sandbox runners."""
-    serialized_runtime = (
-        serialize_public_runtime_paths(runtime_paths) if public_runtime else serialize_runtime_paths(runtime_paths)
-    )
     return {
-        "runtime_paths": serialized_runtime,
+        "runtime_paths": serialize_public_runtime_paths(runtime_paths)
+        if public_runtime
+        else serialize_runtime_paths(runtime_paths),
         "tool_validation_snapshot": dict(tool_validation_snapshot or {}),
     }
 
@@ -541,10 +582,7 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
 
 def _is_known_worker_credential_env_name(name: str) -> bool:
     return name in {
-        *PROVIDER_ENV_KEYS.values(),
         "GOOGLE_APPLICATION_CREDENTIALS",
-        "GOOGLE_CLIENT_ID",
-        "GOOGLE_CLIENT_SECRET",
         "GITHUB_TOKEN",
         *VERTEXAI_CLAUDE_ENV_KEYS,
     }
@@ -587,6 +625,20 @@ def _sandbox_execution_runtime_env_layers(
     runtime_paths: RuntimePaths,
 ) -> tuple[dict[str, str], dict[str, str]]:
     env_file_values = {
+        key: value
+        for key, value in runtime_paths.env_file_values.items()
+        if _is_sandbox_execution_runtime_env_name(key)
+    }
+    process_env = {
+        key: value for key, value in runtime_paths.process_env.items() if _is_sandbox_execution_runtime_env_name(key)
+    }
+    return process_env, env_file_values
+
+
+def _isolated_runtime_env_layers(
+    runtime_paths: RuntimePaths,
+) -> tuple[dict[str, str], dict[str, str]]:
+    env_file_values = {
         key: value for key, value in runtime_paths.env_file_values.items() if _is_isolated_runtime_public_env_name(key)
     }
     process_env = {
@@ -625,6 +677,18 @@ def shell_extra_env_values(
     return cast("Mapping[str, str]", MappingProxyType(selected_env))
 
 
+def sandbox_shell_system_env_values(
+    *,
+    process_env: Mapping[str, str] | None = None,
+) -> Mapping[str, str]:
+    """Return the non-secret system env shell commands may receive by default."""
+    source_env = os.environ if process_env is None else process_env
+    return cast(
+        "Mapping[str, str]",
+        MappingProxyType({key: value for key, value in source_env.items() if key in _SANDBOX_SHELL_SYSTEM_ENV_NAMES}),
+    )
+
+
 def execution_runtime_env_values(
     runtime_paths: RuntimePaths,
 ) -> Mapping[str, str]:
@@ -655,7 +719,7 @@ def sandbox_execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping
 
 def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Return one runtime view filtered for isolated worker execution."""
-    process_env, env_file_values = _sandbox_execution_runtime_env_layers(runtime_paths)
+    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     return RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
@@ -684,19 +748,19 @@ def shell_execution_runtime_env_values(
 
 
 def sandbox_shell_execution_runtime_env_values(
-    runtime_paths: RuntimePaths,
+    _runtime_paths: RuntimePaths,
     *,
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied shell execution."""
-    merged_env = dict(
+    merged_env = dict(sandbox_shell_system_env_values(process_env=process_env))
+    merged_env.update(
         shell_extra_env_values(
             extra_env_passthrough=extra_env_passthrough,
             process_env=process_env,
         ),
     )
-    merged_env.update(sandbox_execution_runtime_env_values(runtime_paths))
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
@@ -945,7 +1009,16 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
 DEFAULT_WORKER_GRANTABLE_CREDENTIALS = frozenset()
 # Some credentials are intentionally unsupported in isolated workers because they rely on
 # host-local files or ambient env that the sandbox contract now denies by default.
-UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset({"google_vertex_adc"})
+UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
+    {
+        "google_vertex_adc",
+        "google_oauth_client",
+        "google_calendar_oauth",
+        "google_drive_oauth",
+        "google_gmail_oauth",
+        "google_sheets_oauth",
+    },
+)
 VERTEXAI_CLAUDE_ENV_KEYS: tuple[str, str] = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
 
 _CHROMADB_PY314_PATCHED = False

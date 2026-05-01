@@ -6,6 +6,7 @@ used by both agents and the dashboard interface.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -13,7 +14,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import worker_root_path
+from mindroom.tool_system.worker_routing import (
+    service_uses_local_shared_credentials,
+    service_uses_primary_runtime_scoped_credentials,
+    worker_root_path,
+)
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -21,6 +26,7 @@ if TYPE_CHECKING:
 
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 _WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
+_PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 SHARED_CREDENTIALS_PATH_ENV = "MINDROOM_SHARED_CREDENTIALS_PATH"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
@@ -38,6 +44,12 @@ def validate_service_name(service: str) -> str:
         msg = "Service name can only include letters, numbers, colon, underscore, and hyphen"
         raise ValueError(msg)
     return normalized
+
+
+def _scoped_credentials_dir_part(value: str) -> str:
+    safe_prefix = re.sub(r"[^a-zA-Z0-9._-]+", "_", value).strip("._-")[:80]
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"{safe_prefix or 'scope'}-{digest}"
 
 
 class CredentialsManager:
@@ -92,6 +104,13 @@ class CredentialsManager:
             current_worker_key=worker_key,
             current_worker_root=worker_root,
         )
+
+    def for_primary_runtime_scope(self, requester_id: str, agent_name: str | None) -> CredentialsManager:
+        """Return a primary-runtime-only scoped credentials manager."""
+        requester_dir = _scoped_credentials_dir_part(requester_id)
+        agent_dir = _scoped_credentials_dir_part(agent_name or "_shared")
+        scoped_path = self.storage_root / _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME / requester_dir / agent_dir
+        return CredentialsManager(base_path=scoped_path, shared_base_path=scoped_path)
 
     def shared_manager(self) -> CredentialsManager:
         """Return a manager rooted in the shared credential layer for this execution context."""
@@ -448,6 +467,22 @@ def sync_shared_credentials_to_worker(
         worker_shared_manager.delete_credentials(service)
 
 
+def _primary_runtime_scoped_credentials_manager(
+    service: str,
+    *,
+    manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget,
+) -> CredentialsManager | None:
+    if not service_uses_primary_runtime_scoped_credentials(service, worker_target.worker_scope):
+        return None
+    identity = worker_target.execution_identity
+    if identity is None or identity.requester_id is None:
+        msg = f"Primary-runtime scoped credentials for {service} require a requester identity"
+        raise ValueError(msg)
+    agent_name = worker_target.routing_agent_name if worker_target.worker_scope == "user_agent" else None
+    return manager.for_primary_runtime_scope(identity.requester_id, agent_name)
+
+
 def load_scoped_credentials(
     service: str,
     *,
@@ -467,14 +502,30 @@ def load_scoped_credentials(
             )
         return shared_manager.load_credentials(service)
 
-    worker_manager = _resolve_worker_credentials_manager(
-        credentials_manager=manager,
+    primary_runtime_manager = _primary_runtime_scoped_credentials_manager(
+        service,
+        manager=manager,
         worker_target=worker_target,
+    )
+    uses_local_shared_credentials = service_uses_local_shared_credentials(service, worker_target.worker_scope)
+    worker_manager = (
+        _resolve_worker_credentials_manager(
+            credentials_manager=manager,
+            worker_target=worker_target,
+        )
+        if primary_runtime_manager is None and not uses_local_shared_credentials
+        else None
     )
     resolved_allowed_shared_services = allowed_shared_services
     if resolved_allowed_shared_services is None and manager.shared_base_path == manager.base_path:
         resolved_allowed_shared_services = frozenset()
-    if manager.shared_base_path != manager.base_path or resolved_allowed_shared_services is None:
+    if primary_runtime_manager is not None:
+        shared_credentials = None
+    elif (
+        uses_local_shared_credentials
+        or manager.shared_base_path != manager.base_path
+        or resolved_allowed_shared_services is None
+    ):
         shared_credentials = shared_manager.load_credentials(service)
     else:
         shared_credentials = load_worker_grantable_shared_credentials(
@@ -482,7 +533,8 @@ def load_scoped_credentials(
             shared_manager=shared_manager,
             allowed_services=resolved_allowed_shared_services,
         )
-    worker_credentials = worker_manager.load_credentials(service) if worker_manager is not None else None
+    scoped_manager = primary_runtime_manager or worker_manager
+    worker_credentials = scoped_manager.load_credentials(service) if scoped_manager is not None else None
     return _merge_credential_layers(shared_credentials, worker_credentials)
 
 
@@ -500,9 +552,56 @@ def save_scoped_credentials(
         target_manager.save_credentials(service, credentials)
         return
 
+    if service_uses_local_shared_credentials(service, worker_target.worker_scope):
+        manager.shared_manager().save_credentials(service, credentials)
+        return
+
+    primary_runtime_manager = _primary_runtime_scoped_credentials_manager(
+        service,
+        manager=manager,
+        worker_target=worker_target,
+    )
+    if primary_runtime_manager is not None:
+        primary_runtime_manager.save_credentials(service, credentials)
+        return
+
     worker_manager = _resolve_worker_credentials_manager(
         credentials_manager=manager,
         worker_target=worker_target,
     )
     target_manager = worker_manager or manager.shared_manager()
     target_manager.save_credentials(service, credentials)
+
+
+def delete_scoped_credentials(
+    service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> None:
+    """Delete credentials for a service from the current worker scope when available."""
+    manager = credentials_manager
+    if worker_target is None or worker_target.worker_scope is None:
+        target_manager = manager if manager.shared_base_path != manager.base_path else manager.shared_manager()
+        target_manager.delete_credentials(service)
+        return
+
+    if service_uses_local_shared_credentials(service, worker_target.worker_scope):
+        manager.shared_manager().delete_credentials(service)
+        return
+
+    primary_runtime_manager = _primary_runtime_scoped_credentials_manager(
+        service,
+        manager=manager,
+        worker_target=worker_target,
+    )
+    if primary_runtime_manager is not None:
+        primary_runtime_manager.delete_credentials(service)
+        return
+
+    worker_manager = _resolve_worker_credentials_manager(
+        credentials_manager=manager,
+        worker_target=worker_target,
+    )
+    target_manager = worker_manager or manager.shared_manager()
+    target_manager.delete_credentials(service)
