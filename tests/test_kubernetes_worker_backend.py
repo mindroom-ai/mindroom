@@ -726,6 +726,7 @@ def test_kubernetes_backend_recreate_failure_removes_orphaned_tenant_auth_secret
         backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
 
     assert handle.worker_id not in apps_api.deployments
+    assert handle.worker_id not in core_api.secrets[auth_secret_name].stringData
     assert handle.worker_id not in core_api.secrets[auth_secret_name].data
 
 
