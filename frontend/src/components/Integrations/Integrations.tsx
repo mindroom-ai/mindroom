@@ -704,7 +704,8 @@ export function Integrations() {
 
     if (
       integration.setup_type === "oauth" &&
-      integration.oauth_client_configured === false
+      integration.oauth_client_configured === false &&
+      integration.oauth_service_account_configured !== true
     ) {
       return (
         <Button disabled variant="outline" size="sm">

@@ -1634,6 +1634,27 @@ def test_status_requires_client_config_for_connected_true(tmp_path: Path) -> Non
     assert status_response.json()["connected"] is False
 
 
+def test_google_status_reports_connected_with_service_account(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "google-service-account.json"),
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = google_drive_oauth_provider()
+
+    with TestClient(api_app) as client:
+        _login(client)
+        status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["has_client_config"] is False
+    assert status_response.json()["has_service_account_config"] is True
+    assert status_response.json()["connected"] is True
+
+
 def test_status_rejects_expired_access_token_without_refresh(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,

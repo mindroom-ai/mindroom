@@ -25,6 +25,7 @@ const OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete";
 type OAuthStatus = {
   connected: boolean;
   hasClientConfig: boolean;
+  hasServiceAccountConfig: boolean;
   toolConfigService?: string;
   statusError?: string;
 };
@@ -90,6 +91,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
           : "not_connected",
       connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
+      oauth_service_account_configured: status.hasServiceAccountConfig,
       config_service: status.toolConfigService,
     };
     if (status.statusError) {
@@ -172,6 +174,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         return {
           connected: false,
           hasClientConfig: false,
+          hasServiceAccountConfig: false,
           statusError: detail,
         };
       }
@@ -179,6 +182,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       return {
         connected: data.connected === true,
         hasClientConfig: data.has_client_config === true,
+        hasServiceAccountConfig: data.has_service_account_config === true,
         toolConfigService:
           typeof data.tool_config_service === "string"
             ? data.tool_config_service
@@ -189,6 +193,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       return {
         connected: false,
         hasClientConfig: false,
+        hasServiceAccountConfig: false,
         statusError: `Failed to load ${this.integration.name} OAuth status.`,
       };
     }

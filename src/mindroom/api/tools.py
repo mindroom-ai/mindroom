@@ -23,7 +23,7 @@ from mindroom.credentials import (
     load_worker_grantable_shared_credentials,
 )
 from mindroom.oauth.registry import load_oauth_providers
-from mindroom.oauth.service import oauth_credentials_usable
+from mindroom.oauth.service import oauth_credentials_usable, oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import export_tools_metadata, resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
@@ -107,10 +107,14 @@ def _check_auth_provider_configured(
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Return whether a delegated auth provider has usable credentials for one tool."""
+    if provider is None:
+        if not credentials:
+            return False
+        return _check_standard_tool_configured(tool, credentials)
+    if oauth_provider_service_account_configured(provider, runtime_paths):
+        return True
     if not credentials:
         return False
-    if provider is None:
-        return _check_standard_tool_configured(tool, credentials)
     return oauth_credentials_usable(provider, runtime_paths, credentials)
 
 

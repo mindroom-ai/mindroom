@@ -1704,6 +1704,45 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert connected_tool["status"] == "available"
 
 
+def test_get_tools_marks_google_oauth_tool_available_with_service_account(
+    test_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Google OAuth-backed tools should be available when service-account auth is configured."""
+    config = _config_with_worker_scope("shared")
+    app_runtime_paths = main._app_runtime_paths(main.app)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=app_runtime_paths.config_path,
+        storage_path=app_runtime_paths.storage_root,
+        process_env={
+            "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "google-service-account.json"),
+        },
+    )
+    tools = [
+        {
+            "name": "google_drive",
+            "display_name": "Google Drive",
+            "description": "Drive access",
+            "category": "productivity",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "google_drive",
+            "config_fields": [],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    tool = response.json()["tools"][0]
+    assert tool["name"] == "google_drive"
+    assert tool["status"] == "available"
+
+
 def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboard_truth(
     test_client: TestClient,
 ) -> None:

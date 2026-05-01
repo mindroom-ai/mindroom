@@ -32,6 +32,7 @@ from mindroom.oauth.service import (
     consume_oauth_connect_token,
     lookup_oauth_connect_token,
     oauth_credentials_usable,
+    oauth_provider_service_account_configured,
     oauth_success_redirect_url,
     sanitized_oauth_token_result,
 )
@@ -65,6 +66,7 @@ class OAuthStatusResponse(BaseModel):
     tool_config_service: str | None = None
     connected: bool
     has_client_config: bool
+    has_service_account_config: bool = False
     email: str | None = None
     hosted_domain: str | None = None
     capabilities: list[str] = Field(default_factory=list)
@@ -425,7 +427,8 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         or {}
     )
     has_client_config = provider.client_config(runtime_paths) is not None
-    connected = oauth_credentials_usable(provider, runtime_paths, credentials)
+    has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
+    connected = has_service_account_config or oauth_credentials_usable(provider, runtime_paths, credentials)
     return OAuthStatusResponse(
         provider=provider.id,
         display_name=provider.display_name,
@@ -433,6 +436,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         tool_config_service=provider.tool_config_service,
         connected=connected,
         has_client_config=has_client_config,
+        has_service_account_config=has_service_account_config,
         email=_claim_str(credentials, "email"),
         hosted_domain=_claim_str(credentials, "hd"),
         capabilities=list(provider.status_capabilities),

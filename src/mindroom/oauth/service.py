@@ -40,6 +40,14 @@ OAUTH_CREDENTIAL_FIELDS = frozenset(
     },
 )
 _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
+_GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
+    {
+        "google_calendar",
+        "google_drive",
+        "google_gmail",
+        "google_sheets",
+    },
+)
 _SCOPE_IMPLICATIONS = {
     "https://www.googleapis.com/auth/calendar": frozenset(
         {"https://www.googleapis.com/auth/calendar.readonly"},
@@ -182,6 +190,13 @@ def oauth_success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePa
     """Return the post-callback browser destination for one provider."""
     base_url = mindroom_public_base_url(runtime_paths, provider)
     return f"{base_url}/api/oauth/{provider.id}/success"
+
+
+def oauth_provider_service_account_configured(provider: OAuthProvider, runtime_paths: RuntimePaths) -> bool:
+    """Return whether one provider can authenticate through a Google service account."""
+    return provider.id in _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS and bool(
+        runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"),
+    )
 
 
 def oauth_credentials_usable(  # noqa: PLR0911
