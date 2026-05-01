@@ -16,7 +16,8 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so da
 `MINDROOM_OWNER_USER_ID` is a single-owner shortcut and is not suitable for a hosted multi-user private-agent deployment.
 Hosted deployments that put MindRoom behind an external access layer should enable trusted upstream auth and configure the exact headers MindRoom may trust.
 When trusted upstream auth is enabled, MindRoom reads the configured stable user ID and optional email headers into `request.scope["auth_user"]`.
-For Matrix-backed private agents, the trusted identity must include a configured Matrix user ID header.
+For Matrix-backed private agents, the trusted identity must resolve to a Matrix user ID either from a configured Matrix user ID header or from `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE`.
+The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER`.
 If a browser request cannot map to the requester stored in the conversation connect token, the OAuth authorize or callback path fails closed and no credential is saved.
 The access layer must strip any client-supplied copies of the trusted headers before injecting verified values.
 

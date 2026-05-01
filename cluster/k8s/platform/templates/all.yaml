@@ -13,6 +13,11 @@ metadata:
   namespace: mindroom-{{ .Values.environment }}
 {{ $prov := .Values.provisioner | default (dict) }}
 {{ $trustedUpstreamAuth := $prov.trustedUpstreamAuth | default (dict) }}
+{{ $trustedUpstreamAuthEnabledValue := lower (toString ($trustedUpstreamAuth.enabled | default false)) }}
+{{ $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") }}
+{{ if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailHeader | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.emailHeader is required when provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" }}
+{{ end }}
 data:
   PLATFORM_DOMAIN: {{ .Values.domain }}
   ENVIRONMENT: {{ .Values.environment }}
@@ -27,6 +32,7 @@ data:
   INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER: {{ $trustedUpstreamAuth.userIdHeader | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER: {{ $trustedUpstreamAuth.emailHeader | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER: {{ $trustedUpstreamAuth.matrixUserIdHeader | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE: {{ $trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | quote }}
   DO_NOT_TRACK: "1"
   NEXT_TELEMETRY_DISABLED: "1"
   TURBO_TELEMETRY_DISABLED: "1"

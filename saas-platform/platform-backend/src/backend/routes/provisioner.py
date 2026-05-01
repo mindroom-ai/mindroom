@@ -17,6 +17,7 @@ from backend.config import (
     INSTANCE_SYNAPSE_IMAGE_PULL_POLICY,
     INSTANCE_STORAGE_CLASS_NAME,
     INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED,
+    INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER,
     INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER,
     INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER,
@@ -250,6 +251,14 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             helm_args += [
                 "--set",
                 f"trustedUpstreamAuth.matrixUserIdHeader={INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER}",
+            ]
+        if INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE:
+            helm_args += [
+                "--set",
+                (
+                    "trustedUpstreamAuth.emailToMatrixUserIdTemplate="
+                    f"{INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE}"
+                ),
             ]
 
         code, stdout, stderr = await run_helm(helm_args)

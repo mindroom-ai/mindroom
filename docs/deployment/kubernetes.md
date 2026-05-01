@@ -61,10 +61,13 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set-string trustedUpstreamAuth.enabled=true \
   --set trustedUpstreamAuth.userIdHeader=X-MindRoom-User-Id \
   --set trustedUpstreamAuth.emailHeader=X-MindRoom-User-Email \
-  --set trustedUpstreamAuth.matrixUserIdHeader=X-MindRoom-Matrix-User-Id
+  --set trustedUpstreamAuth.matrixUserIdHeader=X-MindRoom-Matrix-User-Id \
+  --set trustedUpstreamAuth.emailToMatrixUserIdTemplate='@{localpart}:example.org'
 ```
 
 When using the provisioner, configure the platform chart with `provisioner.trustedUpstreamAuth.enabled="true"` and the matching `provisioner.trustedUpstreamAuth.*Header` values.
+If your access layer cannot supply a Matrix ID header, configure `provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate` with the same template.
+The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires the matching `emailHeader` value in both the instance and platform chart configuration.
 
 ## Runtime-Only Deployment
 

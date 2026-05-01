@@ -38,6 +38,7 @@ provisioner:
     userIdHeader: ""
     emailHeader: ""
     matrixUserIdHeader: ""
+    emailToMatrixUserIdTemplate: ""
 
 # Optional AI API keys
 apiKeys:
