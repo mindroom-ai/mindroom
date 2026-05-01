@@ -1387,6 +1387,41 @@ def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path)
     assert tools[0]["status"] == "available"
 
 
+@pytest.mark.parametrize(
+    ("service", "execution_scope", "expected_allowed_services"),
+    [
+        ("google_drive", "shared", frozenset({"google_drive"})),
+        ("google_calendar", "shared", frozenset({"google_calendar"})),
+        ("google_sheets", "shared", frozenset({"google_sheets"})),
+        ("gmail", "shared", frozenset({"gmail"})),
+        ("google_drive_oauth", "shared", frozenset({"google_drive_oauth"})),
+        ("weather", "shared", frozenset({"weather"})),
+        ("google_drive", "user", frozenset({"weather"})),
+        ("google_drive", "user_agent", frozenset({"weather"})),
+    ],
+)
+def test_effective_allowed_shared_services_uses_credential_policy(
+    tmp_path: Path,
+    service: str,
+    execution_scope: str,
+    expected_allowed_services: frozenset[str],
+) -> None:
+    """Tool availability should apply local-only credential policy before worker grants."""
+    context = tools_api._ResolvedToolAvailabilityContext(
+        execution_scope=execution_scope,
+        dashboard_configuration_supported=True,
+        status_authoritative=True,
+        credentials_manager=get_runtime_credentials_manager(_runtime_paths(tmp_path)),
+        worker_target=None,
+        allowed_shared_services=frozenset({"weather"}),
+        auth_provider_credential_services={},
+        oauth_providers={},
+        runtime_paths=_runtime_paths(tmp_path),
+    )
+
+    assert tools_api._effective_allowed_shared_services(service, context) == expected_allowed_services
+
+
 def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_worker_scope(
     test_client: TestClient,
 ) -> None:

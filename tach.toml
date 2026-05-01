@@ -368,6 +368,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials",
     "mindroom.config.main",
+    "mindroom.credential_policy",
     "mindroom.credentials",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.worker_routing",
