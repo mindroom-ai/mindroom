@@ -354,8 +354,17 @@ class DeliveryGateway:
         visible_body: str,
         *,
         canonical_body_candidate: str | None,
+        stream_option_map: dict[str, str] | None = None,
+        stream_options_list: tuple[dict[str, str], ...] | None = None,
     ) -> interactive._InteractiveResponse:
         """Return interactive metadata only when it belongs to the visible body."""
+        if stream_option_map and stream_options_list:
+            return interactive._InteractiveResponse(
+                visible_body,
+                dict(stream_option_map),
+                [dict(item) for item in stream_options_list],
+            )
+
         visible_response = interactive.parse_and_format_interactive(visible_body, extract_mapping=True)
         if visible_response.option_map and visible_response.options_list:
             return visible_response
@@ -1444,6 +1453,8 @@ class DeliveryGateway:
             interactive_response = self._interactive_response_for_visible_body(
                 streamed_text,
                 canonical_body_candidate=final_body_candidate,
+                stream_option_map=stream_outcome.option_map,
+                stream_options_list=stream_outcome.options_list,
             )
             return FinalDeliveryOutcome(
                 terminal_status="completed",

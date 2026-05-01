@@ -126,6 +126,8 @@ def _build_streaming_delivery_error(
             visible_body_state=visible_body_state,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=failure_reason,
+            option_map=streaming._last_committed_option_map,
+            options_list=streaming._last_committed_options_list,
         ),
     )
 
@@ -206,6 +208,8 @@ class _CommittedDeliveryState:
     placeholder_progress_sent: bool
     rendered_body: str
     visible_body_state: Literal["placeholder_only", "visible_body"]
+    option_map: dict[str, str] | None
+    options_list: tuple[dict[str, str], ...] | None
 
 
 def _normalize_stream_accumulated_text(text: str) -> str:
@@ -303,6 +307,8 @@ class StreamingResponse:
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
     _last_placeholder_progress_sent: bool = field(default=False, init=False, repr=False)
     _last_committed_rendered_body: str | None = field(default=None, init=False, repr=False)
+    _last_committed_option_map: dict[str, str] | None = field(default=None, init=False, repr=False)
+    _last_committed_options_list: tuple[dict[str, str], ...] | None = field(default=None, init=False, repr=False)
     _last_committed_visible_body_state: Literal["none", "placeholder_only", "visible_body"] = field(
         default="none",
         init=False,
@@ -544,6 +550,8 @@ class StreamingResponse:
                 visible_body_state=committed_visible_body_state,
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason,
+                option_map=self._last_committed_option_map,
+                options_list=self._last_committed_options_list,
             )
         if not text_to_send.strip() and final_stream_status == STREAM_STATUS_COMPLETED:
             text_to_send = canonical_final_body_candidate or ""
@@ -628,6 +636,8 @@ class StreamingResponse:
                 visible_body_state=committed_visible_body_state,
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason or "terminal_update_cancelled",
+                option_map=self._last_committed_option_map,
+                options_list=self._last_committed_options_list,
             )
         except Exception as exc:
             logger.warning(
@@ -649,6 +659,8 @@ class StreamingResponse:
                 visible_body_state=committed_visible_body_state,
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason or f"terminal_update_exception:{exc.__class__.__name__}",
+                option_map=self._last_committed_option_map,
+                options_list=self._last_committed_options_list,
             )
         if not send_succeeded:
             logger.warning(
@@ -668,6 +680,8 @@ class StreamingResponse:
                 visible_body_state=committed_visible_body_state,
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason or "terminal_update_failed",
+                option_map=self._last_committed_option_map,
+                options_list=self._last_committed_options_list,
             )
         return StreamTransportOutcome(
             last_physical_stream_event_id=self.event_id,
@@ -676,6 +690,8 @@ class StreamingResponse:
             visible_body_state=attempted_visible_body_state,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
+            option_map=response.option_map,
+            options_list=tuple(response.options_list) if response.options_list is not None else None,
         )
 
     async def _send_or_edit_message(
@@ -840,6 +856,8 @@ class StreamingResponse:
                 visible_body_state=(
                     "placeholder_only" if canonical_visible_body == _PROGRESS_PLACEHOLDER else "visible_body"
                 ),
+                option_map=response.option_map,
+                options_list=tuple(response.options_list) if response.options_list is not None else None,
             ),
             had_warmup_suffix=bool(warmup_suffix_lines),
         )
@@ -851,6 +869,12 @@ class StreamingResponse:
         self._last_placeholder_progress_sent = committed_state.placeholder_progress_sent
         self._last_committed_rendered_body = committed_state.rendered_body
         self._last_committed_visible_body_state = committed_state.visible_body_state
+        self._last_committed_option_map = dict(committed_state.option_map) if committed_state.option_map else None
+        self._last_committed_options_list = (
+            tuple(dict(item) for item in committed_state.options_list)
+            if committed_state.options_list is not None
+            else None
+        )
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent
 
     def _committed_terminal_snapshot(

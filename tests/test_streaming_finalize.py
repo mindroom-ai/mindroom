@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -719,6 +720,97 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
         assert reaction_keys == ["✅", "❌", "🧪"]
     finally:
         interactive._cleanup()
+
+
+@pytest.mark.asyncio
+async def test_streamed_interactive_metadata_survives_unparseable_canonical_final_body(tmp_path: Path) -> None:
+    """Registration should use the same interactive parse that rendered the visible streamed body."""
+    config = _config(tmp_path)
+    target = MessageTarget.resolve("!room:localhost", "$thread-root", "$reply")
+    client = _client()
+    raw_interactive = (
+        "```interactive\n"
+        "{\n"
+        '  "question": "What next?",\n'
+        '  "options": [\n'
+        '    {"emoji": "🎙️", "label": "Transcribe audio", "value": "transcribe"},\n'
+        '    {"emoji": "📂", "label": "Inspect incoming", "value": "inspect"}\n'
+        "  ]\n"
+        "}\n"
+        "```"
+    )
+    formatted_interactive = interactive.parse_and_format_interactive(raw_interactive, extract_mapping=True)
+
+    async def interactive_stream() -> AsyncIterator[str]:
+        yield raw_interactive
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=DeliveredMatrixEvent("$edit", {}))):
+        stream_outcome = await send_streaming_response(
+            client=client,
+            room_id=target.room_id,
+            reply_to_event_id=target.reply_to_event_id,
+            thread_id=target.resolved_thread_id,
+            sender_domain="localhost",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            response_stream=interactive_stream(),
+            existing_event_id="$displayed-root",
+            adopt_existing_placeholder=True,
+            target=target,
+            room_mode=target.is_room_mode,
+        )
+
+    assert stream_outcome.rendered_body == formatted_interactive.formatted_text
+    stream_outcome = replace(
+        stream_outcome,
+        canonical_final_body_candidate='```interactive\n{"question": "What next?", "options": [',
+    )
+
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(
+            return_value=SimpleNamespace(
+                response_text=stream_outcome.canonical_final_body_candidate,
+                response_kind="ai",
+                envelope=_envelope(),
+            ),
+        ),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    gateway = DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=client, orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=get_logger("tests.delivery"),
+            redact_message_event=AsyncMock(return_value=True),
+            sender_domain="localhost",
+            resolver=Mock(),
+            response_hooks=response_hooks,
+        ),
+    )
+
+    final_outcome = await gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=target,
+            stream_transport_outcome=stream_outcome,
+            initial_delivery_kind="sent",
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-streamed-interactive-unparseable-canonical",
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert final_outcome.final_visible_body == formatted_interactive.formatted_text
+    assert dict(final_outcome.option_map or {}) == {
+        "🎙️": "transcribe",
+        "1": "transcribe",
+        "📂": "inspect",
+        "2": "inspect",
+    }
 
 
 @pytest.mark.asyncio

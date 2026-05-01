@@ -29,6 +29,8 @@ class StreamTransportOutcome:  # noqa: D101
     visible_body_state: VisibleBodyState
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
+    option_map: dict[str, str] | None = None
+    options_list: tuple[dict[str, str], ...] | None = None
 
     @property
     def has_any_physical_stream_event(self) -> bool:  # noqa: D102
