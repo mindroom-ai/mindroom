@@ -863,6 +863,8 @@ defaults:
   tools:
     - scheduler
   markdown: true
+  compaction:
+    enabled: true
 """
 
 
@@ -970,6 +972,8 @@ defaults:
   tools:
     - scheduler
   markdown: true
+  compaction:
+    enabled: true
 """
 
 

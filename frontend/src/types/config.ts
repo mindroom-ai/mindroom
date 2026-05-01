@@ -138,7 +138,7 @@ function resolveAuthoredCompactionEnabled(
   compaction: CompactionConfig | null | undefined,
 ): boolean {
   if (compaction == null) {
-    return false;
+    return true;
   }
   if (compaction.enabled !== undefined) {
     return compaction.enabled;

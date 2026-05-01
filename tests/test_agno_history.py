@@ -2411,6 +2411,7 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path, context_window=600)
+    config.defaults.compaction = None
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
         "session-1",
@@ -2673,6 +2674,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_without_authored_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, context_window=None)
+    config.defaults.compaction = None
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
         "session-1",
@@ -3534,7 +3536,42 @@ def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_p
     assert execution_plan.authored_compaction_enabled is True
 
 
-def test_authored_empty_agent_compaction_override_stays_disabled_without_defaults(tmp_path: Path) -> None:
+def test_omitted_defaults_compaction_enables_destructive_compaction(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "agents": {
+                "test_agent": {
+                    "display_name": "Test Agent",
+                },
+            },
+            "defaults": {
+                "tools": [],
+            },
+            "models": {
+                "default": {
+                    "provider": "openai",
+                    "id": "test-model",
+                    "context_window": 48_000,
+                },
+            },
+        },
+        runtime_paths,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.get_entity_compaction_config("test_agent"),
+        has_authored_compaction_config=config.has_authored_entity_compaction_config("test_agent"),
+        active_model_name="default",
+        active_context_window=48_000,
+        static_prompt_tokens=2_000,
+    )
+
+    assert execution_plan.authored_compaction_enabled is True
+
+
+def test_empty_agent_compaction_override_stays_disabled_with_disabled_defaults(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
@@ -3542,6 +3579,12 @@ def test_authored_empty_agent_compaction_override_stays_disabled_without_default
                 "test_agent": {
                     "display_name": "Test Agent",
                     "compaction": {},
+                },
+            },
+            "defaults": {
+                "tools": [],
+                "compaction": {
+                    "enabled": False,
                 },
             },
             "models": {

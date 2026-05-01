@@ -312,8 +312,8 @@ class DefaultsConfig(BaseModel):
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
     compaction: CompactionConfig | None = Field(
-        default=None,
-        description="Default automatic compaction policy (materializes defaults when absent)",
+        default_factory=CompactionConfig,
+        description="Default automatic compaction policy (set to null or enabled=false to disable)",
     )
     num_history_runs: int | None = Field(
         default=None,
