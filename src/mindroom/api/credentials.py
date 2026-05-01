@@ -83,13 +83,6 @@ def _filter_credentials_for_response(credentials: dict[str, Any], *, is_oauth_se
     return filter_oauth_credential_fields(credentials)
 
 
-def _filter_oauth_client_config_for_response(credentials: dict[str, Any]) -> dict[str, Any]:
-    """Return OAuth app client config without client secret material."""
-    filtered = _filter_internal_keys(credentials)
-    filtered.pop("client_secret", None)
-    return filtered
-
-
 def _validated_service(service: str) -> str:
     try:
         return validate_service_name(service)
@@ -129,7 +122,6 @@ class OAuthCredentialServiceMatch:
     provider: OAuthProvider
     token_service: bool
     tool_config_service: bool
-    client_config_service: bool
 
 
 @dataclass(frozen=True)
@@ -143,13 +135,11 @@ class OAuthCredentialServices:
         for provider in self.providers.values():
             token_service = provider.credential_service == service
             tool_config_service = provider.tool_config_service == service
-            client_config_service = service in provider.client_config_services
-            if token_service or tool_config_service or client_config_service:
+            if token_service or tool_config_service:
                 return OAuthCredentialServiceMatch(
                     provider=provider,
                     token_service=token_service,
                     tool_config_service=tool_config_service,
-                    client_config_service=client_config_service,
                 )
         return None
 
@@ -161,7 +151,7 @@ class OAuthCredentialServices:
     def allows_private_scope_for(self, service: str) -> bool:
         """Return whether this OAuth tool config service can target a private scope."""
         match = self.match(service)
-        return match is not None and match.tool_config_service and _dashboard_may_edit_oauth_match(match)
+        return _dashboard_may_edit_oauth_match(match)
 
     def dashboard_may_show_service(self, service: str) -> bool:
         """Return whether a service may appear in dashboard credential listings."""
@@ -640,16 +630,10 @@ def _reject_oauth_token_service(
 def _dashboard_may_edit_oauth_match(oauth_service_match: OAuthCredentialServiceMatch | None) -> bool:
     if oauth_service_match is None:
         return False
-    if oauth_service_match.client_config_service:
-        return True
     return dashboard_may_edit_oauth_service(
         token_service=oauth_service_match.token_service,
         tool_config_service=oauth_service_match.tool_config_service,
     )
-
-
-def _is_oauth_client_config_match(oauth_service_match: OAuthCredentialServiceMatch | None) -> bool:
-    return oauth_service_match is not None and oauth_service_match.client_config_service
 
 
 def _reject_oauth_credentials_document(credentials: dict[str, Any]) -> None:
@@ -663,11 +647,6 @@ def _reject_oauth_api_key_field(
     *,
     key_name: str,
 ) -> None:
-    if _is_oauth_client_config_match(oauth_service_match) and key_name == "client_secret":
-        raise HTTPException(
-            status_code=400,
-            detail="OAuth client secret must be managed through the credentials document route.",
-        )
     if not _dashboard_may_edit_oauth_match(oauth_service_match):
         return
     if key_name not in OAUTH_CREDENTIAL_FIELDS:
@@ -749,8 +728,6 @@ class DashboardCredentialAccess:
 
     def response_credentials(self, service: str, credentials: dict[str, Any]) -> dict[str, Any]:
         """Return credentials filtered for dashboard responses."""
-        if _is_oauth_client_config_match(self.match(service)):
-            return _filter_oauth_client_config_for_response(credentials)
         return _filter_credentials_for_response(
             credentials,
             is_oauth_service=_dashboard_may_edit_oauth_match(self.match(service)),
@@ -760,10 +737,7 @@ class DashboardCredentialAccess:
         """Return user-submitted credentials normalized for storage."""
         return _dashboard_credentials_for_save(
             config_values,
-            strip_oauth_fields=(
-                _dashboard_may_edit_oauth_match(self.match(service))
-                and not _is_oauth_client_config_match(self.match(service))
-            ),
+            strip_oauth_fields=_dashboard_may_edit_oauth_match(self.match(service)),
         )
 
     def list_services(self) -> list[str]:

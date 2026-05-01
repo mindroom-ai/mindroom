@@ -119,10 +119,6 @@ def _google_redirect_env_names(provider_id: str) -> tuple[str, ...]:
     return (f"{prefix}_REDIRECT_URI", f"MINDROOM_OAUTH_{prefix}_REDIRECT_URI")
 
 
-def _google_client_config_services(provider_id: str) -> tuple[str, ...]:
-    return (f"{provider_id}_oauth_client", "google_oauth_client")
-
-
 def _google_domain_env_names(provider_id: str, suffix: str) -> tuple[str, ...]:
     prefix = provider_id.upper()
     return (f"{prefix}_{suffix}", f"MINDROOM_OAUTH_{prefix}_{suffix}")
