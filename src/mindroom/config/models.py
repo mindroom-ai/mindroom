@@ -99,7 +99,10 @@ def _coerce_named_tool_entry(data: dict[object, object]) -> dict[str, object]:
 def _coerce_single_key_tool_entry(data: dict[object, object]) -> dict[str, object]:
     """Normalize the compact single-key YAML form."""
     if len(data) != 1:
-        msg = "Tool entries must be either a string name or a single-key mapping like {shell: {extra_env_passthrough: 'DAWARICH_*'}}"
+        msg = (
+            "Tool entries must be either a string name or a single-key mapping like "
+            "{shell: {extra_env_passthrough: 'DAWARICH_*'}}"
+        )
         raise ValueError(msg)
 
     name, overrides = next(iter(data.items()))

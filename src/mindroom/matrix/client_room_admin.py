@@ -223,7 +223,8 @@ async def _set_room_join_rule(
         join_rule=join_rule,
         error=_describe_matrix_response_error(response),
         hint=(
-            "Ensure the service account is joined to the room and has enough power to send m.room.join_rules state events."
+            "Ensure the service account is joined to the room and has enough power "
+            "to send m.room.join_rules state events."
         ),
     )
     return False
@@ -289,7 +290,8 @@ async def _set_room_directory_visibility(
     error_text = await response.text()
     response.release()
     hint = (
-        "Ensure the service account is a room moderator/admin; Synapse requires sufficient power in the room to edit directory entries."
+        "Ensure the service account is a room moderator/admin; Synapse requires sufficient "
+        "power in the room to edit directory entries."
         if response.status == 403
         else "Check homeserver logs and Matrix API response for details."
     )

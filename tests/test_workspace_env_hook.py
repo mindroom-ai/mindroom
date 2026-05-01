@@ -174,7 +174,10 @@ def test_source_workspace_env_hook_keeps_user_exported_credentials(tmp_path: Pat
     workspace.mkdir()
     hook_path = _write_hook(
         workspace,
-        "export OPENAI_API_KEY=from-hook\nexport STRIPE_SECRET=from-hook\nexport CI_JOB_TOKEN=from-hook\nexport GITEA_TOKEN=from-hook\n",
+        "export OPENAI_API_KEY=from-hook\n"
+        "export STRIPE_SECRET=from-hook\n"
+        "export CI_JOB_TOKEN=from-hook\n"
+        "export GITEA_TOKEN=from-hook\n",
     )
 
     overlay = source_workspace_env_hook(

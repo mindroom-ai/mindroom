@@ -486,7 +486,8 @@ def _emit_extra_host_summary(results: list[ExtraHostResult], *, json_output: boo
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(
-            f"\nSummary: total={payload['summary']['total']} ok={payload['summary']['ok']} failed={payload['summary']['failed']}",
+            f"\nSummary: total={payload['summary']['total']} "
+            f"ok={payload['summary']['ok']} failed={payload['summary']['failed']}",
         )
         if failed:
             print("\nFailed tools:")

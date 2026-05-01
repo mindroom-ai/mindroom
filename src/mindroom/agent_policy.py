@@ -284,7 +284,10 @@ def _team_eligibility_reason(
         return "Private agents cannot participate in teams yet."
     if len(private_targets) == 1:
         return f"Delegates to private agent '{private_targets[0]}', so it cannot participate in teams yet."
-    return f"Delegates to private agents {', '.join(repr(target) for target in private_targets)}, so it cannot participate in teams yet."
+    return (
+        "Delegates to private agents "
+        f"{', '.join(repr(target) for target in private_targets)}, so it cannot participate in teams yet."
+    )
 
 
 def unsupported_team_agent_message(

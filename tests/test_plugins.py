@@ -646,7 +646,11 @@ def test_load_plugins_warns_once_for_repeated_non_bundled_plugin_loads(
         encoding="utf-8",
     )
     (plugin_root / "hooks.py").write_text(
-        "from mindroom.hooks import hook\n\n@hook(event='message:received')\nasync def demo_hook(context):\n    return None\n",
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook(event='message:received')\n"
+        "async def demo_hook(context):\n"
+        "    return None\n",
         encoding="utf-8",
     )
 
@@ -1714,7 +1718,11 @@ def test_load_plugins_discovers_hooks_from_tools_module_when_hooks_module_missin
         encoding="utf-8",
     )
     (plugin_root / "plugin.py").write_text(
-        "from mindroom.hooks import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    ctx.suppress = True\n",
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    ctx.suppress = True\n",
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
@@ -1751,7 +1759,11 @@ def test_load_plugins_discovers_hooks_from_dedicated_hooks_module(tmp_path: Path
     )
     (plugin_root / "tools.py").write_text("TOOLS_IMPORTED = True\n", encoding="utf-8")
     (plugin_root / "hooks.py").write_text(
-        "from mindroom.hooks import hook\n\n@hook('message:received', name='from-hooks-module')\nasync def audit(ctx):\n    del ctx\n",
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received', name='from-hooks-module')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n",
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
@@ -1999,7 +2011,12 @@ async def test_reload_plugins_cancels_tasks_for_removed_plugins(tmp_path: Path) 
         encoding="utf-8",
     )
     (plugin_root / "hooks.py").write_text(
-        "from mindroom.hooks import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    del ctx\n    return 'ok'\n",
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'ok'\n",
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
@@ -2051,7 +2068,12 @@ def test_reload_plugins_raises_when_configured_plugin_becomes_invalid(tmp_path: 
     )
     hooks_path = plugin_root / "hooks.py"
     hooks_path.write_text(
-        "from mindroom.hooks import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    del ctx\n    return 'ok'\n",
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'ok'\n",
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
@@ -2092,7 +2114,12 @@ def test_reload_plugins_skip_broken_plugins_keeps_healthy_plugin_when_explicit_p
         encoding="utf-8",
     )
     (plugin_root / "hooks.py").write_text(
-        "from mindroom.hooks import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    del ctx\n    return 'ok'\n",
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'ok'\n",
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"

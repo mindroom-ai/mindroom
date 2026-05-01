@@ -392,11 +392,17 @@ def _resolve_user_agent_worker_payload(
     worker_target: ResolvedWorkerTarget,
 ) -> tuple[str, frozenset[str]]:
     if worker_target.private_agent_names is None:
-        msg = f"Worker-routed tool '{tool_name}.{function_name}' with scope 'user_agent' requires explicit private visibility."
+        msg = (
+            f"Worker-routed tool '{tool_name}.{function_name}' with scope 'user_agent' "
+            "requires explicit private visibility."
+        )
         raise RuntimeError(msg)
     worker_key = worker_target.worker_key
     if worker_key is None:
-        msg = f"Worker scope 'user_agent' for tool '{tool_name}.{function_name}' could not be resolved from the current execution identity."
+        msg = (
+            f"Worker scope 'user_agent' for tool '{tool_name}.{function_name}' "
+            "could not be resolved from the current execution identity."
+        )
         raise RuntimeError(msg)
     return worker_key, worker_target.private_agent_names
 
@@ -628,7 +634,10 @@ def save_attachment_to_worker(
     byte_limit = inline_attachment_byte_limit(runtime_paths)
     byte_count = len(payload_bytes)
     if byte_count > byte_limit:
-        msg = f"Attachment {attachment_id} exceeds inline save-to-disk size limit ({byte_count} bytes > {byte_limit} bytes)."
+        msg = (
+            f"Attachment {attachment_id} exceeds inline save-to-disk size limit "
+            f"({byte_count} bytes > {byte_limit} bytes)."
+        )
         raise RuntimeError(msg)
 
     proxy_config = sandbox_proxy_config(runtime_paths)

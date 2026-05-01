@@ -404,7 +404,10 @@ def test_ty_rejects_runtime_view_missing_structural_member(tmp_path: Path) -> No
     runtime_protocols_path = project_root / "src" / "mindroom" / "runtime_protocols.py"
     bot_runtime_view_path = project_root / "src" / "mindroom" / "bot_runtime_view.py"
     original_text = bot_runtime_view_path.read_text()
-    missing_member_block = f"\n    @property\n    def {RUNTIME_VIEW_STRUCTURAL_MEMBER}(self) -> OrchestratorRuntime | None: ...  # noqa: D102\n"
+    missing_member_block = (
+        "\n    @property\n"
+        f"    def {RUNTIME_VIEW_STRUCTURAL_MEMBER}(self) -> OrchestratorRuntime | None: ...  # noqa: D102\n"
+    )
     assert missing_member_block in original_text
     bot_runtime_view_path.write_text(original_text.replace(missing_member_block, "\n"))
 

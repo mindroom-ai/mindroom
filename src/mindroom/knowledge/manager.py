@@ -337,7 +337,10 @@ def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
             dimensions=embedder_config.dimensions,
         )
 
-    msg = f"Unsupported knowledge embedder provider: {provider}. Supported providers: openai, ollama, sentence_transformers"
+    msg = (
+        f"Unsupported knowledge embedder provider: {provider}. "
+        "Supported providers: openai, ollama, sentence_transformers"
+    )
     raise ValueError(msg)
 
 
@@ -1152,7 +1155,10 @@ class KnowledgeManager:
             return False
 
         if knowledge_root.exists() and any(knowledge_root.iterdir()):
-            msg = f"Cannot clone knowledge git repository into non-empty path {knowledge_root}. Clear the folder or use a dedicated path."
+            msg = (
+                f"Cannot clone knowledge git repository into non-empty path {knowledge_root}. "
+                "Clear the folder or use a dedicated path."
+            )
             raise RuntimeError(msg)
 
         knowledge_root.parent.mkdir(parents=True, exist_ok=True)

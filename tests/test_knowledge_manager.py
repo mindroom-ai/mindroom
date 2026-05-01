@@ -534,9 +534,7 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
             refreshed = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
             if refreshed is not None and [
                 document.content for document in refreshed.search("shared", max_results=5)
-            ] == [
-                "shared local new",
-            ]:
+            ] == ["shared local new"]:
                 break
         else:
             pytest.fail("background on-access refresh did not publish the edited local source")
@@ -6360,7 +6358,8 @@ async def test_run_git_preserves_index_lock_and_does_not_retry(
             return (
                 b"",
                 (
-                    f"fatal: Unable to create '{lock_path}': File exists.\nAnother git process seems to be running in this repository."
+                    f"fatal: Unable to create '{lock_path}': File exists.\n"
+                    "Another git process seems to be running in this repository."
                 ).encode(),
             )
 
@@ -6540,5 +6539,6 @@ async def test_index_file_locked_runs_off_event_loop_thread(
     assert insert_thread_ids, "expected at least one insert call during refresh"
     for thread_id in insert_thread_ids:
         assert thread_id != main_thread_id, (
-            f"Knowledge.insert ran on the asyncio main thread (id={thread_id}); it must run on a worker thread via asyncio.to_thread."
+            f"Knowledge.insert ran on the asyncio main thread (id={thread_id}); "
+            "it must run on a worker thread via asyncio.to_thread."
         )

@@ -1010,7 +1010,10 @@ def _unsupported_team_member_detail(
             f"{', '.join(repr(target) for target in private_targets)} via delegation "
             "and cannot participate in teams yet"
         )
-    return f"agent '{member.name}' reaches private agent '{private_targets[0]}' via delegation and cannot participate in teams yet"
+    return (
+        f"agent '{member.name}' reaches private agent '{private_targets[0]}' via delegation "
+        "and cannot participate in teams yet"
+    )
 
 
 def _team_resolution_member_detail(

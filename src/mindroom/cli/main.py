@@ -400,7 +400,8 @@ def _print_connection_error(exc: BaseException, runtime_paths: RuntimePaths) -> 
     console.print("Check that:")
     console.print("  1. Your Matrix homeserver is running")
     console.print(
-        f"  2. MATRIX_HOMESERVER is set correctly (current: {constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)})",
+        "  2. MATRIX_HOMESERVER is set correctly "
+        f"(current: {constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)})",
     )
     console.print("  3. The server is reachable from this machine")
 

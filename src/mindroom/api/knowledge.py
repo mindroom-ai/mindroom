@@ -408,7 +408,8 @@ def _reject_unmanaged_knowledge_file_path(config: Config, base_id: str, relative
     raise HTTPException(
         status_code=415,
         detail=(
-            f"File '{relative_path}' is not supported by knowledge base '{base_id}' because it is excluded by the managed file filters"
+            f"File '{relative_path}' is not supported by knowledge base '{base_id}' "
+            "because it is excluded by the managed file filters"
         ),
     )
 

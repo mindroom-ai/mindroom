@@ -194,7 +194,10 @@ async def _registration_failure_message(
         and not registration_token
         and await _homeserver_requires_registration_token(homeserver, runtime_paths)
     ):
-        return "Matrix homeserver requires registration tokens for account creation. Set MATRIX_REGISTRATION_TOKEN and retry."
+        return (
+            "Matrix homeserver requires registration tokens for account creation. "
+            "Set MATRIX_REGISTRATION_TOKEN and retry."
+        )
 
     return None
 

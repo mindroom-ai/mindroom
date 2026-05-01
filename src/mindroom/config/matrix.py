@@ -57,7 +57,10 @@ class MindRoomUserConfig(BaseModel):
             raise ValueError(msg)
 
         if not _MATRIX_LOCALPART_PATTERN.fullmatch(normalized):
-            msg = "mindroom_user.username contains invalid characters; allowed: lowercase letters, digits, '.', '_', '=', '-', '/'"
+            msg = (
+                "mindroom_user.username contains invalid characters; "
+                "allowed: lowercase letters, digits, '.', '_', '=', '-', '/'"
+            )
             raise ValueError(msg)
 
         return normalized
@@ -111,7 +114,8 @@ class MatrixRoomAccessConfig(BaseModel):
     reconcile_existing_rooms: bool = Field(
         default=False,
         description=(
-            "Whether to reconcile existing managed rooms to match current mode/join rule/directory settings on startup and config reload"
+            "Whether to reconcile existing managed rooms to match current mode/join rule/directory settings "
+            "on startup and config reload"
         ),
     )
 
@@ -213,7 +217,8 @@ class CacheConfig(BaseModel):
     namespace: str | None = Field(
         default=None,
         description=(
-            "Logical namespace for PostgreSQL event-cache rows. Defaults to MINDROOM_NAMESPACE when set, otherwise 'default'."
+            "Logical namespace for PostgreSQL event-cache rows. "
+            "Defaults to MINDROOM_NAMESPACE when set, otherwise 'default'."
         ),
     )
 

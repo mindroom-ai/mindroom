@@ -223,9 +223,7 @@ def resolve_agent_runtime(
             for base_config in config.knowledge_bases.values()
             if (
                 configured_path := resolve_config_relative_path_preserving_leaf(base_config.path, runtime_paths)
-            ).is_relative_to(
-                workspace_knowledge_root,
-            )
+            ).is_relative_to(workspace_knowledge_root)
         }
         knowledge_paths: dict[str, Path] = {}
         for base_id in config.get_agent_knowledge_base_ids(agent_name):

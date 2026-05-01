@@ -45,7 +45,10 @@ class DynamicToolkitConflictError(DynamicToolkitMergeError):
         self.tool_name = tool_name
         self.existing_overrides = dict(existing_overrides)
         self.candidate_overrides = dict(candidate_overrides)
-        msg = f"Toolkit '{toolkit_name}' conflicts on tool '{tool_name}' because its overrides do not match the already active definition."
+        msg = (
+            f"Toolkit '{toolkit_name}' conflicts on tool '{tool_name}' because its overrides do not match "
+            "the already active definition."
+        )
         super().__init__(msg)
 
 

@@ -104,7 +104,12 @@ def _write_plugin_removal_test_files(tmp_path: Path) -> Path:
     )
     hooks_path = plugin_root / "hooks.py"
     hooks_path.write_text(
-        "from mindroom.hooks import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    del ctx\n    return 'ok'\n",
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'ok'\n",
         encoding="utf-8",
     )
     return hooks_path
@@ -762,7 +767,12 @@ async def test_reload_plugins_now_deactivates_broken_plugin_after_failure(tmp_pa
     )
     hooks_path = (plugin_root / "hooks.py").resolve()
     hooks_path.write_text(
-        "from mindroom.hooks import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    del ctx\n    return 'ok'\n",
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'ok'\n",
         encoding="utf-8",
     )
     config = _runtime_bound_config(Config(plugins=["./plugins/broken-reload"]), tmp_path)
@@ -815,7 +825,12 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
         encoding="utf-8",
     )
     (first_root / "hooks.py").write_text(
-        "from mindroom.hooks import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    del ctx\n    return 'first'\n",
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'first'\n",
         encoding="utf-8",
     )
     first_skills = first_root / "skills" / "first-skill"
@@ -833,7 +848,12 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
         encoding="utf-8",
     )
     (second_root / "hooks.py").write_text(
-        "from mindroom.hooks import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    del ctx\n    return 'second'\n",
+        "from mindroom.hooks import hook\n"
+        "\n"
+        "@hook('message:received')\n"
+        "async def audit(ctx):\n"
+        "    del ctx\n"
+        "    return 'second'\n",
         encoding="utf-8",
     )
 

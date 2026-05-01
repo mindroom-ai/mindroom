@@ -478,7 +478,8 @@ def resolve_request_credentials_target(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Dashboard credential management does not support {scope_label} for agent '{scope_request.agent_name}'."
+                f"Dashboard credential management does not support {scope_label} "
+                f"for agent '{scope_request.agent_name}'."
             ),
         )
 

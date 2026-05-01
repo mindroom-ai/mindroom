@@ -1611,7 +1611,10 @@ def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
 
     assert [worker.worker_key for worker in workers] == [handle.worker_key]
     assert apps_api.list_label_selectors[-1] == (
-        "app.kubernetes.io/managed-by=mindroom,app.kubernetes.io/name=mindroom-worker,mindroom.ai/component=worker,mindroom.ai/tenant=test"
+        "app.kubernetes.io/managed-by=mindroom,"
+        "app.kubernetes.io/name=mindroom-worker,"
+        "mindroom.ai/component=worker,"
+        "mindroom.ai/tenant=test"
     )
 
 

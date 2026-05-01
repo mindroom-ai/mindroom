@@ -4297,7 +4297,11 @@ class TestStreamingBehavior:
             agent_name="helper",
             source_kind="message",
         )
-        raw_interactive = '```interactive\n{"question":"Approve?","options":[{"emoji":"✅","label":"Approve","value":"approve"}]}\n```'
+        raw_interactive = (
+            "```interactive\n"
+            '{"question":"Approve?","options":[{"emoji":"✅","label":"Approve","value":"approve"}]}\n'
+            "```"
+        )
         formatted_interactive = interactive.parse_and_format_interactive(
             raw_interactive,
             extract_mapping=True,

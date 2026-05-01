@@ -870,7 +870,10 @@ class Config(BaseModel):
         )
         if colliding_rooms:
             formatted = ", ".join(colliding_rooms)
-            msg = f"Managed room keys conflict with the reserved root Space alias '{reserved_alias_localpart}': {formatted}"
+            msg = (
+                "Managed room keys conflict with the reserved root Space alias "
+                f"'{reserved_alias_localpart}': {formatted}"
+            )
             raise ValueError(msg)
         return self
 
@@ -1308,7 +1311,10 @@ class Config(BaseModel):
             for index, entry in enumerate(toolkit.tools):
                 config_path_prefix = f"toolkits.{toolkit_name}.tools[{index}]"
                 if entry.name in _RESERVED_DYNAMIC_TOOLKIT_TOOLS:
-                    msg = f"{config_path_prefix}.{entry.name}: Toolkit definitions cannot include reserved control-plane tool '{entry.name}'."
+                    msg = (
+                        f"{config_path_prefix}.{entry.name}: Toolkit definitions cannot include reserved "
+                        f"control-plane tool '{entry.name}'."
+                    )
                     raise ValueError(msg)
                 validation_info = tool_validation_snapshot.get(entry.name)
                 if validation_info is None or not validation_info.runtime_loadable:

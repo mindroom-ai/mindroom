@@ -1232,7 +1232,9 @@ def test_worker_subprocess_env_preserves_parent_path(
     credentials_path = tmp_path / "google-credentials.json"
     config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
     (config_dir / ".env").write_text(
-        f"GOOGLE_CLOUD_PROJECT=demo-project\nGOOGLE_CLOUD_LOCATION=us-central1\nGOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n",
+        "GOOGLE_CLOUD_PROJECT=demo-project\n"
+        "GOOGLE_CLOUD_LOCATION=us-central1\n"
+        f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n",
         encoding="utf-8",
     )
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
@@ -1987,7 +1989,15 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
     )
     config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\nplugins:\n  - ./plugins/demo\n",
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents: {}\n"
+        "router:\n"
+        "  model: default\n"
+        "plugins:\n"
+        "  - ./plugins/demo\n",
         encoding="utf-8",
     )
     _refresh_runner_app_from_env()
@@ -3644,7 +3654,9 @@ def test_workspace_home_contract_runs_before_workspace_env_hook(tmp_path: Path) 
     _write_workspace_env_hook(
         workspace,
         (
-            'export HOOK_SAW_HOME="$HOME"\nexport HOOK_SAW_AGENT_WORKSPACE="$MINDROOM_AGENT_WORKSPACE"\nexport HOME="$PWD/hook-home"\n'
+            'export HOOK_SAW_HOME="$HOME"\n'
+            'export HOOK_SAW_AGENT_WORKSPACE="$MINDROOM_AGENT_WORKSPACE"\n'
+            'export HOME="$PWD/hook-home"\n'
         ),
     )
     request = sandbox_runner_module.SandboxRunnerExecuteRequest(

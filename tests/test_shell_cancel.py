@@ -122,7 +122,9 @@ async def test_run_shell_command_cancellation_kills_subprocess(tmp_path: Path) -
         sys.executable,
         "-c",
         (
-            "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); time.sleep(300)"
+            "import os, pathlib, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
+            "time.sleep(300)"
         ),
         str(pid_file),
     ]
@@ -186,7 +188,9 @@ async def test_run_shell_command_cancellation_cleans_up_background_handle(tmp_pa
         sys.executable,
         "-c",
         (
-            "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); time.sleep(300)"
+            "import os, pathlib, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
+            "time.sleep(300)"
         ),
         str(pid_file),
     ]

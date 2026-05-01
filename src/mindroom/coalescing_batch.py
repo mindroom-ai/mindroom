@@ -77,7 +77,11 @@ def coalesced_prompt(message_bodies: list[str]) -> str:
     if len(message_bodies) == 1:
         return message_bodies[0]
     combined_body = "\n".join(message_bodies)
-    return f"The user sent the following messages in quick succession. Treat them as one turn and respond once:\n\n{combined_body}"
+    return (
+        "The user sent the following messages in quick succession. "
+        "Treat them as one turn and respond once:\n\n"
+        f"{combined_body}"
+    )
 
 
 def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, bool]:

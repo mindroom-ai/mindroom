@@ -384,7 +384,11 @@ def source_workspace_env_hook(
     """
     bash_path = _resolve_bash(base_env)
     capture_marker = secrets.token_hex(16)
-    bash_script = '. "$1"; printf "%s\\0" "$2"; while IFS= read -r name; do printf "%s=%s\\0" "$name" "${!name}"; done < <(compgen -e)'
+    bash_script = (
+        '. "$1"; '
+        'printf "%s\\0" "$2"; '
+        'while IFS= read -r name; do printf "%s=%s\\0" "$name" "${!name}"; done < <(compgen -e)'
+    )
     try:
         process = subprocess.Popen(
             [bash_path, "-c", bash_script, "bash", str(hook_path), capture_marker],

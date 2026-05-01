@@ -510,7 +510,10 @@ class ConfigManagerTools(Toolkit):
         for name, team in config.teams.items():
             agents_str = ", ".join(team.agents)
             teams_info.append(
-                f"**{name}** ({team.display_name})\n  - Role: {team.role}\n  - Agents: {agents_str}\n  - Mode: {team.mode}\n",
+                f"**{name}** ({team.display_name})\n"
+                f"  - Role: {team.role}\n"
+                f"  - Agents: {agents_str}\n"
+                f"  - Mode: {team.mode}\n",
             )
 
         if not teams_info:

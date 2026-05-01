@@ -527,7 +527,8 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
         "\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget\n   Overhead: 62 prompt"
     )
     assert sent_content["formatted_body"] == (
-        "<em>\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget<br/>   Overhead: 62 prompt</em>"
+        "<em>\U0001f4e6 Compacted 12 runs: 30,000 \u2192 12,000 / 100,000 history budget<br/>"
+        "   Overhead: 62 prompt</em>"
     )
 
 

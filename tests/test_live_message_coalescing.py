@@ -430,7 +430,8 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
     assert calls == [
         (
             "$m2",
-            "The user sent the following messages in quick succession. Treat them as one turn and respond once:\n\nfirst\nsecond",
+            "The user sent the following messages in quick succession. "
+            "Treat them as one turn and respond once:\n\nfirst\nsecond",
             ["$m1", "$m2"],
         ),
     ]

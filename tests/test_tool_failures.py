@@ -142,7 +142,8 @@ def test_sanitize_failure_text_redacts_gcs_signed_url_query_credentials() -> Non
             "GoogleAccessId=***redacted***&Expires=123&Signature=***redacted***",
         ),
         (
-            "https://example-bucket.s3.amazonaws.com/object?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Expires=123&Signature=s3-v2-signature",
+            "https://example-bucket.s3.amazonaws.com/object?"
+            "AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Expires=123&Signature=s3-v2-signature",
             "AWSAccessKeyId=***redacted***&Expires=123&Signature=***redacted***",
         ),
     ],
@@ -227,7 +228,8 @@ def test_build_tool_failure_record_redacts_camel_case_and_prefixed_secret_keys(
 def test_sanitize_failure_text_redacts_camel_case_secret_assignments() -> None:
     """CamelCase secret assignments should redact across quoted and unquoted forms."""
     sanitized = tool_failures.sanitize_failure_text(
-        "apiKey=secret clientSecret='top-secret' accessToken: token-value refreshToken=\"refresh-value\" openaiApiKey=provider-secret",
+        "apiKey=secret clientSecret='top-secret' accessToken: token-value "
+        'refreshToken="refresh-value" openaiApiKey=provider-secret',
     )
 
     assert sanitized == (

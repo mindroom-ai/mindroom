@@ -97,7 +97,8 @@ class MatrixMessageTools(Toolkit):
                 "error",
                 action=action,
                 message=(
-                    f"attachment_ids plus attachment_file_paths cannot exceed {self._MAX_ATTACHMENTS_PER_CALL} per call."
+                    f"attachment_ids plus attachment_file_paths cannot exceed "
+                    f"{self._MAX_ATTACHMENTS_PER_CALL} per call."
                 ),
             )
         if action != "context" and not room_access_allowed(context, room_id):

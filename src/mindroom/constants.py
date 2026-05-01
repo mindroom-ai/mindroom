@@ -557,7 +557,10 @@ def _expand_runtime_path_vars(value: str, paths: RuntimePaths) -> str:
             return str(paths.config_path)
         if name == "MINDROOM_STORAGE_PATH":
             return str(paths.storage_root)
-        msg = f"Config-relative paths only support ${{MINDROOM_CONFIG_PATH}} and ${{MINDROOM_STORAGE_PATH}} placeholders (got: {name})"
+        msg = (
+            "Config-relative paths only support ${MINDROOM_CONFIG_PATH} and "
+            f"${{MINDROOM_STORAGE_PATH}} placeholders (got: {name})"
+        )
         raise ValueError(msg)
 
     return _CONFIG_PATH_PLACEHOLDER_PATTERN.sub(_replace, value)

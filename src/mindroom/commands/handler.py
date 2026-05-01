@@ -144,7 +144,10 @@ def _generate_welcome_message(room_id: str, config: Config, runtime_paths: Runti
         agent_list.append(agent_entry)
 
     # Create welcome message
-    welcome_msg = "🎉 **Welcome to MindRoom!**\n\nI'm your routing assistant, here to help coordinate our team of specialized AI agents. 🤖\n\n"
+    welcome_msg = (
+        "🎉 **Welcome to MindRoom!**\n\n"
+        "I'm your routing assistant, here to help coordinate our team of specialized AI agents. 🤖\n\n"
+    )
 
     if agent_list:
         welcome_msg += "🧠 **Available agents in this room:**\n"

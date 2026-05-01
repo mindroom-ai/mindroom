@@ -336,7 +336,8 @@ def test_block_html_before_fenced_code_keeps_the_fence() -> None:
 def test_unsafe_raw_html_attributes_are_stripped() -> None:
     """Supported tags keep only safe attributes after sanitization."""
     html = markdown_to_html(
-        '<a href="javascript:alert(1)" onclick="alert(1)">click</a>\n<img src="javascript:alert(1)" onerror="alert(1)" alt="safe">',
+        '<a href="javascript:alert(1)" onclick="alert(1)">click</a>\n'
+        '<img src="javascript:alert(1)" onerror="alert(1)" alt="safe">',
     )
     assert "<a>click</a>" in html
     assert 'href="javascript:alert(1)"' not in html

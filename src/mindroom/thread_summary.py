@@ -255,7 +255,8 @@ _SUMMARY_INSTRUCTIONS = [
     "- One line only, plain text only.",
     "- Under 160 characters is preferred.",
     "- Hard max 300 characters after normalization.",
-    '- Prefer stable noun phrases such as "Fixing X", "Review of Y", "Discussion of Z", "Live test of A", or "Investigation of B".',
+    '- Prefer stable noun phrases such as "Fixing X", "Review of Y", "Discussion of Z", '
+    '"Live test of A", or "Investigation of B".',
     "- Start with 1-2 emojis representing the topic category.",
     "- Include a ticket, issue, or PR number when it helps identify the enduring subject.",
     "- Lead with the main work item or topic, not the latest state update.",
@@ -269,7 +270,8 @@ _SUMMARY_INSTRUCTIONS = [
     '- No quotes, no prefixes like "Summary:", and no trailing punctuation.',
     "",
     "BAD -> GOOD EXAMPLES:",
-    '- "\u2705 PR #548 approved after round 13 fixes, 25 bugs found" -> "\U0001f9f5 Review of PR #548 session persistence hooks"',
+    '- "\u2705 PR #548 approved after round 13 fixes, 25 bugs found" -> '
+    '"\U0001f9f5 Review of PR #548 session persistence hooks"',
     '- "\U0001f9ec ISSUE-148: live e2e test of matrix cache invalidate-and-refetch \u2014 '
     'thread context and post-restart cache persistence confirmed working" -> '
     '"\U0001f9ea ISSUE-148 matrix cache invalidate-and-refetch live test"',
@@ -277,7 +279,8 @@ _SUMMARY_INSTRUCTIONS = [
     'uploaded test file" -> "\U0001f9ea Attachment cache live test"',
     '- "\u2705 ISSUE-083: thread-goal plugin e2e test \u2014 all 4 operations passed '
     'successfully" -> "\U0001f9ea ISSUE-083 thread-goal plugin end-to-end test"',
-    '- "\U0001f331 Bot echo test \u2014 three seed prompts sent and correctly replied" -> "\U0001f501 Bot echo/reply verification test"',
+    '- "\U0001f331 Bot echo test \u2014 three seed prompts sent and correctly replied" '
+    '-> "\U0001f501 Bot echo/reply verification test"',
 ]
 
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
