@@ -6,19 +6,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from mindroom.interactive import InteractiveMetadata
     from mindroom.tool_system.events import ToolTraceEntry
 
 TerminalStatus = Literal["completed", "cancelled", "error"]
 VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
 VisibleDeliveryKind = Literal["sent", "edited"]
-
-
-def _copy_dict(value: dict[str, str] | dict[str, Any] | None) -> dict[str, Any] | None:
-    return dict(value) if value else None
-
-
-def _copy_options(value: tuple[dict[str, str], ...] | list[dict[str, str]] | None) -> tuple[dict[str, str], ...] | None:
-    return tuple(dict(item) for item in value) if value is not None else None
 
 
 @dataclass(frozen=True)
@@ -29,6 +22,7 @@ class StreamTransportOutcome:  # noqa: D101
     visible_body_state: VisibleBodyState
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
+    interactive_metadata: InteractiveMetadata | None = None
 
     @property
     def has_any_physical_stream_event(self) -> bool:  # noqa: D102
@@ -50,14 +44,11 @@ class FinalDeliveryOutcome:  # noqa: D101
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     extra_content: dict[str, Any] | None = None
-    option_map: dict[str, str] | None = None
-    options_list: tuple[dict[str, str], ...] | None = None
+    interactive_metadata: InteractiveMetadata | None = None
 
     def __post_init__(self) -> None:  # noqa: D105
         object.__setattr__(self, "tool_trace", tuple(self.tool_trace or ()))
         object.__setattr__(self, "extra_content", dict(self.extra_content or {}))
-        object.__setattr__(self, "option_map", _copy_dict(self.option_map))
-        object.__setattr__(self, "options_list", _copy_options(self.options_list))
 
     @property
     def final_visible_event_id(self) -> str | None:  # noqa: D102
@@ -70,6 +61,18 @@ class FinalDeliveryOutcome:  # noqa: D101
     @property
     def response_text(self) -> str:  # noqa: D102
         return self.final_visible_body or ""
+
+    @property
+    def option_map(self) -> dict[str, str] | None:  # noqa: D102
+        if self.interactive_metadata is None:
+            return None
+        return dict(self.interactive_metadata.option_map)
+
+    @property
+    def options_list(self) -> tuple[dict[str, str], ...] | None:  # noqa: D102
+        if self.interactive_metadata is None:
+            return None
+        return tuple(dict(item) for item in self.interactive_metadata.options_list)
 
     @classmethod
     def cancelled_for_empty_prompt(cls) -> FinalDeliveryOutcome:

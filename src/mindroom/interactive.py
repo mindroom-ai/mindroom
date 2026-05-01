@@ -12,7 +12,7 @@ import time
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import nio
 
@@ -20,6 +20,8 @@ from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -45,12 +47,52 @@ class _InteractiveQuestion:
     created_at: float = field(default_factory=time.time)
 
 
-class _InteractiveResponse(NamedTuple):
+@dataclass(frozen=True, slots=True)
+class InteractiveMetadata:
+    """Registration metadata extracted from one interactive response."""
+
+    option_map: dict[str, str]
+    options_list: tuple[dict[str, str], ...]
+
+    @classmethod
+    def from_parts(
+        cls,
+        option_map: dict[str, str] | None,
+        options_list: Sequence[dict[str, str]] | None,
+    ) -> InteractiveMetadata | None:
+        """Return copied metadata when both interactive registration parts exist."""
+        if not option_map or not options_list:
+            return None
+        return cls(
+            option_map=dict(option_map),
+            options_list=tuple(dict(item) for item in options_list),
+        )
+
+    def options_as_list(self) -> list[dict[str, str]]:
+        """Return a mutable copy for Matrix reaction-button registration."""
+        return [dict(item) for item in self.options_list]
+
+
+@dataclass(frozen=True, slots=True)
+class _InteractiveResponse:
     """Result of parsing and formatting an interactive response."""
 
     formatted_text: str
-    option_map: dict[str, str] | None
-    options_list: list[dict[str, str]] | None
+    interactive_metadata: InteractiveMetadata | None = None
+
+    @property
+    def option_map(self) -> dict[str, str] | None:
+        """Return the emoji/number mapping when this response is interactive."""
+        if self.interactive_metadata is None:
+            return None
+        return dict(self.interactive_metadata.option_map)
+
+    @property
+    def options_list(self) -> list[dict[str, str]] | None:
+        """Return the button option list when this response is interactive."""
+        if self.interactive_metadata is None:
+            return None
+        return self.interactive_metadata.options_as_list()
 
 
 @dataclass(frozen=True, slots=True)
@@ -560,7 +602,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
                 "Interactive block not parsed",
                 preview=_preview_text(response_text),
             )
-        return _InteractiveResponse(response_text, None, None)
+        return _InteractiveResponse(response_text)
 
     try:
         interactive_data = json.loads(first_match.group(1))
@@ -570,7 +612,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
             error=str(exc),
             preview=_preview_text(first_match.group(1)),
         )
-        return _InteractiveResponse(response_text, None, None)
+        return _InteractiveResponse(response_text)
 
     if not isinstance(interactive_data, dict):
         logger.warning(
@@ -578,14 +620,14 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
             payload_type=type(interactive_data).__name__,
             preview=_preview_text(first_match.group(1)),
         )
-        return _InteractiveResponse(response_text, None, None)
+        return _InteractiveResponse(response_text)
 
     interactive_payload = cast("dict[str, object]", interactive_data)
     question = interactive_payload.get("question", _DEFAULT_QUESTION)
     options = cast("list[dict[str, str]]", interactive_payload.get("options", []))
 
     if not options:
-        return _InteractiveResponse(response_text, None, None)
+        return _InteractiveResponse(response_text)
 
     options = options[:_MAX_OPTIONS]
     clean_response = response_text.replace(first_match.group(0), "").strip()
@@ -616,7 +658,10 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
 
     final_text = "\n".join(message_parts)
 
-    return _InteractiveResponse(final_text, option_map, options if extract_mapping else None)
+    return _InteractiveResponse(
+        final_text,
+        InteractiveMetadata.from_parts(option_map, options if extract_mapping else None),
+    )
 
 
 def register_interactive_question(

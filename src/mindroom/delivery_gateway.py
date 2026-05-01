@@ -354,10 +354,14 @@ class DeliveryGateway:
         visible_body: str,
         *,
         canonical_body_candidate: str | None,
+        stream_interactive_metadata: interactive.InteractiveMetadata | None = None,
     ) -> interactive._InteractiveResponse:
         """Return interactive metadata only when it belongs to the visible body."""
+        if stream_interactive_metadata is not None:
+            return interactive._InteractiveResponse(visible_body, stream_interactive_metadata)
+
         visible_response = interactive.parse_and_format_interactive(visible_body, extract_mapping=True)
-        if visible_response.option_map and visible_response.options_list:
+        if visible_response.interactive_metadata is not None:
             return visible_response
 
         if canonical_body_candidate is None or canonical_body_candidate == visible_body:
@@ -367,11 +371,7 @@ class DeliveryGateway:
             canonical_body_candidate,
             extract_mapping=True,
         )
-        if (
-            canonical_response.option_map
-            and canonical_response.options_list
-            and canonical_response.formatted_text == visible_body
-        ):
+        if canonical_response.interactive_metadata is not None and canonical_response.formatted_text == visible_body:
             return canonical_response
 
         return visible_response
@@ -776,12 +776,7 @@ class DeliveryGateway:
                     delivery_kind="edited",
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
-                    option_map=interactive_response.option_map,
-                    options_list=(
-                        tuple(interactive_response.options_list)
-                        if interactive_response.options_list is not None
-                        else None
-                    ),
+                    interactive_metadata=interactive_response.interactive_metadata,
                 )
 
             if request.existing_event_is_placeholder:
@@ -830,10 +825,7 @@ class DeliveryGateway:
             delivery_kind="sent",
             tool_trace=tuple(draft.tool_trace or ()),
             extra_content=draft.extra_content,
-            option_map=interactive_response.option_map,
-            options_list=tuple(interactive_response.options_list)
-            if interactive_response.options_list is not None
-            else None,
+            interactive_metadata=interactive_response.interactive_metadata,
         )
 
     async def deliver_cancelled_visible_note(
@@ -1096,10 +1088,7 @@ class DeliveryGateway:
             failure_reason=failure_reason,
             tool_trace=tuple(tool_trace or ()),
             extra_content=extra_content,
-            option_map=interactive_response.option_map,
-            options_list=tuple(interactive_response.options_list)
-            if interactive_response.options_list is not None
-            else None,
+            interactive_metadata=interactive_response.interactive_metadata,
         )
 
     async def _finalize_placeholder_only_stream_error(
@@ -1444,6 +1433,7 @@ class DeliveryGateway:
             interactive_response = self._interactive_response_for_visible_body(
                 streamed_text,
                 canonical_body_candidate=final_body_candidate,
+                stream_interactive_metadata=stream_outcome.interactive_metadata,
             )
             return FinalDeliveryOutcome(
                 terminal_status="completed",
@@ -1454,10 +1444,7 @@ class DeliveryGateway:
                 failure_reason=stream_outcome.failure_reason,
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
-                option_map=interactive_response.option_map,
-                options_list=tuple(interactive_response.options_list)
-                if interactive_response.options_list is not None
-                else None,
+                interactive_metadata=interactive_response.interactive_metadata,
             )
         except asyncio.CancelledError:
             visible_event_id = self._visible_stream_event_id(stream_outcome)
