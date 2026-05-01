@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import UTC, datetime
+from enum import Enum, auto
 from functools import wraps
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
@@ -30,6 +31,15 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
+
+
+class OAuthAuthSource(Enum):
+    """Credential source selected for one tool auth attempt."""
+
+    PROVIDED_CREDENTIALS = auto()
+    ORIGINAL_AUTH = auto()
+    VALID_CREDENTIALS = auto()
+    STORED_OAUTH = auto()
 
 
 class _AuthDescriptor(Protocol):
@@ -150,13 +160,14 @@ class ScopedOAuthClientMixin:
         )
 
     def _ensure_structured_auth(self) -> str | None:
-        if self._should_skip_auth():
+        auth_source = self._select_auth_source()
+        if auth_source in {OAuthAuthSource.PROVIDED_CREDENTIALS, OAuthAuthSource.VALID_CREDENTIALS}:
             return None
-        if self._should_fallback_to_original_auth():
-            self._auth()
+        if auth_source is OAuthAuthSource.ORIGINAL_AUTH:
+            self._auth_with_original_fallback()
             return None
         try:
-            self._auth()
+            self._auth_with_stored_oauth()
         except OAuthConnectionRequired as exc:
             return self._structured_auth_failure(exc)
         return None
@@ -233,6 +244,16 @@ class ScopedOAuthClientMixin:
         """Return whether tool auth can return early with already-valid provided credentials."""
         return bool(self._provided_creds and self.creds and self.creds.valid)
 
+    def _select_auth_source(self) -> OAuthAuthSource:
+        """Select the credential source according to the tool auth priority contract."""
+        if self._should_skip_auth():
+            return OAuthAuthSource.PROVIDED_CREDENTIALS
+        if self._should_fallback_to_original_auth():
+            return OAuthAuthSource.ORIGINAL_AUTH
+        if self.creds and self.creds.valid:
+            return OAuthAuthSource.VALID_CREDENTIALS
+        return OAuthAuthSource.STORED_OAUTH
+
     def _auth_with_original_fallback(self) -> None:
         """Authenticate through the wrapped tool's original auth flow."""
         if self._original_auth_completed and self.creds and self.creds.valid:
@@ -241,18 +262,8 @@ class ScopedOAuthClientMixin:
         self._original_auth()
         self._original_auth_completed = True
 
-    def _auth(self) -> None:
-        """Authenticate using MindRoom-scoped OAuth credentials."""
-        if self._should_skip_auth():
-            return
-
-        if self._should_fallback_to_original_auth():
-            self._auth_with_original_fallback()
-            return
-
-        if self.creds and self.creds.valid:
-            return
-
+    def _auth_with_stored_oauth(self) -> None:
+        """Authenticate using MindRoom-scoped stored OAuth credentials."""
         token_data = self._load_token_data()
         if (
             not token_data
@@ -285,3 +296,13 @@ class ScopedOAuthClientMixin:
                 error_type=type(exc).__name__,
             )
             raise self._connection_required() from exc
+
+    def _auth(self) -> None:
+        """Authenticate using the selected MindRoom or wrapped-tool credential source."""
+        auth_source = self._select_auth_source()
+        if auth_source in {OAuthAuthSource.PROVIDED_CREDENTIALS, OAuthAuthSource.VALID_CREDENTIALS}:
+            return
+        if auth_source is OAuthAuthSource.ORIGINAL_AUTH:
+            self._auth_with_original_fallback()
+            return
+        self._auth_with_stored_oauth()
