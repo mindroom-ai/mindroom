@@ -41,6 +41,7 @@ from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -367,6 +368,11 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
         thread_id="$thread",
         reply_to_event_id="$event",
     )
+    interactive_metadata = InteractiveMetadata.from_parts(
+        {"1": "yes"},
+        ({"emoji": "1", "label": "Yes", "value": "yes"},),
+    )
+    assert interactive_metadata is not None
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
@@ -375,8 +381,7 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
             is_visible_response=True,
             final_visible_body="Choose",
             delivery_kind="sent",
-            option_map={"1": "yes"},
-            options_list=({"emoji": "1", "label": "Yes", "value": "yes"},),
+            interactive_metadata=interactive_metadata,
         ),
         ResponseOutcome(
             interactive_target=target,
@@ -390,8 +395,7 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
     register_interactive.assert_awaited_once_with(
         "$stream",
         target,
-        {"1": "yes"},
-        [{"emoji": "1", "label": "Yes", "value": "yes"}],
+        interactive_metadata,
     )
 
 
@@ -404,6 +408,11 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
         thread_id="$thread",
         reply_to_event_id="$event",
     )
+    interactive_metadata = InteractiveMetadata.from_parts(
+        {"1": "yes"},
+        ({"emoji": "1", "label": "Yes", "value": "yes"},),
+    )
+    assert interactive_metadata is not None
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
@@ -411,8 +420,7 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
             event_id="$stream",
             is_visible_response=True,
             final_visible_body="Choose",
-            option_map={"1": "yes"},
-            options_list=({"emoji": "1", "label": "Yes", "value": "yes"},),
+            interactive_metadata=interactive_metadata,
         ),
         ResponseOutcome(
             interactive_target=target,

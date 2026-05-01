@@ -27,6 +27,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
@@ -280,8 +281,7 @@ def _outcome(
         suppressed=resolved_suppressed,
         tool_trace=tool_trace,
         extra_content=dict(extra_content or {}),
-        option_map=option_map,
-        options_list=options_list,
+        interactive_metadata=InteractiveMetadata.from_parts(option_map, options_list),
     )
 
 
