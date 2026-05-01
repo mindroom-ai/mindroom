@@ -1059,6 +1059,7 @@ def _execute_request_subprocess_sync(
     subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, execution_env)
     # python's subprocess inherits this cwd as Path.cwd(); shell sets its own cwd via base_dir.
     if workspace_home is not None and request.tool_name == "python":
+        workspace_home.mkdir(parents=True, exist_ok=True)
         cwd = str(workspace_home)
     effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
         runtime_paths,
