@@ -89,7 +89,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "avatars")
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "avatars", "tool_approval")
 
 
 class ConfigRuntimeValidationError(ValueError):

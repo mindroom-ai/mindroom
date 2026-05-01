@@ -594,6 +594,14 @@ class TestConsolidatedConfigManager:
         resolved = next(entry for entry in config.get_agent_tool_configs("code") if entry.name == "clickup")
         assert resolved.tool_config_overrides == {}
 
+    def test_tool_approval_null_section_uses_default_config(self) -> None:
+        """An uncommented blank tool_approval section should behave like an empty mapping."""
+        config = Config.model_validate({"tool_approval": None})
+
+        assert config.tool_approval.default == "auto_approve"
+        assert config.tool_approval.timeout_days == 7.0
+        assert config.tool_approval.rules == []
+
     def test_duplicate_tool_entries_are_rejected_for_agents_and_defaults(self) -> None:
         """Duplicate tool names should be rejected even across mixed string and mapping syntax."""
         with pytest.raises(ValueError, match="Duplicate default tools are not allowed: shell"):
