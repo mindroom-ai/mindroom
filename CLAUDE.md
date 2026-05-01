@@ -285,6 +285,10 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 
 - Default to the smallest correct change.
 - Never add a production branch, wrapper, or fallback whose only purpose is to preserve an old test expectation.
+- Treat `src/mindroom/bot.py` and `src/mindroom/orchestrator.py` as composition roots and lifecycle shells, not feature implementation modules.
+- Default to putting new behavior in focused modules or collaborators, then wire it into `bot.py` or `orchestrator.py` through a small public method or dependency.
+- A PR that adds substantial code to `bot.py` or `orchestrator.py` must explain why the code truly belongs at that lifecycle boundary and why a focused module would be worse.
+- During PR review, flag growth in `bot.py` or `orchestrator.py` as a design smell unless it is limited to routing, lifecycle coordination, dependency wiring, or calls into extracted collaborators.
 - Every 3 review rounds, if reviews still show many issues or new major bug classes, stop patching and reconsider the design before another patch round.
 - Use larger refactors when they provide clear immediate maintenance ROI, not hypothetical future value.
 - A larger refactor is justified only if it:
