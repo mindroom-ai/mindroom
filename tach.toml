@@ -1614,7 +1614,6 @@ depends_on = ["mindroom.tool_system.plugin_imports"]
 [[modules]]
 path = "mindroom.tool_system.worker_routing"
 depends_on = [
-    "mindroom.credential_policy",
     "mindroom.mcp.registry",
 ]
 
@@ -2445,7 +2444,6 @@ expose = [
     "build_tool_execution_identity",
     "build_worker_target_from_runtime_env",
     "get_tool_execution_identity",
-    "local_shared_credential_allowlist",
     "private_instance_scope_root_path",
     "require_worker_key_for_scope",
     "resolve_agent_owned_path",

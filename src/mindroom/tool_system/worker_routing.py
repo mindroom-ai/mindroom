@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
 
-from mindroom.credential_policy import credential_service_policy
-
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
 
@@ -354,16 +352,6 @@ def unsupported_shared_only_integration_names(
 def tool_stays_local(name: str) -> bool:
     """Return whether one integration tool always stays in the primary runtime."""
     return name in LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES
-
-
-def local_shared_credential_allowlist(
-    service: str,
-    worker_scope: WorkerScope | None,
-) -> frozenset[str] | None:
-    """Return the explicit shared-service allowlist for one local-only scoped integration."""
-    if credential_service_policy(service, worker_scope).uses_local_shared_credentials:
-        return frozenset({service})
-    return None
 
 
 def unsupported_shared_only_integration_message(
