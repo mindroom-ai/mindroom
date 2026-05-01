@@ -15,6 +15,12 @@ from mindroom.agent_policy import (
 )
 from mindroom.api import config_lifecycle
 from mindroom.config.main import Config
+from mindroom.credential_policy import (
+    OAUTH_CREDENTIAL_FIELDS,
+    credential_service_policy,
+    filter_oauth_credential_fields,
+    looks_like_oauth_credentials,
+)
 from mindroom.credentials import (
     CredentialsManager,
     delete_scoped_credentials,
@@ -27,7 +33,6 @@ from mindroom.credentials import (
 )
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
-from mindroom.oauth.service import OAUTH_CREDENTIAL_FIELDS
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -35,8 +40,6 @@ from mindroom.tool_system.worker_routing import (
     local_shared_credential_allowlist,
     require_worker_key_for_scope,
     resolve_worker_target,
-    service_uses_local_shared_credentials,
-    service_uses_primary_runtime_scoped_credentials,
     unsupported_shared_only_integration_message,
     unsupported_shared_only_integration_names,
 )
@@ -74,19 +77,9 @@ def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
 def _filter_credentials_for_response(credentials: dict[str, Any], *, is_oauth_service: bool) -> dict[str, Any]:
     """Return credentials safe for dashboard config responses."""
     filtered = _filter_internal_keys(credentials)
-    if not is_oauth_service and not _looks_like_oauth_credentials(credentials):
+    if not is_oauth_service and not looks_like_oauth_credentials(credentials):
         return filtered
-    return {key: value for key, value in filtered.items() if key not in OAUTH_CREDENTIAL_FIELDS}
-
-
-def _looks_like_oauth_credentials(credentials: dict[str, Any]) -> bool:
-    """Return whether stored credentials carry MindRoom OAuth token metadata."""
-    return (
-        credentials.get("_source") == "oauth"
-        or isinstance(credentials.get("_oauth_provider"), str)
-        or isinstance(credentials.get("_id_token"), str)
-        or isinstance(credentials.get("_oauth_claims"), dict)
-    )
+    return filter_oauth_credential_fields(credentials)
 
 
 def _validated_service(service: str) -> str:
@@ -555,10 +548,8 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
 
 
 def _service_uses_primary_runtime_store(service: str, target: RequestCredentialsTarget) -> bool:
-    return service_uses_primary_runtime_scoped_credentials(
-        service,
-        target.worker_scope,
-    ) or service_uses_local_shared_credentials(service, target.worker_scope)
+    policy = credential_service_policy(service, target.worker_scope)
+    return policy.uses_primary_runtime_scoped_credentials or policy.uses_local_shared_credentials
 
 
 def _worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:
@@ -596,7 +587,7 @@ def _primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget
     return {
         service
         for service in scoped_manager.list_services()
-        if service_uses_primary_runtime_scoped_credentials(service, target.worker_scope)
+        if credential_service_policy(service, target.worker_scope).uses_primary_runtime_scoped_credentials
     }
 
 
@@ -639,7 +630,7 @@ def _reject_oauth_token_service(
 
 
 def _reject_oauth_credentials_document(credentials: dict[str, Any]) -> None:
-    if not _looks_like_oauth_credentials(credentials):
+    if not looks_like_oauth_credentials(credentials):
         return
     raise HTTPException(status_code=400, detail=_OAUTH_TOKEN_CREDENTIALS_ERROR)
 
@@ -666,11 +657,7 @@ def _dashboard_credentials_for_save(
 ) -> dict[str, Any]:
     credentials = dict(config_values)
     if strip_oauth_fields:
-        credentials = {
-            key: value
-            for key, value in credentials.items()
-            if key not in OAUTH_CREDENTIAL_FIELDS and not key.startswith("_")
-        }
+        credentials = filter_oauth_credential_fields(credentials)
     credentials["_source"] = "ui"
     return credentials
 
@@ -764,7 +751,7 @@ class DashboardCredentialAccess:
             shared_services |= {
                 service
                 for service in shared_manager.list_services()
-                if service_uses_local_shared_credentials(service, self.target.worker_scope)
+                if credential_service_policy(service, self.target.worker_scope).uses_local_shared_credentials
             }
         services = worker_services | primary_runtime_services | shared_services
         services -= set(unsupported_shared_only_integration_names(sorted(services), self.target.worker_scope))

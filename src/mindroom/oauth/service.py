@@ -18,27 +18,6 @@ if TYPE_CHECKING:
 
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
-OAUTH_CREDENTIAL_FIELDS = frozenset(
-    {
-        "_id_token",
-        "_oauth_claims",
-        "_oauth_claims_verified",
-        "_oauth_provider",
-        "_source",
-        "access_token",
-        "client_id",
-        "client_secret",
-        "expires_at",
-        "expires_in",
-        "id_token",
-        "refresh_token",
-        "scope",
-        "scopes",
-        "token",
-        "token_type",
-        "token_uri",
-    },
-)
 _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
 _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
     {

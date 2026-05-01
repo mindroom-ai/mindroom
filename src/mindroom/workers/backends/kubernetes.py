@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.constants import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
@@ -258,7 +258,13 @@ class KubernetesWorkerBackend:
         tool_validation_snapshot: dict[str, dict[str, object]],
         worker_grantable_credentials: frozenset[str],
     ) -> None:
-        unsupported_services = sorted(worker_grantable_credentials & UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS)
+        unsupported_services = sorted(
+            {
+                service
+                for service in worker_grantable_credentials
+                if not credential_service_policy(service, None).worker_grantable_supported
+            },
+        )
         if unsupported_services:
             msg = (
                 "Dedicated workers do not support "

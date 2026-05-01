@@ -163,6 +163,10 @@ path = "mindroom.agent_policy"
 depends_on = ["mindroom.config.agent"]
 
 [[modules]]
+path = "mindroom.credential_policy"
+depends_on = []
+
+[[modules]]
 path = "mindroom.runtime_resolution"
 depends_on = [
     "mindroom.agent_policy",
@@ -350,6 +354,7 @@ depends_on = [
     "mindroom.agent_policy",
     "mindroom.api.config_lifecycle",
     "mindroom.config.main",
+    "mindroom.credential_policy",
     "mindroom.credentials",
     "mindroom.oauth.registry",
     "mindroom.oauth.service",
@@ -1607,7 +1612,10 @@ depends_on = ["mindroom.tool_system.plugin_imports"]
 
 [[modules]]
 path = "mindroom.tool_system.worker_routing"
-depends_on = ["mindroom.mcp.registry"]
+depends_on = [
+    "mindroom.credential_policy",
+    "mindroom.mcp.registry",
+]
 
 [[modules]]
 path = "mindroom.tool_system.events"
@@ -2448,8 +2456,6 @@ expose = [
     "resolved_worker_key_scope",
     "requires_shared_only_integration_scope",
     "run_with_tool_execution_identity",
-    "service_uses_local_shared_credentials",
-    "service_uses_primary_runtime_scoped_credentials",
     "shared_storage_root",
     "stream_with_tool_execution_identity",
     "supports_tool_name_for_worker_scope",

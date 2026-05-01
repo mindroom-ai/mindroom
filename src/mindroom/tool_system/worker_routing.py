@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
 
+from mindroom.credential_policy import credential_service_policy
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
 
@@ -36,20 +38,6 @@ LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
         "google_calendar",
         "google_drive",
         "google_sheets",
-        "homeassistant",
-    },
-)
-LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
-    {
-        "google_calendar",
-        "google_calendar_oauth",
-        "google_drive",
-        "google_drive_oauth",
-        "google_gmail",
-        "google_gmail_oauth",
-        "google_sheets",
-        "google_sheets_oauth",
-        "gmail",
         "homeassistant",
     },
 )
@@ -368,22 +356,12 @@ def tool_stays_local(name: str) -> bool:
     return name in LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES
 
 
-def service_uses_local_shared_credentials(service: str, worker_scope: WorkerScope | None) -> bool:
-    """Return whether one scoped service reads shared credentials locally instead of worker mirrors."""
-    return worker_scope == "shared" and service in LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
-
-
-def service_uses_primary_runtime_scoped_credentials(service: str, worker_scope: WorkerScope | None) -> bool:
-    """Return whether one scoped service must stay outside worker-mounted storage."""
-    return worker_scope in {"user", "user_agent"} and service in LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
-
-
 def local_shared_credential_allowlist(
     service: str,
     worker_scope: WorkerScope | None,
 ) -> frozenset[str] | None:
     """Return the explicit shared-service allowlist for one local-only scoped integration."""
-    if service_uses_local_shared_credentials(service, worker_scope):
+    if credential_service_policy(service, worker_scope).uses_local_shared_credentials:
         return frozenset({service})
     return None
 
