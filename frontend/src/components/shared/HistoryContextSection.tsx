@@ -116,7 +116,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
   }) as CompactionConfig | null | undefined;
   const [compactionThresholdPercentInput, setCompactionThresholdPercentInput] =
     useState("");
-  const defaultCompaction = defaults?.compaction ?? null;
+  const defaultCompaction = defaults?.compaction;
   const effectiveCompactionEnabled = resolveEffectiveCompactionEnabled(
     compactionConfig,
     defaultCompaction,

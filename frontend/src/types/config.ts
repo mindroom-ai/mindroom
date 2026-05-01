@@ -137,7 +137,10 @@ function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
 function resolveAuthoredCompactionEnabled(
   compaction: CompactionConfig | null | undefined,
 ): boolean {
-  if (compaction == null) {
+  if (compaction === null) {
+    return false;
+  }
+  if (compaction === undefined) {
     return true;
   }
   if (compaction.enabled !== undefined) {
