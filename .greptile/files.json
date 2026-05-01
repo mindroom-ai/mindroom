@@ -1,0 +1,28 @@
+{
+  "files": [
+    {
+      "path": "CLAUDE.md",
+      "description": "Repository architecture map, project workflow, coding standards, testing guidance, and current model-name policy."
+    },
+    {
+      "path": "pyproject.toml",
+      "description": "Core Python package metadata, runtime dependencies, optional tool extras, and supported Python versions.",
+      "scope": ["src/**", "tests/**", "pyproject.toml"]
+    },
+    {
+      "path": "tach.toml",
+      "description": "Architecture boundary definitions for the core MindRoom package.",
+      "scope": ["src/**", "tach.toml"]
+    },
+    {
+      "path": ".github/workflows/pytest.yml",
+      "description": "Primary backend test workflow and expected CI test shape.",
+      "scope": [".github/**", "src/**", "tests/**"]
+    },
+    {
+      "path": "saas-platform/README.md",
+      "description": "SaaS platform development and deployment overview.",
+      "scope": ["saas-platform/**"]
+    }
+  ]
+}

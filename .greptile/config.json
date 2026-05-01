@@ -1,0 +1,45 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax", "style"],
+  "triggerOnUpdates": true,
+  "statusCheck": false,
+  "ignorePatterns": "mindroom_data/\ntests/mindroom_data/\n.venv/\nnode_modules/\nfrontend/node_modules/\nfrontend/dist/\n**/.next/\n**/coverage/\n**/htmlcov/\nskills/mindroom-docs/references/llms-full.txt",
+  "instructions": "MindRoom is an Apache-2.0 repository for Matrix-based AI agent orchestration plus a SaaS control plane. Review with CLAUDE.md as the primary repository guidance. Prioritize correctness, security, privacy, Matrix protocol behavior, concurrency, config migration safety, deployment safety, and focused tests.",
+  "rules": [
+    {
+      "id": "verify-current-model-names",
+      "rule": "Do not flag AI model identifiers as invalid just because they are unfamiliar. When model names matter, ask for current provider documentation verification.",
+      "severity": "medium"
+    },
+    {
+      "id": "typed-interfaces-over-dynamic-probes",
+      "rule": "Do not recommend getattr or hasattr fallbacks that weaken a typed production interface. Prefer fixing the declared type, dataclass, Pydantic model, or test fixture.",
+      "scope": ["src/**", "tests/**", "saas-platform/platform-backend/**"],
+      "severity": "high"
+    },
+    {
+      "id": "no-test-only-production-branches",
+      "rule": "Do not recommend production wrappers, fallback branches, or compatibility shims whose only purpose is to preserve an old test expectation.",
+      "scope": ["src/**", "saas-platform/**"],
+      "severity": "high"
+    },
+    {
+      "id": "module-top-imports",
+      "rule": "Prefer module-level imports in Python. Only recommend function-local imports when they avoid a real circular import or expensive optional dependency boundary.",
+      "scope": ["**/*.py"],
+      "severity": "medium"
+    },
+    {
+      "id": "deployment-secret-safety",
+      "rule": "Flag committed secrets, plaintext deployment credentials, unsafe Helm values, and changes that bypass the provisioner-owned instance deployment flow.",
+      "scope": ["cluster/**", "local/**", "saas-platform/**"],
+      "severity": "high"
+    },
+    {
+      "id": "markdown-one-sentence-per-line",
+      "rule": "Markdown documentation should keep one sentence per line and should not split a single sentence across multiple lines.",
+      "scope": ["docs/**/*.md", "README.md", "skills/**/*.md"],
+      "severity": "low"
+    }
+  ]
+}
