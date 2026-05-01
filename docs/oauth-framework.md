@@ -21,6 +21,9 @@ This keeps FastAPI routing and state handling in core while still letting plugin
 OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`.
 For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime.
 If MindRoom cannot resolve the authenticated dashboard user to the requester carried by a conversation-issued link, the link fails closed and no credential is saved.
+Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`.
+That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections.
+Storage, API routing, OAuth provider loading, and worker identity derivation stay in their existing modules.
 Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent.
 Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need Google OAuth client config or user refresh tokens.
 OAuth token documents and editable tool setting documents should be separate services.

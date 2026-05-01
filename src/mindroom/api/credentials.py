@@ -531,14 +531,10 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
         )
 
     shared_manager = target.base_manager.shared_manager()
-    policy = credential_service_policy(service, target.worker_scope)
-    allowed_shared_services = (
-        frozenset({service}) if policy.uses_local_shared_credentials else target.allowed_shared_services or frozenset()
-    )
     shared_credentials = load_worker_grantable_shared_credentials(
         service,
         shared_manager=shared_manager,
-        allowed_services=allowed_shared_services,
+        allowed_services=target.allowed_shared_services or frozenset(),
     )
     worker_credentials = target.target_manager.load_credentials(service)
     if not shared_credentials and not isinstance(worker_credentials, dict):
