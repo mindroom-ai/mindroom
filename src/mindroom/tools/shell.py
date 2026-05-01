@@ -19,7 +19,11 @@ from typing import Annotated, cast
 from agno.tools.toolkit import Toolkit
 from pydantic import BeforeValidator
 
-from mindroom.constants import RuntimePaths, shell_execution_runtime_env_values
+from mindroom.constants import (
+    WORKSPACE_HOME_CONTRACT_ENV_NAMES,
+    RuntimePaths,
+    shell_execution_runtime_env_values,
+)
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import (
     ConfigField,
@@ -56,6 +60,9 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
         "USER",
         "VIRTUAL_ENV",
         "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
         "http_proxy",
         "https_proxy",
         "no_proxy",
@@ -124,6 +131,23 @@ def _shell_subprocess_path(
     return os.pathsep.join(deduped_entries)
 
 
+def _workspace_home_contract_env_from_process_env(base_process_env: dict[str, str]) -> dict[str, str]:
+    """Return MindRoom-owned workspace env only when the full workspace contract is present."""
+    workspace = base_process_env.get("MINDROOM_AGENT_WORKSPACE")
+    if not workspace or base_process_env.get("HOME") != workspace:
+        return {}
+
+    expected_identity = {
+        "XDG_CONFIG_HOME": str(Path(workspace) / ".config"),
+        "XDG_DATA_HOME": str(Path(workspace) / ".local" / "share"),
+        "XDG_STATE_HOME": str(Path(workspace) / ".local" / "state"),
+    }
+    if any(base_process_env.get(name) != value for name, value in expected_identity.items()):
+        return {}
+
+    return {key: value for key, value in base_process_env.items() if key in WORKSPACE_HOME_CONTRACT_ENV_NAMES}
+
+
 def _shell_subprocess_env(
     runtime_env: dict[str, str],
     *,
@@ -135,6 +159,8 @@ def _shell_subprocess_env(
     if base_process_env is not None:
         env.update({key: value for key, value in base_process_env.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS})
     env.update(runtime_env)
+    if base_process_env is not None:
+        env.update(_workspace_home_contract_env_from_process_env(base_process_env))
 
     path_value = _shell_subprocess_path(
         env.get("PATH"),

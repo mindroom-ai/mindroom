@@ -119,6 +119,25 @@ _RUNNER_CONTROL_ENV_EXCLUDED_NAMES = frozenset(
 # Bash bookkeeping vars that change every time printenv runs and are never
 # meaningful overlay output from `.mindroom/worker-env.sh`.
 WORKSPACE_ENV_OVERLAY_TRANSIENT_NAMES = frozenset({"PWD", "OLDPWD", "SHLVL", "_", "PIPESTATUS"})
+WORKSPACE_HOME_IDENTITY_ENV_NAMES = frozenset(
+    {
+        "HOME",
+        "MINDROOM_AGENT_WORKSPACE",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    },
+)
+WORKER_RUNTIME_ENV_NAMES = frozenset(
+    {
+        "XDG_CACHE_HOME",
+        "PIP_CACHE_DIR",
+        "UV_CACHE_DIR",
+        "PYTHONPYCACHEPREFIX",
+        "VIRTUAL_ENV",
+    },
+)
+WORKSPACE_HOME_CONTRACT_ENV_NAMES = WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_ENV_NAMES
 
 
 def is_workspace_env_overlay_name_allowed(name: str) -> bool:
