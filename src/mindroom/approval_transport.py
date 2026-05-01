@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from math import ceil
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import nio
 
@@ -15,7 +15,7 @@ from mindroom.matrix.cache import normalize_nio_event_for_cache
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
-    _DEFAULT_ROUTER_MANAGED_ROOM_REASON,
+    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     SentApprovalEvent,
     ToolApprovalTransportError,
     expire_orphaned_approval_cards_on_startup,
@@ -34,21 +34,15 @@ logger = get_logger(__name__)
 _TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
 
 
-class _ApprovalConversationCache(Protocol):
-    async def get_latest_thread_event_id_if_needed(self, room_id: str, thread_id: str) -> str | None:
-        """Return the latest event id for one Matrix thread when known."""
-        ...
-
-
 class _ApprovalTransportBot(Protocol):
     agent_name: str
     running: bool
     client: nio.AsyncClient | None
     event_cache: ConversationEventCache
 
-
-class _ApprovalThreadBot(_ApprovalTransportBot, Protocol):
-    _conversation_cache: _ApprovalConversationCache
+    async def latest_thread_event_id_if_needed(self, room_id: str, thread_id: str) -> str | None:
+        """Return the latest event id for one Matrix thread when known."""
+        ...
 
 
 def _approval_startup_lookback_hours(config: Config) -> int:
@@ -136,8 +130,7 @@ class ApprovalMatrixTransport:
         bot = self.bot_provider(agent_name)
         latest_thread_event_id = thread_id
         if bot is not None:
-            thread_bot = cast("_ApprovalThreadBot", bot)
-            resolved_latest_event_id = await thread_bot._conversation_cache.get_latest_thread_event_id_if_needed(
+            resolved_latest_event_id = await bot.latest_thread_event_id_if_needed(
                 room_id,
                 thread_id,
             )
@@ -170,7 +163,7 @@ class ApprovalMatrixTransport:
         if bot is None or not bot.running or bot.client is None:
             return None
         if not self._bot_has_approval_room(bot, room_id):
-            raise ToolApprovalTransportError(_DEFAULT_ROUTER_MANAGED_ROOM_REASON)
+            raise ToolApprovalTransportError(DEFAULT_ROUTER_MANAGED_ROOM_REASON)
         send_content = dict(content)
         if thread_id is not None:
             send_content["m.relates_to"] = await self._approval_thread_relation(

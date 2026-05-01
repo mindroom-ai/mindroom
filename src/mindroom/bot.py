@@ -594,6 +594,10 @@ class AgentBot:
         """Return when this bot runtime started."""
         return self._runtime_view.runtime_started_at
 
+    async def latest_thread_event_id_if_needed(self, room_id: str, thread_id: str) -> str | None:
+        """Return the latest event id for one Matrix thread when the cache knows it."""
+        return await self._conversation_cache.get_latest_thread_event_id_if_needed(room_id, thread_id)
+
     @property
     def hook_registry(self) -> HookRegistry:
         """Return the currently active hook registry."""

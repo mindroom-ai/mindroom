@@ -14,8 +14,8 @@ from uuid import uuid4
 
 from mindroom import approval_manager
 from mindroom.approval_manager import (
-    _DEFAULT_ROUTER_MANAGED_ROOM_REASON,
-    _DEFAULT_SHUTDOWN_REASON,
+    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
+    DEFAULT_SHUTDOWN_REASON,
     ApprovalActionResult,
     ApprovalDecision,
     ApprovalRoomProvider,
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache.event_cache import ConversationEventCache
 
 __all__ = [
-    "_DEFAULT_ROUTER_MANAGED_ROOM_REASON",
+    "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "ApprovalActionResult",
     "ApprovalDecision",
     "MatrixApprovalAction",
@@ -329,12 +329,12 @@ async def expire_orphaned_approval_cards_on_startup(*, lookback_hours: int) -> i
     return await manager.discard_pending_on_startup(lookback_hours=lookback_hours)
 
 
-async def shutdown_approval_runtime(reason: str = _DEFAULT_SHUTDOWN_REASON) -> None:
+async def shutdown_approval_runtime(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
     """Expire live approvals, drop runtime state, and clear approval script state."""
     await shutdown_approval_store(reason=reason)
 
 
-async def shutdown_approval_store(reason: str = _DEFAULT_SHUTDOWN_REASON) -> None:
+async def shutdown_approval_store(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
     """Expire pending approvals, drop the manager, and clear script state."""
     await approval_manager.shutdown_approval_manager(reason=reason)
     _clear_script_cache()

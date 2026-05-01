@@ -1016,10 +1016,10 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     router_client.rooms = {"!room:localhost": object()}
     router_client.room_send = AsyncMock(side_effect=room_send)
     router_bot = MagicMock(agent_name="router", running=True, client=router_client)
-    router_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$router-latest")
+    router_bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$router-latest")
 
     code_bot = MagicMock(agent_name="code", running=True)
-    code_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$code-latest")
+    code_bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$code-latest")
 
     orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
     orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
@@ -1052,8 +1052,8 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     assert edited is True
     assert sent_contents[0]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
     assert sent_contents[1]["m.new_content"]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
-    assert code_bot._conversation_cache.get_latest_thread_event_id_if_needed.await_count == 2
-    router_bot._conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+    assert code_bot.latest_thread_event_id_if_needed.await_count == 2
+    router_bot.latest_thread_event_id_if_needed.assert_not_awaited()
 
 
 @pytest.mark.asyncio

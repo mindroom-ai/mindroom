@@ -20,6 +20,8 @@ from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.tool_system.tool_failures import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache.event_cache import ConversationEventCache
 
@@ -36,20 +38,19 @@ _POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
 _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
-_DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
+DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
     "Tool approval requires the router to be joined to the Matrix room. "
     "In ad-hoc invited rooms accepted via accept_invites, approval only works if the router "
     "is already joined there; otherwise retry from a managed room."
 )
 _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
-_DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
+DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the displayed arguments are truncated. "
     "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
-_CANCEL_RESOLUTION_RACE_GRACE_SECONDS = 0.01
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MANAGER: ApprovalManager | None = None
 logger = get_logger(__name__)
@@ -488,7 +489,7 @@ class ApprovalManager:
             resolved_by=sender_id,
         )
 
-    def _configure_transport(
+    def configure_transport(
         self,
         *,
         sender: MatrixEventSender | None = None,
@@ -497,6 +498,7 @@ class ApprovalManager:
         approval_room_ids: ApprovalRoomProvider | None = None,
         transport_sender: TransportSenderProvider | None = None,
     ) -> None:
+        """Update Matrix transport hooks for an existing runtime manager."""
         if sender is not None:
             self._send_event = sender
         if editor is not None:
@@ -700,7 +702,7 @@ class ApprovalManager:
             )
         claim_released = False
         try:
-            await asyncio.sleep(_CANCEL_RESOLUTION_RACE_GRACE_SECONDS)
+            await self._yield_to_queued_cancellation()
             with self._live_lock:
                 cancelled = pending.card_event_id in self._cancelled_card_event_ids
             if cancelled:
@@ -732,6 +734,14 @@ class ApprovalManager:
             if not claim_released:
                 with self._live_lock:
                     self._resolving_card_event_ids.discard(pending.card_event_id)
+
+    @staticmethod
+    async def _yield_to_queued_cancellation() -> None:
+        """Let a cancellation already queued behind the resolution claim mark the waiter."""
+        loop = asyncio.get_running_loop()
+        checkpoint = loop.create_future()
+        loop.call_soon(checkpoint.set_result, None)
+        await checkpoint
 
     async def _discard_matrix_only_card(
         self,
@@ -937,6 +947,14 @@ class ApprovalManager:
         with self._live_lock:
             self._post_cancel_cleanup_tasks.discard(cleanup_task)
 
+    def uses_storage_root(self, storage_root: Path) -> bool:
+        """Return whether this manager belongs to one runtime storage root."""
+        return self._runtime_storage_root == storage_root
+
+    def has_live_work(self) -> bool:
+        """Return whether live approvals or cancelled-send cleanup are still active."""
+        return self._has_live_work()
+
     def _has_live_work(self) -> bool:
         with self._live_lock:
             has_waiters = bool(self._pending_by_card_event or self._resolving_card_event_ids)
@@ -1092,23 +1110,27 @@ class ApprovalManager:
             tz=UTC,
         )
         expires_at = _parse_datetime(pending.expires_at) or requested_at + timedelta(seconds=pending.timeout_seconds)
-        content = ApprovalManager._pending_event_content(
-            approval_id=pending.approval_id,
-            tool_name=pending.tool_name,
-            arguments=pending.arguments_preview,
-            arguments_truncated=pending.arguments_preview_truncated,
-            agent_name=pending.agent_name,
-            room_id=pending.room_id,
-            thread_id=pending.thread_id,
-            requester_id=pending.requester_id or None,
-            approver_user_id=pending.approver_user_id,
-            requested_at=requested_at,
-            expires_at=expires_at,
-            status=status,
-        )
-        content["body"] = ApprovalManager._event_body(pending.tool_name, status)
-        content["resolved_at"] = resolved_at.isoformat()
-        content["resolved_by"] = resolved_by
+        content: dict[str, Any] = {
+            "msgtype": "io.mindroom.tool_approval",
+            "body": ApprovalManager._event_body(pending.tool_name, status),
+            "tool_name": pending.tool_name,
+            "tool_call_id": pending.approval_id,
+            "arguments": pending.arguments_preview,
+            "status": status,
+            "approval_id": pending.approval_id,
+            "approver_user_id": pending.approver_user_id,
+            "requested_at": requested_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "thread_id": pending.thread_id,
+            "resolved_at": resolved_at.isoformat(),
+            "resolved_by": resolved_by,
+        }
+        if pending.agent_name is not None:
+            content["agent_name"] = pending.agent_name
+        if pending.arguments_preview_truncated:
+            content["arguments_truncated"] = True
+        if pending.requester_id:
+            content["requester_id"] = pending.requester_id
         if reason:
             content["resolution_reason"] = reason
         return content
@@ -1217,8 +1239,8 @@ def initialize_approval_store(
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
 
-    if _MANAGER is not None and _MANAGER._runtime_storage_root == runtime_paths.storage_root:
-        _MANAGER._configure_transport(
+    if _MANAGER is not None and _MANAGER.uses_storage_root(runtime_paths.storage_root):
+        _MANAGER.configure_transport(
             sender=sender,
             editor=editor,
             event_cache=event_cache,
@@ -1227,7 +1249,7 @@ def initialize_approval_store(
         )
         return _MANAGER
 
-    if _MANAGER is not None and _MANAGER._has_live_work():
+    if _MANAGER is not None and _MANAGER.has_live_work():
         msg = "Cannot reinitialize approval store with pending live approvals; shut it down first."
         raise RuntimeError(msg)
 
@@ -1242,7 +1264,7 @@ def initialize_approval_store(
     return _MANAGER
 
 
-async def shutdown_approval_manager(reason: str = _DEFAULT_SHUTDOWN_REASON) -> None:
+async def shutdown_approval_manager(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
     """Expire pending approvals and drop the module-level manager."""
     global _MANAGER
 

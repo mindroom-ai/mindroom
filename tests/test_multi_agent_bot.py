@@ -477,7 +477,7 @@ def _mock_approval_reload_bot(
     bot.client.room_send = room_send
     bot.client.rooms["!room:localhost"].add_member(user_id, agent_name.capitalize(), None)
     latest_thread_event_id = "$latest-thread-event" if agent_name == "code" else None
-    bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
+    bot.latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
     bot.cleanup = AsyncMock()
     return bot
 
@@ -12987,7 +12987,7 @@ class TestMultiAgentOrchestrator:
         code_bot.client = make_matrix_client_mock(user_id=code_user.user_id)
         code_bot.client.room_send = AsyncMock()
         code_bot.client.rooms["!room:localhost"].add_member(code_user.user_id, code_user.display_name, None)
-        code_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+        code_bot.latest_thread_event_id_if_needed = AsyncMock(
             return_value="$latest-thread-event",
         )
         code_bot.running = True

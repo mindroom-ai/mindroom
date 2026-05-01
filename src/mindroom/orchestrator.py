@@ -739,7 +739,7 @@ class MultiAgentOrchestrator:
                 config_path=self.config_path,
             ),
         )
-        bot._runtime_view.orchestrator = self
+        bot.orchestrator = self
         bot.hook_registry = self.hook_registry
         self._bind_runtime_support_services(bot)
         self.agent_bots[entity_name] = bot
