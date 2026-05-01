@@ -54,14 +54,11 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
 )
-from mindroom.hooks import HookRegistry
 from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
-from mindroom.tool_approval import get_approval_store, shutdown_approval_store
-from mindroom.tool_system.runtime_context import ToolDispatchContext
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
+from mindroom.tool_approval import shutdown_approval_store
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,

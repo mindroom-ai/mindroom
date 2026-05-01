@@ -6,7 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 import nio
@@ -1075,7 +1075,7 @@ class AgentBot:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
             orchestrator = self.orchestrator
             if orchestrator is not None:
-                await orchestrator._handle_bot_ready(self)
+                await orchestrator.handle_bot_ready(self)
             self._maybe_start_startup_thread_prewarm()
 
         if first_sync_response or has_deferred_overdue_tasks():
@@ -1477,6 +1477,8 @@ class AgentBot:
         reply_to_event_id = _reply_to_event_id_from_event_source(event.source)
         if reply_to_event_id is None:
             return False
+        if not approval_manager.knows_in_memory_approval_card(reply_to_event_id):
+            return False
 
         return await self._handle_tool_approval_action(
             room=room,
@@ -1616,7 +1618,7 @@ class AgentBot:
         if notice_event_id is not None and result.error_reason is not None:
             orchestrator = self.orchestrator
             if orchestrator is not None:
-                await orchestrator._send_approval_notice(
+                await orchestrator.send_approval_notice(
                     room_id=room.room_id,
                     approval_event_id=notice_event_id,
                     thread_id=result.thread_id,

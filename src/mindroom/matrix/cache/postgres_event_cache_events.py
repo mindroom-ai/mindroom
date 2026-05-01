@@ -159,8 +159,28 @@ async def load_latest_edit(
     namespace: str,
     room_id: str,
     original_event_id: str,
+    sender: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
+    if sender is None:
+        row = await _fetchone(
+            db,
+            """
+            SELECT mindroom_event_cache_events.event_json
+            FROM mindroom_event_cache_event_edits
+            JOIN mindroom_event_cache_events
+                ON mindroom_event_cache_events.namespace = mindroom_event_cache_event_edits.namespace
+                AND mindroom_event_cache_events.event_id = mindroom_event_cache_event_edits.edit_event_id
+            WHERE mindroom_event_cache_event_edits.namespace = %s
+                AND mindroom_event_cache_event_edits.room_id = %s
+                AND mindroom_event_cache_event_edits.original_event_id = %s
+            ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
+            LIMIT 1
+            """,
+            (namespace, room_id, original_event_id),
+        )
+        return None if row is None else json.loads(row[0])
+
     row = await _fetchone(
         db,
         """
@@ -172,10 +192,11 @@ async def load_latest_edit(
         WHERE mindroom_event_cache_event_edits.namespace = %s
             AND mindroom_event_cache_event_edits.room_id = %s
             AND mindroom_event_cache_event_edits.original_event_id = %s
+            AND mindroom_event_cache_events.event_json::jsonb ->> 'sender' = %s
         ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
         LIMIT 1
         """,
-        (namespace, room_id, original_event_id),
+        (namespace, room_id, original_event_id, sender),
     )
     return None if row is None else json.loads(row[0])
 

@@ -885,7 +885,13 @@ class PostgresEventCache:
             ),
         )
 
-    async def get_latest_edit(self, room_id: str, original_event_id: str) -> dict[str, Any] | None:
+    async def get_latest_edit(
+        self,
+        room_id: str,
+        original_event_id: str,
+        *,
+        sender: str | None = None,
+    ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
         return await self._read_operation(
             room_id,
@@ -896,6 +902,7 @@ class PostgresEventCache:
                 namespace=self._runtime.namespace,
                 room_id=room_id,
                 original_event_id=original_event_id,
+                sender=sender,
             ),
         )
 

@@ -63,7 +63,13 @@ class ConversationEventCache(Protocol):
     ) -> list[dict[str, Any]]:
         """Return recent cached room events of one type, newest first."""
 
-    async def get_latest_edit(self, room_id: str, original_event_id: str) -> dict[str, Any] | None:
+    async def get_latest_edit(
+        self,
+        room_id: str,
+        original_event_id: str,
+        *,
+        sender: str | None = None,
+    ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
 
     async def get_latest_agent_message_snapshot(

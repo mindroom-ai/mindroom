@@ -121,18 +121,37 @@ async def load_latest_edit(
     *,
     room_id: str,
     original_event_id: str,
+    sender: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
+    if sender is None:
+        cursor = await db.execute(
+            """
+            SELECT events.event_json
+            FROM event_edits
+            JOIN events ON events.event_id = event_edits.edit_event_id
+            WHERE event_edits.room_id = ? AND event_edits.original_event_id = ?
+            ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
+            LIMIT 1
+            """,
+            (room_id, original_event_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return None if row is None else json.loads(row[0])
+
     cursor = await db.execute(
         """
         SELECT events.event_json
         FROM event_edits
         JOIN events ON events.event_id = event_edits.edit_event_id
-        WHERE event_edits.room_id = ? AND event_edits.original_event_id = ?
+        WHERE event_edits.room_id = ?
+            AND event_edits.original_event_id = ?
+            AND json_extract(events.event_json, '$.sender') = ?
         ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
         LIMIT 1
         """,
-        (room_id, original_event_id),
+        (room_id, original_event_id, sender),
     )
     row = await cursor.fetchone()
     await cursor.close()

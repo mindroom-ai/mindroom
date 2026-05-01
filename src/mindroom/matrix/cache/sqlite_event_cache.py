@@ -515,7 +515,13 @@ class SqliteEventCache:
             ),
         )
 
-    async def get_latest_edit(self, room_id: str, original_event_id: str) -> dict[str, Any] | None:
+    async def get_latest_edit(
+        self,
+        room_id: str,
+        original_event_id: str,
+        *,
+        sender: str | None = None,
+    ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
         return await self._read_operation(
             room_id,
@@ -525,6 +531,7 @@ class SqliteEventCache:
                 db,
                 room_id=room_id,
                 original_event_id=original_event_id,
+                sender=sender,
             ),
         )
 

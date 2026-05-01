@@ -37,13 +37,32 @@ if TYPE_CHECKING:
 class FakeEventCache:
     def __init__(self) -> None:
         self.events: dict[tuple[str, str], dict[str, Any]] = {}
-        self.latest_edits: dict[tuple[str, str], dict[str, Any]] = {}
 
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
         return self.events.get((room_id, event_id))
 
-    async def get_latest_edit(self, room_id: str, original_event_id: str) -> dict[str, Any] | None:
-        return self.latest_edits.get((room_id, original_event_id))
+    async def get_latest_edit(
+        self,
+        room_id: str,
+        original_event_id: str,
+        *,
+        sender: str | None = None,
+    ) -> dict[str, Any] | None:
+        edits: list[dict[str, Any]] = []
+        for (event_room_id, _), event in self.events.items():
+            if event_room_id != room_id or (sender is not None and event.get("sender") != sender):
+                continue
+            content = event.get("content")
+            if not isinstance(content, dict):
+                continue
+            relates_to = content.get("m.relates_to")
+            if not isinstance(relates_to, dict):
+                continue
+            if relates_to.get("rel_type") == "m.replace" and relates_to.get("event_id") == original_event_id:
+                edits.append(event)
+        if not edits:
+            return None
+        return max(edits, key=lambda event: int(event.get("origin_server_ts", 0)))
 
     async def get_recent_room_events(
         self,
@@ -64,13 +83,6 @@ class FakeEventCache:
 
     async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
         self.events[(room_id, event_id)] = event_data
-        content = event_data.get("content")
-        if isinstance(content, dict):
-            relates_to = content.get("m.relates_to")
-            if isinstance(relates_to, dict) and relates_to.get("rel_type") == "m.replace":
-                original_event_id = relates_to.get("event_id")
-                if isinstance(original_event_id, str):
-                    self.latest_edits[(room_id, original_event_id)] = event_data
 
 
 @pytest.fixture(autouse=True)
@@ -217,6 +229,64 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
     assert editor.await_args.args[2]["status"] == "approved"
     assert editor.await_args.args[2]["approver_user_id"] == "@user:localhost"
+
+
+@pytest.mark.asyncio
+async def test_live_card_response_ignores_cached_terminal_edit_from_different_sender(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=sender,
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender)
+    fake_edit = _approval_edit(
+        _approval_card(
+            event_id=pending.card_event_id,
+            room_id=pending.room_id,
+            sender=pending.card_sender_id,
+            approver=pending.approver_user_id,
+        ),
+        sender="@attacker:localhost",
+        status="approved",
+    )
+    await cache.store_event("$fake-edit", "!room:localhost", fake_edit)
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = None
+    if result.resolved:
+        decision = await asyncio.wait_for(task, timeout=1)
+    else:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert result.resolved is True
+    assert result.consumed is True
+    assert decision is not None
+    assert decision.status == "approved"
+    editor.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -468,7 +538,7 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
     bot = MagicMock()
     bot._sender_can_resolve_tool_approval.return_value = True
     bot.orchestrator = MagicMock()
-    bot.orchestrator._send_approval_notice = AsyncMock(return_value=True)
+    bot.orchestrator.send_approval_notice = AsyncMock(return_value=True)
 
     with patch("mindroom.bot.get_approval_store", return_value=store):
         handled = await AgentBot._handle_tool_approval_action(
@@ -484,7 +554,7 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
     assert handled is True
     assert decision.status == "denied"
     assert editor.await_args.args[2]["status"] == "denied"
-    notice = bot.orchestrator._send_approval_notice
+    notice = bot.orchestrator.send_approval_notice
     notice.assert_awaited_once()
     assert notice.await_args.kwargs == {
         "room_id": "!room:localhost",
@@ -982,6 +1052,32 @@ async def test_cached_terminal_edit_from_different_sender_is_ignored(tmp_path: P
 
     assert pending is not None
     assert pending.card_event_id == "$approval"
+
+
+@pytest.mark.asyncio
+async def test_newer_cached_terminal_edit_from_different_sender_does_not_hide_trusted_terminal_edit(
+    tmp_path: Path,
+) -> None:
+    cache = FakeEventCache()
+    card = _approval_card(sender="@mindroom_router:localhost")
+    trusted_edit = _approval_edit(card, event_id="$trusted-edit", status="approved")
+    fake_edit = _approval_edit(card, event_id="$fake-edit", sender="@attacker:localhost", status="denied")
+    fake_edit["origin_server_ts"] = int(trusted_edit["origin_server_ts"]) + 1
+    await cache.store_event("$approval", "!room:localhost", card)
+    await cache.store_event("$trusted-edit", "!room:localhost", trusted_edit)
+    await cache.store_event("$fake-edit", "!room:localhost", fake_edit)
+    scanner = AsyncMock(side_effect=RuntimeError("history unavailable"))
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        event_cache=cache,
+        room_event_scanner=scanner,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    pending = await store.get_pending_approval("!room:localhost", "approval-1")
+
+    assert pending is None
+    scanner.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,6 @@ import json
 import os
 import signal
 import sys
-import threading
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -78,6 +77,7 @@ from mindroom.hooks import (
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
 from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
+from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.utils import MultiKnowledgeVectorDb
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -4045,7 +4045,7 @@ class TestAgentBot:
         bot.client = make_matrix_client_mock()
         orchestrator = MagicMock()
         orchestrator._approval_transport_bot.return_value = bot
-        orchestrator._send_approval_notice = AsyncMock(return_value=True)
+        orchestrator.send_approval_notice = AsyncMock(return_value=True)
         bot.orchestrator = orchestrator
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         _store, pending, task, editor = await _start_live_approval(
@@ -4067,7 +4067,7 @@ class TestAgentBot:
             replacement = editor.await_args.args[2]
             assert replacement["status"] == "denied"
             assert "displayed arguments are truncated" in replacement["resolution_reason"]
-            orchestrator._send_approval_notice.assert_awaited_once_with(
+            orchestrator.send_approval_notice.assert_awaited_once_with(
                 room_id="!test:localhost",
                 approval_event_id=pending.card_event_id,
                 thread_id=pending.thread_id,
@@ -4095,7 +4095,7 @@ class TestAgentBot:
         router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
         orchestrator = MagicMock()
         orchestrator._approval_transport_bot.return_value = router_bot
-        orchestrator._send_approval_notice = AsyncMock(return_value=True)
+        orchestrator.send_approval_notice = AsyncMock(return_value=True)
         agent_bot.orchestrator = orchestrator
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         _store, pending, task, editor = await _start_live_approval(
@@ -4117,7 +4117,7 @@ class TestAgentBot:
             assert decision.status == "denied"
             replacement = editor.await_args.args[2]
             assert "displayed arguments are truncated" in replacement["resolution_reason"]
-            orchestrator._send_approval_notice.assert_awaited_once_with(
+            orchestrator.send_approval_notice.assert_awaited_once_with(
                 room_id="!test:localhost",
                 approval_event_id=pending.card_event_id,
                 thread_id=pending.thread_id,
@@ -4147,9 +4147,14 @@ class TestAgentBot:
             approver_user_id="@approver:localhost",
         )
         event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$reply"
         event.sender = "@other:localhost"
         event.body = "I should not resolve this."
+        event.server_timestamp = 1234
         event.source = {
+            "event_id": "$reply",
+            "sender": "@other:localhost",
+            "origin_server_ts": 1234,
             "content": {
                 "m.relates_to": {"m.in_reply_to": {"event_id": pending.card_event_id}},
             },
@@ -4199,9 +4204,14 @@ class TestAgentBot:
             room_event_scanner=AsyncMock(side_effect=RuntimeError("scanner should not run")),
         )
         event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$ordinary-rich-reply"
         event.sender = "@user:localhost"
         event.body = "!help"
+        event.server_timestamp = 1234
         event.source = {
+            "event_id": "$ordinary-rich-reply",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234,
             "content": {
                 "m.relates_to": {"m.in_reply_to": {"event_id": "$ordinary-message"}},
             },
@@ -4216,6 +4226,41 @@ class TestAgentBot:
             store._event_fetcher.assert_not_awaited()
             assert store._room_event_scanner is not None
             store._room_event_scanner.assert_not_awaited()
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_plain_thread_reply_with_approval_store_does_not_require_room_alias(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Ordinary replies should not run approval authorization before matching an in-memory card."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot._turn_controller.handle_text_event = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        initialize_approval_store(runtime_paths)
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$ordinary-thread-reply"
+        event.sender = "@user:localhost"
+        event.body = "ordinary reply"
+        event.server_timestamp = 1234
+        event.source = {
+            "event_id": "$ordinary-thread-reply",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234,
+            "content": {
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$ordinary-message"}},
+            },
+        }
+
+        try:
+            await bot._on_message(room, event)
+
+            bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
         finally:
             await shutdown_approval_store()
 
@@ -4253,9 +4298,14 @@ class TestAgentBot:
             ),
         )
         event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$duplicate-approval-reply"
         event.sender = "@user:localhost"
         event.body = "No, deny it."
+        event.server_timestamp = 1234
         event.source = {
+            "event_id": "$duplicate-approval-reply",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234,
             "content": {
                 "m.relates_to": {"m.in_reply_to": {"event_id": pending.card_event_id}},
             },
@@ -12164,6 +12214,8 @@ class TestMultiAgentOrchestrator:
         """Router readiness should trigger Matrix-backed startup auto-deny after room setup."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = [SimpleNamespace(timeout_days=10.0)]
 
         bot = MagicMock()
         bot.agent_name = "router"
@@ -12195,7 +12247,7 @@ class TestMultiAgentOrchestrator:
             call_order.append("support_services")
 
         async def _auto_deny_pending_on_startup(*, lookback_hours: int) -> int:
-            assert lookback_hours == 24
+            assert lookback_hours == 240
             call_order.append("auto_deny")
             return 2
 
@@ -12221,7 +12273,7 @@ class TestMultiAgentOrchestrator:
             "support_services",
             "auto_deny",
         ]
-        approval_manager.auto_deny_pending_on_startup.assert_awaited_once_with(lookback_hours=24)
+        approval_manager.auto_deny_pending_on_startup.assert_awaited_once_with(lookback_hours=240)
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -12541,6 +12593,7 @@ class TestMultiAgentOrchestrator:
         router_bot.agent_name = "router"
         router_bot.running = True
         router_bot.client = router_client
+        router_bot.event_cache = make_event_cache_mock()
         router_bot.stop = AsyncMock()
 
         code_bot = MagicMock()
@@ -12569,15 +12622,16 @@ class TestMultiAgentOrchestrator:
         )
 
         await send_started.wait()
+        orchestrator._knowledge_refresh_scheduler = MagicMock()
+        orchestrator._knowledge_refresh_scheduler.shutdown = AsyncMock()
 
         try:
             with (
                 patch.object(orchestrator, "_cancel_config_reload_task", new=AsyncMock()),
                 patch.object(orchestrator, "_stop_memory_auto_flush_worker", new=AsyncMock()),
-                patch.object(orchestrator, "_cancel_knowledge_refresh_task", new=AsyncMock()),
+                patch.object(orchestrator._knowledge_source_watcher, "shutdown", new=AsyncMock()),
                 patch.object(orchestrator, "_cancel_bot_start_tasks", new=AsyncMock()),
                 patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock()),
-                patch("mindroom.orchestrator.shutdown_shared_knowledge_managers", new=AsyncMock()),
                 patch.object(orchestrator, "_close_runtime_support_services", new=AsyncMock()),
             ):
                 stop_task = asyncio.create_task(orchestrator.stop())
@@ -12842,7 +12896,7 @@ class TestMultiAgentOrchestrator:
         try:
             with (
                 patch("mindroom.orchestrator.sync_owned_runtime_support", new=AsyncMock(return_value=support)),
-                patch.object(orchestrator, "_refresh_knowledge_for_runtime", new=AsyncMock()),
+                patch.object(orchestrator._knowledge_source_watcher, "sync", new=AsyncMock()),
                 patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             ):
                 await orchestrator._sync_runtime_support_services(config, start_watcher=False)
@@ -12957,7 +13011,6 @@ class TestMultiAgentOrchestrator:
                 patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
                 patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
                 patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
-                patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
                 patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             ):
                 updated = await orchestrator.update_config()

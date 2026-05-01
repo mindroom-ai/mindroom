@@ -124,7 +124,7 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
             break
 
     while _json_preview_length(preview) > _MAX_ARGUMENTS_PREVIEW_CHARS and preview:
-        drop_key = max(preview, key=len)
+        drop_key: str = max(preview, key=lambda candidate: len(candidate))
         preview.pop(drop_key)
 
     if not preview:
@@ -419,25 +419,10 @@ class ApprovalManager:
             if pending is not None:
                 return pending
 
-        cached_pending: PendingApproval | None = None
-        cached_pending_is_same_router = False
-        for event in await self._scan_cached_room_cards(room_id, since_ts_ms=_lookback_cutoff_ms(24), limit=500):
-            event_id = event.get("event_id")
-            latest_edit = (
-                await self._latest_edit(room_id=room_id, card_event_id=event_id) if isinstance(event_id, str) else None
-            )
-            pending = await self._pending_from_event_if_matching(
-                event,
-                room_id=room_id,
-                approval_id=approval_id,
-                latest_edit=latest_edit,
-                latest_edit_known=True,
-                origin=_CardOrigin.CACHE_HIT,
-            )
-            if pending is not None:
-                cached_pending = pending
-                cached_pending_is_same_router = pending.card_sender_id == self._transport_sender_id()
-                break
+        cached_pending, cached_pending_is_same_router = await self._cached_pending_approval_by_id(
+            room_id=room_id,
+            approval_id=approval_id,
+        )
 
         try:
             history_events = await self._scan_room_messages_for_approval_events(
@@ -473,6 +458,25 @@ class ApprovalManager:
         if history_matched:
             return None
         return cached_pending
+
+    async def _cached_pending_approval_by_id(
+        self,
+        *,
+        room_id: str,
+        approval_id: str,
+    ) -> tuple[PendingApproval | None, bool]:
+        for event in await self._scan_cached_room_cards(room_id, since_ts_ms=_lookback_cutoff_ms(24), limit=500):
+            try:
+                pending = PendingApproval.from_card_event(event, room_id=room_id)
+            except (TypeError, ValueError):
+                continue
+            if pending.approval_id != approval_id:
+                continue
+            latest_edit = await self._latest_trusted_edit(pending)
+            if pending.latest_status(latest_edit) != "pending":
+                continue
+            return pending, pending.card_sender_id == self._transport_sender_id()
+        return None, False
 
     async def auto_deny_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
         """Auto-deny unresolved approval cards after startup using Matrix as source of truth."""
@@ -571,12 +575,7 @@ class ApprovalManager:
         history_scan_succeeded: bool,
     ) -> _StartupTerminalState:
         if origin == _CardOrigin.CACHE_HIT:
-            cached_latest_edit = await self._latest_edit(
-                room_id=pending.room_id,
-                card_event_id=pending.card_event_id,
-            )
-            if not _terminal_edit_matches_card_sender(cached_latest_edit, pending.card_sender_id):
-                cached_latest_edit = None
+            cached_latest_edit = await self._latest_trusted_edit(pending)
             if cached_latest_edit is not None and pending.latest_status(cached_latest_edit) != "pending":
                 return _StartupTerminalState.RESOLVED
         if history_scan_succeeded and pending.latest_status(history_latest_edit) != "pending":
@@ -1012,7 +1011,7 @@ class ApprovalManager:
         except (TypeError, ValueError):
             return None
         if self._live_waiter_for_card(card_event_id) is not None:
-            latest_edit = await self._latest_edit(room_id=room_id, card_event_id=card_event_id)
+            latest_edit = await self._latest_trusted_edit(pending)
             terminal_state_known = True
         else:
             latest_edit, terminal_state_known = await self._latest_edit_with_history_fallback(pending, origin=origin)
@@ -1044,10 +1043,26 @@ class ApprovalManager:
             return await self._event_fetcher(room_id, card_event_id), _CardOrigin.FETCHED
         return None, _CardOrigin.FETCHED
 
-    async def _latest_edit(self, *, room_id: str, card_event_id: str) -> dict[str, Any] | None:
+    async def _latest_edit(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+        sender: str | None = None,
+    ) -> dict[str, Any] | None:
         if self._event_cache is None:
             return None
-        return await self._event_cache.get_latest_edit(room_id, card_event_id)
+        return await self._event_cache.get_latest_edit(room_id, card_event_id, sender=sender)
+
+    async def _latest_trusted_edit(self, pending: PendingApproval) -> dict[str, Any] | None:
+        latest_edit = await self._latest_edit(
+            room_id=pending.room_id,
+            card_event_id=pending.card_event_id,
+            sender=pending.card_sender_id,
+        )
+        if _terminal_edit_matches_card_sender(latest_edit, pending.card_sender_id):
+            return latest_edit
+        return None
 
     async def _latest_edit_with_history_fallback(
         self,
@@ -1055,11 +1070,9 @@ class ApprovalManager:
         *,
         origin: _CardOrigin,
     ) -> tuple[dict[str, Any] | None, bool]:
-        latest_edit = await self._latest_edit(room_id=pending.room_id, card_event_id=pending.card_event_id)
+        latest_edit = await self._latest_trusted_edit(pending)
         if latest_edit is not None:
-            if _terminal_edit_matches_card_sender(latest_edit, pending.card_sender_id):
-                return latest_edit, True
-            latest_edit = None
+            return latest_edit, True
         if (
             self._event_cache is not None
             and origin == _CardOrigin.CACHE_HIT
@@ -1200,6 +1213,10 @@ class ApprovalManager:
                 or card_event_id in self._resolved_card_event_ids
                 or card_event_id in self._cancelled_card_event_ids
             )
+
+    def knows_in_memory_approval_card(self, card_event_id: str) -> bool:
+        """Return whether this process has seen one approval card id."""
+        return self._known_in_memory_approval_card(card_event_id)
 
     async def _wait_for_competing_terminal_decision(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
         if waiter.future.done():

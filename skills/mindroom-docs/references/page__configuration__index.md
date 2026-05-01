@@ -34,7 +34,8 @@ React to the approval card with `✅` to approve the tool call.
 Reply to the approval card with a message to deny the tool call and record that text as the denial reason.
 Only the original human requester can approve or deny their pending tool call.
 Approval responses only resolve the live Matrix approval card in the same room; approval IDs are used only as a live client hint.
-If MindRoom restarts before a tool call is approved, the tool call is cancelled and old approval cards are marked denied on startup.
+If MindRoom restarts before a tool call is approved, the live tool call is cancelled.
+On startup, MindRoom attempts to mark recent unresolved approval cards sent by the current router as denied.
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 

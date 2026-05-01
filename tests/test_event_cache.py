@@ -1016,6 +1016,83 @@ async def test_edit_cache_row_indexes_io_mindroom_tool_approval_edits(
 
 
 @pytest.mark.asyncio
+async def test_latest_edit_can_be_scoped_to_sender_when_newer_edit_is_untrusted(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Approval lookup should be able to ignore newer edits from other senders."""
+    cache = event_cache
+
+    approval_card = {
+        "event_id": "$approval",
+        "sender": "@bot:localhost",
+        "origin_server_ts": 1000,
+        "type": "io.mindroom.tool_approval",
+        "content": {
+            "approval_id": "approval-1",
+            "requester_id": "@user:localhost",
+            "status": "pending",
+            "tool_name": "read_file",
+        },
+    }
+    trusted_edit = {
+        "event_id": "$trusted_edit",
+        "sender": "@bot:localhost",
+        "origin_server_ts": 2000,
+        "type": "io.mindroom.tool_approval",
+        "content": {
+            "approval_id": "approval-1",
+            "requester_id": "@user:localhost",
+            "status": "approved",
+            "tool_name": "read_file",
+            "m.new_content": {
+                "approval_id": "approval-1",
+                "requester_id": "@user:localhost",
+                "status": "approved",
+                "tool_name": "read_file",
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+        },
+    }
+    untrusted_edit = {
+        "event_id": "$untrusted_edit",
+        "sender": "@attacker:localhost",
+        "origin_server_ts": 3000,
+        "type": "io.mindroom.tool_approval",
+        "content": {
+            "approval_id": "approval-1",
+            "requester_id": "@user:localhost",
+            "status": "denied",
+            "tool_name": "read_file",
+            "m.new_content": {
+                "approval_id": "approval-1",
+                "requester_id": "@user:localhost",
+                "status": "denied",
+                "tool_name": "read_file",
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+        },
+    }
+
+    try:
+        await cache.store_events_batch(
+            [
+                ("$approval", "!room:localhost", approval_card),
+                ("$trusted_edit", "!room:localhost", trusted_edit),
+                ("$untrusted_edit", "!room:localhost", untrusted_edit),
+            ],
+        )
+        latest_edit = await cache.get_latest_edit("!room:localhost", "$approval")
+        latest_trusted_edit = await cache.get_latest_edit("!room:localhost", "$approval", sender="@bot:localhost")
+    finally:
+        await cache.close()
+
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$untrusted_edit"
+    assert latest_trusted_edit is not None
+    assert latest_trusted_edit["event_id"] == "$trusted_edit"
+
+
+@pytest.mark.asyncio
 async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(
     event_cache: ConversationEventCache,
 ) -> None:

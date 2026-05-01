@@ -8,6 +8,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
+from math import ceil
 from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 from uuid import uuid4
 
@@ -163,6 +164,15 @@ def _raise_embedded_api_server_exit(api_server: _EmbeddedApiServerContext, *, re
     )
     msg = "Embedded API server exited unexpectedly"
     raise RuntimeError(msg)
+
+
+def _approval_startup_lookback_hours(config: Config) -> int:
+    """Return the Matrix history window needed to clean up live-only approval cards."""
+    timeout_days = config.tool_approval.timeout_days
+    for rule in config.tool_approval.rules:
+        if rule.timeout_days is not None:
+            timeout_days = max(timeout_days, rule.timeout_days)
+    return max(1, ceil(timeout_days * 24))
 
 
 class RoomMessagesError(RuntimeError):
@@ -723,6 +733,22 @@ class MultiAgentOrchestrator:
         )
         return False
 
+    async def send_approval_notice(
+        self,
+        *,
+        room_id: str,
+        approval_event_id: str,
+        thread_id: str | None,
+        reason: str,
+    ) -> bool:
+        """Send one approval notice through the public runtime protocol."""
+        return await self._send_approval_notice(
+            room_id=room_id,
+            approval_event_id=approval_event_id,
+            thread_id=thread_id,
+            reason=reason,
+        )
+
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
         bot.event_cache = self._runtime_support.event_cache
@@ -1123,7 +1149,7 @@ class MultiAgentOrchestrator:
                 config_path=self.config_path,
             ),
         )
-        bot.orchestrator = self
+        bot._runtime_view.orchestrator = self
         bot.hook_registry = self.hook_registry
         self._bind_runtime_support_services(bot)
         self.agent_bots[entity_name] = bot
@@ -1469,16 +1495,25 @@ class MultiAgentOrchestrator:
         """Auto-deny orphaned approval cards once the router finishes first sync."""
         if bot.agent_name != ROUTER_AGENT_NAME or not bot.running or bot.client is None:
             return
+        config = self.config
+        if config is None:
+            return
         approval_manager = get_approval_store()
         if approval_manager is None:
             return
         try:
-            denied_count = await approval_manager.auto_deny_pending_on_startup(lookback_hours=24)
+            denied_count = await approval_manager.auto_deny_pending_on_startup(
+                lookback_hours=_approval_startup_lookback_hours(config),
+            )
         except Exception as exc:
             logger.warning("tool_approval_startup_auto_deny_failed", error=str(exc))
             return
         if denied_count > 0:
             logger.info("approval.auto_deny.startup", denied_count=denied_count)
+
+    async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
+        """Handle bot-ready notifications through the public runtime protocol."""
+        await self._handle_bot_ready(bot)
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
