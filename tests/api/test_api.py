@@ -3971,6 +3971,43 @@ def test_trusted_upstream_auth_email_template_requires_email_header_config(tmp_p
     )
 
 
+@pytest.mark.parametrize(
+    "template",
+    ["@alice:example.org", "@{localpart}-{localpart}:example.org"],
+)
+def test_trusted_upstream_auth_email_template_requires_exactly_one_localpart_placeholder(
+    tmp_path: Path,
+    template: str,
+) -> None:
+    """Trusted auth should reject constant or ambiguous email-to-Matrix templates."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": template,
+        },
+    )
+    api_app = _trusted_auth_test_app(runtime_paths)
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                "X-Trusted-User": "alice",
+                "X-Trusted-Email": "alice@example.com",
+                "X-Trusted-Matrix-User": "@alice:example.org",
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == (
+        "Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder"
+    )
+
+
 def test_trusted_upstream_auth_rejects_invalid_derived_matrix_user_id(tmp_path: Path) -> None:
     """Derived Matrix IDs must pass the same Matrix parser as explicit headers."""
     runtime_paths = _runtime_paths(

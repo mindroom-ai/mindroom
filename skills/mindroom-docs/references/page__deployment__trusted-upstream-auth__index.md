@@ -34,6 +34,7 @@ For private `user` and `user_agent` OAuth flows, the trusted identity must resol
 Prefer `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` when your access layer can supply a real Matrix ID.
 When the access layer only supplies email, set `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` to derive the Matrix ID from the trusted email localpart.
 For example, the template `@{localpart}:example.org` maps `alice@example.com` to `@alice:example.org`.
+The template must contain exactly one `{localpart}` placeholder.
 Derived Matrix IDs must pass MindRoom's Matrix user ID parser.
 
 ## Instance Chart
@@ -51,6 +52,7 @@ trustedUpstreamAuth:
 
 The chart renders these values as the `MINDROOM_TRUSTED_UPSTREAM_*` runtime environment variables.
 The instance chart fails rendering when `trustedUpstreamAuth.emailToMatrixUserIdTemplate` is set without `trustedUpstreamAuth.emailHeader`.
+The template value must contain exactly one `{localpart}` placeholder.
 When using the platform provisioner, configure the platform chart with matching provisioner values:
 
 ```
@@ -64,6 +66,7 @@ provisioner:
 ```
 
 The platform chart renders these as `INSTANCE_TRUSTED_UPSTREAM_*` variables on the provisioner deployment.
+The platform chart fails rendering when `provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate` is set without `provisioner.trustedUpstreamAuth.emailHeader`.
 
 ## Security Boundary
 

@@ -226,11 +226,10 @@ def _trusted_upstream_email_localpart(email: str) -> str | None:
     return localpart
 
 
-def _derive_trusted_upstream_matrix_user_id(
+def _validated_trusted_upstream_email_to_matrix_template(
     settings: TrustedUpstreamAuthSettings,
-    email: str | None,
 ) -> str | None:
-    """Derive a Matrix user ID from the trusted email header when configured."""
+    """Return the configured email-to-Matrix template after validating it."""
     template = settings.email_to_matrix_user_id_template
     if template is None:
         return None
@@ -241,6 +240,22 @@ def _derive_trusted_upstream_matrix_user_id(
                 "Trusted upstream email-to-Matrix template is set but MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is not set"
             ),
         )
+    if template.count("{localpart}") != 1:
+        raise HTTPException(
+            status_code=500,
+            detail=("Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder"),
+        )
+    return template
+
+
+def _derive_trusted_upstream_matrix_user_id(
+    settings: TrustedUpstreamAuthSettings,
+    email: str | None,
+    template: str | None,
+) -> str | None:
+    """Derive a Matrix user ID from the trusted email header when configured."""
+    if template is None:
+        return None
     if email is None:
         raise HTTPException(
             status_code=401,
@@ -276,13 +291,14 @@ def _trusted_upstream_auth_user(
             detail=f"Missing trusted upstream identity header: {settings.user_id_header}",
         )
 
+    email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(settings)
     email = _get_configured_header(request, settings.email_header)
     matrix_user_id = _get_configured_header(request, settings.matrix_user_id_header)
     parsed_matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id)
     if matrix_user_id is not None and parsed_matrix_user_id is None:
         raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
     if parsed_matrix_user_id is None:
-        parsed_matrix_user_id = _derive_trusted_upstream_matrix_user_id(settings, email)
+        parsed_matrix_user_id = _derive_trusted_upstream_matrix_user_id(settings, email, email_to_matrix_template)
 
     auth_user = {
         "user_id": user_id,

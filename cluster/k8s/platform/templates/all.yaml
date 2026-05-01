@@ -13,6 +13,11 @@ metadata:
   namespace: mindroom-{{ .Values.environment }}
 {{ $prov := .Values.provisioner | default (dict) }}
 {{ $trustedUpstreamAuth := $prov.trustedUpstreamAuth | default (dict) }}
+{{ $trustedUpstreamAuthEnabledValue := lower (toString ($trustedUpstreamAuth.enabled | default false)) }}
+{{ $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") }}
+{{ if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailHeader | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.emailHeader is required when provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" }}
+{{ end }}
 data:
   PLATFORM_DOMAIN: {{ .Values.domain }}
   ENVIRONMENT: {{ .Values.environment }}

@@ -12,22 +12,33 @@ import yaml
 
 
 def _render_chart(chart_dir: Path, *set_args: str, release_name: str = "mindroom-demo") -> list[dict[str, Any]]:
+    completed = _run_helm_template(chart_dir, *set_args, release_name=release_name)
+    completed.check_returncode()
+    return [doc for doc in yaml.safe_load_all(completed.stdout) if isinstance(doc, dict)]
+
+
+def _run_helm_template(
+    chart_dir: Path,
+    *set_args: str,
+    release_name: str = "mindroom-demo",
+    set_string_args: tuple[str, ...] = (),
+) -> subprocess.CompletedProcess[str]:
     helm = shutil.which("helm")
     if helm is None:
         pytest.skip("helm is required for rendered chart checks")
-    completed = subprocess.run(
+    return subprocess.run(
         [
             helm,
             "template",
             release_name,
             str(chart_dir),
             *(arg for value in set_args for arg in ("--set", value)),
+            *(arg for value in set_string_args for arg in ("--set-string", value)),
         ],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
-    return [doc for doc in yaml.safe_load_all(completed.stdout) if isinstance(doc, dict)]
 
 
 def _render_instance_chart() -> list[dict[str, Any]]:
@@ -121,26 +132,11 @@ def test_instance_chart_uses_tenant_worker_auth_secret() -> None:
 
 def test_instance_chart_rejects_email_template_without_email_header() -> None:
     """Email-to-Matrix derivation requires the trusted email header name."""
-    helm = shutil.which("helm")
-    if helm is None:
-        pytest.skip("helm is required for rendered chart checks")
-
-    completed = subprocess.run(
-        [
-            helm,
-            "template",
-            "mindroom-demo",
-            "cluster/k8s/instance",
-            "--set",
-            "trustedUpstreamAuth.enabled=true",
-            "--set",
-            "trustedUpstreamAuth.userIdHeader=X-Trusted-User",
-            "--set-string",
-            "trustedUpstreamAuth.emailToMatrixUserIdTemplate=@{localpart}:example.org",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+    completed = _run_helm_template(
+        Path("cluster/k8s/instance"),
+        "trustedUpstreamAuth.enabled=true",
+        "trustedUpstreamAuth.userIdHeader=X-Trusted-User",
+        set_string_args=("trustedUpstreamAuth.emailToMatrixUserIdTemplate=@{localpart}:example.org",),
     )
 
     assert completed.returncode != 0
@@ -148,6 +144,23 @@ def test_instance_chart_rejects_email_template_without_email_header() -> None:
         "trustedUpstreamAuth.emailHeader is required when trustedUpstreamAuth.emailToMatrixUserIdTemplate is set"
         in completed.stderr
     )
+
+
+def test_platform_chart_rejects_email_template_without_email_header() -> None:
+    """The platform chart should fail before provisioning invalid instance auth config."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/platform"),
+        "provisioner.trustedUpstreamAuth.enabled=true",
+        "provisioner.trustedUpstreamAuth.userIdHeader=X-Trusted-User",
+        release_name="mindroom-platform",
+        set_string_args=("provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate=@{localpart}:example.org",),
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "provisioner.trustedUpstreamAuth.emailHeader is required when "
+        "provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set"
+    ) in completed.stderr
 
 
 def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> None:
