@@ -167,16 +167,12 @@ def _raise_embedded_api_server_exit(api_server: _EmbeddedApiServerContext, *, re
 
 
 def _approval_startup_lookback_hours(config: Config) -> int:
-    """Return the Matrix history window needed to clean up live-only approval cards."""
+    """Return the cache lookback window needed to clean up live-only approval cards."""
     timeout_days = config.tool_approval.timeout_days
     for rule in config.tool_approval.rules:
         if rule.timeout_days is not None:
             timeout_days = max(timeout_days, rule.timeout_days)
     return max(1, ceil(timeout_days * 24))
-
-
-class RoomMessagesError(RuntimeError):
-    """One Matrix room history pagination failure."""
 
 
 @dataclass
@@ -530,81 +526,6 @@ class MultiAgentOrchestrator:
             room_ids.update(bot.client.rooms)
         return room_ids
 
-    async def _fetch_approval_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
-        """Fetch one approval event source from Matrix via the router transport."""
-        return await self._run_on_runtime_loop(lambda: self._fetch_approval_event_now(room_id, event_id))
-
-    async def _fetch_approval_event_now(self, room_id: str, event_id: str) -> dict[str, Any] | None:
-        bot = self._approval_transport_bot(room_id)
-        if bot is None or bot.client is None:
-            return None
-        response = await bot.client.room_get_event(room_id, event_id)
-        if not isinstance(response, nio.RoomGetEventResponse):
-            return None
-        return _normalize_approval_nio_event(response.event, event_id=event_id)
-
-    async def _scan_approval_room_events(
-        self,
-        room_id: str,
-        since_ts_ms: int,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        """Scan recent Matrix history for approval cards."""
-        return await self._run_on_runtime_loop(
-            lambda: self._scan_approval_room_events_now(room_id, since_ts_ms, limit),
-        )
-
-    async def _scan_approval_room_events_now(
-        self,
-        room_id: str,
-        since_ts_ms: int,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        bot = self._approval_transport_bot(room_id)
-        if bot is None or bot.client is None:
-            return []
-        client = bot.client
-        events: list[dict[str, Any]] = []
-        from_token = await self._approval_room_history_start_token(client)
-        while len(events) < limit:
-            response = await client.room_messages(
-                room_id,
-                start=from_token,
-                limit=min(100, limit - len(events)),
-                message_filter={"types": ["io.mindroom.tool_approval"]},
-                direction=nio.MessageDirection.back,
-            )
-            if isinstance(response, nio.RoomMessagesError):
-                msg = f"room_messages failed: {response.message}"
-                raise RoomMessagesError(msg)
-            if not isinstance(response, nio.RoomMessagesResponse):
-                msg = f"unexpected response type: {type(response).__name__}"
-                raise RoomMessagesError(msg)
-            if not response.chunk:
-                return events
-            for event in response.chunk:
-                source = _normalize_approval_nio_event(event)
-                timestamp = source.get("origin_server_ts")
-                if isinstance(timestamp, int) and timestamp < since_ts_ms:
-                    return events
-                events.append(source)
-                if len(events) >= limit:
-                    return events
-            if not response.end or response.end == from_token:
-                return events
-            from_token = response.end
-        return events
-
-    async def _approval_room_history_start_token(self, client: nio.AsyncClient) -> str:
-        from_token = client.next_batch
-        if not from_token:
-            await client.sync(timeout=10000)
-            from_token = client.next_batch
-        if not from_token:
-            msg = "no sync token available for history scan"
-            raise RoomMessagesError(msg)
-        return from_token
-
     async def _edit_approval_event_now(
         self,
         room_id: str,
@@ -780,8 +701,6 @@ class MultiAgentOrchestrator:
             sender=self._send_approval_event,
             editor=self._edit_approval_event,
             event_cache=self._runtime_support.event_cache,
-            event_fetcher=self._fetch_approval_event,
-            room_event_scanner=self._scan_approval_room_events,
             approval_room_ids=self._configured_approval_room_ids,
             transport_sender=self._approval_transport_sender_id,
             runtime_loop=self._runtime_loop,

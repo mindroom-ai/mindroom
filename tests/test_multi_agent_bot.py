@@ -94,7 +94,6 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.orchestrator import (
     MultiAgentOrchestrator,
-    RoomMessagesError,
     _EmbeddedApiServerContext,
     _run_api_server,
     _run_auxiliary_task_forever,
@@ -4152,12 +4151,12 @@ class TestAgentBot:
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
-    async def test_plain_rich_reply_does_not_probe_approval_matrix_transport(
+    async def test_plain_rich_reply_does_not_probe_approval_cache(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Ordinary rich replies should not touch approval fetch or history transport."""
+        """Ordinary rich replies should not touch approval cache lookup."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
@@ -4168,8 +4167,6 @@ class TestAgentBot:
         store = initialize_approval_store(
             runtime_paths,
             event_cache=event_cache,
-            event_fetcher=AsyncMock(side_effect=RuntimeError("fetcher should not run")),
-            room_event_scanner=AsyncMock(side_effect=RuntimeError("scanner should not run")),
         )
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$ordinary-rich-reply"
@@ -4190,10 +4187,7 @@ class TestAgentBot:
 
             bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
             event_cache.get_event.assert_not_awaited()
-            assert store._event_fetcher is not None
-            store._event_fetcher.assert_not_awaited()
-            assert store._room_event_scanner is not None
-            store._room_event_scanner.assert_not_awaited()
+            assert store is get_approval_store()
         finally:
             await shutdown_approval_store()
 
@@ -11501,81 +11495,6 @@ class TestMultiAgentOrchestrator:
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         assert orchestrator.agent_bots == {}
         assert not orchestrator.running
-
-    @pytest.mark.asyncio
-    async def test_scan_approval_room_events_now_raises_on_room_messages_error(self, tmp_path: Path) -> None:
-        """Matrix pagination errors must propagate so startup cleanup can treat history as unknown."""
-        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        router_bot = MagicMock()
-        router_bot.running = True
-        router_bot.client = MagicMock()
-        router_bot.client.rooms = {"!room:localhost": object()}
-        router_bot.client.next_batch = "$sync"
-        router_bot.client.sync = AsyncMock()
-        router_bot.client.room_messages = AsyncMock(return_value=nio.RoomMessagesError(message="forbidden"))
-        orchestrator.agent_bots = {"router": router_bot}
-
-        with pytest.raises(RoomMessagesError, match="room_messages failed: forbidden"):
-            await orchestrator._scan_approval_room_events_now(
-                "!room:localhost",
-                since_ts_ms=0,
-                limit=10,
-            )
-
-    @pytest.mark.asyncio
-    async def test_scan_approval_room_events_now_uses_next_batch_as_start_token(self, tmp_path: Path) -> None:
-        """History scans must pass a concrete sync token to Matrix pagination."""
-        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        router_bot = MagicMock()
-        router_bot.running = True
-        router_bot.client = MagicMock()
-        router_bot.client.rooms = {"!room:localhost": object()}
-        router_bot.client.next_batch = "$sync"
-        router_bot.client.sync = AsyncMock()
-        router_bot.client.room_messages = AsyncMock(
-            return_value=nio.RoomMessagesResponse("!room:localhost", [], "$sync", None),
-        )
-        orchestrator.agent_bots = {"router": router_bot}
-
-        events = await orchestrator._scan_approval_room_events_now(
-            "!room:localhost",
-            since_ts_ms=0,
-            limit=10,
-        )
-
-        assert events == []
-        router_bot.client.sync.assert_not_awaited()
-        assert router_bot.client.room_messages.await_args.kwargs["start"] == "$sync"
-
-    @pytest.mark.asyncio
-    async def test_scan_approval_room_events_now_syncs_before_scan_without_next_batch(self, tmp_path: Path) -> None:
-        """If startup cleanup runs before the first sync token, do one sync before paginating."""
-        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        router_bot = MagicMock()
-        router_bot.running = True
-        router_bot.client = MagicMock()
-        router_bot.client.rooms = {"!room:localhost": object()}
-        router_bot.client.next_batch = None
-
-        async def sync_once(**kwargs: int) -> None:
-            assert kwargs == {"timeout": 10000}
-            router_bot.client.next_batch = "$after-sync"
-
-        router_bot.client.sync = AsyncMock(side_effect=sync_once)
-        router_bot.client.room_messages = AsyncMock(
-            return_value=nio.RoomMessagesResponse("!room:localhost", [], "$after-sync", None),
-        )
-        orchestrator.agent_bots = {"router": router_bot}
-
-        events = await orchestrator._scan_approval_room_events_now(
-            "!room:localhost",
-            since_ts_ms=0,
-            limit=10,
-        )
-
-        assert events == []
-        router_bot.client.sync.assert_awaited_once_with(timeout=10000)
-        assert router_bot.client.room_messages.await_args.kwargs["start"] == "$after-sync"
 
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:
