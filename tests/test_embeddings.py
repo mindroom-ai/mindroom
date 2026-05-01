@@ -125,17 +125,42 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
     }
 
 
-def test_mem0_and_knowledge_signatures_keep_their_own_openai_defaults() -> None:
-    """Memory and knowledge signatures should not conflate different OpenAI defaults."""
+def test_mem0_and_knowledge_signatures_use_openai_model_defaults() -> None:
+    """Memory and knowledge signatures should match known OpenAI model defaults."""
     assert effective_mem0_embedder_signature("openai", "text-embedding-3-large") == (
         "openai",
         "text-embedding-3-large",
         "",
-        "1536",
+        "3072",
     )
     assert effective_knowledge_embedder_signature("openai", "text-embedding-3-large") == (
         "openai",
         "text-embedding-3-large",
         "",
         "3072",
+    )
+
+
+def test_mem0_custom_openai_compatible_signature_keeps_implicit_dimensions_unset() -> None:
+    """Custom OpenAI-compatible models should not be keyed as explicit 1536-d vectors."""
+    assert effective_mem0_embedder_signature(
+        "openai",
+        "gemini-embedding-001",
+        host="http://example.com/v1",
+    ) == (
+        "openai",
+        "gemini-embedding-001",
+        "http://example.com/v1",
+        "",
+    )
+    assert effective_mem0_embedder_signature(
+        "openai",
+        "gemini-embedding-001",
+        host="http://example.com/v1",
+        dimensions=1536,
+    ) == (
+        "openai",
+        "gemini-embedding-001",
+        "http://example.com/v1",
+        "1536",
     )

@@ -245,7 +245,7 @@ class TestMemoryConfig:
         ("model", "effective_dimensions"),
         [
             ("text-embedding-3-small", 1536),
-            ("text-embedding-3-large", 1536),
+            ("text-embedding-3-large", 3072),
         ],
     )
     def test_memory_collection_name_ignores_equivalent_mem0_openai_default_dimensions(
@@ -272,6 +272,34 @@ class TestMemoryConfig:
         explicit_config = Config(memory=explicit_default, router=RouterConfig(model="default"))
 
         assert _memory_collection_name(implicit_config) == _memory_collection_name(explicit_config)
+
+    def test_custom_openai_compatible_memory_collection_name_tracks_explicit_dimensions(self) -> None:
+        """Custom OpenAI-compatible embedders must not treat omitted dimensions as explicit 1536."""
+        implicit_dimensions = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="openai",
+                config=EmbedderConfig(
+                    model="gemini-embedding-001",
+                    host="http://example.com/v1",
+                ),
+            ),
+            llm=None,
+        )
+        explicit_dimensions = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="openai",
+                config=EmbedderConfig(
+                    model="gemini-embedding-001",
+                    host="http://example.com/v1",
+                    dimensions=1536,
+                ),
+            ),
+            llm=None,
+        )
+        implicit_config = Config(memory=implicit_dimensions, router=RouterConfig(model="default"))
+        explicit_config = Config(memory=explicit_dimensions, router=RouterConfig(model="default"))
+
+        assert _memory_collection_name(implicit_config) != _memory_collection_name(explicit_config)
 
     @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     @patch.dict("os.environ", {}, clear=True)
