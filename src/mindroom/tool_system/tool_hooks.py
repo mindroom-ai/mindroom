@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 import time
+from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import wraps
@@ -68,7 +70,9 @@ _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakK
 ToolHookResult = Any
 # Agno upgrade landmine — see ARCH-000.md for context.
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
+_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN = FunctionCall._build_nested_execution_chain
 _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
+_AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED = False
 logger = get_logger(__name__)
 
 
@@ -254,6 +258,60 @@ def _run_coroutine_from_sync(coroutine: ToolHookResult) -> ToolHookResult:
     return _DeferredAsyncToolHookResult(runner_coroutine)
 
 
+def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> ToolHookResult:
+    """Run a deferred async hook result for Agno's synchronous execute() chain."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_await_result(deferred.awaitable))
+
+    result_box: list[ToolHookResult] = []
+    error_box: list[BaseException] = []
+    context = copy_context()
+
+    def runner() -> None:
+        try:
+            result_box.append(context.run(asyncio.run, _await_result(deferred.awaitable)))
+        except BaseException as exc:
+            error_box.append(exc)
+
+    thread = threading.Thread(target=runner, name="mindroom-tool-hook-sync-bridge")
+    thread.start()
+    thread.join()
+    if error_box:
+        raise error_box[0]
+    return result_box[0]
+
+
+def _resolve_deferred_sync_result(result: ToolHookResult) -> ToolHookResult:
+    while isinstance(result, _DeferredAsyncToolHookResult):
+        result = _run_deferred_result_from_sync(result)
+    return result
+
+
+def _patch_agno_sync_tool_hook_chain() -> None:
+    """Teach Agno's sync tool hook chain to unwrap deferred async bridge results."""
+    global _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED
+
+    if _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED:
+        return
+
+    @wraps(_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN)
+    def _patched_build_nested_execution_chain(
+        self: FunctionCall,
+        entrypoint_args: dict[str, Any],
+    ) -> Callable[..., ToolHookResult]:
+        execution_chain = _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN(self, entrypoint_args)
+
+        def _wrapped_execution_chain(name: str, func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
+            return _resolve_deferred_sync_result(execution_chain(name, func, args))
+
+        return _wrapped_execution_chain
+
+    type.__setattr__(FunctionCall, "_build_nested_execution_chain", _patched_build_nested_execution_chain)
+    _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED = True
+
+
 def _patch_agno_async_tool_hook_chain() -> None:
     """Teach Agno's async tool hook chain to unwrap deferred sync-hook awaitables."""
     global _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED
@@ -280,6 +338,7 @@ def _patch_agno_async_tool_hook_chain() -> None:
     _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = True
 
 
+_patch_agno_sync_tool_hook_chain()
 _patch_agno_async_tool_hook_chain()
 
 

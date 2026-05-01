@@ -175,6 +175,11 @@ def _approval_startup_lookback_hours(config: Config) -> int:
     return max(1, ceil(timeout_days * 24))
 
 
+def _approval_relation_agent_name(content: dict[str, Any], *, fallback: str) -> str:
+    agent_name = content.get("agent_name")
+    return agent_name if isinstance(agent_name, str) and agent_name else fallback
+
+
 @dataclass
 class _ConfigReloadDrainState:
     """Track response-drain state for a queued config reload."""
@@ -446,7 +451,11 @@ class MultiAgentOrchestrator:
             raise ToolApprovalTransportError(_DEFAULT_ROUTER_MANAGED_ROOM_REASON)
         send_content = dict(content)
         if thread_id is not None:
-            send_content["m.relates_to"] = await self._approval_thread_relation(room_id, thread_id, bot.agent_name)
+            send_content["m.relates_to"] = await self._approval_thread_relation(
+                room_id,
+                thread_id,
+                _approval_relation_agent_name(send_content, fallback=bot.agent_name),
+            )
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
@@ -547,7 +556,7 @@ class MultiAgentOrchestrator:
             replacement_content["m.relates_to"] = await self._approval_thread_relation(
                 room_id,
                 thread_id,
-                bot.agent_name,
+                _approval_relation_agent_name(new_content, fallback=bot.agent_name),
             )
         response = await bot.client.room_send(
             room_id=room_id,
@@ -703,7 +712,6 @@ class MultiAgentOrchestrator:
             event_cache=self._runtime_support.event_cache,
             approval_room_ids=self._configured_approval_room_ids,
             transport_sender=self._approval_transport_sender_id,
-            runtime_loop=self._runtime_loop,
         )
 
     async def _close_runtime_support_services(self) -> None:

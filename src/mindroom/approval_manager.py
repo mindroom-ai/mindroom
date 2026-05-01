@@ -29,10 +29,10 @@ MatrixEventEditor = Callable[[str, str, dict[str, Any]], Awaitable[bool]]
 ApprovalRoomProvider = Callable[[], set[str]]
 TransportSenderProvider = Callable[[], str | None]
 
+_STARTUP_DISCARD_SCAN_LIMIT = 10_000
 _DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
 _DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
 _DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
-_DEFAULT_REINITIALIZE_REASON = "MindRoom reinitialized before approval completed."
 _DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
     "Tool approval requires the router to be joined to the Matrix room. "
     "In ad-hoc invited rooms accepted via accept_invites, approval only works if the router "
@@ -159,9 +159,6 @@ class ApprovalActionResult:
     error_reason: str | None = None
     thread_id: str | None = None
     card_event_id: str | None = None
-
-
-AnchoredApprovalActionResult = ApprovalActionResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,7 +397,11 @@ class ApprovalManager:
         cutoff_ts_ms = _lookback_cutoff_ms(lookback_hours)
         discarded = 0
         for room_id in self._configured_approval_room_ids():
-            for card_event in await self._scan_cached_room_cards(room_id, since_ts_ms=cutoff_ts_ms, limit=500):
+            for card_event in await self._scan_cached_room_cards(
+                room_id,
+                since_ts_ms=cutoff_ts_ms,
+                limit=_STARTUP_DISCARD_SCAN_LIMIT,
+            ):
                 try:
                     pending = PendingApproval.from_card_event(card_event, room_id=room_id)
                 except (TypeError, ValueError):
@@ -714,7 +715,7 @@ class ApprovalManager:
                     reason=reason,
                 )
             decision = self._new_decision(status=resolved_status, reason=resolved_reason, resolved_by=resolved_by)
-            await self._settle_waiter_with_terminal_edit(waiter, decision)
+            delivered = await self._settle_waiter_with_terminal_edit(waiter, decision)
             with self._live_lock:
                 self._resolving_card_event_ids.discard(pending.card_event_id)
                 self._resolved_card_event_ids.add(pending.card_event_id)
@@ -722,7 +723,7 @@ class ApprovalManager:
             claim_released = True
             return ApprovalActionResult(
                 consumed=True,
-                resolved=True,
+                resolved=delivered,
                 error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON
                 if resolved_reason == _DEFAULT_TRUNCATED_APPROVAL_REASON
                 else None,
@@ -901,14 +902,17 @@ class ApprovalManager:
                 if not claim_released:
                     with self._live_lock:
                         self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
+        await self._drain_post_cancel_cleanup_tasks()
 
-    def _abort_pending(self, *, reason: str) -> None:
+    async def _drain_post_cancel_cleanup_tasks(self) -> None:
+        while self._post_cancel_cleanup_tasks:
+            tasks = tuple(self._post_cancel_cleanup_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _has_live_work(self) -> bool:
         with self._live_lock:
-            waiters = list(self._pending_by_card_event.values())
-            self._pending_by_card_event.clear()
-            self._resolving_card_event_ids.clear()
-        for waiter in waiters:
-            self._complete_waiter_direct(waiter, self._new_decision(status="expired", reason=reason, resolved_by=None))
+            has_waiters = bool(self._pending_by_card_event or self._resolving_card_event_ids)
+        return has_waiters or bool(self._post_cancel_cleanup_tasks)
 
     def _live_waiter_for_card(self, card_event_id: str) -> _LiveApprovalWaiter | None:
         with self._live_lock:
@@ -1181,10 +1185,8 @@ def initialize_approval_store(
     event_cache: ConversationEventCache | None = None,
     approval_room_ids: ApprovalRoomProvider | None = None,
     transport_sender: TransportSenderProvider | None = None,
-    runtime_loop: asyncio.AbstractEventLoop | None = None,
 ) -> ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
-    del runtime_loop
     global _MANAGER
 
     if _MANAGER is not None and _MANAGER._runtime_storage_root == runtime_paths.storage_root:
@@ -1197,8 +1199,9 @@ def initialize_approval_store(
         )
         return _MANAGER
 
-    if _MANAGER is not None:
-        _MANAGER._abort_pending(reason=_DEFAULT_REINITIALIZE_REASON)
+    if _MANAGER is not None and _MANAGER._has_live_work():
+        msg = "Cannot reinitialize approval store with pending live approvals; shut it down first."
+        raise RuntimeError(msg)
 
     _MANAGER = ApprovalManager(
         runtime_paths,

@@ -732,6 +732,54 @@ async def test_request_approval_cancelled_slow_send_background_cleanup_removes_w
 
 
 @pytest.mark.asyncio
+async def test_shutdown_waits_for_cancelled_send_background_cleanup(tmp_path: Path) -> None:
+    event_committed = asyncio.Event()
+    release_sender = asyncio.Event()
+    edit_seen = asyncio.Event()
+    edits: list[dict[str, Any]] = []
+
+    async def sender(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> SentApprovalEvent:
+        event_committed.set()
+        await release_sender.wait()
+        return SentApprovalEvent("$approval")
+
+    async def editor(_room_id: str, _event_id: str, content: dict[str, Any]) -> bool:
+        edits.append(content)
+        edit_seen.set()
+        return True
+
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await asyncio.wait_for(event_committed.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+    assert store._post_cancel_cleanup_tasks
+
+    shutdown_task = asyncio.create_task(shutdown_approval_store())
+    await asyncio.sleep(0)
+    assert not shutdown_task.done()
+
+    release_sender.set()
+    await asyncio.wait_for(edit_seen.wait(), timeout=1)
+    await asyncio.wait_for(shutdown_task, timeout=1)
+
+    assert edits[0]["status"] == "expired"
+    assert edits[0]["resolution_reason"] == "Tool approval request was cancelled."
+    assert not store._post_cancel_cleanup_tasks
+
+
+@pytest.mark.asyncio
 async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_room_send(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
@@ -777,6 +825,70 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
     release_cache.set()
     await asyncio.wait_for(cache_task, timeout=1)
     assert not orchestrator._approval_cache_write_tasks
+
+
+@pytest.mark.asyncio
+async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+    sent_contents: list[dict[str, Any]] = []
+
+    async def room_send(
+        *,
+        room_id: str,
+        message_type: str,
+        content: dict[str, Any],
+    ) -> nio.RoomSendResponse:
+        assert room_id == "!room:localhost"
+        assert message_type == "io.mindroom.tool_approval"
+        sent_contents.append(content)
+        event_id = "$approval-edit" if "m.new_content" in content else "$approval"
+        return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
+
+    router_client = MagicMock()
+    router_client.user_id = "@mindroom_router:localhost"
+    router_client.rooms = {"!room:localhost": object()}
+    router_client.room_send = AsyncMock(side_effect=room_send)
+    router_bot = MagicMock(agent_name="router", running=True, client=router_client)
+    router_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$router-latest")
+
+    code_bot = MagicMock(agent_name="code", running=True)
+    code_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$code-latest")
+
+    orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
+    orchestrator._cache_approval_event_now = AsyncMock()
+
+    sent = await orchestrator._send_approval_event_now(
+        "!room:localhost",
+        "$thread",
+        {
+            "approval_id": "approval-1",
+            "tool_name": "read_file",
+            "arguments": {"path": "notes.txt"},
+            "status": "pending",
+            "agent_name": "code",
+        },
+    )
+    edited = await orchestrator._edit_approval_event_now(
+        "!room:localhost",
+        "$approval",
+        {
+            "approval_id": "approval-1",
+            "tool_name": "read_file",
+            "arguments": {"path": "notes.txt"},
+            "status": "expired",
+            "agent_name": "code",
+            "thread_id": "$thread",
+        },
+    )
+
+    assert sent == SentApprovalEvent(event_id="$approval")
+    assert edited is True
+    assert sent_contents[0]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
+    assert sent_contents[1]["m.new_content"]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
+    assert code_bot._conversation_cache.get_latest_thread_event_id_if_needed.await_count == 2
+    router_bot._conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1284,7 +1396,7 @@ async def test_failed_terminal_edit_keeps_card_terminal_in_process(tmp_path: Pat
         reason=None,
     )
 
-    assert first_result.resolved is True
+    assert first_result.resolved is False
     assert decision.status == "denied"
     assert decision.reason == "Tool approval request could not be delivered to Matrix."
     assert second_result.resolved is False
@@ -1393,6 +1505,33 @@ async def test_discard_pending_on_startup_uses_cached_cards_without_history_scan
 
 
 @pytest.mark.asyncio
+async def test_discard_pending_on_startup_scans_more_than_500_cached_cards(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    for index in range(501):
+        event_id = f"$approval-{index}"
+        await cache.store_event(
+            event_id,
+            "!room:localhost",
+            _approval_card(
+                approval_id=f"approval-{index}",
+                event_id=event_id,
+                origin_server_ts=int(datetime.now(UTC).timestamp() * 1000) + index,
+            ),
+        )
+    editor = AsyncMock(return_value=True)
+    store = ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.discard_pending_on_startup() == 501
+    assert editor.await_count == 501
+
+
+@pytest.mark.asyncio
 async def test_discard_pending_on_startup_expires_same_router_cached_cards(
     tmp_path: Path,
 ) -> None:
@@ -1496,6 +1635,40 @@ def test_pending_approval_from_card_event_requires_approver_user_id() -> None:
 
     with pytest.raises(ValueError, match="missing required approval fields"):
         PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+
+@pytest.mark.asyncio
+async def test_initialize_approval_store_rejects_storage_root_change_with_pending_waiter(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    first_runtime_paths = test_runtime_paths(tmp_path / "first")
+    second_runtime_paths = test_runtime_paths(tmp_path / "second")
+    store = initialize_approval_store(first_runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender)
+
+    with pytest.raises(RuntimeError, match="Cannot reinitialize approval store"):
+        initialize_approval_store(second_runtime_paths)
+
+    result = await store.resolve_approval(
+        card_event_id=pending.card_event_id,
+        room_id=pending.room_id,
+        status="approved",
+        resolved_by="@user:localhost",
+    )
+    decision = await task
+
+    assert result.resolved is True
+    assert decision.status == "approved"
 
 
 def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -> None:

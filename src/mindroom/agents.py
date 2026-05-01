@@ -885,14 +885,6 @@ def _prune_openai_approval_gated_tools(
         for tool_name, function in toolkit.async_functions.items()
         if tool_name not in hidden_tool_names
     }
-    toolkit.tools = [
-        tool
-        for tool in toolkit.tools
-        if getattr(tool, "name", getattr(tool, "__name__", None)) not in hidden_tool_names
-    ]
-    toolkit._async_tools = [
-        (tool, tool_name) for tool, tool_name in toolkit._async_tools if tool_name not in hidden_tool_names
-    ]
 
     if toolkit.functions or toolkit.async_functions:
         return toolkit
