@@ -74,7 +74,7 @@ class PostResponseEffectsDeps:
     logger: structlog.stdlib.BoundLogger
     register_interactive: (
         Callable[
-            [str, MessageTarget, dict[str, str], list[dict[str, str]]],
+            [str, MessageTarget, interactive.InteractiveMetadata],
             Awaitable[None],
         ]
         | None
@@ -133,8 +133,7 @@ class PostResponseEffectsSupport:
         event_id: str,
         room_id: str,
         target: MessageTarget,
-        option_map: dict[str, str],
-        options_list: list[dict[str, str]],
+        interactive_metadata: interactive.InteractiveMetadata,
         agent_name: str,
     ) -> None:
         """Persist one interactive response and add its reaction buttons."""
@@ -142,14 +141,14 @@ class PostResponseEffectsSupport:
             event_id,
             room_id,
             target.resolved_thread_id,
-            option_map,
+            interactive_metadata.option_map,
             agent_name,
         )
         await interactive.add_reaction_buttons(
             self._client(),
             room_id,
             event_id,
-            options_list,
+            interactive_metadata.options_as_list(),
         )
 
     def queue_thread_summary(
@@ -216,15 +215,13 @@ class PostResponseEffectsSupport:
         async def register_interactive(
             event_id: str,
             target: MessageTarget,
-            option_map: dict[str, str],
-            options_list: list[dict[str, str]],
+            interactive_metadata: interactive.InteractiveMetadata,
         ) -> None:
             await self._register_interactive_delivery(
                 event_id=event_id,
                 room_id=room_id,
                 target=target,
-                option_map=option_map,
-                options_list=options_list,
+                interactive_metadata=interactive_metadata,
                 agent_name=interactive_agent_name,
             )
 
@@ -268,23 +265,20 @@ async def apply_post_response_effects(
         and final_delivery_outcome.terminal_status == "completed"
         and final_delivery_outcome.final_visible_body is not None
         and not final_delivery_outcome.suppressed
-        and final_delivery_outcome.option_map
-        and final_delivery_outcome.options_list
+        and final_delivery_outcome.interactive_metadata is not None
         and outcome.interactive_target is not None
     ):
         await deps.register_interactive(
             response_event_id,
             outcome.interactive_target,
-            dict(final_delivery_outcome.option_map),
-            [dict(item) for item in final_delivery_outcome.options_list],
+            final_delivery_outcome.interactive_metadata,
         )
     else:  # noqa: PLR5501, RUF100
         if response_event_id is not None and (
             (final_delivery_outcome.final_visible_body or "")
             .rstrip()
             .endswith("React with an emoji or type the number to respond.")
-            or final_delivery_outcome.option_map
-            or final_delivery_outcome.options_list
+            or final_delivery_outcome.interactive_metadata is not None
         ):
             deps.logger.warning(
                 "Interactive question registration skipped",
@@ -293,8 +287,8 @@ async def apply_post_response_effects(
                 terminal_status=final_delivery_outcome.terminal_status,
                 final_visible_body_is_none=final_delivery_outcome.final_visible_body is None,
                 suppressed=final_delivery_outcome.suppressed,
-                option_map_empty=not bool(final_delivery_outcome.option_map),
-                options_list_empty=not bool(final_delivery_outcome.options_list),
+                option_map_empty=not bool(final_delivery_outcome.interactive_metadata),
+                options_list_empty=not bool(final_delivery_outcome.interactive_metadata),
                 interactive_target_is_none=outcome.interactive_target is None,
             )
 

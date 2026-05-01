@@ -805,6 +805,7 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
     )
 
     assert final_outcome.final_visible_body == formatted_interactive.formatted_text
+    assert final_outcome.interactive_metadata is not None
     assert dict(final_outcome.option_map or {}) == {
         "🎙️": "transcribe",
         "1": "transcribe",

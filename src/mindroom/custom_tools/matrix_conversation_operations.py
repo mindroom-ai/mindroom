@@ -119,21 +119,21 @@ class MatrixMessageOperations:
             return
 
         response = parse_and_format_interactive(original_text, extract_mapping=True)
-        if not response.option_map or not response.options_list:
+        if response.interactive_metadata is None:
             return
 
         register_interactive_question(
             event_id,
             room_id,
             thread_id,
-            response.option_map,
+            response.interactive_metadata.option_map,
             context.agent_name,
         )
         await add_reaction_buttons(
             context.client,
             room_id,
             event_id,
-            response.options_list,
+            response.interactive_metadata.options_as_list(),
         )
 
     async def _message_send_or_reply(  # noqa: C901, PLR0911, PLR0912
@@ -659,19 +659,19 @@ class MatrixMessageOperations:
             delivered.content_sent,
         )
 
-        if interactive_response.option_map and interactive_response.options_list:
+        if interactive_response.interactive_metadata is not None:
             register_interactive_question(
                 target,
                 room_id,
                 thread_id,
-                interactive_response.option_map,
+                interactive_response.interactive_metadata.option_map,
                 context.agent_name,
             )
             await add_reaction_buttons(
                 context.client,
                 room_id,
                 target,
-                interactive_response.options_list,
+                interactive_response.interactive_metadata.options_as_list(),
             )
 
         return self._result(
