@@ -580,30 +580,6 @@ class TestCredentialsManager:
         }
         assert worker_shared_manager.load_credentials("spotify") is None
 
-    def test_sync_shared_credentials_to_worker_never_mirrors_oauth_client_config(
-        self,
-        temp_credentials_dir: Path,
-    ) -> None:
-        """OAuth app client secrets should stay in the primary runtime even if allowlisted."""
-        manager = CredentialsManager(temp_credentials_dir)
-        manager.save_credentials(
-            "google_drive_oauth_client",
-            {
-                "client_id": "stored-client-id",
-                "client_secret": "stored-client-secret",
-                "_source": "ui",
-            },
-        )
-        worker_shared_manager = manager.for_worker("worker-a").shared_manager()
-
-        sync_shared_credentials_to_worker(
-            "worker-a",
-            allowed_services=frozenset({"google_drive_oauth_client"}),
-            credentials_manager=manager,
-        )
-
-        assert worker_shared_manager.load_credentials("google_drive_oauth_client") is None
-
     def test_sync_shared_credentials_to_worker_default_denies_all_services(
         self,
         temp_credentials_dir: Path,

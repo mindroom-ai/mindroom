@@ -48,13 +48,9 @@ def test_local_shared_service_policy(service: str, worker_scope: str, expected: 
     "service",
     [
         "google_oauth_client",
-        "google_calendar_oauth_client",
         "google_calendar_oauth",
-        "google_drive_oauth_client",
         "google_drive_oauth",
-        "google_gmail_oauth_client",
         "google_gmail_oauth",
-        "google_sheets_oauth_client",
         "google_sheets_oauth",
         "google_vertex_adc",
     ],

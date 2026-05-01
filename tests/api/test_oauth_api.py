@@ -111,20 +111,17 @@ def _fake_provider(
     allowed_email_domains: tuple[str, ...] = (),
     allowed_hosted_domains: tuple[str, ...] = (),
     scopes: tuple[str, ...] = ("scope.read",),
-    client_config_services: tuple[str, ...] = (),
 ) -> OAuthProvider:
     async def _exchange(
         provider: OAuthProvider,
         code: str,
-        client_config: object,
+        _client_config: object,
         _runtime_paths: object,
     ) -> OAuthTokenResult:
         assert code == "test-code"
-        assert isinstance(client_config, OAuthClientConfig)
         token_data = {
             "token": f"{provider.id}-access-token",
             "token_uri": provider.token_url,
-            "client_id": client_config.client_id,
             "scopes": list(provider.scopes),
             "_source": "oauth",
             "_oauth_provider": provider.id,
@@ -150,7 +147,6 @@ def _fake_provider(
         scopes=scopes,
         credential_service=credential_service,
         tool_config_service=tool_config_service,
-        client_config_services=client_config_services,
         client_id_env="TEST_OAUTH_CLIENT_ID",
         client_secret_env="TEST_OAUTH_CLIENT_SECRET",
         allowed_email_domains=allowed_email_domains,
@@ -473,33 +469,6 @@ def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -
     assert params["state"][0] in state_store.read_text(encoding="utf-8")
 
 
-def test_connect_uses_stored_oauth_client_config(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
-    )
-    api_app = _make_test_app(runtime_paths, _config_payload())
-    provider = _fake_provider(client_config_services=("test_drive_oauth_client",))
-    manager = get_runtime_credentials_manager(runtime_paths)
-    manager.save_credentials(
-        "test_drive_oauth_client",
-        {
-            "client_id": "stored-client-id",
-            "client_secret": "stored-client-secret",
-            "_source": "ui",
-        },
-    )
-
-    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
-        with TestClient(api_app) as client:
-            _login(client)
-            response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
-
-    assert response.status_code == 200
-    params = parse_qs(urlparse(response.json()["auth_url"]).query)
-    assert params["client_id"] == ["stored-client-id"]
-
-
 def test_provider_exchange_and_refresh_use_oauth_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -748,85 +717,6 @@ def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp
     assert result.claims_verified is True
 
 
-def test_google_oauth_client_config_prefers_stored_provider_config(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {
-            "GOOGLE_DRIVE_CLIENT_ID": "env-client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "env-client-secret",
-            "GOOGLE_DRIVE_REDIRECT_URI": "https://env.example.test/callback",
-        },
-    )
-    manager = get_runtime_credentials_manager(runtime_paths)
-    manager.save_credentials(
-        "google_drive_oauth_client",
-        {
-            "client_id": "stored-client-id",
-            "client_secret": "stored-client-secret",
-            "redirect_uri": "https://stored.example.test/callback",
-            "_source": "ui",
-        },
-    )
-
-    client_config = google_drive_oauth_provider().client_config(runtime_paths)
-
-    assert client_config == OAuthClientConfig(
-        client_id="stored-client-id",
-        client_secret="stored-client-secret",
-        redirect_uri="https://stored.example.test/callback",
-    )
-
-
-def test_google_oauth_client_config_falls_back_to_env(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {
-            "GOOGLE_CLIENT_ID": "env-client-id",
-            "GOOGLE_CLIENT_SECRET": "env-client-secret",
-            "MINDROOM_PUBLIC_URL": "https://mindroom.example.test",
-        },
-    )
-
-    client_config = google_drive_oauth_provider().client_config(runtime_paths)
-
-    assert client_config == OAuthClientConfig(
-        client_id="env-client-id",
-        client_secret="env-client-secret",
-        redirect_uri="https://mindroom.example.test/api/oauth/google_drive/callback",
-    )
-
-
-def test_google_provider_oauth_client_config_wins_over_shared_config(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    manager = get_runtime_credentials_manager(runtime_paths)
-    manager.save_credentials(
-        "google_oauth_client",
-        {
-            "client_id": "shared-client-id",
-            "client_secret": "shared-client-secret",
-            "redirect_uri": "https://shared.example.test/callback",
-            "_source": "ui",
-        },
-    )
-    manager.save_credentials(
-        "google_drive_oauth_client",
-        {
-            "client_id": "drive-client-id",
-            "client_secret": "drive-client-secret",
-            "redirect_uri": "https://drive.example.test/callback",
-            "_source": "ui",
-        },
-    )
-
-    client_config = google_drive_oauth_provider().client_config(runtime_paths)
-
-    assert client_config == OAuthClientConfig(
-        client_id="drive-client-id",
-        client_secret="drive-client-secret",
-        redirect_uri="https://drive.example.test/callback",
-    )
-
-
 def test_google_drive_refresh_parser_rejects_unverified_existing_claim_summary(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     provider = google_drive_oauth_provider()
@@ -1002,46 +892,6 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
     }
     assert manager.for_worker(owner_worker_key).load_credentials("google_drive") is None
     assert manager.for_worker(_worker_key_for_standalone_user()).load_credentials(provider.credential_service) is None
-
-
-def test_callback_uses_stored_oauth_client_config(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
-    )
-    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider(
-        provider_id="google_drive",
-        credential_service="google_drive_oauth",
-        tool_config_service="google_drive",
-        client_config_services=("google_drive_oauth_client",),
-    )
-    manager = get_runtime_credentials_manager(runtime_paths)
-    manager.save_credentials(
-        "google_drive_oauth_client",
-        {
-            "client_id": "stored-client-id",
-            "client_secret": "stored-client-secret",
-            "_source": "ui",
-        },
-    )
-
-    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
-        with TestClient(api_app) as client:
-            _login(client)
-            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
-            state = _state_from_auth_url(connect_response.json()["auth_url"])
-            callback_response = client.get(
-                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
-                follow_redirects=False,
-            )
-
-    assert callback_response.status_code == 307
-    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
-    scoped_credentials = scoped_manager.load_credentials(provider.credential_service)
-    assert scoped_credentials is not None
-    assert scoped_credentials["client_id"] == "stored-client-id"
-    assert scoped_credentials["token"] == "google_drive-access-token"
 
 
 def test_user_scope_oauth_token_not_in_worker_path(tmp_path: Path) -> None:
@@ -2116,42 +1966,6 @@ def test_status_requires_client_config_for_connected_true(tmp_path: Path) -> Non
     assert status_response.status_code == 200
     assert status_response.json()["has_client_config"] is False
     assert status_response.json()["connected"] is False
-
-
-def test_status_uses_stored_oauth_client_config(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
-    )
-    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider(client_config_services=("test_drive_oauth_client",))
-    manager = get_runtime_credentials_manager(runtime_paths)
-    manager.save_credentials(
-        "test_drive_oauth_client",
-        {
-            "client_id": "stored-client-id",
-            "client_secret": "stored-client-secret",
-            "_source": "ui",
-        },
-    )
-    manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).save_credentials(
-        provider.credential_service,
-        {
-            "token": "stored-token",
-            "scopes": list(provider.scopes),
-            "_source": "oauth",
-            "_oauth_provider": provider.id,
-        },
-    )
-
-    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
-        with TestClient(api_app) as client:
-            _login(client)
-            status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
-
-    assert status_response.status_code == 200
-    assert status_response.json()["has_client_config"] is True
-    assert status_response.json()["connected"] is True
 
 
 def test_google_status_reports_connected_with_service_account(tmp_path: Path) -> None:
