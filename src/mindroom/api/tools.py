@@ -17,6 +17,7 @@ from mindroom.api.credentials import (
     resolve_dashboard_execution_scope_override,
 )
 from mindroom.config.main import Config
+from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import (
     get_runtime_credentials_manager,
     load_scoped_credentials,
@@ -28,7 +29,6 @@ from mindroom.tool_system.catalog import export_tools_metadata, resolved_tool_me
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
     build_worker_target_from_runtime_env,
-    local_shared_credential_allowlist,
     unsupported_shared_only_integration_names,
 )
 
@@ -68,9 +68,9 @@ def _effective_allowed_shared_services(
     context: _ResolvedToolAvailabilityContext,
 ) -> frozenset[str] | None:
     """Return the worker allowlist that applies to one dashboard credential lookup."""
-    local_allowlist = local_shared_credential_allowlist(service, context.execution_scope)
-    if local_allowlist is not None:
-        return local_allowlist
+    policy = credential_service_policy(service, context.execution_scope)
+    if policy.uses_local_shared_credentials:
+        return frozenset({service})
     return context.allowed_shared_services
 
 
