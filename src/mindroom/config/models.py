@@ -7,7 +7,7 @@ from typing import Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
-from mindroom.constants import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import validate_service_name
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
@@ -446,7 +446,13 @@ class DefaultsConfig(BaseModel):
         if services is None:
             return None
         normalized_services = [validate_service_name(service) for service in services]
-        unsupported_services = sorted(set(normalized_services) & UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS)
+        unsupported_services = sorted(
+            {
+                service
+                for service in normalized_services
+                if not credential_service_policy(service, None).worker_grantable_supported
+            },
+        )
         if unsupported_services:
             msg = (
                 "worker_grantable_credentials does not support "

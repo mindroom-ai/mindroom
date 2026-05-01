@@ -13,12 +13,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mindroom.credential_policy import credential_service_policy
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import (
-    service_uses_local_shared_credentials,
-    service_uses_primary_runtime_scoped_credentials,
-    worker_root_path,
-)
+from mindroom.tool_system.worker_routing import worker_root_path
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -473,7 +470,8 @@ def _primary_runtime_scoped_credentials_manager(
     manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget,
 ) -> CredentialsManager | None:
-    if not service_uses_primary_runtime_scoped_credentials(service, worker_target.worker_scope):
+    policy = credential_service_policy(service, worker_target.worker_scope)
+    if not policy.uses_primary_runtime_scoped_credentials:
         return None
     identity = worker_target.execution_identity
     if identity is None or identity.requester_id is None:
@@ -507,7 +505,10 @@ def load_scoped_credentials(
         manager=manager,
         worker_target=worker_target,
     )
-    uses_local_shared_credentials = service_uses_local_shared_credentials(service, worker_target.worker_scope)
+    uses_local_shared_credentials = credential_service_policy(
+        service,
+        worker_target.worker_scope,
+    ).uses_local_shared_credentials
     worker_manager = (
         _resolve_worker_credentials_manager(
             credentials_manager=manager,
@@ -552,7 +553,7 @@ def save_scoped_credentials(
         target_manager.save_credentials(service, credentials)
         return
 
-    if service_uses_local_shared_credentials(service, worker_target.worker_scope):
+    if credential_service_policy(service, worker_target.worker_scope).uses_local_shared_credentials:
         manager.shared_manager().save_credentials(service, credentials)
         return
 
@@ -586,7 +587,7 @@ def delete_scoped_credentials(
         target_manager.delete_credentials(service)
         return
 
-    if service_uses_local_shared_credentials(service, worker_target.worker_scope):
+    if credential_service_policy(service, worker_target.worker_scope).uses_local_shared_credentials:
         manager.shared_manager().delete_credentials(service)
         return
 
