@@ -1029,9 +1029,11 @@ def _seen_event_ids_for_runs(runs: Sequence[RunOutput | TeamRunOutput]) -> list[
         if not isinstance(metadata, dict):
             continue
         raw_seen_ids = metadata.get("matrix_seen_event_ids")
-        if not isinstance(raw_seen_ids, list):
-            continue
-        seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
+        if isinstance(raw_seen_ids, list):
+            seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
+        response_event_id = metadata.get("matrix_response_event_id")
+        if isinstance(response_event_id, str) and response_event_id:
+            seen_event_ids.add(response_event_id)
     return sorted(seen_event_ids)
 
 

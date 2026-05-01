@@ -283,6 +283,12 @@ def _message_speaker_label(message: ResolvedVisibleMessage) -> str:
     return message.sender
 
 
+def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
+    """Return whether an internal Matrix sender is relaying a user-authored message."""
+    original_sender = message.content.get(ORIGINAL_SENDER_KEY)
+    return isinstance(original_sender, str) and bool(original_sender)
+
+
 def _build_unseen_messages_header(partial_reply_kinds: set[_PartialReplyKind]) -> str:
     """Choose the unseen-context guidance for the partial-reply mix present."""
     if not partial_reply_kinds:
@@ -301,7 +307,11 @@ def _context_message_from_visible_message(
     missing_sender_label: str | None = None,
 ) -> Message:
     """Convert one visible Matrix message into a structured Agno message."""
-    if response_sender_id is not None and message.sender == response_sender_id:
+    if (
+        response_sender_id is not None
+        and message.sender == response_sender_id
+        and not _is_relayed_user_message(message)
+    ):
         return Message(role="assistant", content=message.body)
     speaker_label = _message_speaker_label(message)
     if not speaker_label:
@@ -474,29 +484,28 @@ def _get_unseen_messages_for_sender(
             continue
         if isinstance(content, dict) and COMPACTION_NOTICE_CONTENT_KEY in content:
             continue
-        if sender_id and sender == sender_id:
+        if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
             partial_kind = _classify_partial_reply(
                 msg,
                 active_event_ids=active_event_ids,
             )
             if partial_kind is _PartialReplyKind.INTERRUPTED:
                 continue
-            if partial_kind is None:
+            if partial_kind is not None:
+                cleaned_body = _clean_partial_reply_body(msg.body)
+                if not cleaned_body:
+                    continue
+                partial_reply_kinds.add(partial_kind)
+                if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
+                    in_progress_event_ids.add(event_id)
+                unseen.append(
+                    replace_visible_message(
+                        msg,
+                        sender=_PARTIAL_REPLY_SENDER_LABELS.get(partial_kind.value, "You (partial reply)"),
+                        body=cleaned_body,
+                    ),
+                )
                 continue
-            cleaned_body = _clean_partial_reply_body(msg.body)
-            if not cleaned_body:
-                continue
-            partial_reply_kinds.add(partial_kind)
-            if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
-                in_progress_event_ids.add(event_id)
-            unseen.append(
-                replace_visible_message(
-                    msg,
-                    sender=_PARTIAL_REPLY_SENDER_LABELS.get(partial_kind.value, "You (partial reply)"),
-                    body=cleaned_body,
-                ),
-            )
-            continue
         unseen.append(msg)
     return unseen, partial_reply_kinds, in_progress_event_ids
 

@@ -153,6 +153,9 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
         raw_seen_ids = metadata.get("matrix_seen_event_ids")
         if isinstance(raw_seen_ids, list):
             seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
+        response_event_id = metadata.get("matrix_response_event_id")
+        if isinstance(response_event_id, str) and response_event_id:
+            seen_event_ids.add(response_event_id)
     return seen_event_ids
 
 

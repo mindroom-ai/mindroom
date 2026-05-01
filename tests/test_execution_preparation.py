@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from defusedxml.ElementTree import fromstring
 
-from mindroom.execution_preparation import _collect_history_messages, build_matrix_prompt_with_thread_history
+from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.execution_preparation import (
+    _build_unseen_context_messages,
+    _collect_history_messages,
+    build_matrix_prompt_with_thread_history,
+)
 from tests.conftest import make_visible_message
 
 
@@ -112,3 +117,97 @@ def test_build_matrix_prompt_with_thread_history_truncates_visible_body_to_max_l
     assert message.text.startswith("okok")
     assert message.text.endswith("…")
     assert len(message.text) <= 200
+
+
+def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
+    """A tool-relayed user message from the agent account should remain user context."""
+    thread_history = [
+        make_visible_message(
+            sender="@mindroom_code:localhost",
+            body="@mindroom_missing_agent Please investigate this",
+            event_id="$spawn-root",
+            content={
+                "body": "@mindroom_missing_agent Please investigate this",
+                ORIGINAL_SENDER_KEY: "@alice:localhost",
+            },
+        ),
+        make_visible_message(
+            sender="@alice:localhost",
+            body="What happened?",
+            event_id="$question",
+        ),
+    ]
+
+    messages, unseen_event_ids = _build_unseen_context_messages(
+        "What happened?",
+        thread_history,
+        seen_event_ids=set(),
+        current_event_id="$question",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+    )
+
+    assert unseen_event_ids == ["$spawn-root"]
+    assert messages[0].role == "user"
+    assert messages[0].content == "@alice:localhost: @mindroom_missing_agent Please investigate this"
+
+
+def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
+    """A self-sent Matrix event not known to persisted history should remain visible context."""
+    thread_history = [
+        make_visible_message(
+            sender="@mindroom_code:localhost",
+            body="@mindroom_missing_agent Please investigate this",
+            event_id="$spawn-root",
+        ),
+        make_visible_message(
+            sender="@alice:localhost",
+            body="What happened?",
+            event_id="$question",
+        ),
+    ]
+
+    messages, unseen_event_ids = _build_unseen_context_messages(
+        "What happened?",
+        thread_history,
+        seen_event_ids=set(),
+        current_event_id="$question",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+    )
+
+    assert unseen_event_ids == ["$spawn-root"]
+    assert messages[0].role == "assistant"
+    assert messages[0].content == "@mindroom_missing_agent Please investigate this"
+
+
+def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
+    """A self-sent Matrix event already represented in persisted history should not be duplicated."""
+    thread_history = [
+        make_visible_message(
+            sender="@mindroom_code:localhost",
+            body="Persisted assistant answer",
+            event_id="$answer",
+        ),
+        make_visible_message(
+            sender="@alice:localhost",
+            body="What next?",
+            event_id="$question",
+        ),
+    ]
+
+    messages, unseen_event_ids = _build_unseen_context_messages(
+        "What next?",
+        thread_history,
+        seen_event_ids={"$answer"},
+        current_event_id="$question",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+    )
+
+    assert unseen_event_ids == []
+    assert len(messages) == 1
+    assert messages[0].content == 'Current message:\n<msg from="@alice:localhost"><![CDATA[What next?]]></msg>'
