@@ -2958,12 +2958,12 @@ def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
-def test_sandbox_runner_worker_shell_uses_worker_home_and_venv(
+def test_sandbox_runner_worker_shell_uses_workspace_home_and_worker_venv(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker-routed shell execution should inherit the worker runtime env."""
+    """Worker-routed shell execution should use workspace HOME and worker venv."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
@@ -2985,7 +2985,7 @@ def test_sandbox_runner_worker_shell_uses_worker_home_and_venv(
     assert data["ok"] is True
 
     worker_root = storage_root / "workers" / worker_dir_name("worker-a")
-    expected_result = f"{worker_root}|{worker_root / 'venv'}|{worker_root / 'workspace'}"
+    expected_result = f"{worker_root / 'workspace'}|{worker_root / 'venv'}|{worker_root / 'workspace'}"
     assert data["result"] == expected_result
 
 
