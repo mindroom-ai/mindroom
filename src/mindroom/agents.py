@@ -396,6 +396,28 @@ def _build_registered_agent_tool(
     )
 
 
+def _log_toolkits_without_unique_model_functions(
+    toolkits: list[Toolkit],
+    *,
+    agent_name: str,
+) -> None:
+    """Warn when Agno would drop every function from a configured toolkit."""
+    for parse_mode in ("sync", "async"):
+        seen_function_names: set[str] = set()
+        for toolkit in toolkits:
+            functions = toolkit.get_async_functions() if parse_mode == "async" else toolkit.get_functions()
+            function_names = set(functions)
+            if function_names and function_names <= seen_function_names:
+                logger.warning(
+                    "Configured toolkit exposes no unique model functions because function names collide",
+                    agent=agent_name,
+                    toolkit=toolkit.name,
+                    parse_mode=parse_mode,
+                    function_names=sorted(function_names),
+                )
+            seen_function_names.update(function_names)
+
+
 def _wrap_direct_agent_toolkit_for_output_files(
     toolkit: Toolkit,
     *,
@@ -1110,6 +1132,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     if include_interactive_questions:
         instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
+
+    _log_toolkits_without_unique_model_functions(tools, agent_name=agent_name)
 
     knowledge_enabled = bool(config.get_agent_knowledge_base_ids(agent_name)) and knowledge is not None
     culture_storage_root = resolved_storage_path

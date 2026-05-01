@@ -646,7 +646,7 @@ async def test_execute_request_inprocess_serializes_oauth_connection_required(
     response = await sandbox_runner_module._execute_request_inprocess(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
             tool_name="google_drive",
-            function_name="search_files",
+            function_name="google_drive_search_files",
             args=[],
             kwargs={},
         ),
@@ -687,7 +687,7 @@ async def test_execute_request_inprocess_serializes_oauth_connection_required_fr
     response = await sandbox_runner_module._execute_request_inprocess(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
             tool_name="google_drive",
-            function_name="search_files",
+            function_name="google_drive_search_files",
             args=[],
             kwargs={},
         ),

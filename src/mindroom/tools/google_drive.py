@@ -74,9 +74,9 @@ if TYPE_CHECKING:
     ],
     docs_url="https://docs.agno.com/tools/toolkits/others/google_drive",
     function_names=(
-        "list_files",
-        "search_files",
-        "read_file",
+        "google_drive_list_files",
+        "google_drive_search_files",
+        "google_drive_read_file",
     ),
 )
 def google_drive_tools() -> type[GoogleDriveTools]:
