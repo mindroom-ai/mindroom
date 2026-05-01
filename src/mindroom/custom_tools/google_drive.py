@@ -10,6 +10,7 @@ from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -61,7 +62,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, AgnoGoogleDriveTools):
         super().__init__(creds=creds, **kwargs)
         self._set_original_auth(AgnoGoogleDriveTools._auth)
         self._wrap_oauth_function_entrypoints()
-        self._rename_model_functions()
+        apply_toolkit_function_aliases(self, _MODEL_FUNCTION_NAME_ALIASES)
 
     def _coerce_max_read_size(self, value: object) -> int | float | None:
         if value is None:
@@ -93,18 +94,3 @@ class GoogleDriveTools(ScopedOAuthClientMixin, AgnoGoogleDriveTools):
     def _should_fallback_to_original_auth(self) -> bool:
         """Prefer the upstream auth path when a service account is configured."""
         return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
-
-    def _rename_model_functions(self) -> None:
-        """Expose Drive-specific function names while preserving upstream methods."""
-        self.functions = self._renamed_functions(self.functions, expose_attributes=True)
-        self.async_functions = self._renamed_functions(self.async_functions, expose_attributes=False)
-
-    def _renamed_functions(self, functions: dict[str, Any], *, expose_attributes: bool) -> dict[str, Any]:
-        renamed_functions: dict[str, Any] = type(functions)()
-        for function_name, function in functions.items():
-            renamed_name = _MODEL_FUNCTION_NAME_ALIASES.get(function_name, function_name)
-            function.name = renamed_name
-            renamed_functions[renamed_name] = function
-            if expose_attributes and renamed_name != function_name:
-                setattr(self, renamed_name, function.entrypoint)
-        return renamed_functions
