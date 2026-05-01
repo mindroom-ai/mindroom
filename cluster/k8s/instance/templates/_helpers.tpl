@@ -44,6 +44,8 @@
   value: {{ $values.kubernetesWorkerNamePrefix | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
   value: {{ $values.kubernetesWorkerEnableServiceLinks | quote }}
+- name: MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME
+  value: "mindroom-worker-auth-{{ $values.customer }}"
 - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
   value: {{ dict "customer" $values.customer | toJson | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME

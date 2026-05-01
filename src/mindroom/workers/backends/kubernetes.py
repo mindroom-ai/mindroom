@@ -384,7 +384,10 @@ class KubernetesWorkerBackend:
                         progress_sink=self._emit_progress,
                     )
                 deployment_apply: resources.DeploymentApplyResult | None = None
+                auth_secret_applied = False
                 try:
+                    self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
+                    auth_secret_applied = True
                     deployment_apply = self._resources.apply_deployment(
                         worker_key=worker_key,
                         worker_id=worker_id,
@@ -435,13 +438,15 @@ class KubernetesWorkerBackend:
                 except Exception as exc:
                     failure_reason = str(exc)
                     finalize_progress("failed", failure_reason)
-                    if destructive_failure_allowed and self._resources.read_deployment(worker_id) is not None:
-                        self.record_failure(
-                            worker_key,
-                            failure_reason,
-                            now=timestamp,
-                            annotations_override=annotations,
-                        )
+                    self._record_startup_failure_or_cleanup_secret(
+                        worker_key=worker_key,
+                        worker_id=worker_id,
+                        failure_reason=failure_reason,
+                        timestamp=timestamp,
+                        annotations=annotations,
+                        destructive_failure_allowed=destructive_failure_allowed,
+                        auth_secret_applied=auth_secret_applied,
+                    )
                     if isinstance(exc, WorkerBackendError):
                         raise
                     raise WorkerBackendError(failure_reason) from exc
@@ -506,6 +511,7 @@ class KubernetesWorkerBackend:
         if not preserve_state:
             self._resources.delete_deployment(worker_id)
             self._resources.delete_service(worker_id)
+            self._resources.delete_secret(worker_id)
             return None
 
         annotations = dict(deployment.metadata.annotations or {})
@@ -513,6 +519,7 @@ class KubernetesWorkerBackend:
         annotations[resources.ANNOTATION_WORKER_STATUS] = "idle"
         self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
         self._resources.delete_service(worker_id)
+        self._resources.delete_secret(worker_id)
         deployment.spec.replicas = 0
         deployment.metadata.annotations = annotations
         return self._handle_from_deployment(deployment, now=timestamp)
@@ -529,6 +536,7 @@ class KubernetesWorkerBackend:
             annotations[resources.ANNOTATION_WORKER_STATUS] = "idle"
             self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
             self._resources.delete_service(handle.worker_id)
+            self._resources.delete_secret(handle.worker_id)
             deployment.spec.replicas = 0
             deployment.metadata.annotations = annotations
             cleaned.append(self._handle_from_deployment(deployment, now=timestamp))
@@ -561,9 +569,33 @@ class KubernetesWorkerBackend:
         )
         self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
         self._resources.delete_service(worker_id)
+        self._resources.delete_secret(worker_id)
         deployment.spec.replicas = 0
         deployment.metadata.annotations = annotations
         return self._handle_from_deployment(deployment, now=timestamp)
+
+    def _record_startup_failure_or_cleanup_secret(
+        self,
+        *,
+        worker_key: str,
+        worker_id: str,
+        failure_reason: str,
+        timestamp: float,
+        annotations: dict[str, str],
+        destructive_failure_allowed: bool,
+        auth_secret_applied: bool,
+    ) -> None:
+        deployment_after_failure = self._resources.read_deployment(worker_id)
+        if deployment_after_failure is not None:
+            if destructive_failure_allowed:
+                self.record_failure(
+                    worker_key,
+                    failure_reason,
+                    now=timestamp,
+                    annotations_override=annotations,
+                )
+        elif auth_secret_applied:
+            self._resources.delete_secret(worker_id)
 
     def _worker_lock(self, worker_key: str) -> threading.Lock:
         with self._worker_locks_lock:

@@ -89,6 +89,36 @@ def test_instance_chart_disables_service_links_for_dynamic_worker_pods_by_defaul
     assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
 
 
+def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -> None:
+    """Shared-namespace instances must not get cross-tenant Secret permissions."""
+    docs = _render_instance_chart()
+    role = _resource(docs, "Role", "mindroom-worker-manager-demo")
+
+    secret_rules = [rule for rule in role["rules"] if "secrets" in rule.get("resources", [])]
+    assert secret_rules == [
+        {
+            "apiGroups": [""],
+            "resources": ["secrets"],
+            "resourceNames": ["mindroom-worker-auth-demo"],
+            "verbs": ["get", "patch"],
+        },
+    ]
+
+
+def test_instance_chart_uses_tenant_worker_auth_secret() -> None:
+    """Shared-namespace instances should reference a pre-created tenant token Secret."""
+    docs = _render_instance_chart()
+    deployment = _resource(docs, "Deployment", "mindroom-demo")
+    worker_auth_secret = _resource(docs, "Secret", "mindroom-worker-auth-demo")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+
+    assert env_values["MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME"] == "mindroom-worker-auth-demo"  # noqa: S105
+    assert worker_auth_secret["metadata"]["namespace"] == "mindroom-instances"
+    assert "stringData" not in worker_auth_secret
+    assert "data" not in worker_auth_secret
+
+
 def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> None:
     """The runtime chart worker NetworkPolicy selector should match generated worker pod labels."""
     docs = _render_runtime_chart()
@@ -109,6 +139,53 @@ def test_runtime_chart_disables_service_links_for_dynamic_worker_pods_by_default
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
     assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
+
+
+def test_runtime_chart_worker_manager_can_only_patch_default_worker_auth_secret() -> None:
+    """Default same-namespace runtime workers should not get broad Secret permissions."""
+    docs = _render_runtime_chart()
+    role = _resource(docs, "Role", "mindroom-runtime-worker-manager")
+
+    secret_rules = [rule for rule in role["rules"] if "secrets" in rule.get("resources", [])]
+    assert secret_rules == [
+        {
+            "apiGroups": [""],
+            "resources": ["secrets"],
+            "resourceNames": ["mindroom-runtime-worker-auth"],
+            "verbs": ["get", "patch"],
+        },
+    ]
+
+
+def test_runtime_chart_uses_default_worker_auth_secret() -> None:
+    """The runtime chart should use one scoped auth Secret in its release namespace by default."""
+    docs = _render_runtime_chart()
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    worker_auth_secret = _resource(docs, "Secret", "mindroom-runtime-worker-auth")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+
+    assert env_values["MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME"] == "mindroom-runtime-worker-auth"  # noqa: S105
+    assert worker_auth_secret["metadata"]["namespace"] == "default"
+    assert "stringData" not in worker_auth_secret
+    assert "data" not in worker_auth_secret
+
+
+def test_runtime_chart_separate_worker_namespace_can_manage_per_worker_auth_secrets() -> None:
+    """Explicit worker namespaces may use per-worker Secrets in that namespace."""
+    docs = _render_runtime_chart_with_separate_worker_namespace()
+    role = _resource(docs, "Role", "mindroom-runtime-worker-manager")
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_names = {env["name"] for env in container["env"]}
+
+    assert "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME" not in env_names
+    assert role["metadata"]["namespace"] == "mindroom-workers"
+    assert {
+        "apiGroups": [""],
+        "resources": ["secrets"],
+        "verbs": ["create", "delete", "get", "patch"],
+    } in role["rules"]
 
 
 def test_runtime_chart_does_not_copy_shared_proxy_token_to_worker_namespace() -> None:
