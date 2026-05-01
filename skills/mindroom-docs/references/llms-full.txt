@@ -8734,7 +8734,7 @@ plugins:
 
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account. Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client environment variables, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
-The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`. Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider. Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery. Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result. That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials. Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal.
+The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`. Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider. Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery. Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result. That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials. Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal. `MINDROOM_OWNER_USER_ID` is a single-owner shortcut and is not suitable for a hosted multi-user private-agent deployment. Hosted deployments that put MindRoom behind an external access layer should enable trusted upstream auth and configure the exact headers MindRoom may trust. When trusted upstream auth is enabled, MindRoom reads the configured stable user ID and optional email headers into `request.scope["auth_user"]`. For Matrix-backed private agents, the trusted identity must also map to a Matrix user ID through either a configured Matrix user ID header or `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE`. If a browser request cannot map to the requester stored in the conversation connect token, the OAuth authorize or callback path fails closed and no credential is saved. The access layer must strip any client-supplied copies of the trusted headers before injecting verified values.
 
 Plugins may declare an `oauth_module` in `mindroom.plugin.json`. That module exposes `register_oauth_providers(settings, runtime_paths)` and returns `OAuthProvider` objects. This keeps FastAPI routing and state handling in core while still letting plugin authors define provider IDs, scopes, token exchange details, optional claim validators, and tool metadata.
 
@@ -11078,13 +11078,14 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method                                                                                         | Best For                                                           |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally                |
-| Full Stack (Docker Compose)                                                                    | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)             | Single MindRoom runtime or when you already have Matrix            |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                        | Multi-tenant SaaS, production                                      |
-| Direct                                                                                         | Development, simple setups                                         |
+| Method                                                                                                | Best For                                                           |
+| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/index.md)        | Simplest setup: run only `uvx mindroom run` locally                |
+| Full Stack (Docker Compose)                                                                           | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)                    | Single MindRoom runtime or when you already have Matrix            |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                               | Multi-tenant SaaS, production                                      |
+| [Trusted upstream browser auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/index.md) | Hosted private agents behind an authenticated access layer         |
+| Direct                                                                                                | Development, simple setups                                         |
 
 ## Bridges
 
@@ -11100,7 +11101,7 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 - [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - one-time setup for shared/team deployments
 - [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - single-user bring-your-own OAuth app setup
 
-For private personal-agent tools, use the generic [OAuth Framework](https://docs.mindroom.chat/oauth-framework/index.md) and the Google Drive section in the individual setup guide.
+For private personal-agent tools, use the generic [OAuth Framework](https://docs.mindroom.chat/oauth-framework/index.md) and the Google Drive section in the individual setup guide. For hosted multi-user private agents, also configure [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/index.md) so agent-issued OAuth links authenticate as the requester that triggered them.
 
 ## Quick Start
 
@@ -11671,7 +11672,7 @@ GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 ```
 
-When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
+When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`. Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents. Use [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/index.md) for those deployments.
 
 For explicit service-specific redirect URIs, set:
 

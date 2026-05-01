@@ -14,6 +14,7 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
 )
 from mindroom.api import config_lifecycle
+from mindroom.api.auth import request_uses_trusted_upstream_auth, trusted_upstream_matrix_user_id_for_request
 from mindroom.config.main import Config
 from mindroom.credential_policy import (
     OAUTH_CREDENTIAL_FIELDS,
@@ -32,6 +33,7 @@ from mindroom.credentials import (
     save_scoped_credentials,
     validate_service_name,
 )
+from mindroom.matrix.identity import MatrixID
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
@@ -173,6 +175,11 @@ def _require_auth_user_id(request: Request) -> str:
 
 def dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
     """Return the requester identity dashboard-scoped worker credentials should use."""
+    trusted_matrix_user_id = trusted_upstream_matrix_user_id_for_request(request)
+    if trusted_matrix_user_id:
+        return trusted_matrix_user_id
+    if request_uses_trusted_upstream_auth(request):
+        return None
     owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
     if owner_user_id:
         return owner_user_id
@@ -181,18 +188,19 @@ def dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimeP
     return user_id if isinstance(user_id, str) and user_id else None
 
 
-def _looks_like_matrix_user_id(value: str | None) -> bool:
-    return isinstance(value, str) and value.startswith("@") and ":" in value[1:] and " " not in value
-
-
 def _reject_unbound_private_dashboard_requester(
     execution_scope: WorkerScope,
     execution_identity: ToolExecutionIdentity,
 ) -> None:
     if execution_scope not in {"user", "user_agent"}:
         return
-    if _looks_like_matrix_user_id(execution_identity.requester_id):
-        return
+    if execution_identity.requester_id is not None:
+        try:
+            MatrixID.parse(execution_identity.requester_id)
+        except ValueError:
+            pass
+        else:
+            return
     raise HTTPException(
         status_code=400,
         detail=(

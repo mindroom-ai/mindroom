@@ -9,13 +9,13 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
-from typing import Any, NoReturn, cast
+from typing import Annotated, Any, NoReturn, cast
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
@@ -3805,6 +3805,86 @@ def test_api_key_authenticated_teams_access(api_key_client: TestClient) -> None:
         headers={"Authorization": "Bearer test-key"},
     )
     assert response.status_code == 200
+
+
+def _trusted_auth_test_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
+    """Create a minimal app that returns the authenticated API user."""
+    api_app = FastAPI()
+    main.initialize_api_app(api_app, runtime_paths)
+
+    @api_app.get("/whoami")
+    async def _whoami(auth_user: Annotated[dict[str, Any], Depends(auth.verify_user)]) -> dict[str, Any]:
+        return auth_user
+
+    return api_app
+
+
+def test_trusted_upstream_headers_ignored_when_disabled(tmp_path: Path) -> None:
+    """Trusted identity headers must do nothing unless explicitly enabled."""
+    api_app = _trusted_auth_test_app(_runtime_paths(tmp_path))
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                "X-Trusted-User": "alice",
+                "X-Trusted-Email": "alice@example.com",
+                "X-Trusted-Matrix-User": "@alice:example.org",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"user_id": "standalone", "email": None}
+
+
+def test_trusted_upstream_headers_populate_auth_user_when_enabled(tmp_path: Path) -> None:
+    """Enabled trusted upstream auth should expose stable user and email fields."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+        },
+    )
+    api_app = _trusted_auth_test_app(runtime_paths)
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                "X-Trusted-User": "alice",
+                "X-Trusted-Email": "alice@example.com",
+                "X-Trusted-Matrix-User": "@alice:example.org",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_id": "alice",
+        "email": "alice@example.com",
+        "matrix_user_id": "@alice:example.org",
+        "auth_source": "trusted_upstream",
+    }
+
+
+def test_trusted_upstream_auth_requires_configured_user_header(tmp_path: Path) -> None:
+    """A trusted upstream deployment must fail closed when the user id header is absent."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+        },
+    )
+    api_app = _trusted_auth_test_app(runtime_paths)
+
+    with TestClient(api_app) as client:
+        response = client.get("/whoami")
+
+    assert response.status_code == 401
+    assert "trusted upstream identity header" in response.json()["detail"]
 
 
 @pytest.mark.parametrize(

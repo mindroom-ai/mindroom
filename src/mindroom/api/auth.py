@@ -5,7 +5,7 @@ import html
 import importlib
 import json
 import secrets
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.parse import quote, urlencode
 
@@ -17,6 +17,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
+from mindroom.matrix.identity import MatrixID
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 
 if TYPE_CHECKING:
@@ -58,6 +59,17 @@ class _SupabaseClientProtocol(Protocol):
 
 
 @dataclass(frozen=True)
+class TrustedUpstreamAuthSettings:
+    """Trusted reverse-proxy/browser identity settings for hosted deployments."""
+
+    enabled: bool = False
+    user_id_header: str | None = None
+    email_header: str | None = None
+    matrix_user_id_header: str | None = None
+    email_to_matrix_user_id_template: str | None = None
+
+
+@dataclass(frozen=True)
 class ApiAuthSettings:
     """Dashboard authentication settings for one runtime."""
 
@@ -66,6 +78,7 @@ class ApiAuthSettings:
     supabase_anon_key: str | None
     account_id: str | None
     mindroom_api_key: str | None
+    trusted_upstream: TrustedUpstreamAuthSettings = field(default_factory=TrustedUpstreamAuthSettings)
 
 
 @dataclass(frozen=True)
@@ -85,6 +98,29 @@ def build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None =
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
         account_id=account_id,
         mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
+        trusted_upstream=build_trusted_upstream_auth_settings(runtime_paths),
+    )
+
+
+def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
+    value = runtime_paths.env_value(name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> TrustedUpstreamAuthSettings:
+    """Read trusted-upstream auth settings from one runtime context."""
+    return TrustedUpstreamAuthSettings(
+        enabled=runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"),
+        user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER"),
+        email_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER"),
+        matrix_user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"),
+        email_to_matrix_user_id_template=_env_text(
+            runtime_paths,
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
+        ),
     )
 
 
@@ -169,6 +205,108 @@ def _get_request_token(
     return None
 
 
+def _get_configured_header(request: Request, header_name: str | None) -> str | None:
+    """Return a stripped configured header value when present."""
+    if header_name is None:
+        return None
+    value = request.headers.get(header_name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _parse_matrix_user_id(value: str | None) -> str | None:
+    """Return a canonical Matrix user ID when the value parses."""
+    if value is None:
+        return None
+    try:
+        return MatrixID.parse(value).full_id
+    except ValueError:
+        return None
+
+
+def _matrix_user_id_from_email_template(
+    *,
+    template: str | None,
+    user_id: str,
+    email: str | None,
+) -> str | None:
+    """Return a Matrix user id formatted from a trusted email mapping template."""
+    if template is None:
+        return None
+    if email is None or "@" not in email:
+        return None
+    localpart, domain = email.split("@", 1)
+    try:
+        matrix_user_id = template.format(
+            user_id=user_id,
+            email=email,
+            localpart=localpart,
+            domain=domain,
+        )
+    except (KeyError, IndexError, ValueError):
+        return None
+    return _parse_matrix_user_id(matrix_user_id)
+
+
+def _trusted_upstream_auth_user(
+    request: Request,
+    settings: TrustedUpstreamAuthSettings,
+) -> dict[str, Any] | None:
+    """Return the trusted-upstream auth user for this request when configured."""
+    if not settings.enabled:
+        return None
+    if settings.user_id_header is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Trusted upstream auth is enabled but MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER is not set",
+        )
+
+    user_id = _get_configured_header(request, settings.user_id_header)
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Missing trusted upstream identity header: {settings.user_id_header}",
+        )
+
+    email = _get_configured_header(request, settings.email_header)
+    matrix_user_id = _get_configured_header(request, settings.matrix_user_id_header)
+    parsed_matrix_user_id = _parse_matrix_user_id(matrix_user_id)
+    if matrix_user_id is not None and parsed_matrix_user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
+    if parsed_matrix_user_id is None:
+        parsed_matrix_user_id = _matrix_user_id_from_email_template(
+            template=settings.email_to_matrix_user_id_template,
+            user_id=user_id,
+            email=email,
+        )
+
+    auth_user = {
+        "user_id": user_id,
+        "email": email,
+        "auth_source": "trusted_upstream",
+    }
+    if parsed_matrix_user_id is not None:
+        auth_user["matrix_user_id"] = parsed_matrix_user_id
+    return auth_user
+
+
+def trusted_upstream_matrix_user_id_for_request(request: Request) -> str | None:
+    """Return the trusted-upstream Matrix requester id attached to this request."""
+    auth_user = request.scope.get("auth_user")
+    if not isinstance(auth_user, dict) or auth_user.get("auth_source") != "trusted_upstream":
+        return None
+    matrix_user_id = auth_user.get("matrix_user_id")
+    return _parse_matrix_user_id(matrix_user_id) if isinstance(matrix_user_id, str) else None
+
+
+def request_uses_trusted_upstream_auth(request: Request) -> bool:
+    """Return whether this request authenticated through trusted upstream headers."""
+    auth_user = request.scope.get("auth_user")
+    return isinstance(auth_user, dict) and auth_user.get("auth_source") == "trusted_upstream"
+
+
 def _supabase_auth_error_class() -> type[Exception]:
     """Return Supabase's AuthError class for narrow exception handling at the auth boundary."""
     return cast("type[Exception]", importlib.import_module("supabase_auth.errors").AuthError)
@@ -238,6 +376,13 @@ def request_has_frontend_access(request: Request) -> bool:
     authorization = request.headers.get("authorization")
     auth_state = cast("ApiAuthState", bind_authenticated_request_snapshot(request).auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
+    try:
+        trusted_auth_user = _trusted_upstream_auth_user(request, auth_state.settings.trusted_upstream)
+    except HTTPException:
+        return False
+    if trusted_auth_user is not None:
+        request.scope["auth_user"] = trusted_auth_user
+        return True
 
     if auth_state.supabase_auth is None:
         if not mindroom_api_key:
@@ -254,12 +399,8 @@ def request_has_frontend_access(request: Request) -> bool:
         authorization,
         cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
     )
-    if token is None:
-        return False
-    user = _validate_supabase_token(token, auth_state)
-    if user is None:
-        return False
-    return not auth_state.settings.account_id or user.id == auth_state.settings.account_id
+    user = _validate_supabase_token(token, auth_state) if token is not None else None
+    return user is not None and (not auth_state.settings.account_id or user.id == auth_state.settings.account_id)
 
 
 def sanitize_next_path(next_path: str | None) -> str:
@@ -410,6 +551,10 @@ async def verify_user(
     snapshot = bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
+    trusted_auth_user = _trusted_upstream_auth_user(request, auth_state.settings.trusted_upstream)
+    if trusted_auth_user is not None:
+        request.scope["auth_user"] = trusted_auth_user
+        return trusted_auth_user
 
     if auth_state.supabase_auth is None:
         if allow_public_paths and _is_standalone_public_path(request.url.path):

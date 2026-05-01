@@ -47,6 +47,8 @@ GOOGLE_CLIENT_SECRET=your-client-secret
 ```
 
 When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
+Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents.
+Use [Trusted Upstream Browser Auth](trusted-upstream-auth.md) for those deployments.
 
 For explicit service-specific redirect URIs, set:
 
