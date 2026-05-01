@@ -8,6 +8,7 @@ from mindroom.credential_policy import (
     OAUTH_CREDENTIAL_FIELDS,
     UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     credential_service_policy,
+    dashboard_may_edit_oauth_service,
     filter_oauth_credential_fields,
     looks_like_oauth_credentials,
 )
@@ -117,3 +118,27 @@ def test_oauth_credential_fields_include_current_token_material() -> None:
         "token",
         "token_uri",
     } <= OAUTH_CREDENTIAL_FIELDS
+
+
+@pytest.mark.parametrize(
+    ("token_service", "tool_config_service", "expected"),
+    [
+        (True, False, False),
+        (False, True, True),
+        (True, True, False),
+        (False, False, False),
+    ],
+)
+def test_dashboard_may_edit_oauth_service(
+    token_service: bool,
+    tool_config_service: bool,
+    expected: bool,
+) -> None:
+    """Dashboard OAuth edits should be limited to tool settings services."""
+    assert (
+        dashboard_may_edit_oauth_service(
+            token_service=token_service,
+            tool_config_service=tool_config_service,
+        )
+        is expected
+    )

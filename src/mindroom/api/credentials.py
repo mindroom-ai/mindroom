@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.credential_policy import (
     OAUTH_CREDENTIAL_FIELDS,
     credential_service_policy,
+    dashboard_may_edit_oauth_service,
     filter_oauth_credential_fields,
     looks_like_oauth_credentials,
 )
@@ -129,11 +130,6 @@ class OAuthCredentialServices:
 
     providers: dict[str, OAuthProvider]
 
-    @property
-    def token_services(self) -> frozenset[str]:
-        """Return OAuth token credential service names."""
-        return frozenset(provider.credential_service for provider in self.providers.values())
-
     def match(self, service: str) -> OAuthCredentialServiceMatch | None:
         """Return the OAuth role for one credential service, if registered."""
         for provider in self.providers.values():
@@ -147,15 +143,20 @@ class OAuthCredentialServices:
                 )
         return None
 
-    def reject_token_services(self, services: tuple[str, ...]) -> None:
-        """Reject direct dashboard access to OAuth token credential services."""
+    def reject_non_editable_services(self, services: tuple[str, ...]) -> None:
+        """Reject direct dashboard access to non-editable OAuth credential services."""
         for service in services:
             _reject_oauth_token_service(self.match(service))
 
     def allows_private_scope_for(self, service: str) -> bool:
         """Return whether this OAuth tool config service can target a private scope."""
         match = self.match(service)
-        return match is not None and match.tool_config_service
+        return _dashboard_may_edit_oauth_match(match)
+
+    def dashboard_may_show_service(self, service: str) -> bool:
+        """Return whether a service may appear in dashboard credential listings."""
+        match = self.match(service)
+        return match is None or _dashboard_may_edit_oauth_match(match)
 
 
 def _request_auth_user(request: Request) -> dict[str, Any] | None:
@@ -624,9 +625,18 @@ def _oauth_service_match(request: Request, service: str) -> OAuthCredentialServi
 def _reject_oauth_token_service(
     oauth_service_match: OAuthCredentialServiceMatch | None,
 ) -> None:
-    if oauth_service_match is None or not oauth_service_match.token_service:
+    if oauth_service_match is None or _dashboard_may_edit_oauth_match(oauth_service_match):
         return
     raise HTTPException(status_code=400, detail=_OAUTH_TOKEN_CREDENTIALS_ERROR)
+
+
+def _dashboard_may_edit_oauth_match(oauth_service_match: OAuthCredentialServiceMatch | None) -> bool:
+    if oauth_service_match is None:
+        return False
+    return dashboard_may_edit_oauth_service(
+        token_service=oauth_service_match.token_service,
+        tool_config_service=oauth_service_match.tool_config_service,
+    )
 
 
 def _reject_oauth_credentials_document(credentials: dict[str, Any]) -> None:
@@ -640,7 +650,7 @@ def _reject_oauth_api_key_field(
     *,
     key_name: str,
 ) -> None:
-    if oauth_service_match is None or not oauth_service_match.tool_config_service:
+    if not _dashboard_may_edit_oauth_match(oauth_service_match):
         return
     if key_name not in OAUTH_CREDENTIAL_FIELDS:
         return
@@ -680,7 +690,7 @@ class DashboardCredentialAccess:
     ) -> DashboardCredentialAccess:
         """Resolve dashboard credential access for one request."""
         oauth_services = _oauth_services_for_request(request)
-        oauth_services.reject_token_services(service_names)
+        oauth_services.reject_non_editable_services(service_names)
         allow_oauth_private_scopes = any(
             oauth_services.allows_private_scope_for(service) for service in service_names
         ) and _request_may_target_scoped_credentials(request, agent_name)
@@ -721,13 +731,16 @@ class DashboardCredentialAccess:
 
     def response_credentials(self, service: str, credentials: dict[str, Any]) -> dict[str, Any]:
         """Return credentials filtered for dashboard responses."""
-        return _filter_credentials_for_response(credentials, is_oauth_service=self.match(service) is not None)
+        return _filter_credentials_for_response(
+            credentials,
+            is_oauth_service=_dashboard_may_edit_oauth_match(self.match(service)),
+        )
 
     def credentials_for_save(self, service: str, config_values: dict[str, Any]) -> dict[str, Any]:
         """Return user-submitted credentials normalized for storage."""
         return _dashboard_credentials_for_save(
             config_values,
-            strip_oauth_fields=self.match(service) is not None,
+            strip_oauth_fields=_dashboard_may_edit_oauth_match(self.match(service)),
         )
 
     def list_services(self) -> list[str]:
@@ -736,7 +749,7 @@ class DashboardCredentialAccess:
             return [
                 service
                 for service in self.target.target_manager.list_services()
-                if service not in self.oauth_services.token_services
+                if self.oauth_services.dashboard_may_show_service(service)
             ]
         worker_services = set(self.target.target_manager.list_services())
         primary_runtime_services = _primary_runtime_scoped_services_for_target(self.target)
@@ -755,8 +768,7 @@ class DashboardCredentialAccess:
             }
         services = worker_services | primary_runtime_services | shared_services
         services -= set(unsupported_shared_only_integration_names(sorted(services), self.target.worker_scope))
-        services -= set(self.oauth_services.token_services)
-        return sorted(services)
+        return sorted(service for service in services if self.oauth_services.dashboard_may_show_service(service))
 
 
 class SetApiKeyRequest(BaseModel):

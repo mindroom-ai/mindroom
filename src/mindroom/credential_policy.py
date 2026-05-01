@@ -81,6 +81,11 @@ def credential_service_policy(service: str, worker_scope: WorkerScope | None) ->
     )
 
 
+def dashboard_may_edit_oauth_service(*, token_service: bool, tool_config_service: bool) -> bool:
+    """Return whether dashboard credential routes may edit one OAuth service role."""
+    return tool_config_service and not token_service
+
+
 def looks_like_oauth_credentials(credentials: dict[str, object]) -> bool:
     """Return whether a credential document appears to contain OAuth token state."""
     return (
