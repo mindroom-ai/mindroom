@@ -381,6 +381,8 @@ def load_worker_grantable_shared_credentials(
     """Return one shared credential only when the worker allowlist permits mirroring it."""
     if service not in allowed_services:
         return None
+    if not credential_service_policy(service, None).worker_grantable_supported:
+        return None
     shared_credentials = shared_manager.load_credentials(service)
     if not isinstance(shared_credentials, Mapping):
         return None

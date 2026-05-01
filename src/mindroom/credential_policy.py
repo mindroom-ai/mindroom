@@ -48,9 +48,13 @@ UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
         "google_vertex_adc",
         "google_oauth_client",
+        "google_calendar_oauth_client",
         "google_calendar_oauth",
+        "google_drive_oauth_client",
         "google_drive_oauth",
+        "google_gmail_oauth_client",
         "google_gmail_oauth",
+        "google_sheets_oauth_client",
         "google_sheets_oauth",
     },
 )
