@@ -3893,6 +3893,110 @@ def test_trusted_upstream_headers_populate_auth_user_when_enabled(tmp_path: Path
     }
 
 
+def test_trusted_upstream_auth_prefers_matrix_header_over_email_template(tmp_path: Path) -> None:
+    """A real Matrix identity header should win over a derived email mapping."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:wrong.example",
+        },
+    )
+    api_app = _trusted_auth_test_app(runtime_paths)
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                "X-Trusted-User": "alice",
+                "X-Trusted-Email": "alice@example.com",
+                "X-Trusted-Matrix-User": "@alice:example.org",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["matrix_user_id"] == "@alice:example.org"
+
+
+def test_trusted_upstream_auth_derives_matrix_user_id_from_email_localpart(tmp_path: Path) -> None:
+    """Trusted email-only deployments may derive the Matrix identity from a template."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org",
+        },
+    )
+    api_app = _trusted_auth_test_app(runtime_paths)
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                "X-Trusted-User": "alice",
+                "X-Trusted-Email": "alice@example.com",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["matrix_user_id"] == "@alice:example.org"
+
+
+def test_trusted_upstream_auth_email_template_requires_email_header_config(tmp_path: Path) -> None:
+    """Email-to-Matrix derivation should fail clearly when the email header is not configured."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org",
+        },
+    )
+    api_app = _trusted_auth_test_app(runtime_paths)
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={"X-Trusted-User": "alice"},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == (
+        "Trusted upstream email-to-Matrix template is set but MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is not set"
+    )
+
+
+def test_trusted_upstream_auth_rejects_invalid_derived_matrix_user_id(tmp_path: Path) -> None:
+    """Derived Matrix IDs must pass the same Matrix parser as explicit headers."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org.",
+        },
+    )
+    api_app = _trusted_auth_test_app(runtime_paths)
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                "X-Trusted-User": "alice",
+                "X-Trusted-Email": "alice@example.com",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid trusted upstream Matrix user id"
+
+
 @pytest.mark.parametrize("matrix_user_id", ["@Alice:example.org", "@:example.org"])
 def test_trusted_upstream_auth_accepts_historical_matrix_user_id(tmp_path: Path, matrix_user_id: str) -> None:
     """Trusted Matrix identities may use historical Matrix localparts."""

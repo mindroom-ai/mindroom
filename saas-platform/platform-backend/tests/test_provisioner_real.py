@@ -147,6 +147,10 @@ class TestProvisionerCommandValidation:
                 "backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER",
                 "X-MindRoom-Matrix-User-Id",
             ),
+            patch(
+                "backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
+                "@{localpart}:example.org",
+            ),
             patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
             patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
         ):
@@ -180,6 +184,7 @@ class TestProvisionerCommandValidation:
         assert set_args["trustedUpstreamAuth.userIdHeader"] == "X-MindRoom-User-Id"
         assert set_args["trustedUpstreamAuth.emailHeader"] == "X-MindRoom-User-Email"
         assert set_args["trustedUpstreamAuth.matrixUserIdHeader"] == "X-MindRoom-Matrix-User-Id"
+        assert set_args["trustedUpstreamAuth.emailToMatrixUserIdTemplate"] == "@{localpart}:example.org"
 
     @pytest.mark.asyncio
     async def test_kubectl_scale_command_uses_correct_syntax(self):

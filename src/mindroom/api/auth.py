@@ -66,6 +66,7 @@ class TrustedUpstreamAuthSettings:
     user_id_header: str | None = None
     email_header: str | None = None
     matrix_user_id_header: str | None = None
+    email_to_matrix_user_id_template: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,10 @@ def build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> Trusted
         user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER"),
         email_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER"),
         matrix_user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"),
+        email_to_matrix_user_id_template=_env_text(
+            runtime_paths,
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
+        ),
     )
 
 
@@ -211,6 +216,46 @@ def _get_configured_header(request: Request, header_name: str | None) -> str | N
     return stripped or None
 
 
+def _trusted_upstream_email_localpart(email: str) -> str | None:
+    """Return the localpart from a trusted email identity."""
+    if email.count("@") != 1:
+        return None
+    localpart, separator, domain = email.partition("@")
+    if not separator or not localpart or not domain:
+        return None
+    return localpart
+
+
+def _derive_trusted_upstream_matrix_user_id(
+    settings: TrustedUpstreamAuthSettings,
+    email: str | None,
+) -> str | None:
+    """Derive a Matrix user ID from the trusted email header when configured."""
+    template = settings.email_to_matrix_user_id_template
+    if template is None:
+        return None
+    if settings.email_header is None:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Trusted upstream email-to-Matrix template is set but MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is not set"
+            ),
+        )
+    if email is None:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Missing trusted upstream email header: {settings.email_header}",
+        )
+    localpart = _trusted_upstream_email_localpart(email)
+    if localpart is None:
+        raise HTTPException(status_code=401, detail="Invalid trusted upstream email")
+    derived = template.replace("{localpart}", localpart)
+    parsed_matrix_user_id = try_parse_historical_matrix_user_id(derived)
+    if parsed_matrix_user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
+    return parsed_matrix_user_id
+
+
 def _trusted_upstream_auth_user(
     request: Request,
     settings: TrustedUpstreamAuthSettings,
@@ -236,6 +281,8 @@ def _trusted_upstream_auth_user(
     parsed_matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id)
     if matrix_user_id is not None and parsed_matrix_user_id is None:
         raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
+    if parsed_matrix_user_id is None:
+        parsed_matrix_user_id = _derive_trusted_upstream_matrix_user_id(settings, email)
 
     auth_user = {
         "user_id": user_id,

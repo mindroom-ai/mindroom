@@ -1202,6 +1202,13 @@ def _trusted_upstream_oauth_env() -> dict[str, str]:
     }
 
 
+def _trusted_upstream_oauth_email_template_env() -> dict[str, str]:
+    env = _trusted_upstream_oauth_env()
+    env.pop("MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER")
+    env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE"] = "@{localpart}:example.org"
+    return env
+
+
 def _trusted_upstream_headers(
     *,
     user_id: str = "alice",
@@ -1260,6 +1267,53 @@ def test_agent_connect_token_uses_trusted_upstream_matrix_requester(tmp_path: Pa
     assert matrix_credentials is not None
     assert matrix_credentials["token"] == "google_drive-access-token"
     assert standalone_credentials is None
+
+
+def test_agent_connect_token_accepts_trusted_upstream_derived_matrix_requester(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_email_template_env())
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+
+    headers = {
+        "X-Trusted-User": "alice",
+        "X-Trusted-Email": "alice@example.com",
+    }
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                headers=headers,
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                headers=headers,
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 307
+    assert callback_response.status_code == 307
+    manager = get_runtime_credentials_manager(runtime_paths)
+    matrix_credentials = manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(
+        provider.credential_service,
+    )
+    assert matrix_credentials is not None
+    assert matrix_credentials["token"] == "google_drive-access-token"
 
 
 @pytest.mark.parametrize("matrix_user_id", ["@Alice:example.org", "@:example.org"])

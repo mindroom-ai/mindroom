@@ -27,6 +27,7 @@ data:
   INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER: {{ $trustedUpstreamAuth.userIdHeader | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER: {{ $trustedUpstreamAuth.emailHeader | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER: {{ $trustedUpstreamAuth.matrixUserIdHeader | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE: {{ $trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | quote }}
   DO_NOT_TRACK: "1"
   NEXT_TELEMETRY_DISABLED: "1"
   TURBO_TELEMETRY_DISABLED: "1"

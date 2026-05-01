@@ -15,6 +15,9 @@
 {{- if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.userIdHeader | default "")) -}}
 {{- fail "trustedUpstreamAuth.userIdHeader is required when trustedUpstreamAuth.enabled=true" -}}
 {{- end -}}
+{{- if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailHeader | default "")) -}}
+{{- fail "trustedUpstreamAuth.emailHeader is required when trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -131,6 +134,10 @@ spec:
         {{- if $trustedUpstreamAuth.matrixUserIdHeader }}
         - name: MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER
           value: {{ $trustedUpstreamAuth.matrixUserIdHeader | quote }}
+        {{- end }}
+        {{- if $trustedUpstreamAuth.emailToMatrixUserIdTemplate }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE
+          value: {{ $trustedUpstreamAuth.emailToMatrixUserIdTemplate | quote }}
         {{- end }}
         {{- end }}
         - name: MINDROOM_PLATFORM_LOGIN_URL

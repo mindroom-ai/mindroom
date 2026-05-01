@@ -119,6 +119,37 @@ def test_instance_chart_uses_tenant_worker_auth_secret() -> None:
     assert "data" not in worker_auth_secret
 
 
+def test_instance_chart_rejects_email_template_without_email_header() -> None:
+    """Email-to-Matrix derivation requires the trusted email header name."""
+    helm = shutil.which("helm")
+    if helm is None:
+        pytest.skip("helm is required for rendered chart checks")
+
+    completed = subprocess.run(
+        [
+            helm,
+            "template",
+            "mindroom-demo",
+            "cluster/k8s/instance",
+            "--set",
+            "trustedUpstreamAuth.enabled=true",
+            "--set",
+            "trustedUpstreamAuth.userIdHeader=X-Trusted-User",
+            "--set-string",
+            "trustedUpstreamAuth.emailToMatrixUserIdTemplate=@{localpart}:example.org",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "trustedUpstreamAuth.emailHeader is required when trustedUpstreamAuth.emailToMatrixUserIdTemplate is set"
+        in completed.stderr
+    )
+
+
 def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> None:
     """The runtime chart worker NetworkPolicy selector should match generated worker pod labels."""
     docs = _render_runtime_chart()

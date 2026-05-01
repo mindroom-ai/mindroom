@@ -45,6 +45,7 @@ trustedUpstreamAuth:
   userIdHeader: ""
   emailHeader: ""
   matrixUserIdHeader: ""
+  emailToMatrixUserIdTemplate: ""
 
 # Matrix admin user (leave empty and set via --set or Secret)
 matrix_admin_password: ""
