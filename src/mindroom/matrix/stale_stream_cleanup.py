@@ -38,10 +38,7 @@ from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
 )
-from mindroom.streaming import (
-    _RESTART_INTERRUPTED_RESPONSE_NOTE,
-    build_restart_interrupted_body,
-)
+from mindroom.streaming import _RESTART_INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable

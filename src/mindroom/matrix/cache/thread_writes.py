@@ -22,10 +22,7 @@ from mindroom.matrix.thread_bookkeeping import (
 )
 from mindroom.timing import emit_timing_event, timing_enabled
 
-from .event_normalization import (
-    normalize_event_source_for_cache,
-    normalize_nio_event_for_cache,
-)
+from .event_normalization import normalize_event_source_for_cache, normalize_nio_event_for_cache
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps

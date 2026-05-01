@@ -5,13 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
@@ -21,10 +15,7 @@ from mindroom.config.models import (
     ToolConfigEntry,
     validate_unique_tool_entries,
 )
-from mindroom.tool_system.worker_routing import (
-    WorkerScope,
-    agent_workspace_relative_path,
-)
+from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 CultureMode = Literal["automatic", "agentic", "manual"]
 _PrivateWorkerScope = Literal["user", "user_agent"]
@@ -291,10 +282,7 @@ class AgentConfig(BaseModel):
     def get_tool_overrides(self, tool_name: str) -> dict[str, object] | None:
         """Return normalized per-agent runtime overrides for one configured tool."""
         # why-lazy: config.agent is imported by config.main; the tool catalog loads hook/runtime helpers.
-        from mindroom.tool_system.catalog import (  # noqa: PLC0415
-            TOOL_METADATA,
-            normalize_authored_tool_overrides,
-        )
+        from mindroom.tool_system.catalog import TOOL_METADATA, normalize_authored_tool_overrides  # noqa: PLC0415
 
         for entry in self.tools:
             if entry.name == tool_name and entry.overrides:

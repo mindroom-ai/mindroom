@@ -44,12 +44,7 @@ class TestSubscriptionsEndpoints:
         with patch("backend.routes.subscriptions.stripe") as mock:
             yield mock
 
-    def test_get_user_subscription_success(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_get_user_subscription_success(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting user's subscription successfully."""
         # Setup
         subscription = {
@@ -79,10 +74,7 @@ class TestSubscriptionsEndpoints:
         assert data["status"] == "active"
 
     def test_get_user_subscription_auto_creates_free_plan(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """When no subscription exists we create a real free tier row in Supabase."""
         table = mock_supabase.table.return_value
@@ -132,11 +124,7 @@ class TestSubscriptionsEndpoints:
         assert data["updated_at"] == inserted_at
 
     def test_cancel_subscription_success(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_stripe: Mock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
         """Test canceling subscription successfully."""
         # Setup
@@ -167,10 +155,7 @@ class TestSubscriptionsEndpoints:
         assert "cancelled" in data["message"] or "canceled" in data["message"]
 
     def test_cancel_subscription_no_subscription(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test canceling when no subscription exists."""
         # Setup
@@ -184,10 +169,7 @@ class TestSubscriptionsEndpoints:
         assert "No subscription found" in response.json()["detail"]
 
     def test_cancel_subscription_already_cancelled(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test canceling already cancelled subscription."""
         # Setup
@@ -207,11 +189,7 @@ class TestSubscriptionsEndpoints:
         assert "already cancelled" in response.json()["detail"]
 
     def test_cancel_subscription_stripe_error(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_stripe: Mock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
         """Test canceling subscription with Stripe error."""
         # Setup
@@ -234,11 +212,7 @@ class TestSubscriptionsEndpoints:
         assert "Failed to cancel" in response.json()["detail"]
 
     def test_reactivate_subscription_success(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_stripe: Mock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
     ):
         """Test reactivating cancelled subscription."""
         # Setup
@@ -270,10 +244,7 @@ class TestSubscriptionsEndpoints:
         assert data["subscription_id"] == "stripe_sub_123"
 
     def test_reactivate_subscription_not_cancelled(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Test reactivating active subscription."""
         # Setup
@@ -292,12 +263,7 @@ class TestSubscriptionsEndpoints:
         assert response.status_code == 400
         assert "not cancelled" in response.json()["detail"]
 
-    def test_reactivate_no_subscription(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_reactivate_no_subscription(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test reactivating when no subscription exists."""
         # Setup - no subscription
         mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[])
@@ -325,12 +291,7 @@ class TestSubscriptionsEndpoints:
         finally:
             app.dependency_overrides.clear()
 
-    def test_subscription_with_trial(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_verify_user: Mock,
-    ):
+    def test_subscription_with_trial(self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock):
         """Test getting subscription with trial period."""
         # Setup
         trial_end = datetime.now(UTC) + timedelta(days=7)

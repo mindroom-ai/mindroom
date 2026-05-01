@@ -23,11 +23,7 @@ class TestAdminAccountDeletion:
         from backend.deps import verify_admin
 
         def override_verify_admin():
-            return {
-                "user_id": "admin_123",
-                "email": "admin@example.com",
-                "is_admin": True,
-            }
+            return {"user_id": "admin_123", "email": "admin@example.com", "is_admin": True}
 
         app.dependency_overrides[verify_admin] = override_verify_admin
         yield
@@ -49,11 +45,7 @@ class TestAdminAccountDeletion:
             yield mock
 
     def test_delete_account_complete_success(
-        self,
-        client: TestClient,
-        mock_verify_admin: Mock,
-        mock_supabase: MagicMock,
-        mock_uninstall_instance: AsyncMock,
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_uninstall_instance: AsyncMock
     ):
         """Test successful complete account deletion (without Stripe)."""
         # Setup account data without Stripe customer ID
@@ -64,10 +56,7 @@ class TestAdminAccountDeletion:
         }
 
         # Setup instances data
-        instances_data = [
-            {"instance_id": 1, "status": "running"},
-            {"instance_id": 2, "status": "stopped"},
-        ]
+        instances_data = [{"instance_id": 1, "status": "running"}, {"instance_id": 2, "status": "stopped"}]
 
         # Mock Supabase queries
         # Account lookup
@@ -118,12 +107,7 @@ class TestAdminAccountDeletion:
         # Verify uninstall was called for both instances
         assert mock_uninstall_instance.call_count == 2
 
-    def test_delete_account_not_found(
-        self,
-        client: TestClient,
-        mock_verify_admin: Mock,
-        mock_supabase: MagicMock,
-    ):
+    def test_delete_account_not_found(self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock):
         """Test deleting non-existent account."""
         # Mock empty account result
         account_mock = MagicMock()
@@ -141,19 +125,11 @@ class TestAdminAccountDeletion:
         assert response.json()["detail"] == "Account not found"
 
     def test_delete_account_no_instances(
-        self,
-        client: TestClient,
-        mock_verify_admin: Mock,
-        mock_supabase: MagicMock,
-        mock_uninstall_instance: AsyncMock,
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock, mock_uninstall_instance: AsyncMock
     ):
         """Test deleting account with no instances."""
         # Setup account data without Stripe customer
-        account_data = {
-            "id": "account_123",
-            "email": "user@example.com",
-            "stripe_customer_id": None,
-        }
+        account_data = {"id": "account_123", "email": "user@example.com", "stripe_customer_id": None}
 
         # Mock Supabase queries
         account_mock = MagicMock()
@@ -199,10 +175,7 @@ class TestAdminAccountDeletion:
         mock_uninstall_instance.assert_not_called()
 
     def test_delete_account_continues_on_instance_failure(
-        self,
-        client: TestClient,
-        mock_verify_admin: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock
     ):
         """Test that account deletion continues even if instance deprovisioning fails."""
         with patch("backend.routes.admin.uninstall_instance") as mock_uninstall:
@@ -210,11 +183,7 @@ class TestAdminAccountDeletion:
             mock_uninstall.side_effect = Exception("Kubernetes API error")
 
             # Setup account data
-            account_data = {
-                "id": "account_123",
-                "email": "user@example.com",
-                "stripe_customer_id": None,
-            }
+            account_data = {"id": "account_123", "email": "user@example.com", "stripe_customer_id": None}
 
             # Setup instances data
             instances_data = [{"instance_id": 1, "status": "running"}]
@@ -260,10 +229,7 @@ class TestAdminAccountDeletion:
             assert response.json() == {"data": {"id": "account_123"}}
 
     def test_generic_delete_blocks_account_deletion(
-        self,
-        client: TestClient,
-        mock_verify_admin: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock
     ):
         """Test that generic delete endpoint blocks account deletion."""
         # Make the request to generic delete endpoint
@@ -274,10 +240,7 @@ class TestAdminAccountDeletion:
         assert "Use DELETE /admin/accounts/{account_id}/complete" in response.json()["detail"]
 
     def test_generic_delete_allows_other_resources(
-        self,
-        client: TestClient,
-        mock_verify_admin: Mock,
-        mock_supabase: MagicMock,
+        self, client: TestClient, mock_verify_admin: Mock, mock_supabase: MagicMock
     ):
         """Test that generic delete endpoint works for non-account resources."""
         # Mock Supabase delete

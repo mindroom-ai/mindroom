@@ -11,11 +11,7 @@ import nio
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import active_internal_sender_ids
-from mindroom.matrix.message_content import (
-    extract_and_resolve_message,
-    extract_edit_body,
-    resolve_event_source_content,
-)
+from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
 
 if TYPE_CHECKING:

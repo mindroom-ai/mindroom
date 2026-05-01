@@ -57,13 +57,6 @@ async def clear_sso_cookie(request: Request, response: Response) -> dict[str, st
         domain = f".{domain}"
 
     response.set_cookie(
-        key="mindroom_jwt",
-        value="",
-        domain=domain,
-        path="/",
-        secure=True,
-        httponly=True,
-        samesite="lax",
-        max_age=0,
+        key="mindroom_jwt", value="", domain=domain, path="/", secure=True, httponly=True, samesite="lax", max_age=0
     )
     return {"status": "cleared"}

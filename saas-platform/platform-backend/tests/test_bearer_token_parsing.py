@@ -14,17 +14,7 @@ def test_extract_bearer_token_ok() -> None:
     assert _extract_bearer_token("bearer tokenXYZ") == "tokenXYZ"
 
 
-@pytest.mark.parametrize(
-    "header",
-    [
-        None,
-        "",
-        "Basic abc",
-        "Bearer",
-        "Bearer a b",
-        "Token abc",
-    ],
-)
+@pytest.mark.parametrize("header", [None, "", "Basic abc", "Bearer", "Bearer a b", "Token abc"])
 def test_extract_bearer_token_errors(header: str | None) -> None:
     """Rejects missing/invalid/incorrect scheme headers with 401."""
     with pytest.raises(HTTPException) as ei:

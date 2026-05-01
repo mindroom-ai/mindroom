@@ -10,11 +10,7 @@ import pytest
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
-from mindroom.scheduling import (
-    CronSchedule,
-    ScheduledWorkflow,
-    _parse_workflow_schedule,
-)
+from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 
 
 def _mid(name: str) -> MatrixID:

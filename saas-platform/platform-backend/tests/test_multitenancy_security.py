@@ -37,16 +37,8 @@ class TestWebhookEventIsolation:
 
             # Mock webhook events data
             webhook_events = [
-                {
-                    "id": "evt1",
-                    "account_id": account_a_id,
-                    "event_type": "payment.success",
-                },
-                {
-                    "id": "evt2",
-                    "account_id": account_b_id,
-                    "event_type": "payment.success",
-                },
+                {"id": "evt1", "account_id": account_a_id, "event_type": "payment.success"},
+                {"id": "evt2", "account_id": account_b_id, "event_type": "payment.success"},
             ]
 
             # Mock the query chain
@@ -55,7 +47,7 @@ class TestWebhookEventIsolation:
             mock_table.select.return_value = mock_table
             mock_table.eq.return_value = mock_table
             mock_table.execute.return_value = MagicMock(
-                data=[e for e in webhook_events if e["account_id"] == account_a_id],
+                data=[e for e in webhook_events if e["account_id"] == account_a_id]
             )
 
             # Simulate querying webhook events for account A
@@ -103,12 +95,7 @@ class TestPaymentIsolation:
             mock_ensure_supabase.return_value = mock_client
 
             # Mock payment data
-            payment_data = {
-                "id": "pay_123",
-                "account_id": account_a_id,
-                "amount": 1000,
-                "status": "succeeded",
-            }
+            payment_data = {"id": "pay_123", "account_id": account_a_id, "amount": 1000, "status": "succeeded"}
 
             mock_table = MagicMock()
             mock_client.table.return_value = mock_table
@@ -132,12 +119,7 @@ class TestInstanceIsolation:
             mock_client = MagicMock()
             mock_ensure_supabase.return_value = mock_client
 
-            instance_data = {
-                "id": 1,
-                "account_id": account_a_id,
-                "name": "test-instance",
-                "status": "running",
-            }
+            instance_data = {"id": 1, "account_id": account_a_id, "name": "test-instance", "status": "running"}
 
             mock_table = MagicMock()
             mock_client.table.return_value = mock_table
@@ -207,11 +189,7 @@ class TestWebhookHandlerValidation:
             mock_ensure_supabase.return_value = mock_client
 
             # Mock payment intent with customer
-            payment_data = {
-                "id": "pi_123",
-                "customer": "cus_123",
-                "amount": 1000,
-            }
+            payment_data = {"id": "pi_123", "customer": "cus_123", "amount": 1000}
 
             # Mock finding account
             mock_table = MagicMock()

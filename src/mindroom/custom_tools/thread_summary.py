@@ -12,10 +12,7 @@ from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
 from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
-from mindroom.thread_summary import (
-    ThreadSummaryWriteError,
-    set_manual_thread_summary,
-)
+from mindroom.thread_summary import ThreadSummaryWriteError, set_manual_thread_summary
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 

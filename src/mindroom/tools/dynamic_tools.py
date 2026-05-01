@@ -5,13 +5,7 @@ The actual toolkit requires agent and session context and is instantiated
 directly in ``create_agent()``, so it is NOT added to ``TOOL_REGISTRY``.
 """
 
-from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
-    SetupType,
-    ToolCategory,
-    ToolMetadata,
-    ToolStatus,
-)
+from mindroom.tool_system.metadata import TOOL_METADATA, SetupType, ToolCategory, ToolMetadata, ToolStatus
 
 TOOL_METADATA["dynamic_tools"] = ToolMetadata(
     name="dynamic_tools",

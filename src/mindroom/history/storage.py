@@ -8,10 +8,7 @@ from typing import TYPE_CHECKING, Any
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
-from mindroom.constants import (
-    MINDROOM_COMPACTION_METADATA_KEY,
-    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
-)
+from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.types import HistoryScope, HistoryScopeState
 
 if TYPE_CHECKING:

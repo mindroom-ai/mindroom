@@ -749,11 +749,9 @@ class TestCredentialsAPI:
             _publish_committed_runtime_config(app, config)
             return base_manager
 
-        with (
-            patch(
-                "mindroom.api.credentials.get_runtime_credentials_manager",
-                side_effect=_swap_runtime_on_manager_lookup,
-            ),
+        with patch(
+            "mindroom.api.credentials.get_runtime_credentials_manager",
+            side_effect=_swap_runtime_on_manager_lookup,
         ):
             target = credentials_api.resolve_request_credentials_target(request, agent_name="general")
 

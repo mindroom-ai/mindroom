@@ -109,10 +109,7 @@ class TestCheckoutEndpoint:
             mock_stripe.Customer.create.return_value = Mock(id="cus_test_123")
             mock_stripe.Subscription.list.return_value = Mock(data=[])
 
-            response = client.post(
-                "/stripe/checkout",
-                json={"tier": "starter", "billing_cycle": "monthly"},
-            )
+            response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "monthly"})
 
             assert response.status_code == 200
             data = response.json()
@@ -130,10 +127,7 @@ class TestCheckoutEndpoint:
         """Test checkout with invalid plan."""
         with patch("backend.routes.stripe_routes.stripe") as mock_stripe:
             mock_stripe.api_key = "sk_test_mock"
-            response = client.post(
-                "/stripe/checkout",
-                json={"tier": "invalid_plan", "billing_cycle": "monthly"},
-            )
+            response = client.post("/stripe/checkout", json={"tier": "invalid_plan", "billing_cycle": "monthly"})
 
             assert response.status_code == 400
             assert "No price found" in response.json()["detail"]
@@ -142,10 +136,7 @@ class TestCheckoutEndpoint:
         """Test checkout with invalid billing cycle."""
         with patch("backend.routes.stripe_routes.stripe") as mock_stripe:
             mock_stripe.api_key = "sk_test_mock"
-            response = client.post(
-                "/stripe/checkout",
-                json={"tier": "starter", "billing_cycle": "weekly"},
-            )
+            response = client.post("/stripe/checkout", json={"tier": "starter", "billing_cycle": "weekly"})
 
             assert response.status_code == 400
             assert "No price found" in response.json()["detail"]
@@ -161,12 +152,7 @@ class TestCheckoutEndpoint:
             mock_stripe.Subscription.list.return_value = Mock(data=[])
 
             response = client.post(
-                "/stripe/checkout",
-                json={
-                    "tier": "professional",
-                    "billing_cycle": "yearly",
-                    "quantity": 5,
-                },
+                "/stripe/checkout", json={"tier": "professional", "billing_cycle": "yearly", "quantity": 5}
             )
 
             assert response.status_code == 200

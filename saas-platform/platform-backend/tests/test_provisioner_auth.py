@@ -44,8 +44,7 @@ def test_start_ok_with_valid_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 
     client = TestClient(app)
     r = client.post(
-        "/system/instances/1/start",
-        headers={"authorization": "Bearer good", "X-Forwarded-For": "10.0.0.10"},
+        "/system/instances/1/start", headers={"authorization": "Bearer good", "X-Forwarded-For": "10.0.0.10"}
     )
     assert r.status_code == 200
     assert r.json().get("success") is True

@@ -46,12 +46,7 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.config.main import Config
-    from mindroom.history import (
-        CompactionDecision,
-        CompactionLifecycle,
-        CompactionOutcome,
-        PostResponseCompactionCheck,
-    )
+    from mindroom.history import CompactionDecision, CompactionLifecycle, CompactionOutcome, PostResponseCompactionCheck
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 logger = get_logger(__name__)

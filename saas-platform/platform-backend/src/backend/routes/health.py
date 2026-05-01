@@ -23,8 +23,4 @@ async def health_check() -> dict[str, Any]:
 
     overall_status = "ok" if (supabase_ok and bool(stripe.api_key)) else "degraded"
 
-    return {
-        "status": overall_status,
-        "supabase": supabase_ok,
-        "stripe": bool(stripe.api_key),
-    }
+    return {"status": overall_status, "supabase": supabase_ok, "stripe": bool(stripe.api_key)}

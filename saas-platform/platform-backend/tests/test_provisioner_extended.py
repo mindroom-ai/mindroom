@@ -123,11 +123,7 @@ class TestProvisionerExtended:
 
                 # Setup existing instance
                 mock_db.table().select().eq().single().execute.return_value = Mock(
-                    data={
-                        "instance_id": "123",
-                        "account_id": "acc-123",
-                        "status": "deprovisioned",
-                    }
+                    data={"instance_id": "123", "account_id": "acc-123", "status": "deprovisioned"}
                 )
                 # Make update fail
                 mock_db.table().update().eq().execute.side_effect = Exception("Update failed")
@@ -169,11 +165,7 @@ class TestProvisionerExtended:
                     with pytest.raises(HTTPException) as exc_info:
                         await provision_instance(
                             None,  # request
-                            {
-                                "subscription_id": "sub-123",
-                                "account_id": "acc-123",
-                                "tier": "starter",
-                            },
+                            {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
                             "Bearer test-api-key",  # authorization
                             None,  # background_tasks
                         )
@@ -182,11 +174,7 @@ class TestProvisionerExtended:
                     assert "Kubectl command not found" in str(exc_info.value.detail)
 
     def test_provision_namespace_creation_failure(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: Mock,
-        valid_auth: dict,
+        self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, valid_auth: dict
     ):
         """Test provision handles namespace creation failure gracefully."""
         # Setup new instance
@@ -194,21 +182,14 @@ class TestProvisionerExtended:
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "789"}])
 
         # Make namespace creation fail (non-FileNotFoundError)
-        mock_kubectl.side_effect = [
-            Exception("Namespace already exists"),
-            (0, "OK", ""),
-        ]
+        mock_kubectl.side_effect = [Exception("Namespace already exists"), (0, "OK", "")]
 
         with patch("backend.routes.provisioner.run_helm") as mock_helm:
             mock_helm.return_value = (0, "Deployed", "")
 
             response = client.post(
                 "/system/provision",
-                json={
-                    "subscription_id": "sub-123",
-                    "account_id": "acc-123",
-                    "tier": "starter",
-                },
+                json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
                 headers=valid_auth,
             )
 
@@ -216,12 +197,7 @@ class TestProvisionerExtended:
         assert response.status_code == 200
 
     def test_provision_url_update_failure(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: Mock,
-        mock_helm: Mock,
-        valid_auth: dict,
+        self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, mock_helm: Mock, valid_auth: dict
     ):
         """Test provision handles URL update failure gracefully."""
         # Setup new instance
@@ -243,11 +219,7 @@ class TestProvisionerExtended:
 
         response = client.post(
             "/system/provision",
-            json={
-                "subscription_id": "sub-123",
-                "account_id": "acc-123",
-                "tier": "starter",
-            },
+            json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
             headers=valid_auth,
         )
 
@@ -255,12 +227,7 @@ class TestProvisionerExtended:
         assert response.status_code == 200
 
     def test_provision_helm_failure_with_db_update_error(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: Mock,
-        mock_helm: Mock,
-        valid_auth: dict,
+        self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, mock_helm: Mock, valid_auth: dict
     ):
         """Test provision handles helm failure with DB update error."""
         # Setup new instance
@@ -284,11 +251,7 @@ class TestProvisionerExtended:
 
         response = client.post(
             "/system/provision",
-            json={
-                "subscription_id": "sub-123",
-                "account_id": "acc-123",
-                "tier": "starter",
-            },
+            json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
             headers=valid_auth,
         )
 
@@ -296,11 +259,7 @@ class TestProvisionerExtended:
         assert "Helm install failed" in response.json()["detail"]
 
     def test_provision_general_exception_with_db_update_error(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: Mock,
-        valid_auth: dict,
+        self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, valid_auth: dict
     ):
         """Test provision handles general exception with DB update error."""
         # Setup new instance
@@ -326,11 +285,7 @@ class TestProvisionerExtended:
             with patch("backend.config.PROVISIONER_API_KEY", "test-api-key"):
                 response = client.post(
                     "/system/provision",
-                    json={
-                        "subscription_id": "sub-123",
-                        "account_id": "acc-123",
-                        "tier": "starter",
-                    },
+                    json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
                     headers=valid_auth,
                 )
 
@@ -338,12 +293,7 @@ class TestProvisionerExtended:
         assert "Failed to deploy instance" in response.json()["detail"]
 
     def test_provision_status_update_after_readiness_failure(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: Mock,
-        mock_helm: Mock,
-        valid_auth: dict,
+        self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, mock_helm: Mock, valid_auth: dict
     ):
         """Test provision handles status update failure after readiness check."""
         # Setup new instance
@@ -368,11 +318,7 @@ class TestProvisionerExtended:
             with patch("backend.config.PROVISIONER_API_KEY", "test-api-key"):
                 response = client.post(
                     "/system/provision",
-                    json={
-                        "subscription_id": "sub-123",
-                        "account_id": "acc-123",
-                        "tier": "starter",
-                    },
+                    json={"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
                     headers=valid_auth,
                 )
 
@@ -380,12 +326,7 @@ class TestProvisionerExtended:
             assert response.status_code == 200
 
     def test_provision_background_task_scheduling_failure(
-        self,
-        client: TestClient,
-        mock_supabase: MagicMock,
-        mock_kubectl: Mock,
-        mock_helm: Mock,
-        valid_auth: dict,
+        self, client: TestClient, mock_supabase: MagicMock, mock_kubectl: Mock, mock_helm: Mock, valid_auth: dict
     ):
         """Test provision handles background task scheduling failure."""
         # Setup new instance
@@ -405,11 +346,7 @@ class TestProvisionerExtended:
 
                 response_coro = provision_instance(
                     None,  # request
-                    {
-                        "subscription_id": "sub-123",
-                        "account_id": "acc-123",
-                        "tier": "starter",
-                    },
+                    {"subscription_id": "sub-123", "account_id": "acc-123", "tier": "starter"},
                     "Bearer test-api-key",
                     mock_bg_tasks,
                 )
@@ -421,126 +358,76 @@ class TestProvisionerExtended:
             # Should still succeed despite background task failure
             assert result["success"] is True
 
-    def test_start_instance_status_update_failure(
-        self,
-        client: TestClient,
-        mock_kubectl: Mock,
-        valid_auth: dict,
-    ):
+    def test_start_instance_status_update_failure(self, client: TestClient, mock_kubectl: Mock, valid_auth: dict):
         """Test start instance handles status update failure."""
         with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
             mock_check.return_value = True
             with patch("backend.routes.provisioner.update_instance_status") as mock_update:
                 mock_update.return_value = False  # Update fails
 
-                response = client.post(
-                    "/system/instances/555/start",
-                    headers=valid_auth,
-                )
+                response = client.post("/system/instances/555/start", headers=valid_auth)
 
         assert response.status_code == 200
         assert response.json()["success"] is True
 
-    def test_stop_instance_status_update_failure(
-        self,
-        client: TestClient,
-        mock_kubectl: Mock,
-        valid_auth: dict,
-    ):
+    def test_stop_instance_status_update_failure(self, client: TestClient, mock_kubectl: Mock, valid_auth: dict):
         """Test stop instance handles status update failure."""
         with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
             mock_check.return_value = True
             with patch("backend.routes.provisioner.update_instance_status") as mock_update:
                 mock_update.return_value = False  # Update fails
 
-                response = client.post(
-                    "/system/instances/666/stop",
-                    headers=valid_auth,
-                )
+                response = client.post("/system/instances/666/stop", headers=valid_auth)
 
         assert response.status_code == 200
         assert response.json()["success"] is True
 
-    def test_restart_instance_kubectl_failure(
-        self,
-        client: TestClient,
-        mock_kubectl: Mock,
-        valid_auth: dict,
-    ):
+    def test_restart_instance_kubectl_failure(self, client: TestClient, mock_kubectl: Mock, valid_auth: dict):
         """Test restart instance handles kubectl failure."""
         mock_kubectl.return_value = (1, "", "Kubectl failed")
 
         with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
             mock_check.return_value = True
-            response = client.post(
-                "/system/instances/777/restart",
-                headers=valid_auth,
-            )
+            response = client.post("/system/instances/777/restart", headers=valid_auth)
 
         assert response.status_code == 500
         assert "kubectl command failed" in response.json()["detail"]
 
-    def test_restart_instance_general_exception(
-        self,
-        client: TestClient,
-        valid_auth: dict,
-    ):
+    def test_restart_instance_general_exception(self, client: TestClient, valid_auth: dict):
         """Test restart instance handles general exception."""
         with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
             mock_check.return_value = True
             with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                 mock_kubectl.side_effect = RuntimeError("Unexpected error")
 
-                response = client.post(
-                    "/system/instances/888/restart",
-                    headers=valid_auth,
-                )
+                response = client.post("/system/instances/888/restart", headers=valid_auth)
 
         assert response.status_code == 500
         assert "Failed to restart instance" in response.json()["detail"]
 
-    def test_uninstall_instance_status_update_failure(
-        self,
-        client: TestClient,
-        mock_helm: Mock,
-        valid_auth: dict,
-    ):
+    def test_uninstall_instance_status_update_failure(self, client: TestClient, mock_helm: Mock, valid_auth: dict):
         """Test uninstall handles status update failure."""
         with patch("backend.config.PROVISIONER_API_KEY", "test-api-key"):
             with patch("backend.routes.provisioner.update_instance_status") as mock_update:
                 mock_update.return_value = False  # Update fails
 
-                response = client.delete(
-                    "/system/instances/999/uninstall",
-                    headers=valid_auth,
-                )
+                response = client.delete("/system/instances/999/uninstall", headers=valid_auth)
 
         assert response.status_code == 200
         assert response.json()["success"] is True
 
-    def test_uninstall_instance_general_exception(
-        self,
-        client: TestClient,
-        valid_auth: dict,
-    ):
+    def test_uninstall_instance_general_exception(self, client: TestClient, valid_auth: dict):
         """Test uninstall handles general exception."""
         with patch("backend.routes.provisioner.run_helm") as mock_helm:
             mock_helm.side_effect = RuntimeError("Helm uninstall failed")
 
             with patch("backend.config.PROVISIONER_API_KEY", "test-api-key"):
-                response = client.delete(
-                    "/system/instances/1000/uninstall",
-                    headers=valid_auth,
-                )
+                response = client.delete("/system/instances/1000/uninstall", headers=valid_auth)
 
         assert response.status_code == 500
         assert "Failed to uninstall instance" in response.json()["detail"]
 
-    def test_sync_instances_general_exception(
-        self,
-        client: TestClient,
-        valid_auth: dict,
-    ):
+    def test_sync_instances_general_exception(self, client: TestClient, valid_auth: dict):
         """Test sync instances handles general exception."""
         with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
             mock_db = MagicMock()
@@ -548,10 +435,7 @@ class TestProvisionerExtended:
             # Make the select().execute() call raise an exception
             mock_db.table().select().execute.side_effect = RuntimeError("Database connection failed")
 
-            response = client.post(
-                "/system/sync-instances",
-                headers=valid_auth,
-            )
+            response = client.post("/system/sync-instances", headers=valid_auth)
 
         assert response.status_code == 500
         assert "Failed to sync instances" in response.json()["detail"]

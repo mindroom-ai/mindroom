@@ -33,12 +33,7 @@ from backend.config import (
 )
 from backend.db_utils import update_instance_status
 from backend.deps import _extract_bearer_token, ensure_supabase, limiter
-from backend.k8s import (
-    check_deployment_exists,
-    instance_deployment_ref,
-    run_kubectl,
-    wait_for_deployment_ready,
-)
+from backend.k8s import check_deployment_exists, instance_deployment_ref, run_kubectl, wait_for_deployment_ready
 from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
 from backend.process import run_helm
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
@@ -53,14 +48,11 @@ async def _background_mark_running_when_ready(instance_id: str, namespace: str =
         if ready:
             try:
                 sb = ensure_supabase()
-                sb.table("instances").update(
-                    {"status": "running", "updated_at": datetime.now(UTC).isoformat()},
-                ).eq("instance_id", instance_id).execute()
+                sb.table("instances").update({"status": "running", "updated_at": datetime.now(UTC).isoformat()}).eq(
+                    "instance_id", instance_id
+                ).execute()
             except Exception:
-                logger.warning(
-                    "Background update: failed to mark instance %s as running",
-                    instance_id,
-                )
+                logger.warning("Background update: failed to mark instance %s as running", instance_id)
     except Exception:
         logger.exception("Background readiness wait failed for instance %s", instance_id)
 
@@ -102,12 +94,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         try:
             update_res = (
                 sb.table("instances")
-                .update(
-                    {
-                        "status": "provisioning",
-                        "updated_at": datetime.now(UTC).isoformat(),
-                    },
-                )
+                .update({"status": "provisioning", "updated_at": datetime.now(UTC).isoformat()})
                 .eq("instance_id", customer_id)
                 .execute()
             )
@@ -134,7 +121,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                         "tier": tier,
                         "created_at": now,
                         "updated_at": now,
-                    },
+                    }
                 )
                 .execute()
             )
@@ -149,12 +136,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             raise HTTPException(status_code=500, detail=f"Failed to insert instance: {e!s}") from e
 
     helm_release_name = f"instance-{customer_id}"
-    logger.info(
-        "Provisioning instance for subscription %s, new id: %s, tier: %s",
-        subscription_id,
-        customer_id,
-        tier,
-    )
+    logger.info("Provisioning instance for subscription %s, new id: %s, tier: %s", subscription_id, customer_id, tier)
 
     namespace = "mindroom-instances"
     try:
@@ -183,7 +165,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 "matrix_url": matrix_url,
                 "matrix_server_url": matrix_url,
                 "updated_at": datetime.now(UTC).isoformat(),
-            },
+            }
         ).eq("instance_id", customer_id).execute()
     except Exception:
         logger.warning("Failed to update URLs for instance %s", customer_id)
@@ -265,9 +247,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         if code != 0:
             # Mark as error in DB
             try:
-                sb.table("instances").update(
-                    {"status": "error", "updated_at": datetime.now(UTC).isoformat()},
-                ).eq("instance_id", customer_id).execute()
+                sb.table("instances").update({"status": "error", "updated_at": datetime.now(UTC).isoformat()}).eq(
+                    "instance_id", customer_id
+                ).execute()
             except Exception:
                 logger.warning("Failed to update instance status to error after helm failure")
             msg = f"Helm install failed: {stderr}"
@@ -279,9 +261,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         logger.exception("Failed to deploy instance")
         # Mark as error in DB
         try:
-            sb.table("instances").update(
-                {"status": "error", "updated_at": datetime.now(UTC).isoformat()},
-            ).eq("instance_id", customer_id).execute()
+            sb.table("instances").update({"status": "error", "updated_at": datetime.now(UTC).isoformat()}).eq(
+                "instance_id", customer_id
+            ).execute()
         except Exception:
             logger.warning("Failed to update instance status to error after deploy exception")
         raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
@@ -290,10 +272,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
     try:
         sb.table("instances").update(
-            {
-                "status": "running" if ready else "provisioning",
-                "updated_at": datetime.now(UTC).isoformat(),
-            },
+            {"status": "running" if ready else "provisioning", "updated_at": datetime.now(UTC).isoformat()}
         ).eq("instance_id", customer_id).execute()
     except Exception:
         logger.warning("Failed to update instance status after readiness poll")
@@ -303,10 +282,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         try:
             background_tasks.add_task(_background_mark_running_when_ready, customer_id, namespace)
         except Exception:
-            logger.warning(
-                "Failed to schedule background readiness task for instance %s",
-                customer_id,
-            )
+            logger.warning("Failed to schedule background readiness task for instance %s", customer_id)
 
     return {
         "customer_id": customer_id,
@@ -337,12 +313,7 @@ async def start_instance_provisioner(
 
     try:
         code, out, err = await run_kubectl(
-            [
-                "scale",
-                instance_deployment_ref(instance_id),
-                "--replicas=1",
-            ],
-            namespace="mindroom-instances",
+            ["scale", instance_deployment_ref(instance_id), "--replicas=1"], namespace="mindroom-instances"
         )
         if code != 0:
             msg = f"kubectl command failed: {err}"
@@ -377,12 +348,7 @@ async def stop_instance_provisioner(
 
     try:
         code, out, err = await run_kubectl(
-            [
-                "scale",
-                instance_deployment_ref(instance_id),
-                "--replicas=0",
-            ],
-            namespace="mindroom-instances",
+            ["scale", instance_deployment_ref(instance_id), "--replicas=0"], namespace="mindroom-instances"
         )
         if code != 0:
             msg = f"kubectl command failed: {err}"
@@ -417,12 +383,7 @@ async def restart_instance_provisioner(
 
     try:
         code, out, err = await run_kubectl(
-            [
-                "rollout",
-                "restart",
-                instance_deployment_ref(instance_id),
-            ],
-            namespace="mindroom-instances",
+            ["rollout", "restart", instance_deployment_ref(instance_id)], namespace="mindroom-instances"
         )
         if code != 0:
             msg = f"kubectl command failed: {err}"
@@ -432,10 +393,7 @@ async def restart_instance_provisioner(
         logger.exception("Failed to restart instance %s", instance_id)
         raise HTTPException(status_code=500, detail=f"Failed to restart instance: {e}") from e
 
-    return {
-        "success": True,
-        "message": f"Instance {instance_id} restarted successfully",
-    }
+    return {"success": True, "message": f"Instance {instance_id} restarted successfully"}
 
 
 @router.delete("/system/instances/{instance_id}/uninstall", response_model=ActionResult)
@@ -474,11 +432,7 @@ async def uninstall_instance(
         logger.exception("Failed to uninstall instance %s", instance_id)
         raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {e}") from e
 
-    return {
-        "success": True,
-        "message": f"Instance {instance_id} uninstalled successfully",
-        "instance_id": instance_id,
-    }
+    return {"success": True, "message": f"Instance {instance_id} uninstalled successfully", "instance_id": instance_id}
 
 
 @router.post("/system/sync-instances", response_model=SyncResult)
@@ -498,12 +452,7 @@ async def sync_instances(
         result = sb.table("instances").select("*").execute()
         instances = result.data if result.data else []
 
-        sync_results: dict[str, Any] = {
-            "total": len(instances),
-            "synced": 0,
-            "errors": 0,
-            "updates": [],
-        }
+        sync_results: dict[str, Any] = {"total": len(instances), "synced": 0, "errors": 0, "updates": []}
 
         for instance in instances:
             instance_id = instance.get("instance_id") or instance.get("subdomain")
@@ -517,17 +466,10 @@ async def sync_instances(
 
             if not exists:
                 if current_status not in ["error", "deprovisioned"]:
-                    logger.info(
-                        "Instance %s not found in cluster, marking as error",
-                        instance_id,
-                    )
+                    logger.info("Instance %s not found in cluster, marking as error", instance_id)
                     now = datetime.now(UTC).isoformat()
                     sb.table("instances").update(
-                        {
-                            "status": "error",
-                            "kubernetes_synced_at": now,
-                            "updated_at": now,
-                        },
+                        {"status": "error", "kubernetes_synced_at": now, "updated_at": now}
                     ).eq("id", instance["id"]).execute()
 
                     sync_results["updates"].append(
@@ -536,17 +478,13 @@ async def sync_instances(
                             old_status=current_status,
                             new_status="error",
                             reason="deployment_not_found",
-                        ).model_dump(),
+                        ).model_dump()
                     )
                     sync_results["synced"] += 1
             else:
                 try:
                     code, out, _ = await run_kubectl(
-                        [
-                            "get",
-                            instance_deployment_ref(instance_id),
-                            "-o=jsonpath={.spec.replicas}",
-                        ],
+                        ["get", instance_deployment_ref(instance_id), "-o=jsonpath={.spec.replicas}"],
                         namespace="mindroom-instances",
                     )
                     if code == 0:
@@ -555,18 +493,11 @@ async def sync_instances(
 
                         if current_status != actual_status:
                             logger.info(
-                                "Instance %s status mismatch: DB=%s, K8s=%s",
-                                instance_id,
-                                current_status,
-                                actual_status,
+                                "Instance %s status mismatch: DB=%s, K8s=%s", instance_id, current_status, actual_status
                             )
                             now = datetime.now(UTC).isoformat()
                             sb.table("instances").update(
-                                {
-                                    "status": actual_status,
-                                    "kubernetes_synced_at": now,
-                                    "updated_at": now,
-                                },
+                                {"status": actual_status, "kubernetes_synced_at": now, "updated_at": now}
                             ).eq("id", instance["id"]).execute()
 
                             sync_results["updates"].append(
@@ -575,7 +506,7 @@ async def sync_instances(
                                     old_status=current_status,
                                     new_status=actual_status,
                                     reason="status_mismatch",
-                                ).model_dump(),
+                                ).model_dump()
                             )
                             sync_results["synced"] += 1
                 except Exception:

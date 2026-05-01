@@ -31,14 +31,8 @@ from mindroom.matrix.client_session import (
     matrix_startup_error,
     restore_login,
 )
-from mindroom.matrix.client_thread_history import (
-    RoomThreadsPageError,
-    get_room_threads_page,
-)
-from mindroom.matrix.client_visible_messages import (
-    ResolvedVisibleMessage,
-    replace_visible_message,
-)
+from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 
 __all__ = [
     "DeliveredMatrixEvent",

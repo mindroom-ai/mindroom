@@ -32,11 +32,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
 )
-from mindroom.delivery_gateway import (
-    DeliveryGateway,
-    DeliveryGatewayDeps,
-    FinalizeStreamedResponseRequest,
-)
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalizeStreamedResponseRequest
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
@@ -65,9 +61,7 @@ from mindroom.streaming import (
     is_interrupted_partial_reply,
     send_streaming_response,
 )
-from mindroom.streaming_delivery import (
-    _consume_streaming_chunks as _consume_streaming_chunks_impl,
-)
+from mindroom.streaming_delivery import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.streaming_delivery import (
     _DeliveryRequest,
     _drive_stream_delivery,

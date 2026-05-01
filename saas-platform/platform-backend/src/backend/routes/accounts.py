@@ -12,10 +12,7 @@ router = APIRouter()
 
 @router.get("/my/account", response_model=AccountWithRelationsOut)
 @limiter.limit("30/minute")  # Reading account info
-async def get_current_account(
-    request: Request,
-    user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, Any]:
+async def get_current_account(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get current user's account with subscription and instances."""
     sb = ensure_supabase()
 
@@ -33,10 +30,7 @@ async def get_current_account(
 
 @router.get("/my/account/admin-status", response_model=AdminStatusOut)
 @limiter.limit("30/minute")  # Reading admin status
-async def check_admin_status(
-    request: Request,
-    user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, bool]:
+async def check_admin_status(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, bool]:
     """Check if current user is an admin."""
     sb = ensure_supabase()
 

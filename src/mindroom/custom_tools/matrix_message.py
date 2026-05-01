@@ -10,16 +10,9 @@ from typing import ClassVar
 from agno.tools import Toolkit
 
 from mindroom.custom_tools import matrix_conversation_operations
-from mindroom.custom_tools.attachment_helpers import (
-    normalize_str_list,
-    resolve_context_thread_id,
-    room_access_allowed,
-)
+from mindroom.custom_tools.attachment_helpers import normalize_str_list, resolve_context_thread_id, room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeContext,
-    get_tool_runtime_context,
-)
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 
 class MatrixMessageTools(Toolkit):

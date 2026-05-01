@@ -19,9 +19,7 @@ from mindroom.attachments import (
     register_local_attachment,
     resolve_attachments,
 )
-from mindroom.custom_tools.attachment_helpers import (
-    room_access_allowed,
-)
+from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.matrix.client_delivery import send_file_message
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT_DESCRIPTION,

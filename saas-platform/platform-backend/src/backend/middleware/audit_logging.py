@@ -43,9 +43,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
     }
 
     async def dispatch(  # noqa: C901
-        self,
-        request: Request,
-        call_next: Callable,
+        self, request: Request, call_next: Callable
     ) -> Response:
         """Process request and log if needed."""
         # Skip non-auditable requests
@@ -79,12 +77,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                 # Recreate the request with the stored body
                 # Create a new request with the body we read
                 request = StarletteRequest(
-                    scope={
-                        **request.scope,
-                        "body": body,
-                    },
-                    receive=request.receive,
-                    send=request._send,
+                    scope={**request.scope, "body": body}, receive=request.receive, send=request._send
                 )
 
                 # Parse body for audit details (remove sensitive fields)
@@ -95,13 +88,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                         details = {"body": "non-json"}
                     else:
                         # Remove sensitive fields
-                        sensitive_fields = {
-                            "password",
-                            "api_key",
-                            "secret",
-                            "token",
-                            "credit_card",
-                        }
+                        sensitive_fields = {"password", "api_key", "secret", "token", "credit_card"}
                         details = {
                             k: v
                             for k, v in data.items()
@@ -143,12 +130,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
 
     def _get_action(self, method: str) -> str:
         """Map HTTP method to action name."""
-        mapping = {
-            "POST": "create",
-            "PUT": "update",
-            "PATCH": "update",
-            "DELETE": "delete",
-        }
+        mapping = {"POST": "create", "PUT": "update", "PATCH": "update", "DELETE": "delete"}
         return mapping.get(method, method.lower())
 
     def _get_resource_type(self, path: str) -> str:
@@ -196,12 +178,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                 "action": action,
                 "resource_type": resource_type,
                 "resource_id": resource_id,
-                "details": {
-                    **details,
-                    "path": path,
-                    "status_code": status_code,
-                    "user_email": user_email,
-                },
+                "details": {**details, "path": path, "status_code": status_code, "user_email": user_email},
                 "ip_address": ip_address,
                 "created_at": datetime.now(UTC).isoformat(),
             }

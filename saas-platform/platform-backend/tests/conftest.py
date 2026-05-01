@@ -109,8 +109,8 @@ def _create_no_op_limiter():  # noqa: C901, ANN202
                             "limit": limit_str,
                             "per": 60,  # seconds
                             "methods": ["POST", "GET"],  # Include GET for admin endpoint
-                            "exempt_when": None,
-                        },
+                            "exempt_when": None
+                        }
                     )()
                     # Raise rate limit exception with proper Limit object
                     raise RateLimitExceeded(mock_limit)
@@ -140,7 +140,7 @@ modules_to_clear = [
     "backend.routes",
     "backend.routes.accounts",
     "backend.routes.stripe_routes",
-    "main",
+    "main"
 ]
 for module_name in modules_to_clear:
     if module_name in sys.modules:

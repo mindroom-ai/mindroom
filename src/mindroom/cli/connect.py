@@ -11,9 +11,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
-from mindroom.constants import (
-    OWNER_MATRIX_USER_ID_ENV,
-)
+from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 
 if TYPE_CHECKING:
     from collections.abc import Callable

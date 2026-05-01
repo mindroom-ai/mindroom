@@ -16,11 +16,7 @@ from mindroom.memory._policy import (
     get_team_ids_for_agent,
     storage_paths_for_scope_user_id,
 )
-from mindroom.tool_system.worker_routing import (
-    ToolExecutionIdentity,
-    agent_state_root_path,
-    tool_execution_identity,
-)
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_state_root_path, tool_execution_identity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
 

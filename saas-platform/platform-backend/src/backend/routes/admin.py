@@ -35,21 +35,11 @@ from backend.routes.provisioner import (
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 router = APIRouter()
-ALLOWED_RESOURCES = {
-    "accounts",
-    "subscriptions",
-    "instances",
-    "audit_logs",
-    "usage_metrics",
-}
+ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs", "usage_metrics"}
 
 
 def audit_log_entry(
-    account_id: str,
-    action: str,
-    resource_type: str,
-    resource_id: str | None = None,
-    details: dict | None = None,
+    account_id: str, action: str, resource_type: str, resource_id: str | None = None, details: dict | None = None
 ) -> None:
     """Log an admin action to the audit_logs table (best effort)."""
     # Use the shared helper for consistency
@@ -65,16 +55,9 @@ def audit_log_entry(
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
 @limiter.limit("30/minute")
-async def get_admin_stats(
-    request: Request,
-    admin: Annotated[dict, Depends(verify_admin)],
-) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
+async def get_admin_stats(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
     """Get platform statistics for admin dashboard."""
-    audit_log_entry(
-        account_id=admin["user_id"],
-        action="view",
-        resource_type="stats",
-    )
+    audit_log_entry(account_id=admin["user_id"], action="view", resource_type="stats")
     sb = ensure_supabase()
 
     try:
@@ -128,12 +111,7 @@ async def admin_start_instance(
 ) -> dict[str, Any]:
     """Start an instance (admin proxy)."""
     result = await _proxy_to_provisioner(request, start_instance_provisioner, instance_id, admin)
-    audit_log_entry(
-        account_id=admin["user_id"],
-        action="start",
-        resource_type="instance",
-        resource_id=str(instance_id),
-    )
+    audit_log_entry(account_id=admin["user_id"], action="start", resource_type="instance", resource_id=str(instance_id))
     return result
 
 
@@ -146,12 +124,7 @@ async def admin_stop_instance(
 ) -> dict[str, Any]:
     """Stop an instance (admin proxy)."""
     result = await _proxy_to_provisioner(request, stop_instance_provisioner, instance_id, admin)
-    audit_log_entry(
-        account_id=admin["user_id"],
-        action="stop",
-        resource_type="instance",
-        resource_id=str(instance_id),
-    )
+    audit_log_entry(account_id=admin["user_id"], action="stop", resource_type="instance", resource_id=str(instance_id))
     return result
 
 
@@ -165,10 +138,7 @@ async def admin_restart_instance(
     """Restart an instance (admin proxy)."""
     result = await _proxy_to_provisioner(request, restart_instance_provisioner, instance_id, admin)
     audit_log_entry(
-        account_id=admin["user_id"],
-        action="restart",
-        resource_type="instance",
-        resource_id=str(instance_id),
+        account_id=admin["user_id"], action="restart", resource_type="instance", resource_id=str(instance_id)
     )
     return result
 
@@ -183,10 +153,7 @@ async def admin_uninstall_instance(
     """Uninstall an instance (admin proxy)."""
     result = await _proxy_to_provisioner(request, uninstall_instance, instance_id, admin)
     audit_log_entry(
-        account_id=admin["user_id"],
-        action="uninstall",
-        resource_type="instance",
-        resource_id=str(instance_id),
+        account_id=admin["user_id"], action="uninstall", resource_type="instance", resource_id=str(instance_id)
     )
     return result
 
@@ -209,10 +176,7 @@ async def admin_provision_instance(
 
     instance = result.data[0]
     if instance.get("status") not in ["deprovisioned", "error"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Instance must be deprovisioned or in error state to provision",
-        )
+        raise HTTPException(status_code=400, detail="Instance must be deprovisioned or in error state to provision")
 
     # Call provisioner with existing instance data
     data = {
@@ -224,20 +188,14 @@ async def admin_provision_instance(
 
     # provision_instance expects: request, data, authorization, background_tasks
     result = await provision_instance(
-        request=request,
-        data=data,
-        authorization=f"Bearer {PROVISIONER_API_KEY}",
-        background_tasks=background_tasks,
+        request=request, data=data, authorization=f"Bearer {PROVISIONER_API_KEY}", background_tasks=background_tasks
     )
     audit_log_entry(
         account_id=admin["user_id"],
         action="provision",
         resource_type="instance",
         resource_id=str(instance_id),
-        details={
-            "account_id": instance.get("account_id"),
-            "tier": instance.get("tier"),
-        },
+        details={"account_id": instance.get("account_id"), "tier": instance.get("tier")},
     )
     return result
 
@@ -323,12 +281,7 @@ async def update_account_status(
     try:
         result = (
             sb.table("accounts")
-            .update(
-                {
-                    "status": request.status,
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
-            )
+            .update({"status": request.status, "updated_at": datetime.now(UTC).isoformat()})
             .eq("id", account_id)
             .execute()
         )
@@ -344,11 +297,7 @@ async def update_account_status(
             details={"status": request.status, "reason": request.reason},
         )
 
-        return {
-            "status": "success",
-            "account_id": account_id,
-            "new_status": request.status,
-        }  # noqa: TRY300
+        return {"status": "success", "account_id": account_id, "new_status": request.status}  # noqa: TRY300
     except Exception as e:
         logger.exception("Error updating account status")
         raise HTTPException(status_code=500, detail="Failed to update account status") from e
@@ -367,11 +316,7 @@ async def get_dashboard_metrics(
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Get dashboard metrics for admin panel."""
-    audit_log_entry(
-        account_id=admin["user_id"],
-        action="view",
-        resource_type="dashboard_metrics",
-    )
+    audit_log_entry(account_id=admin["user_id"], action="view", resource_type="dashboard_metrics")
     sb = ensure_supabase()
 
     try:
@@ -526,12 +471,7 @@ async def admin_get_one(
         raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
-    audit_log_entry(
-        account_id=admin["user_id"],
-        action="read",
-        resource_type=resource,
-        resource_id=resource_id,
-    )
+    audit_log_entry(account_id=admin["user_id"], action="read", resource_type=resource, resource_id=resource_id)
 
     try:
         result = sb.table(resource).select("*").eq("id", resource_id).single().execute()
@@ -640,10 +580,7 @@ async def admin_delete_account_complete(
             logger.info(f"Deprovisioning instance {instance_id} for account {account_id}")
             try:
                 # Call the uninstall endpoint via provisioner
-                await uninstall_instance(
-                    instance_id=instance_id,
-                    api_key=PROVISIONER_API_KEY,
-                )
+                await uninstall_instance(instance_id=instance_id, api_key=PROVISIONER_API_KEY)
             except Exception as e:
                 logger.error(f"Failed to deprovision instance {instance_id}: {e}")
                 # Continue with other instances even if one fails
@@ -722,12 +659,7 @@ async def admin_delete(
         sb.table(resource).delete().eq("id", resource_id).execute()
 
         # Log admin deletion
-        audit_log_entry(
-            account_id=admin["user_id"],
-            action="delete",
-            resource_type=resource,
-            resource_id=resource_id,
-        )
+        audit_log_entry(account_id=admin["user_id"], action="delete", resource_type=resource, resource_id=resource_id)
     except Exception:
         logger.exception("Error deleting resource")
         raise HTTPException(status_code=400, detail="Invalid request") from None

@@ -35,10 +35,7 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
-from mindroom.streaming import (
-    StreamingResponse,
-    send_streaming_response,
-)
+from mindroom.streaming import StreamingResponse, send_streaming_response
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:

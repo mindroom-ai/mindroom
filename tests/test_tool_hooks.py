@@ -1474,9 +1474,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
     bot.orchestrator = MagicMock(knowledge_managers={}, knowledge_refresh_scheduler=None)
 
     try:
-        with (
-            patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
-        ):
+        with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
             target = MessageTarget.resolve(
                 room_id="!room:localhost",
                 thread_id="$thread",

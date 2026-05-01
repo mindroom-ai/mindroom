@@ -5,13 +5,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import (
-    ConfigField,
-    SetupType,
-    ToolCategory,
-    ToolStatus,
-    register_tool_with_metadata,
-)
+from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
     from types import ModuleType

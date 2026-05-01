@@ -40,10 +40,7 @@ from ._policy import (
     use_disabled_memory_backend,
     use_file_memory_backend,
 )
-from ._prompting import (
-    _format_memories_as_context,
-    build_memory_messages,
-)
+from ._prompting import _format_memories_as_context, build_memory_messages
 from ._shared import MemoryResult, new_memory_id
 
 if TYPE_CHECKING:

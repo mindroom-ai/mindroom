@@ -35,10 +35,7 @@ from mindroom.constants import (
     RuntimePaths,
 )
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.execution_preparation import (
-    prepare_agent_execution_context,
-    render_prepared_messages_text,
-)
+from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history import (
     CompactionOutcome,
     HistoryScope,
@@ -55,10 +52,7 @@ from mindroom.history.interrupted_replay import (
     tool_execution_call_id,
 )
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
-from mindroom.llm_request_logging import (
-    bind_llm_request_log_context,
-    build_llm_request_log_context,
-)
+from mindroom.llm_request_logging import bind_llm_request_log_context, build_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs

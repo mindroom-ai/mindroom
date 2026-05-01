@@ -11,11 +11,7 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
     resolve_private_knowledge_base_agent,
 )
-from mindroom.constants import (
-    RuntimePaths,
-    resolve_config_relative_path,
-    resolve_config_relative_path_preserving_leaf,
-)
+from mindroom.constants import RuntimePaths, resolve_config_relative_path, resolve_config_relative_path_preserving_leaf
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
@@ -34,10 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
-    from mindroom.tool_system.worker_routing import (
-        ToolExecutionIdentity,
-        WorkerScope,
-    )
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 
 @dataclass(frozen=True)

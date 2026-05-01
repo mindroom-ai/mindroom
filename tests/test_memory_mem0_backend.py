@@ -401,9 +401,7 @@ async def test_mixed_private_team_mem0_member_crud_is_rejected(
         id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
         return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
 
-    with (
-        patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance),
-    ):
+    with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
         await add_agent_memory("Shared calculator note", "calculator", storage_path, config, runtime_paths_for(config))
         calculator_memory_id = (
             await list_all_agent_memories("calculator", storage_path, config, runtime_paths_for(config), limit=10)

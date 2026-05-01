@@ -46,22 +46,13 @@ from mindroom.matrix.stale_stream_cleanup import (
     cleanup_stale_streaming_messages,
 )
 from mindroom.matrix.state import matrix_state_for_runtime
-from mindroom.matrix.users import (
-    INTERNAL_USER_ACCOUNT_KEY,
-    INTERNAL_USER_AGENT_NAME,
-    create_agent_user,
-)
+from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, create_agent_user
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
-from mindroom.runtime_state import (
-    reset_runtime_state,
-    set_runtime_failed,
-    set_runtime_ready,
-    set_runtime_starting,
-)
+from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
@@ -80,20 +71,14 @@ from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config
 from .credentials_sync import sync_env_to_credentials
 from .logging_config import get_logger, setup_logging
-from .orchestration.config_updates import (
-    ConfigUpdatePlan,
-    build_config_update_plan,
-)
+from .orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from .orchestration.plugin_watch import (
     capture_plugin_root_snapshots,
     replace_plugin_root_snapshots,
     sync_plugin_root_snapshots,
     watch_plugins_task,
 )
-from .orchestration.rooms import (
-    get_authorized_user_ids_to_invite,
-    get_root_space_user_ids_to_invite,
-)
+from .orchestration.rooms import get_authorized_user_ids_to_invite, get_root_space_user_ids_to_invite
 from .orchestration.runtime import (
     STARTUP_RETRY_INITIAL_DELAY_SECONDS,
     STARTUP_RETRY_MAX_DELAY_SECONDS,

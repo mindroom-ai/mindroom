@@ -34,12 +34,7 @@ async def collect_daily_usage_metrics() -> None:
             account_id = account["id"]
 
             # Collect metrics for this account
-            metrics = await _collect_account_metrics(
-                supabase,
-                account_id,
-                start_date,
-                end_date,
-            )
+            metrics = await _collect_account_metrics(supabase, account_id, start_date, end_date)
 
             # Store metrics
             if metrics:
@@ -52,7 +47,7 @@ async def collect_daily_usage_metrics() -> None:
                         "api_calls": metrics.get("api_calls", 0),
                         "agent_count": metrics.get("agent_count", 0),
                         "created_at": datetime.now(UTC).isoformat(),
-                    },
+                    }
                 ).execute()
 
                 logger.info(f"Collected metrics for account {account_id}: {metrics}")
@@ -68,12 +63,7 @@ async def _collect_account_metrics(
     end_date: datetime,
 ) -> dict[str, int]:
     """Collect metrics for a specific account and date range."""
-    metrics = {
-        "messages_sent": 0,
-        "storage_mb": 0,
-        "api_calls": 0,
-        "agent_count": 0,
-    }
+    metrics = {"messages_sent": 0, "storage_mb": 0, "api_calls": 0, "agent_count": 0}
 
     try:
         # Count messages (from audit logs or a messages table if it exists)
@@ -121,11 +111,7 @@ async def _collect_account_metrics(
     return metrics
 
 
-async def update_realtime_metrics(
-    account_id: str,
-    metric_type: str,
-    value: int = 1,
-) -> None:
+async def update_realtime_metrics(account_id: str, metric_type: str, value: int = 1) -> None:
     """Update real-time usage metrics.
 
     This can be called throughout the application to track usage in real-time.
@@ -156,10 +142,7 @@ async def update_realtime_metrics(
             # Update existing record
             current_value = existing.data.get(metric_type, 0)
             supabase.table("usage_metrics").update(
-                {
-                    metric_type: current_value + value,
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
+                {metric_type: current_value + value, "updated_at": datetime.now(UTC).isoformat()}
             ).eq("id", existing.data["id"]).execute()
         else:
             # Create new record for today
@@ -173,7 +156,7 @@ async def update_realtime_metrics(
                     "api_calls": 0,
                     "agent_count": 0,
                     "created_at": datetime.now(UTC).isoformat(),
-                },
+                }
             ).execute()
 
     except Exception as e:

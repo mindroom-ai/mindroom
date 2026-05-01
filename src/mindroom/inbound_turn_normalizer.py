@@ -22,9 +22,7 @@ from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import resolve_visible_event_source
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.image_handler import download_image
-from mindroom.matrix.message_content import (
-    is_v2_sidecar_text_preview,
-)
+from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timing import emit_elapsed_timing

@@ -22,15 +22,9 @@ from mindroom.interactive import (
     should_create_interactive_question,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import (
-    edit_message_result,
-    send_file_message,
-    send_message_result,
-)
+from mindroom.matrix.client_delivery import edit_message_result, send_file_message, send_message_result
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
-from mindroom.matrix.client_visible_messages import (
-    extract_visible_message as extract_and_resolve_message,
-)
+from mindroom.matrix.client_visible_messages import extract_visible_message as extract_and_resolve_message
 from mindroom.matrix.client_visible_messages import (
     message_preview,
     thread_root_body_preview,

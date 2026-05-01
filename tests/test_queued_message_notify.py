@@ -28,9 +28,7 @@ from mindroom.ai_runtime import (
 )
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing import (
-    COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
-)
+from mindroom.coalescing import COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
 from mindroom.coalescing_batch import PendingEvent, build_coalesced_batch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig

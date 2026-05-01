@@ -603,12 +603,10 @@ async def test_send_context_attachments_reuses_latest_thread_event_id_for_multip
     context = dataclasses.replace(context, event_cache=event_cache)
     context.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest:localhost")
 
-    with (
-        patch(
-            "mindroom.custom_tools.attachments.send_file_message",
-            new=AsyncMock(side_effect=["$file_evt_1", "$file_evt_2"]),
-        ) as mock_send,
-    ):
+    with patch(
+        "mindroom.custom_tools.attachments.send_file_message",
+        new=AsyncMock(side_effect=["$file_evt_1", "$file_evt_2"]),
+    ) as mock_send:
         result, send_error = await send_context_attachments(
             context,
             attachment_ids=["att_one", "att_two"],

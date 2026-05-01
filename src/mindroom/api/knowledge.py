@@ -14,16 +14,9 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import (
-    git_checkout_present,
-    include_semantic_knowledge_relative_path,
-)
-from mindroom.knowledge.manager import (
-    list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files,
-)
-from mindroom.knowledge.manager import (
-    list_knowledge_files as list_managed_knowledge_files,
-)
+from mindroom.knowledge.manager import git_checkout_present, include_semantic_knowledge_relative_path
+from mindroom.knowledge.manager import list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files
+from mindroom.knowledge.manager import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
 from mindroom.knowledge.refresh_runner import (
     is_refresh_active_for_binding,

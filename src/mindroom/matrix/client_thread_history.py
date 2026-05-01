@@ -32,10 +32,7 @@ from mindroom.matrix.client_visible_messages import (
     _record_latest_thread_edit,
 )
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.message_content import (
-    extract_and_resolve_message,
-    resolve_event_source_content,
-)
+from mindroom.matrix.message_content import extract_and_resolve_message, resolve_event_source_content
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,

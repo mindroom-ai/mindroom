@@ -16,12 +16,7 @@ from agno.media import Audio
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import get_available_agents_for_sender_authoritative
-from mindroom.constants import (
-    ATTACHMENT_IDS_KEY,
-    ORIGINAL_SENDER_KEY,
-    VOICE_PREFIX,
-    VOICE_RAW_AUDIO_FALLBACK_KEY,
-)
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_PREFIX, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import download_media_bytes, extract_media_caption, media_mime_type

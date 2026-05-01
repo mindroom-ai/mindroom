@@ -42,8 +42,7 @@ async def wait_for_deployment_ready(
     try:
         deployment_ref = instance_deployment_ref(instance_id)
         code, out, err = await run_kubectl(
-            ["rollout", "status", deployment_ref, f"--timeout={timeout_seconds}s"],
-            namespace=namespace,
+            ["rollout", "status", deployment_ref, f"--timeout={timeout_seconds}s"], namespace=namespace
         )
         if code == 0:
             logger.info("Deployment %s ready: %s", instance_id, out)

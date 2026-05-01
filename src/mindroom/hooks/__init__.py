@@ -37,16 +37,9 @@ from .context import (
     ToolBeforeCallContext,
 )
 from .decorators import get_hook_metadata, hook, iter_module_hooks
-from .enrichment import (
-    render_enrichment_block,
-    render_system_enrichment_block,
-)
+from .enrichment import render_enrichment_block, render_system_enrichment_block
 from .execution import emit, emit_collect, emit_final_response_transform, emit_gate, emit_transform
-from .ingress import (
-    HookIngressPolicy,
-    hook_ingress_policy,
-    should_handle_interactive_text_response,
-)
+from .ingress import HookIngressPolicy, hook_ingress_policy, should_handle_interactive_text_response
 from .registry import HookRegistry, HookRegistryPlugin, HookRegistryState
 from .sender import build_hook_message_sender, send_hook_message
 from .state import build_hook_room_state_putter, build_hook_room_state_querier

@@ -16,10 +16,7 @@ from anthropic import APIStatusError
 from google.auth.exceptions import DefaultCredentialsError, RefreshError
 
 from mindroom import constants
-from mindroom.constants import (
-    RuntimePaths,
-    env_key_for_provider,
-)
+from mindroom.constants import RuntimePaths, env_key_for_provider
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 

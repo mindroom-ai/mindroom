@@ -14,10 +14,7 @@ import typer
 
 import mindroom.cli.connect as cli_connect
 from mindroom import __version__, constants
-from mindroom.constants import (
-    config_search_locations,
-    ensure_writable_config_path,
-)
+from mindroom.constants import config_search_locations, ensure_writable_config_path
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 

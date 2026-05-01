@@ -46,22 +46,13 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         if exists:
             # Inspect deployment status to understand readiness
             code, out, err = await run_kubectl(
-                [
-                    "get",
-                    instance_deployment_ref(instance_id),
-                    "-o=json",
-                ],
-                namespace="mindroom-instances",
+                ["get", instance_deployment_ref(instance_id), "-o=json"], namespace="mindroom-instances"
             )
             if code == 0 and out:
                 try:
                     deployment = json.loads(out)
                 except json.JSONDecodeError:
-                    logger.warning(
-                        "Failed to parse deployment JSON for instance %s: %s",
-                        instance_id,
-                        out[:120],
-                    )
+                    logger.warning("Failed to parse deployment JSON for instance %s: %s", instance_id, out[:120])
                     deployment = out.strip()
 
                 if isinstance(deployment, (int, float)) or (isinstance(deployment, str) and deployment.isdigit()):
@@ -99,13 +90,9 @@ async def _background_sync_instance_status(instance_id: str) -> None:
 
         # Update database
         now = datetime.now(UTC).isoformat()
-        sb.table("instances").update(
-            {
-                "status": actual_status,
-                "kubernetes_synced_at": now,
-                "updated_at": now,
-            },
-        ).eq("instance_id", instance_id).execute()
+        sb.table("instances").update({"status": actual_status, "kubernetes_synced_at": now, "updated_at": now}).eq(
+            "instance_id", instance_id
+        ).execute()
 
         total_time = (time.perf_counter() - start) * 1000
         k8s_time = (time.perf_counter() - k8s_start) * 1000
@@ -123,9 +110,7 @@ async def _background_sync_instance_status(instance_id: str) -> None:
 @router.get("/my/instances", response_model=InstancesResponse)
 @limiter.limit("30/minute")  # Reading is less sensitive
 async def list_user_instances(
-    request: Request,
-    user: Annotated[dict, Depends(verify_user)],
-    background_tasks: BackgroundTasks,
+    request: Request, user: Annotated[dict, Depends(verify_user)], background_tasks: BackgroundTasks
 ) -> dict[str, Any]:
     """List instances for current user with background status refresh."""
     start = time.perf_counter()
@@ -178,19 +163,12 @@ async def list_user_instances(
             needs_sync = synced_time < stale_threshold
 
         if needs_sync:
-            logger.info(
-                "Instance %s has stale K8s status, scheduling background sync",
-                instance_id,
-            )
+            logger.info("Instance %s has stale K8s status, scheduling background sync", instance_id)
             background_tasks.add_task(_background_sync_instance_status, str(instance_id))
 
     # Log cache effectiveness
     total_time = (time.perf_counter() - start) * 1000
-    logger.info(
-        "Instances endpoint: DB query %.2fms, total %.2fms (cached K8s status)",
-        db_time,
-        total_time,
-    )
+    logger.info("Instances endpoint: DB query %.2fms, total %.2fms (cached K8s status)", db_time, total_time)
 
     # Return cached data immediately
     return {"instances": enhanced_instances}
@@ -199,9 +177,7 @@ async def list_user_instances(
 @router.post("/my/instances/provision", response_model=ProvisionResponse)
 @limiter.limit("5/minute")  # Creating instances is expensive
 async def provision_user_instance(
-    request: Request,
-    user: Annotated[dict, Depends(verify_user)],
-    background_tasks: BackgroundTasks,
+    request: Request, user: Annotated[dict, Depends(verify_user)], background_tasks: BackgroundTasks
 ) -> dict[str, Any]:
     """Provision an instance for the current user."""
     sb = ensure_supabase()
@@ -224,10 +200,7 @@ async def provision_user_instance(
         # If instance is deprovisioned, reprovision it
         if existing.get("status") == "deprovisioned":
             logger.info(
-                "Reprovisioning %s instance %s for user %s",
-                existing.get("status"),
-                existing["instance_id"],
-                account_id,
+                "Reprovisioning %s instance %s for user %s", existing.get("status"), existing["instance_id"], account_id
             )
             return await provision_instance(
                 request=request,
@@ -245,9 +218,7 @@ async def provision_user_instance(
         status = existing.get("status", "unknown")
         message = "Instance is already provisioning" if status == "provisioning" else "Instance already exists"
         logger.info(
-            "Instance already exists for user %s with status %s, returning existing metadata",
-            account_id,
-            status,
+            "Instance already exists for user %s with status %s, returning existing metadata", account_id, status
         )
         return {
             "success": True,
@@ -260,11 +231,7 @@ async def provision_user_instance(
 
     return await provision_instance(
         request=request,
-        data={
-            "subscription_id": subscription["id"],
-            "account_id": account_id,
-            "tier": subscription["tier"],
-        },
+        data={"subscription_id": subscription["id"], "account_id": account_id, "tier": subscription["tier"]},
         authorization=f"Bearer {PROVISIONER_API_KEY}",
         background_tasks=background_tasks,
     )
@@ -272,9 +239,7 @@ async def provision_user_instance(
 
 # Helper function for user instance actions
 async def _verify_instance_ownership_and_proxy(
-    instance_id: int,
-    user: dict,
-    provisioner_func: Callable,
+    instance_id: int, user: dict, provisioner_func: Callable
 ) -> dict[str, Any]:
     """Verify user owns instance and proxy to provisioner."""
     sb = ensure_supabase()

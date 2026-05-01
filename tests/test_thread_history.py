@@ -32,14 +32,8 @@ from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
-from mindroom.matrix.client import (
-    ResolvedVisibleMessage,
-    RoomThreadsPageError,
-    get_room_threads_page,
-)
-from mindroom.matrix.client_delivery import (
-    build_threaded_edit_content as _build_threaded_edit_content_impl,
-)
+from mindroom.matrix.client import ResolvedVisibleMessage, RoomThreadsPageError, get_room_threads_page
+from mindroom.matrix.client_delivery import build_threaded_edit_content as _build_threaded_edit_content_impl
 from mindroom.matrix.client_thread_history import (
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
@@ -48,12 +42,7 @@ from mindroom.matrix.client_thread_history import (
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
-from tests.conftest import (
-    bind_runtime_paths,
-    make_event_cache_mock,
-    runtime_paths_for,
-    test_runtime_paths,
-)
+from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

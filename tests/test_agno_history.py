@@ -100,12 +100,7 @@ from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import (
-    bind_runtime_paths,
-    make_conversation_cache_mock,
-    make_event_cache_mock,
-    make_visible_message,
-)
+from tests.conftest import bind_runtime_paths, make_conversation_cache_mock, make_event_cache_mock, make_visible_message
 
 
 @dataclass

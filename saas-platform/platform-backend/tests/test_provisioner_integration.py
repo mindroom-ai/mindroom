@@ -62,11 +62,7 @@ class TestProvisionerIntegration:
 
                 with patch("backend.routes.provisioner.run_helm") as mock_helm:
                     # Helm deployment succeeds
-                    mock_helm.return_value = (
-                        0,
-                        "Release installed successfully",
-                        "",
-                    )
+                    mock_helm.return_value = (0, "Release installed successfully", "")
 
                     with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
                         # Deployment not immediately ready (realistic)
@@ -74,11 +70,7 @@ class TestProvisionerIntegration:
 
                         response = client.post(
                             "/system/provision",
-                            json={
-                                "subscription_id": "sub-123",
-                                "account_id": "acc-456",
-                                "tier": "professional",
-                            },
+                            json={"subscription_id": "sub-123", "account_id": "acc-456", "tier": "professional"},
                             headers=valid_auth,
                         )
 
@@ -113,19 +105,11 @@ class TestProvisionerIntegration:
 
                 with patch("backend.routes.provisioner.run_helm") as mock_helm:
                     # Helm deployment fails
-                    mock_helm.return_value = (
-                        1,
-                        "",
-                        "Error: timed out waiting for the condition",
-                    )
+                    mock_helm.return_value = (1, "", "Error: timed out waiting for the condition")
 
                     response = client.post(
                         "/system/provision",
-                        json={
-                            "subscription_id": "sub-789",
-                            "account_id": "acc-111",
-                            "tier": "starter",
-                        },
+                        json={"subscription_id": "sub-789", "account_id": "acc-111", "tier": "starter"},
                         headers=valid_auth,
                     )
 
@@ -177,10 +161,7 @@ class TestProvisionerIntegration:
                     with patch("backend.routes.provisioner.update_instance_status") as mock_update:
                         mock_update.return_value = True
 
-                        stop_response = client.post(
-                            f"/system/instances/{instance_id}/stop",
-                            headers=valid_auth,
-                        )
+                        stop_response = client.post(f"/system/instances/{instance_id}/stop", headers=valid_auth)
 
             assert stop_response.status_code == 200
             assert stop_response.json()["success"] is True
@@ -194,10 +175,7 @@ class TestProvisionerIntegration:
                     with patch("backend.routes.provisioner.update_instance_status") as mock_update:
                         mock_update.return_value = True
 
-                        start_response = client.post(
-                            f"/system/instances/{instance_id}/start",
-                            headers=valid_auth,
-                        )
+                        start_response = client.post(f"/system/instances/{instance_id}/start", headers=valid_auth)
 
             assert start_response.status_code == 200
             assert start_response.json()["success"] is True
@@ -208,10 +186,7 @@ class TestProvisionerIntegration:
                 with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                     mock_kubectl.return_value = (0, "Deployment restarted", "")
 
-                    restart_response = client.post(
-                        f"/system/instances/{instance_id}/restart",
-                        headers=valid_auth,
-                    )
+                    restart_response = client.post(f"/system/instances/{instance_id}/restart", headers=valid_auth)
 
             assert restart_response.status_code == 200
             assert restart_response.json()["success"] is True
@@ -223,10 +198,7 @@ class TestProvisionerIntegration:
                 with patch("backend.routes.provisioner.update_instance_status") as mock_update:
                     mock_update.return_value = True
 
-                    uninstall_response = client.delete(
-                        f"/system/instances/{instance_id}/uninstall",
-                        headers=valid_auth,
-                    )
+                    uninstall_response = client.delete(f"/system/instances/{instance_id}/uninstall", headers=valid_auth)
 
             assert uninstall_response.status_code == 200
             assert uninstall_response.json()["success"] is True
@@ -403,10 +375,7 @@ class TestProvisionerIntegration:
 
                     mock_db.table().update.side_effect = update_side_effect
 
-                    response = client.post(
-                        "/system/sync-instances",
-                        headers=valid_auth,
-                    )
+                    response = client.post("/system/sync-instances", headers=valid_auth)
 
             assert response.status_code == 200
             result = response.json()
@@ -442,18 +411,11 @@ class TestProvisionerIntegration:
                             # Direct function call with background tasks
                             from backend.routes.provisioner import provision_instance
 
-                            with patch(
-                                "backend.routes.provisioner.PROVISIONER_API_KEY",
-                                "test-api-key",
-                            ):
+                            with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-api-key"):
                                 result = asyncio.run(
                                     provision_instance(
                                         None,  # request
-                                        {
-                                            "subscription_id": "sub-bg",
-                                            "account_id": "acc-bg",
-                                            "tier": "professional",
-                                        },
+                                        {"subscription_id": "sub-bg", "account_id": "acc-bg", "tier": "professional"},
                                         "Bearer test-api-key",
                                         BackgroundTasks(),
                                     )
@@ -494,11 +456,7 @@ class TestProvisionerIntegration:
 
                         response = client.post(
                             "/system/provision",
-                            json={
-                                "subscription_id": "sub-recovery",
-                                "account_id": "acc-recovery",
-                                "tier": "starter",
-                            },
+                            json={"subscription_id": "sub-recovery", "account_id": "acc-recovery", "tier": "starter"},
                             headers=valid_auth,
                         )
 
@@ -520,11 +478,7 @@ class TestProvisionerIntegration:
                 mock_check.return_value = True
                 with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                     # Kubectl returns error
-                    mock_kubectl.return_value = (
-                        1,
-                        "",
-                        f"Error: deployment 'mindroom-{operation}' not found",
-                    )
+                    mock_kubectl.return_value = (1, "", f"Error: deployment 'mindroom-{operation}' not found")
 
                     response = client.post(endpoint, headers=valid_auth)
 
@@ -537,10 +491,7 @@ class TestProvisionerIntegration:
             # Helm uninstall fails with specific error
             mock_helm.return_value = (1, "", "Error: release mindroom-999 not found")
 
-            response = client.delete(
-                "/system/instances/999/uninstall",
-                headers=valid_auth,
-            )
+            response = client.delete("/system/instances/999/uninstall", headers=valid_auth)
 
             # Should handle gracefully
             assert response.status_code == 200
@@ -559,20 +510,14 @@ class TestProvisionerIntegration:
                     mock_kubectl.return_value = (0, "Success", "")
 
                     # Test start with DB failure
-                    response = client.post(
-                        "/system/instances/200/start",
-                        headers=valid_auth,
-                    )
+                    response = client.post("/system/instances/200/start", headers=valid_auth)
 
                     # Operation succeeds despite DB update failure
                     assert response.status_code == 200
                     assert response.json()["success"] is True
 
                     # Test stop with DB failure
-                    response = client.post(
-                        "/system/instances/201/stop",
-                        headers=valid_auth,
-                    )
+                    response = client.post("/system/instances/201/stop", headers=valid_auth)
 
                     assert response.status_code == 200
                     assert response.json()["success"] is True

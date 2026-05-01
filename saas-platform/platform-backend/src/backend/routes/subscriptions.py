@@ -5,11 +5,7 @@ from typing import Annotated, Any
 
 from backend.config import logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
-from backend.models import (
-    SubscriptionCancelResponse,
-    SubscriptionOut,
-    SubscriptionReactivateResponse,
-)
+from backend.models import SubscriptionCancelResponse, SubscriptionOut, SubscriptionReactivateResponse
 from backend.pricing import get_plan_limits_from_metadata
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -25,10 +21,7 @@ class CancelSubscriptionRequest(BaseModel):
 
 @router.get("/my/subscription", response_model=SubscriptionOut)
 @limiter.limit("30/minute")  # Reading subscription info
-async def get_user_subscription(
-    request: Request,
-    user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, Any]:
+async def get_user_subscription(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get current user's subscription."""
     sb = ensure_supabase()
 
@@ -69,9 +62,7 @@ async def get_user_subscription(
 @router.post("/my/subscription/cancel", response_model=SubscriptionCancelResponse)
 @limiter.limit("5/minute")  # Sensitive operation
 async def cancel_subscription(
-    req: Request,
-    request: CancelSubscriptionRequest,
-    user: Annotated[dict, Depends(verify_user)],
+    req: Request, request: CancelSubscriptionRequest, user: Annotated[dict, Depends(verify_user)]
 ) -> dict[str, Any]:
     """Cancel subscription."""
     if not stripe.api_key:
@@ -98,10 +89,7 @@ async def cancel_subscription(
     try:
         if request.cancel_at_period_end:
             # Cancel at end of billing period
-            cancelled_sub = stripe.Subscription.modify(
-                stripe_sub_id,
-                cancel_at_period_end=True,
-            )
+            cancelled_sub = stripe.Subscription.modify(stripe_sub_id, cancel_at_period_end=True)
         else:
             # Cancel immediately
             cancelled_sub = stripe.Subscription.delete(stripe_sub_id)
@@ -121,10 +109,7 @@ async def cancel_subscription(
 
 @router.post("/my/subscription/reactivate", response_model=SubscriptionReactivateResponse)
 @limiter.limit("5/minute")  # Sensitive operation
-async def reactivate_subscription(
-    request: Request,
-    user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, Any]:
+async def reactivate_subscription(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Reactivate a cancelled subscription (if still in billing period)."""
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")
@@ -149,18 +134,11 @@ async def reactivate_subscription(
 
     try:
         # Reactivate by removing the cancel_at_period_end flag
-        reactivated_sub = stripe.Subscription.modify(
-            stripe_sub_id,
-            cancel_at_period_end=False,
-        )
+        reactivated_sub = stripe.Subscription.modify(stripe_sub_id, cancel_at_period_end=False)
 
         # Update local database
         sb.table("subscriptions").update(
-            {
-                "status": "active",
-                "cancelled_at": None,
-                "updated_at": datetime.now(UTC).isoformat(),
-            },
+            {"status": "active", "cancelled_at": None, "updated_at": datetime.now(UTC).isoformat()}
         ).eq("account_id", account_id).execute()
 
         return {  # noqa: TRY300

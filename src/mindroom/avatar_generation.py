@@ -16,11 +16,7 @@ from rich.text import Text
 
 from mindroom import constants
 from mindroom.config.main import Config, load_config
-from mindroom.constants import (
-    ROUTER_AGENT_NAME,
-    resolve_avatar_path,
-    workspace_avatar_path,
-)
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path, workspace_avatar_path
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import get_logger
