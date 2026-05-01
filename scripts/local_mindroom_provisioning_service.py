@@ -788,10 +788,7 @@ async def register_agent(
     configured_homeserver = _normalize_homeserver_url(config.matrix_homeserver)
     requested_homeserver = _normalize_homeserver_url(payload.homeserver)
     if requested_homeserver != configured_homeserver:
-        msg = (
-            "Invalid homeserver for this provisioning service. "
-            f"Expected {configured_homeserver}, got {requested_homeserver}."
-        )
+        msg = f"Invalid homeserver for this provisioning service. Expected {configured_homeserver}, got {requested_homeserver}."
         raise HTTPException(status_code=400, detail=msg)
 
     async with state.lock:

@@ -1163,8 +1163,7 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
         with TestClient(api_app) as client:
             _login(client)
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 follow_redirects=False,
             )
             state = _state_from_auth_url(authorize_response.headers["location"])
@@ -1243,8 +1242,7 @@ def test_agent_connect_token_uses_trusted_upstream_matrix_requester(tmp_path: Pa
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 headers=_trusted_upstream_headers(),
                 follow_redirects=False,
             )
@@ -1294,8 +1292,7 @@ def test_agent_connect_token_accepts_trusted_upstream_derived_matrix_requester(t
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 headers=headers,
                 follow_redirects=False,
             )
@@ -1341,8 +1338,7 @@ def test_agent_connect_token_accepts_historical_trusted_upstream_matrix_requeste
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 headers=_trusted_upstream_headers(matrix_user_id=matrix_user_id),
                 follow_redirects=False,
             )
@@ -1384,8 +1380,7 @@ def test_agent_connect_token_rejects_trusted_upstream_requester_mismatch(tmp_pat
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 headers=_trusted_upstream_headers(
                     user_id="bob",
                     email="bob@example.com",
@@ -1419,8 +1414,7 @@ def test_agent_connect_token_rejects_missing_trusted_upstream_identity(tmp_path:
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 follow_redirects=False,
             )
 
@@ -1454,8 +1448,7 @@ def test_agent_connect_token_missing_trusted_identity_does_not_redirect_to_stand
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 follow_redirects=False,
             )
 
@@ -1490,8 +1483,7 @@ def test_agent_connect_token_rejects_trusted_upstream_identity_without_matrix_ma
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 headers=_trusted_upstream_headers(matrix_user_id=""),
                 follow_redirects=False,
             )
@@ -1521,8 +1513,7 @@ def test_agent_connect_token_callback_rejects_missing_trusted_upstream_identity(
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 headers=_trusted_upstream_headers(),
                 follow_redirects=False,
             )
@@ -1558,8 +1549,7 @@ def test_agent_connect_token_callback_rejects_changed_trusted_matrix_requester(t
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 headers=_trusted_upstream_headers(),
                 follow_redirects=False,
             )
@@ -1627,8 +1617,7 @@ def test_connect_token_rejects_tampered_agent_name(tmp_path: Path) -> None:
         with TestClient(api_app) as client:
             _login(client)
             response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=router_agent&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=router_agent&execution_scope=user_agent&connect_token={connect_token}",
                 follow_redirects=False,
             )
 
@@ -1653,8 +1642,7 @@ def test_connect_token_rejects_tampered_execution_scope(tmp_path: Path) -> None:
         with TestClient(api_app) as client:
             _login(client)
             response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=devagent&execution_scope=shared"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=devagent&execution_scope=shared&connect_token={connect_token}",
                 follow_redirects=False,
             )
 
@@ -1716,8 +1704,7 @@ def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Pat
         with TestClient(api_app) as client:
             _login(client)
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent&connect_token={connect_token}",
                 follow_redirects=False,
             )
 
@@ -1760,8 +1747,7 @@ def test_shared_agent_connect_token_rejects_wrong_authenticated_requester(tmp_pa
         with TestClient(api_app) as client:
             _login(client)
             authorize_response = client.get(
-                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared"
-                f"&connect_token={connect_token}",
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=shared&connect_token={connect_token}",
                 follow_redirects=False,
             )
 

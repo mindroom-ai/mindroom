@@ -266,10 +266,7 @@ class KubernetesWorkerBackend:
             },
         )
         if unsupported_services:
-            msg = (
-                "Dedicated workers do not support "
-                f"{', '.join(unsupported_services)}. Keep these credentials in the primary runtime."
-            )
+            msg = f"Dedicated workers do not support {', '.join(unsupported_services)}. Keep these credentials in the primary runtime."
             raise WorkerBackendError(msg)
         self.runtime_paths = runtime_paths
         self.config = config

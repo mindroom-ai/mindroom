@@ -243,8 +243,7 @@ def _print_config_init_next_steps(
         console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
     if selected_profile == "public":
         console.print(
-            "  [cyan]mindroom connect --pair-code XXXX[/cyan]  "
-            "Pair with hosted Matrix (get code from chat.mindroom.chat)",
+            "  [cyan]mindroom connect --pair-code XXXX[/cyan]  Pair with hosted Matrix (get code from chat.mindroom.chat)",
         )
     console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
@@ -351,8 +350,7 @@ def config_init(
         "full",
         "--profile",
         help=(
-            "Template profile: full, minimal, public, public-codex, or public-vertexai-anthropic "
-            "(hosted Matrix with provider defaults)."
+            "Template profile: full, minimal, public, public-codex, or public-vertexai-anthropic (hosted Matrix with provider defaults)."
         ),
     ),
     provider: str | None = typer.Option(

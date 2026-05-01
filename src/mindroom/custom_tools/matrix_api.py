@@ -671,8 +671,7 @@ class MatrixApiTools(Toolkit):
                 event_type=event_type,
                 dangerous=True,
                 message=(
-                    f"Event type '{event_type}' is dangerous room state and cannot be sent with send_event. "
-                    "Use put_state instead."
+                    f"Event type '{event_type}' is dangerous room state and cannot be sent with send_event. Use put_state instead."
                 ),
             )
         return None

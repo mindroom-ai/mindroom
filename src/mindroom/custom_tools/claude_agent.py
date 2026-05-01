@@ -587,12 +587,7 @@ class ClaudeAgentTools(Toolkit):
         age_seconds = int(now - session.created_at)
         idle_seconds = int(now - session.last_used_at)
         claude_id = session.claude_session_id or "(not available yet)"
-        return (
-            f"Claude session `{session_key}` is active.\n"
-            f"- age: {age_seconds}s\n"
-            f"- idle: {idle_seconds}s\n"
-            f"- claude_session_id: {claude_id}"
-        )
+        return f"Claude session `{session_key}` is active.\n- age: {age_seconds}s\n- idle: {idle_seconds}s\n- claude_session_id: {claude_id}"
 
     async def claude_interrupt(
         self,

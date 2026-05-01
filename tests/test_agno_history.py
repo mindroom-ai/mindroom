@@ -5153,16 +5153,13 @@ async def test_prepare_agent_and_prompt_strips_timestamped_current_turn_duplicat
     }
     model_prompt_by_prompt = {
         "First prompt": (
-            "[2026-03-20 08:15 PDT] First prompt\n\n"
-            "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+            "[2026-03-20 08:15 PDT] First prompt\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them."
         ),
         "Second prompt": (
-            "[2026-03-20 08:16 PDT] Second prompt\n\n"
-            "Available attachment IDs: att_2. Use tool calls to inspect or process them."
+            "[2026-03-20 08:16 PDT] Second prompt\n\nAvailable attachment IDs: att_2. Use tool calls to inspect or process them."
         ),
         "Third prompt": (
-            "[2026-03-20 08:17 PDT] Third prompt\n\n"
-            "Available attachment IDs: att_3. Use tool calls to inspect or process them."
+            "[2026-03-20 08:17 PDT] Third prompt\n\nAvailable attachment IDs: att_3. Use tool calls to inspect or process them."
         ),
     }
 
@@ -5215,7 +5212,5 @@ async def test_prepare_agent_and_prompt_strips_timestamped_current_turn_duplicat
 
     assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
     assert third_request[-1]["content"] == (
-        "Third prompt\n\n"
-        "turn context three\n\n"
-        "Available attachment IDs: att_3. Use tool calls to inspect or process them."
+        "Third prompt\n\nturn context three\n\nAvailable attachment IDs: att_3. Use tool calls to inspect or process them."
     )

@@ -138,8 +138,7 @@ def _attachment_bytes_for_save(
     if size_bytes > byte_limit:
         return (
             None,
-            f"Attachment {attachment.attachment_id} exceeds {limit_label} size limit "
-            f"({size_bytes} bytes > {byte_limit} bytes).",
+            f"Attachment {attachment.attachment_id} exceeds {limit_label} size limit ({size_bytes} bytes > {byte_limit} bytes).",
         )
     try:
         payload = attachment.local_path.read_bytes()

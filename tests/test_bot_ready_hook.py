@@ -1108,7 +1108,10 @@ async def test_startup_thread_prewarm_skips_failed_threads_and_logs_counts(tmp_p
     assert [
         call.args[1]
         for call in bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm.await_args_list
-    ] == ["$thread-a:localhost", "$thread-b:localhost"]
+    ] == [
+        "$thread-a:localhost",
+        "$thread-b:localhost",
+    ]
     bot._conversation_cache.logger.warning.assert_any_call(
         "startup_thread_prewarm_thread_failed",
         room_id="!room:localhost",

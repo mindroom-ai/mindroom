@@ -1062,10 +1062,7 @@ class AgentBot:
     @staticmethod
     def _runtime_support_injection_error() -> str:
         """Return the shared error text for missing runtime support injection."""
-        return (
-            "Runtime support services must be injected before startup; "
-            "AgentBot no longer supports standalone runtime support"
-        )
+        return "Runtime support services must be injected before startup; AgentBot no longer supports standalone runtime support"
 
     def _validate_runtime_support_injection_contract_for_startup(self) -> None:
         """Reject startup unless the full injected runtime-support bundle is present."""

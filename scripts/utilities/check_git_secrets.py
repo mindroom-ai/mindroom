@@ -81,8 +81,7 @@ def scan(  # noqa: C901, PLR0912, PLR0915
     """
     console.print(
         Panel.fit(
-            "[bold cyan]Git History Secret Scanner[/bold cyan]\n"
-            "[dim]Checking for exposed secret values in git history[/dim]",
+            "[bold cyan]Git History Secret Scanner[/bold cyan]\n[dim]Checking for exposed secret values in git history[/dim]",
             border_style="cyan",
         ),
     )

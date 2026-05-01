@@ -206,10 +206,7 @@ def _with_local_network_hint(detail: str, base_url: str | None) -> str:
     if not any(signal in lowered for signal in route_signals):
         return detail
 
-    return (
-        f"{detail}; local host '{host}' may be unreachable from this Python runtime"
-        " (try a reachable LAN IP instead of .local)"
-    )
+    return f"{detail}; local host '{host}' may be unreachable from this Python runtime (try a reachable LAN IP instead of .local)"
 
 
 def _validate_openai_embeddings_endpoint(
@@ -479,9 +476,7 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     if config.memory.llm is None:
         ollama_host = _get_ollama_host(config, runtime_paths=runtime_paths)
         console.print(
-            "[yellow]![/yellow] Memory LLM not configured"
-            f" (defaults to ollama at {ollama_host};"
-            " see memory/config.py fallback)",
+            f"[yellow]![/yellow] Memory LLM not configured (defaults to ollama at {ollama_host}; see memory/config.py fallback)",
         )
         # Check if default Ollama is reachable
         valid, detail = _http_check(f"{ollama_host.rstrip('/')}/api/tags")

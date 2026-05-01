@@ -517,10 +517,7 @@ class KubernetesResourceManager:
             if self.read_deployment(deployment_name) is None:
                 return
             if time.time() >= deadline:
-                msg = (
-                    f"Kubernetes worker deployment '{deployment_name}' did not finish deleting "
-                    f"within {timeout_seconds:.0f}s."
-                )
+                msg = f"Kubernetes worker deployment '{deployment_name}' did not finish deleting within {timeout_seconds:.0f}s."
                 raise WorkerBackendError(msg)
             time.sleep(_DELETE_POLL_INTERVAL_SECONDS)
 

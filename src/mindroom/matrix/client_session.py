@@ -35,10 +35,7 @@ def _require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
     """Reject stale positional call shapes with a clear error."""
     if isinstance(runtime_paths, RuntimePaths):
         return runtime_paths
-    msg = (
-        "matrix_client() requires RuntimePaths as its second argument. "
-        "Call matrix_client(homeserver, runtime_paths, user_id=...)"
-    )
+    msg = "matrix_client() requires RuntimePaths as its second argument. Call matrix_client(homeserver, runtime_paths, user_id=...)"
     raise TypeError(msg)
 
 

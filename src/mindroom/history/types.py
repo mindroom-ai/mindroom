@@ -180,7 +180,7 @@ def _to_k(tokens: int) -> str:
 
 def _format_exact_tokens(tokens: int) -> str:
     """Format token counts exactly with thousands separators."""
-    return f"{tokens:,}"
+    return f"{tokens:}"
 
 
 def _should_render_overhead_tokens(tokens: int | None) -> TypeGuard[int]:

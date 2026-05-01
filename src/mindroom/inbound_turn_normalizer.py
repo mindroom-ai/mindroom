@@ -375,8 +375,7 @@ class InboundTurnNormalizer:
             )
         attachment_prompt = (
             (
-                "Available attachment IDs: "
-                f"{', '.join(resolved_attachment_ids)}. Use tool calls to inspect or process them."
+                f"Available attachment IDs: {', '.join(resolved_attachment_ids)}. Use tool calls to inspect or process them."
             )
             if resolved_attachment_ids
             else None

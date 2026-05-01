@@ -30,10 +30,7 @@ class FrontendBuildHook(BuildHookInterface):
         if bun is None:
             if version == "editable":
                 return
-            msg = (
-                "bun is required to build the bundled frontend for wheel distributions. "
-                "Install bun or build from a prebuilt wheel instead."
-            )
+            msg = "bun is required to build the bundled frontend for wheel distributions. Install bun or build from a prebuilt wheel instead."
             raise RuntimeError(msg)
 
         output_dir = _get_output_dir(frontend_dir, self.directory, version)

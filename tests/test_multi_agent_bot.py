@@ -12199,12 +12199,7 @@ class TestMultiAgentOrchestrator:
             encoding="utf-8",
         )
         (plugin_root / "hooks.py").write_text(
-            "from mindroom.hooks import hook\n"
-            "\n"
-            "@hook('message:received')\n"
-            "async def audit(ctx):\n"
-            "    del ctx\n"
-            "    return None\n",
+            "from mindroom.hooks import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    del ctx\n    return None\n",
             encoding="utf-8",
         )
         (skill_dir / "SKILL.md").write_text(

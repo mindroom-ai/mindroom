@@ -4493,8 +4493,7 @@ class TestUserIdPassthrough:
         mock_agent.arun = AsyncMock(
             side_effect=[
                 Exception(
-                    "litellm.BadRequestError: invalid_request_error: "
-                    "document.source.base64.media_type: Input should be 'application/pdf'",
+                    "litellm.BadRequestError: invalid_request_error: document.source.base64.media_type: Input should be 'application/pdf'",
                 ),
                 mock_run_output,
             ],
@@ -4545,8 +4544,7 @@ class TestUserIdPassthrough:
         mock_agent.arun = AsyncMock(
             side_effect=[
                 Exception(
-                    "litellm.BadRequestError: invalid_request_error: "
-                    "document.source.base64.media_type: Input should be 'application/pdf'",
+                    "litellm.BadRequestError: invalid_request_error: document.source.base64.media_type: Input should be 'application/pdf'",
                 ),
                 mock_run_output,
             ],
@@ -4715,8 +4713,7 @@ class TestUserIdPassthrough:
         async def failing_stream() -> AsyncIterator[object]:
             yield RunErrorEvent(
                 content=(
-                    "litellm.BadRequestError: invalid_request_error: "
-                    "document.source.base64.media_type: Input should be 'application/pdf'"
+                    "litellm.BadRequestError: invalid_request_error: document.source.base64.media_type: Input should be 'application/pdf'"
                 ),
             )
 
@@ -4770,8 +4767,7 @@ class TestUserIdPassthrough:
         async def failing_stream() -> AsyncIterator[object]:
             yield RunErrorEvent(
                 content=(
-                    "litellm.BadRequestError: invalid_request_error: "
-                    "document.source.base64.media_type: Input should be 'application/pdf'"
+                    "litellm.BadRequestError: invalid_request_error: document.source.base64.media_type: Input should be 'application/pdf'"
                 ),
             )
 
@@ -5112,8 +5108,7 @@ class TestUserIdPassthrough:
         async def media_validation_error_stream() -> AsyncIterator[object]:
             yield RunErrorEvent(
                 content=(
-                    "invalid_request_error: "
-                    "messages.3.content.0.document.source.base64.media_type: Input should be 'application/pdf'"
+                    "invalid_request_error: messages.3.content.0.document.source.base64.media_type: Input should be 'application/pdf'"
                 ),
             )
 

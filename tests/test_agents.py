@@ -2794,8 +2794,7 @@ def test_config_rejects_reserved_private_knowledge_base_prefix() -> None:
     with pytest.raises(
         ValidationError,
         match=re.escape(
-            "knowledge_bases keys must not use the reserved private prefix '__agent_private__:'; "
-            "invalid keys: __agent_private__:mind",
+            "knowledge_bases keys must not use the reserved private prefix '__agent_private__:'; invalid keys: __agent_private__:mind",
         ),
     ):
         Config(

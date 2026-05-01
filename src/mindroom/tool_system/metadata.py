@@ -1108,10 +1108,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         try:
             authored_override_validator = ToolAuthoredOverrideValidator(raw_validator)
         except ValueError as exc:
-            msg = (
-                f"Tool validation snapshot entry for '{tool_name}' has unsupported "
-                f"authored_override_validator '{raw_validator}'."
-            )
+            msg = f"Tool validation snapshot entry for '{tool_name}' has unsupported authored_override_validator '{raw_validator}'."
             raise TypeError(msg) from exc
         raw_runtime_loadable = raw_info_mapping.get("runtime_loadable", True)
         if not isinstance(raw_runtime_loadable, bool):

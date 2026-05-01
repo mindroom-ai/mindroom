@@ -407,8 +407,7 @@ def _print_matrix_restart_hint(peer_names: list[str]) -> None:
 
     peers = ", ".join(peer_names)
     console.print(
-        "[yellow]i[/yellow] Restart running Matrix peers to pick up the new federation host mappings:"
-        f" [cyan]{peers}[/cyan]",
+        f"[yellow]i[/yellow] Restart running Matrix peers to pick up the new federation host mappings: [cyan]{peers}[/cyan]",
     )
     console.print("  [dim]Use ./deploy.py restart --only-matrix <name> when convenient.[/dim]")
 
@@ -1298,12 +1297,7 @@ def _repair_data_dir_permissions(data_dir: Path) -> None:
     uid = os.getuid()
     gid = os.getgid()
     repair_script = shlex.quote(f"chown -R {uid}:{gid} /target && chmod -R u+rwX /target")
-    cmd = (
-        "docker run --rm "
-        "--user 0:0 "
-        f"-v {shlex.quote(str(data_dir))}:/target "
-        f"{shlex.quote(PERMISSION_REPAIR_IMAGE)} sh -c {repair_script}"
-    )
+    cmd = f"docker run --rm --user 0:0 -v {shlex.quote(str(data_dir))}:/target {shlex.quote(PERMISSION_REPAIR_IMAGE)} sh -c {repair_script}"
     result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
         error = result.stderr.strip() or "permission repair container failed"
@@ -1315,11 +1309,7 @@ def get_actual_status(name: str) -> tuple[bool, bool]:
 
     Returns: (mindroom_running, matrix_running)
     """
-    cmd = (
-        "docker ps --filter "
-        f"label=com.docker.compose.project={shlex.quote(name)} "
-        "--format '{{.Label \"com.docker.compose.service\"}}'"
-    )
+    cmd = f"docker ps --filter label=com.docker.compose.project={shlex.quote(name)} --format '{{{{.Label \"com.docker.compose.service\"}}}}'"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
 
     if result.returncode != 0:

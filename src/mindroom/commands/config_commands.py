@@ -337,8 +337,7 @@ async def apply_config_change(
         # Save to file and advance any in-process API snapshot immediately.
         config_lifecycle.persist_runtime_validated_config(new_config, runtime_paths)
         return (  # noqa: TRY300
-            f"✅ **Configuration updated successfully!**\n\n"
-            f"Changes saved to {path} and will affect new agent interactions."
+            f"✅ **Configuration updated successfully!**\n\nChanges saved to {path} and will affect new agent interactions."
         )
     except Exception as e:
         logger.exception("Failed to apply config change")

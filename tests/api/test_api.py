@@ -2953,15 +2953,7 @@ def test_load_config_into_app_omits_legacy_null_optional_sections(tmp_path: Path
     """API config loads should drop legacy null optional sections from authored config data."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n"
-        "  default:\n"
-        "    provider: openai\n"
-        "    id: gpt-5.4\n"
-        "agents: {}\n"
-        "teams: null\n"
-        "plugins: null\n"
-        "router:\n"
-        "  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nteams: null\nplugins: null\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})

@@ -53,10 +53,7 @@ def required_local_provisioning_client_credentials_for_registration(
 
     creds = _local_provisioning_client_credentials_from_env(runtime_paths)
     if creds is None:
-        msg = (
-            "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
-            "Run `mindroom connect --pair-code ...` first."
-        )
+        msg = "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. Run `mindroom connect --pair-code ...` first."
         raise matrix_startup_error(msg, permanent=True)
     return creds
 
@@ -108,10 +105,7 @@ async def register_user_via_provisioning_service(
             msg = "Provisioning credentials are invalid or revoked. Run `mindroom connect --pair-code ...` again."
             raise matrix_startup_error(msg, permanent=True)
         if response.status_code == 404:
-            msg = (
-                "Provisioning service does not support /register-agent yet. "
-                "Deploy the latest local provisioning service."
-            )
+            msg = "Provisioning service does not support /register-agent yet. Deploy the latest local provisioning service."
             raise matrix_startup_error(msg, permanent=True)
         msg = f"Provisioning service returned HTTP {response.status_code}: {detail}"
         raise ValueError(msg)

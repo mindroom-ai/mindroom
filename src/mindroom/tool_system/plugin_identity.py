@@ -11,9 +11,6 @@ def validate_plugin_name(plugin_name: str) -> str:
     """Validate one plugin identifier and return the normalized value."""
     normalized = plugin_name.strip()
     if not normalized or not PLUGIN_NAME_PATTERN.fullmatch(normalized):
-        msg = (
-            f"Invalid plugin name: {plugin_name!r}. "
-            "Plugin names must use lowercase ASCII letters, digits, hyphens, or underscores."
-        )
+        msg = f"Invalid plugin name: {plugin_name!r}. Plugin names must use lowercase ASCII letters, digits, hyphens, or underscores."
         raise ValueError(msg)
     return normalized

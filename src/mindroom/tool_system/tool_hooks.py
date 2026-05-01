@@ -53,12 +53,7 @@ if TYPE_CHECKING:
         HookRoomStateQuerier,
     )
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-_DECLINED_RESULT_TEMPLATE = (
-    "[TOOL CALL DECLINED]\n"
-    "Tool: {tool_name}\n"
-    "Reason: {reason}\n\n"
-    "Adjust your approach — try a different tool or different arguments."
-)
+_DECLINED_RESULT_TEMPLATE = "[TOOL CALL DECLINED]\nTool: {tool_name}\nReason: {reason}\n\nAdjust your approach — try a different tool or different arguments."
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 ToolHookResult = Any
 # Agno upgrade landmine — see ARCH-000.md for context.

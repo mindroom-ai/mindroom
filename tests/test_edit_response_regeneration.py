@@ -1309,8 +1309,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
         mock_generate_response.assert_awaited_once()
         call_kwargs = mock_generate_response.call_args.kwargs
         assert call_kwargs["prompt"] == (
-            "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\nupdated first\nprimary"
+            "The user sent the following messages in quick succession. Treat them as one turn and respond once:\n\nupdated first\nprimary"
         )
         assert call_kwargs["reply_to_event_id"] == "$primary:example.com"
         assert call_kwargs["target"] == stored_target
@@ -1828,8 +1827,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
         mock_generate_response.assert_awaited_once()
         call_kwargs = mock_generate_response.call_args.kwargs
         assert call_kwargs["prompt"] == (
-            "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\nupdated first\nprimary"
+            "The user sent the following messages in quick succession. Treat them as one turn and respond once:\n\nupdated first\nprimary"
         )
         assert call_kwargs["reply_to_event_id"] == "$primary:example.com"
         assert call_kwargs["target"] == stored_target
@@ -2242,8 +2240,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
     assert call_kwargs["existing_event_id"] == "$partial-response:example.com"
     assert call_kwargs["reply_to_event_id"] == "$anchor:example.com"
     assert call_kwargs["prompt"] == (
-        "The user sent the following messages in quick succession. "
-        "Treat them as one turn and respond once:\n\nupdated first\nanchor"
+        "The user sent the following messages in quick succession. Treat them as one turn and respond once:\n\nupdated first\nanchor"
     )
     assert call_kwargs["matrix_run_metadata"] == {
         MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first:example.com", "$anchor:example.com"],

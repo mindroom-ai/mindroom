@@ -94,7 +94,7 @@ Features tested:
 """ + ("This is some padding text to reach approximately 1KB. " * 10)
 
         content = {"body": short_text, "msgtype": "m.text"}
-        print(f"📊 Size: {len(short_text):,} bytes")
+        print(f"📊 Size: {len(short_text):} bytes")
         delivered = await send_message_result(client, room_id, content)
         event_id = delivered.event_id if delivered is not None else None
         if event_id:
@@ -118,7 +118,7 @@ This represents a typical long AI response that fits within Matrix limits.
 """ + ("This is content that makes the message approximately 52KB in size. " * 750)
 
         content = {"body": medium_text, "msgtype": "m.text"}
-        print(f"📊 Size: {len(medium_text):,} bytes")
+        print(f"📊 Size: {len(medium_text):} bytes")
         delivered = await send_message_result(client, room_id, content)
         event_id = delivered.event_id if delivered is not None else None
         if event_id:
@@ -142,7 +142,7 @@ The attachment contains the full message content.
 """ + ("This is content that makes the message approximately 65KB in size, triggering the attachment mechanism. " * 900)
 
         content = {"body": over_text, "msgtype": "m.text"}
-        print(f"📊 Size: {len(over_text):,} bytes")
+        print(f"📊 Size: {len(over_text):} bytes")
         delivered = await send_message_result(client, room_id, content)
         event_id = delivered.event_id if delivered is not None else None
         if event_id:
@@ -175,7 +175,7 @@ Key points about large messages:
         )
 
         content = {"body": large_text, "msgtype": "m.text"}
-        print(f"📊 Size: {len(large_text):,} bytes")
+        print(f"📊 Size: {len(large_text):} bytes")
         delivered = await send_message_result(client, room_id, content)
         event_id = delivered.event_id if delivered is not None else None
         if event_id:

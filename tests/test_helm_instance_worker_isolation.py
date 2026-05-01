@@ -158,8 +158,7 @@ def test_platform_chart_rejects_email_template_without_email_header() -> None:
 
     assert completed.returncode != 0
     assert (
-        "provisioner.trustedUpstreamAuth.emailHeader is required when "
-        "provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set"
+        "provisioner.trustedUpstreamAuth.emailHeader is required when provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set"
     ) in completed.stderr
 
 

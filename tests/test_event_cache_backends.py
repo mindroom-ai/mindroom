@@ -702,8 +702,7 @@ def test_postgres_transient_classifier_accepts_dns_resolution_failure() -> None:
 def test_postgres_transient_classifier_rejects_authentication_failures_without_sqlstate() -> None:
     """Authentication failures should disable the cache instead of retrying forever."""
     exc = psycopg.OperationalError(
-        'connection failed: connection to server at "127.0.0.1", port 5432 failed: '
-        'FATAL: password authentication failed for user "cache"',
+        'connection failed: connection to server at "127.0.0.1", port 5432 failed: FATAL: password authentication failed for user "cache"',
     )
 
     assert not _is_transient_postgres_failure(exc)
