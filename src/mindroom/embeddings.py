@@ -21,7 +21,6 @@ _OPENAI_EMBEDDING_DIMENSIONS = {
     "text-embedding-3-large": 3072,
     "text-embedding-3-small": 1536,
 }
-_MEM0_OPENAI_DEFAULT_DIMENSIONS = 1536
 DEFAULT_SENTENCE_TRANSFORMERS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 _SENTENCE_TRANSFORMERS_DEPENDENCIES = ["sentence-transformers"]
 _SENTENCE_TRANSFORMERS_EXTRA = "sentence_transformers"
@@ -65,7 +64,7 @@ def effective_mem0_embedder_signature(
     effective_host = host if provider in {"openai", "ollama"} else ""
     effective_dimensions = dimensions
     if provider == "openai" and effective_dimensions is None:
-        effective_dimensions = _MEM0_OPENAI_DEFAULT_DIMENSIONS
+        effective_dimensions = _default_dimensions(model)
     elif provider in {"ollama", "sentence_transformers"}:
         effective_dimensions = None
     return (
