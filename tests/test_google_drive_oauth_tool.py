@@ -1,12 +1,19 @@
 """Tests for the Google Drive OAuth-backed tool."""
 
-# ruff: noqa: D103, TC003
+# ruff: noqa: D102, D103, TC003
 
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+
+from agno.agent import Agent
+from agno.agent._tools import parse_tools
+from agno.models.base import Model
+from agno.models.response import ModelResponse
+from agno.tools.function import Function
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
@@ -15,6 +22,33 @@ from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google_drive import GOOGLE_DRIVE_OAUTH_SCOPES
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+
+
+class MinimalModel(Model):
+    """Minimal model surface for Agno tool parsing tests."""
+
+    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok")
+
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok")
+
+    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
+        yield ModelResponse(content="ok")
+
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        yield ModelResponse(content="ok")
+
+    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
+        return response
+
+    def _parse_provider_response_delta(
+        self,
+        response: ModelResponse,
+        *_args: object,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        return response
 
 
 def test_google_drive_missing_credentials_returns_connect_instruction(tmp_path: Path) -> None:
@@ -44,10 +78,45 @@ def test_google_drive_missing_credentials_returns_connect_instruction(tmp_path: 
     )
 
     result = json.loads(tool.search_files(query="name contains 'plan'", max_results=1))
+    model_entrypoint = tool.functions["google_drive_search_files"].entrypoint
+    assert model_entrypoint is not None
+    model_result = json.loads(model_entrypoint(query="name contains 'plan'", max_results=1))
 
     assert "Google Drive is not connected for this agent" in result["error"]
     assert "https://mindroom.example.test/api/oauth/google_drive/authorize?connect_token=" in result["error"]
     assert "@alice:example.org" not in result["error"]
+    assert model_result["oauth_connection_required"] is True
+    assert model_result["provider"] == "google_drive"
+
+
+def test_google_drive_model_functions_do_not_collide_with_local_file_tools(tmp_path: Path) -> None:
+    runtime_paths = constants.resolve_runtime_paths(
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    toolkits = [
+        get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=None,
+            disable_sandbox_proxy=True,
+        )
+        for tool_name in ("file", "coding", "google_drive")
+    ]
+    model = MinimalModel(id="fake-model", provider="fake")
+    agent = Agent(id="code", model=model)
+
+    parsed_tools = parse_tools(agent, toolkits, model, async_mode=True)
+    function_names = {function.name for function in parsed_tools if isinstance(function, Function)}
+
+    assert {"read_file", "list_files", "search_files"} <= function_names
+    assert {
+        "google_drive_list_files",
+        "google_drive_search_files",
+        "google_drive_read_file",
+    } <= function_names
 
 
 def test_google_drive_connect_instruction_uses_redirect_uri_public_origin(tmp_path: Path) -> None:
