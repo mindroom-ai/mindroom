@@ -35,6 +35,20 @@ http://localhost:8765/api/oauth/google_gmail/callback
 
 ## Configure MindRoom
 
+For a single personal OAuth client, store shared Google OAuth app client config under `google_oauth_client` through the dashboard credentials API or UI:
+
+```
+{
+  "client_id": "your-client-id.apps.googleusercontent.com",
+  "client_secret": "your-client-secret"
+}
+```
+
+For provider-specific client config, use `google_drive_oauth_client`, `google_calendar_oauth_client`, `google_sheets_oauth_client`, or `google_gmail_oauth_client`.
+Provider-specific client config wins over the shared `google_oauth_client` service.
+MindRoom stores OAuth app client config separately from user OAuth tokens and never mirrors it into worker containers.
+
+Environment variables remain available as bootstrap and fallback.
 For a single personal OAuth client, set the shared fallback client variables:
 
 ```
@@ -63,3 +77,4 @@ After the browser OAuth flow completes, retry the original request.
 
 OAuth tokens are stored under provider token services such as `google_drive_oauth`.
 Editable tool settings are stored separately under services such as `google_drive`, `google_calendar`, `google_sheets`, and `gmail`.
+OAuth app client config is stored separately under services such as `google_oauth_client` or `google_drive_oauth_client`.

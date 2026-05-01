@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mindroom.oauth.google import (
     GOOGLE_IDENTITY_SCOPES,
+    _google_client_config_services,
     _google_domain_env_names,
     _google_provider_env_names,
     _google_redirect_env_names,
@@ -30,6 +31,7 @@ def google_gmail_oauth_provider() -> OAuthProvider:
         scopes=GOOGLE_GMAIL_OAUTH_SCOPES,
         credential_service="google_gmail_oauth",
         tool_config_service="gmail",
+        client_config_services=_google_client_config_services("google_gmail"),
         client_id_env=client_id_env,
         client_secret_env=client_secret_env,
         redirect_uri_env=_google_redirect_env_names("google_gmail"),

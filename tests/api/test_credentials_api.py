@@ -393,6 +393,45 @@ class TestCredentialsAPI:
         assert token_status_response.status_code == 400
         assert "OAuth token credentials" in token_status_response.json()["detail"]
 
+    def test_oauth_client_config_service_redacts_secret_fields(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth app client config services should be editable without echoing secrets."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "client_secret": "stored-client-secret",
+                    "redirect_uri": "https://stored.example.test/callback",
+                },
+            },
+        )
+        get_response = client.get("/api/credentials/google_drive_oauth_client")
+        status_response = client.get("/api/credentials/google_drive_oauth_client/status")
+
+        assert response.status_code == 200
+        assert manager.load_credentials("google_drive_oauth_client") == {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "redirect_uri": "https://stored.example.test/callback",
+            "_source": "ui",
+        }
+        assert get_response.status_code == 200
+        assert get_response.json() == {
+            "service": "google_drive_oauth_client",
+            "credentials": {
+                "client_id": "stored-client-id",
+                "redirect_uri": "https://stored.example.test/callback",
+            },
+        }
+        assert status_response.status_code == 200
+        assert set(status_response.json()["key_names"]) == {"client_id", "redirect_uri"}
+
     def test_orphaned_oauth_credentials_reject_generic_routes(
         self,
         client: TestClient,

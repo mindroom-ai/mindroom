@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mindroom.oauth.google import (
     GOOGLE_IDENTITY_SCOPES,
+    _google_client_config_services,
     _google_domain_env_names,
     _google_provider_env_names,
     _google_redirect_env_names,
@@ -28,6 +29,7 @@ def google_calendar_oauth_provider() -> OAuthProvider:
         scopes=GOOGLE_CALENDAR_OAUTH_SCOPES,
         credential_service="google_calendar_oauth",
         tool_config_service="google_calendar",
+        client_config_services=_google_client_config_services("google_calendar"),
         client_id_env=client_id_env,
         client_secret_env=client_secret_env,
         redirect_uri_env=_google_redirect_env_names("google_calendar"),

@@ -14,7 +14,7 @@ from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
 from httpx import HTTPError
 
-from mindroom.credentials import validate_service_name
+from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
 
 warnings.filterwarnings(
     "ignore",
@@ -230,6 +230,7 @@ class OAuthProvider:
     scopes: tuple[str, ...]
     credential_service: str
     tool_config_service: str | None = None
+    client_config_services: tuple[str, ...] = ()
     client_id_env: str | Sequence[str] | None = None
     client_secret_env: str | Sequence[str] | None = None
     redirect_uri_env: str | Sequence[str] | None = None
@@ -250,6 +251,8 @@ class OAuthProvider:
         validate_service_name(self.credential_service)
         if self.tool_config_service is not None:
             validate_service_name(self.tool_config_service)
+        for service in self.client_config_services:
+            validate_service_name(service)
         if not self.scopes:
             msg = f"OAuth provider '{self.id}' must declare at least one scope"
             raise ValueError(msg)
@@ -289,6 +292,9 @@ class OAuthProvider:
 
     def client_config(self, runtime_paths: RuntimePaths) -> OAuthClientConfig | None:
         """Return resolved client settings or None when the provider is not configured."""
+        stored_config = self._stored_client_config(runtime_paths)
+        if stored_config is not None:
+            return stored_config
         client_id = _runtime_env_value(runtime_paths, self.normalized_client_id_env)
         client_secret = _runtime_env_value(runtime_paths, self.normalized_client_secret_env)
         if not client_id or not client_secret:
@@ -299,6 +305,29 @@ class OAuthProvider:
             client_secret=client_secret,
             redirect_uri=redirect_uri or self.default_redirect_uri(runtime_paths),
         )
+
+    def _stored_client_config(self, runtime_paths: RuntimePaths) -> OAuthClientConfig | None:
+        """Return stored OAuth app client settings before falling back to env."""
+        manager = get_runtime_credentials_manager(runtime_paths)
+        for service in self.client_config_services:
+            credentials = manager.load_credentials(service)
+            if not credentials:
+                continue
+            client_id = credentials.get("client_id")
+            client_secret = credentials.get("client_secret")
+            if not isinstance(client_id, str) or not client_id.strip():
+                continue
+            if not isinstance(client_secret, str) or not client_secret.strip():
+                continue
+            redirect_uri = credentials.get("redirect_uri")
+            return OAuthClientConfig(
+                client_id=client_id.strip(),
+                client_secret=client_secret.strip(),
+                redirect_uri=redirect_uri.strip()
+                if isinstance(redirect_uri, str) and redirect_uri.strip()
+                else self.default_redirect_uri(runtime_paths),
+            )
+        return None
 
     def require_client_config(self, runtime_paths: RuntimePaths) -> OAuthClientConfig:
         """Return client settings or raise one safe user-facing configuration error."""
