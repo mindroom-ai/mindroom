@@ -952,7 +952,7 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
         cache_started.set()
         await release_cache.wait()
 
-    orchestrator._cache_approval_event_now = AsyncMock(side_effect=cache_after_send)
+    orchestrator._approval_transport.cache_approval_event_now = AsyncMock(side_effect=cache_after_send)
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
     client.rooms = {"!room:localhost": object()}
@@ -960,7 +960,11 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
     bot = MagicMock(agent_name="router", running=True, client=client)
     orchestrator.agent_bots = {"router": bot}
     editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=editor)
+    store = initialize_approval_store(
+        runtime_paths,
+        sender=orchestrator._approval_transport.send_approval_event,
+        editor=editor,
+    )
 
     task = asyncio.create_task(
         store.request_approval(
@@ -982,10 +986,10 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
 
     assert editor.await_args.args[2]["status"] == "expired"
     assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request was cancelled."
-    cache_task = next(iter(orchestrator._approval_cache_write_tasks))
+    cache_task = next(iter(orchestrator._approval_transport._cache_write_tasks))
     release_cache.set()
     await asyncio.wait_for(cache_task, timeout=1)
-    assert not orchestrator._approval_cache_write_tasks
+    assert not orchestrator._approval_transport._cache_write_tasks
 
 
 @pytest.mark.asyncio
@@ -1018,9 +1022,9 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     code_bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$code-latest")
 
     orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
-    orchestrator._cache_approval_event_now = AsyncMock()
+    orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
 
-    sent = await orchestrator._send_approval_event_now(
+    sent = await orchestrator._approval_transport.send_approval_event_now(
         "!room:localhost",
         "$thread",
         {
@@ -1031,7 +1035,7 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
             "agent_name": "code",
         },
     )
-    edited = await orchestrator._edit_approval_event_now(
+    edited = await orchestrator._approval_transport.edit_approval_event_now(
         "!room:localhost",
         "$approval",
         {

@@ -8,15 +8,14 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
-from math import ceil
-from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 from uuid import uuid4
 
-import nio
 import uvicorn
 
 from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
+from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import configured_bot_usernames_for_room
@@ -31,12 +30,10 @@ from mindroom.hooks import (
 )
 from mindroom.knowledge import KnowledgeRefreshScheduler
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
-from mindroom.matrix.cache import normalize_nio_event_for_cache
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -58,16 +55,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
-from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
-from mindroom.tool_approval import (
-    _DEFAULT_ROUTER_MANAGED_ROOM_REASON,
-    ApprovalRuntimeBindings,
-    SentApprovalEvent,
-    ToolApprovalTransportError,
-    expire_orphaned_approval_cards_on_startup,
-    initialize_approval_runtime,
-    shutdown_approval_runtime,
-)
+from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
@@ -117,7 +105,7 @@ from .runtime_support import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Iterable
+    from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
     from types import FrameType
 
@@ -130,7 +118,6 @@ _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
 
-_TApprovalTransportResult = TypeVar("_TApprovalTransportResult")
 _CONFIG_RELOAD_IDLE_POLL_SECONDS = 0.5
 _CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS = 30.0
 _CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
@@ -167,20 +154,6 @@ def _raise_embedded_api_server_exit(api_server: _EmbeddedApiServerContext, *, re
     )
     msg = "Embedded API server exited unexpectedly"
     raise RuntimeError(msg)
-
-
-def _approval_startup_lookback_hours(config: Config) -> int:
-    """Return the cache lookback window needed to clean up live-only approval cards."""
-    timeout_days = config.tool_approval.timeout_days
-    for rule in config.tool_approval.rules:
-        if rule.timeout_days is not None:
-            timeout_days = max(timeout_days, rule.timeout_days)
-    return max(1, ceil(timeout_days * 24))
-
-
-def _approval_relation_agent_name(content: dict[str, Any], *, fallback: str) -> str:
-    agent_name = content.get("agent_name")
-    return agent_name if isinstance(agent_name, str) and agent_name else fallback
 
 
 @dataclass
@@ -290,8 +263,7 @@ class MultiAgentOrchestrator:
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
-    _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
-    _approval_cache_write_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -304,6 +276,12 @@ class MultiAgentOrchestrator:
         )
         self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
+        self._approval_transport = ApprovalMatrixTransport(
+            runtime_paths=self.runtime_paths,
+            bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
+            config_provider=lambda: self.config,
+            event_cache_provider=lambda: self._runtime_support.event_cache,
+        )
 
     @property
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
@@ -351,307 +329,9 @@ class MultiAgentOrchestrator:
         self._runtime_shutdown_event = shutdown_event
         return shutdown_event
 
-    def _get_bot_by_agent_name(self, agent_name: str) -> AgentBot | TeamBot | None:
-        """Return the managed bot that owns a given approval request."""
-        return self.agent_bots.get(agent_name)
-
     def _capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
-        runtime_loop = asyncio.get_running_loop()
-        if self._runtime_loop is None:
-            self._runtime_loop = runtime_loop
-            return
-        if self._runtime_loop is not runtime_loop:
-            msg = "MindRoom runtime loop is already bound to a different event loop."
-            raise RuntimeError(msg)
-
-    async def _run_on_runtime_loop(
-        self,
-        coroutine_factory: Callable[[], Coroutine[Any, Any, _TApprovalTransportResult]],
-    ) -> _TApprovalTransportResult:
-        """Run one coroutine on the orchestrator's runtime loop.
-
-        Sync tool hooks can request approval through a private loop created by
-        ``_run_coroutine_from_sync()``. The Matrix aiohttp client belongs to the
-        runtime loop, so approval event sends and edits must hop back there.
-        """
-        runtime_loop = self._runtime_loop
-        if runtime_loop is None or runtime_loop.is_closed():
-            msg = "Approval runtime loop is not available."
-            raise RuntimeError(msg)
-
-        current_loop = asyncio.get_running_loop()
-        if current_loop is runtime_loop:
-            return await coroutine_factory()
-
-        if is_loop_blocked_by_sync_tool_bridge(runtime_loop):
-            msg = (
-                "Cannot perform Matrix approval transport while synchronous FunctionCall.execute() "
-                "is blocking the MindRoom runtime loop; use FunctionCall.aexecute() or run execute() "
-                "outside the runtime event loop."
-            )
-            raise ToolApprovalTransportError(msg)
-
-        future = asyncio.run_coroutine_threadsafe(coroutine_factory(), runtime_loop)
-        try:
-            return await asyncio.wrap_future(future)
-        except asyncio.CancelledError:
-            future.cancel()
-            raise
-
-    async def _approval_thread_relation(
-        self,
-        room_id: str,
-        thread_id: str,
-        agent_name: str,
-    ) -> dict[str, object]:
-        """Return a threaded relation payload for approval events."""
-        bot = self._get_bot_by_agent_name(agent_name)
-        latest_thread_event_id = thread_id
-        if bot is not None:
-            resolved_latest_event_id = await bot._conversation_cache.get_latest_thread_event_id_if_needed(
-                room_id,
-                thread_id,
-            )
-            if resolved_latest_event_id is not None:
-                latest_thread_event_id = resolved_latest_event_id
-        return build_thread_relation(
-            thread_event_id=thread_id,
-            latest_thread_event_id=latest_thread_event_id,
-        )
-
-    async def _send_approval_event(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        content: dict[str, Any],
-    ) -> SentApprovalEvent | None:
-        """Send one custom approval event into the active Matrix thread."""
-        return await self._run_on_runtime_loop(
-            lambda: self._send_approval_event_now(room_id, thread_id, content),
-        )
-
-    async def _send_approval_event_now(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        content: dict[str, Any],
-    ) -> SentApprovalEvent | None:
-        """Send one custom approval event on the current loop."""
-        bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if bot is None or not bot.running or bot.client is None:
-            return None
-        if not self._bot_has_approval_room(bot, room_id):
-            raise ToolApprovalTransportError(_DEFAULT_ROUTER_MANAGED_ROOM_REASON)
-        send_content = dict(content)
-        if thread_id is not None:
-            send_content["m.relates_to"] = await self._approval_thread_relation(
-                room_id,
-                thread_id,
-                _approval_relation_agent_name(send_content, fallback=bot.agent_name),
-            )
-        response = await bot.client.room_send(
-            room_id=room_id,
-            message_type="io.mindroom.tool_approval",
-            content=send_content,
-        )
-        if isinstance(response, nio.RoomSendResponse):
-            sender_user_id = bot.client.user_id
-            if not isinstance(sender_user_id, str) or not sender_user_id:
-                logger.warning(
-                    "Approval sender bot is missing a Matrix user id",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    agent_name=bot.agent_name,
-                )
-                return None
-            self._track_approval_cache_write(bot, room_id, str(response.event_id))
-            return SentApprovalEvent(event_id=str(response.event_id))
-        logger.warning(
-            "Failed to send approval Matrix event",
-            room_id=room_id,
-            thread_id=thread_id,
-            agent_name=bot.agent_name,
-            response=str(response),
-        )
-        return None
-
-    async def _edit_approval_event(
-        self,
-        room_id: str,
-        event_id: str,
-        new_content: dict[str, Any],
-    ) -> bool:
-        """Edit one previously sent approval event."""
-        return await self._run_on_runtime_loop(
-            lambda: self._edit_approval_event_now(
-                room_id,
-                event_id,
-                new_content,
-            ),
-        )
-
-    def _bot_has_approval_room(
-        self,
-        bot: AgentBot | TeamBot,
-        room_id: str,
-    ) -> bool:
-        """Return whether one bot can safely post into an approval room."""
-        if bot.client is None:
-            return False
-        return room_id in tuple(bot.client.rooms)
-
-    def _approval_transport_bot(
-        self,
-        room_id: str,
-    ) -> AgentBot | TeamBot | None:
-        """Return the live router bot that owns approval transport for one room."""
-        bot = self.agent_bots.get("router")
-        if bot is None or not bot.running or bot.client is None:
-            return None
-        if not self._bot_has_approval_room(bot, room_id):
-            return None
-        return bot
-
-    def _approval_transport_sender_id(self) -> str | None:
-        """Return the Matrix user id that owns approval cards for this runtime."""
-        bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if bot is None or bot.client is None:
-            return None
-        user_id = bot.client.user_id
-        return user_id if isinstance(user_id, str) and user_id else None
-
-    def _configured_approval_room_ids(self) -> set[str]:
-        """Return rooms currently served by the router approval transport."""
-        bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        room_ids: set[str] = set()
-        if bot is not None and bot.client is not None:
-            room_ids.update(bot.client.rooms)
-        return room_ids
-
-    async def _edit_approval_event_now(
-        self,
-        room_id: str,
-        event_id: str,
-        new_content: dict[str, Any],
-    ) -> bool:
-        """Edit one previously sent approval event on the current loop."""
-        bot = self._approval_transport_bot(room_id)
-        if bot is None or bot.client is None:
-            return False
-
-        thread_id = new_content.get("thread_id")
-        if thread_id is not None and not isinstance(thread_id, str):
-            msg = "Approval thread_id must be a string when present."
-            raise TypeError(msg)
-
-        replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
-        if isinstance(thread_id, str) and thread_id:
-            replacement_content["m.relates_to"] = await self._approval_thread_relation(
-                room_id,
-                thread_id,
-                _approval_relation_agent_name(new_content, fallback=bot.agent_name),
-            )
-        response = await bot.client.room_send(
-            room_id=room_id,
-            message_type="io.mindroom.tool_approval",
-            content=build_matrix_edit_content(event_id, replacement_content),
-        )
-        if not isinstance(response, nio.RoomSendResponse):
-            logger.warning(
-                "Failed to edit approval Matrix event",
-                room_id=room_id,
-                event_id=event_id,
-                agent_name=bot.agent_name,
-                response=str(response),
-            )
-            return False
-        await self._cache_approval_event_now(bot, room_id, str(response.event_id))
-        return True
-
-    def _track_approval_cache_write(self, bot: AgentBot | TeamBot, room_id: str, event_id: str) -> None:
-        task = asyncio.create_task(
-            self._cache_approval_event_now(bot, room_id, event_id),
-            name=f"approval_cache_write_{event_id}",
-        )
-        self._approval_cache_write_tasks.add(task)
-        task.add_done_callback(self._finish_approval_cache_write)
-
-    def _finish_approval_cache_write(self, task: asyncio.Task[None]) -> None:
-        self._approval_cache_write_tasks.discard(task)
-        if task.cancelled():
-            return
-        try:
-            task.result()
-        except Exception as exc:
-            logger.warning("approval_cache_write_failed", error=str(exc))
-
-    async def _cache_approval_event_now(
-        self,
-        bot: AgentBot | TeamBot,
-        room_id: str,
-        event_id: str,
-    ) -> None:
-        """Store a freshly sent approval event after Matrix assigns canonical event fields."""
-        if bot.client is None:
-            return
-        try:
-            response = await bot.client.room_get_event(room_id, event_id)
-            if not isinstance(response, nio.RoomGetEventResponse):
-                return
-            await bot.event_cache.store_event(
-                event_id,
-                room_id,
-                normalize_nio_event_for_cache(response.event, event_id=event_id),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to cache outbound approval event",
-                room_id=room_id,
-                event_id=event_id,
-                error=str(exc),
-            )
-
-    async def _send_approval_notice(
-        self,
-        *,
-        room_id: str,
-        approval_event_id: str,
-        thread_id: str | None,
-        reason: str,
-    ) -> bool:
-        """Send one approval notice through the router transport bot."""
-        bot = self._approval_transport_bot(room_id)
-        if bot is None or bot.client is None:
-            logger.warning(
-                "Router approval transport unavailable for notice",
-                room_id=room_id,
-                approval_event_id=approval_event_id,
-            )
-            return False
-
-        content = build_message_content(
-            reason,
-            thread_event_id=thread_id,
-            reply_to_event_id=approval_event_id if isinstance(thread_id, str) and thread_id else None,
-            extra_content={"msgtype": "m.notice"},
-        )
-        response = await bot.client.room_send(
-            room_id=room_id,
-            message_type="m.room.message",
-            content=content,
-        )
-        if isinstance(response, nio.RoomSendResponse):
-            return True
-
-        logger.warning(
-            "Failed to send approval notice",
-            room_id=room_id,
-            approval_event_id=approval_event_id,
-            agent_name=bot.agent_name,
-            response=str(response),
-        )
-        return False
+        self._approval_transport.capture_runtime_loop()
 
     async def send_approval_notice(
         self,
@@ -662,7 +342,7 @@ class MultiAgentOrchestrator:
         reason: str,
     ) -> bool:
         """Send one approval notice through the public runtime protocol."""
-        return await self._send_approval_notice(
+        return await self._approval_transport.send_notice(
             room_id=room_id,
             approval_event_id=approval_event_id,
             thread_id=thread_id,
@@ -695,16 +375,7 @@ class MultiAgentOrchestrator:
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
-        initialize_approval_runtime(
-            self.runtime_paths,
-            bindings=ApprovalRuntimeBindings(
-                sender=self._send_approval_event,
-                editor=self._edit_approval_event,
-                event_cache=self._runtime_support.event_cache,
-                approval_room_ids=self._configured_approval_room_ids,
-                transport_sender=self._approval_transport_sender_id,
-            ),
-        )
+        self._approval_transport.bind_approval_runtime()
 
     async def _close_runtime_support_services(self) -> None:
         """Close the shared runtime-owned cache services."""
@@ -1410,26 +1081,9 @@ class MultiAgentOrchestrator:
         except Exception as exc:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
 
-    async def _handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
-        """Discard orphaned approval cards once the router finishes first sync."""
-        if bot.agent_name != ROUTER_AGENT_NAME or not bot.running or bot.client is None:
-            return
-        config = self.config
-        if config is None:
-            return
-        try:
-            discarded_count = await expire_orphaned_approval_cards_on_startup(
-                lookback_hours=_approval_startup_lookback_hours(config),
-            )
-        except Exception as exc:
-            logger.warning("tool_approval_startup_discard_failed", error=str(exc))
-            return
-        if discarded_count > 0:
-            logger.info("approval.startup_discard", discarded_count=discarded_count)
-
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
-        await self._handle_bot_ready(bot)
+        await self._approval_transport.handle_bot_ready(bot)
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""

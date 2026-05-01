@@ -92,17 +92,6 @@ class MatrixApprovalAction:
     reason: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class ApprovalRuntimeBindings:
-    """Runtime hooks used by the approval manager to speak Matrix and inspect cached cards."""
-
-    sender: MatrixEventSender
-    editor: MatrixEventEditor
-    event_cache: ConversationEventCache
-    approval_room_ids: ApprovalRoomProvider
-    transport_sender: TransportSenderProvider
-
-
 def _terminal_decision(status: Literal["denied", "expired"], reason: str) -> ApprovalDecision:
     return ApprovalDecision(
         status=status,
@@ -315,16 +304,20 @@ async def handle_matrix_approval_action(action: MatrixApprovalAction) -> Approva
 def initialize_approval_runtime(
     runtime_paths: RuntimePaths,
     *,
-    bindings: ApprovalRuntimeBindings,
+    sender: MatrixEventSender,
+    editor: MatrixEventEditor,
+    event_cache: ConversationEventCache,
+    approval_room_ids: ApprovalRoomProvider,
+    transport_sender: TransportSenderProvider,
 ) -> None:
     """Initialize the approval runtime behind the public approval seam."""
     approval_manager.initialize_approval_store(
         runtime_paths,
-        sender=bindings.sender,
-        editor=bindings.editor,
-        event_cache=bindings.event_cache,
-        approval_room_ids=bindings.approval_room_ids,
-        transport_sender=bindings.transport_sender,
+        sender=sender,
+        editor=editor,
+        event_cache=event_cache,
+        approval_room_ids=approval_room_ids,
+        transport_sender=transport_sender,
     )
 
 

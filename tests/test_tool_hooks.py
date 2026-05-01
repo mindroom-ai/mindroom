@@ -1322,7 +1322,11 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
     bot.client = client
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
     orchestrator.agent_bots = {"router": bot}
-    initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=AsyncMock())
+    initialize_approval_store(
+        runtime_paths,
+        sender=orchestrator._approval_transport.send_approval_event,
+        editor=AsyncMock(),
+    )
 
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),
@@ -1394,7 +1398,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
     orchestrator.agent_bots = {"router": bot}
     editor = AsyncMock()
-    initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=editor)
+    initialize_approval_store(runtime_paths, sender=orchestrator._approval_transport.send_approval_event, editor=editor)
 
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),
@@ -1487,7 +1491,7 @@ async def test_sync_tool_approval_aexecute_resumes_on_runtime_loop(tmp_path: Pat
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
     orchestrator.agent_bots = {"router": bot}
     editor = AsyncMock(return_value=True)
-    initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=editor)
+    initialize_approval_store(runtime_paths, sender=orchestrator._approval_transport.send_approval_event, editor=editor)
 
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),
@@ -1597,7 +1601,11 @@ async def test_sync_tool_approval_execute_on_runtime_loop_fails_fast(tmp_path: P
     bot.client = client
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
     orchestrator.agent_bots = {"router": bot}
-    initialize_approval_store(runtime_paths, sender=orchestrator._send_approval_event, editor=AsyncMock())
+    initialize_approval_store(
+        runtime_paths,
+        sender=orchestrator._approval_transport.send_approval_event,
+        editor=AsyncMock(),
+    )
 
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),

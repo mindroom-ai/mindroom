@@ -4013,7 +4013,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         orchestrator = MagicMock()
-        orchestrator._approval_transport_bot.return_value = bot
         orchestrator.send_approval_notice = AsyncMock(return_value=True)
         bot.orchestrator = orchestrator
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
@@ -4063,7 +4062,6 @@ class TestAgentBot:
         router_bot = MagicMock()
         router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
         orchestrator = MagicMock()
-        orchestrator._approval_transport_bot.return_value = router_bot
         orchestrator.send_approval_notice = AsyncMock(return_value=True)
         agent_bot.orchestrator = orchestrator
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
@@ -12119,7 +12117,7 @@ class TestMultiAgentOrchestrator:
         bot.try_start = AsyncMock(side_effect=_start_bot)
 
         async def _emit_bot_ready(_response: object) -> None:
-            await orchestrator._handle_bot_ready(bot)
+            await orchestrator.handle_bot_ready(bot)
 
         bot._on_sync_response = AsyncMock(side_effect=_emit_bot_ready)
         bot.stop = AsyncMock()
@@ -12148,7 +12146,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
             patch(
-                "mindroom.orchestrator.expire_orphaned_approval_cards_on_startup",
+                "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
                 new=AsyncMock(side_effect=_discard_pending_on_startup),
             ) as expire_orphaned_approval_cards_on_startup,
             patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
@@ -12180,10 +12178,10 @@ class TestMultiAgentOrchestrator:
         bot.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
 
         with patch(
-            "mindroom.orchestrator.expire_orphaned_approval_cards_on_startup",
+            "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
             new=AsyncMock(),
         ) as expire_orphaned_approval_cards_on_startup:
-            await orchestrator._handle_bot_ready(bot)
+            await orchestrator.handle_bot_ready(bot)
 
         expire_orphaned_approval_cards_on_startup.assert_not_awaited()
 
@@ -12495,8 +12493,8 @@ class TestMultiAgentOrchestrator:
 
         store = initialize_approval_store(
             runtime_paths,
-            sender=orchestrator._send_approval_event,
-            editor=orchestrator._edit_approval_event,
+            sender=orchestrator._approval_transport.send_approval_event,
+            editor=orchestrator._approval_transport.edit_approval_event,
         )
         task = asyncio.create_task(
             store.request_approval(
@@ -12848,8 +12846,8 @@ class TestMultiAgentOrchestrator:
 
         store = initialize_approval_store(
             runtime_paths,
-            sender=orchestrator._send_approval_event,
-            editor=orchestrator._edit_approval_event,
+            sender=orchestrator._approval_transport.send_approval_event,
+            editor=orchestrator._approval_transport.edit_approval_event,
         )
         task = asyncio.create_task(
             store.request_approval(
@@ -12998,8 +12996,8 @@ class TestMultiAgentOrchestrator:
 
         store = initialize_approval_store(
             runtime_paths,
-            sender=orchestrator._send_approval_event,
-            editor=orchestrator._edit_approval_event,
+            sender=orchestrator._approval_transport.send_approval_event,
+            editor=orchestrator._approval_transport.edit_approval_event,
         )
         task = asyncio.create_task(
             store.request_approval(

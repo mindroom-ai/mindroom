@@ -175,6 +175,18 @@ depends_on = [
 visibility = ["mindroom.tool_approval"]
 
 [[modules]]
+path = "mindroom.approval_transport"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.cache",
+    "mindroom.matrix.message_builder",
+    "mindroom.sync_bridge_state",
+    "mindroom.tool_approval",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
 path = "mindroom.tool_approval"
 depends_on = [
     "mindroom.approval_manager",
@@ -184,6 +196,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.agents",
+    "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.orchestrator",
     "mindroom.tool_system.tool_hooks",
@@ -756,6 +769,7 @@ path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.agents",
     "mindroom.api.main",
+    "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.config.main",
     "mindroom.constants",
@@ -763,7 +777,6 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.knowledge",
     "mindroom.knowledge.watch",
-    "mindroom.matrix.cache",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.rooms",
@@ -777,7 +790,6 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.runtime_support",
     "mindroom.scheduling",
-    "mindroom.sync_bridge_state",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
     "mindroom.tool_approval",
@@ -1248,6 +1260,7 @@ depends_on = []
 path = "mindroom.sync_bridge_state"
 depends_on = []
 visibility = [
+    "mindroom.approval_transport",
     "mindroom.orchestrator",
     "mindroom.tool_system.tool_hooks",
 ]
@@ -2675,11 +2688,14 @@ expose = ["build_tool_hook_bridge", "prepend_tool_hook_bridge"]
 from = ["mindroom.tool_system.tool_hooks"]
 
 [[interfaces]]
+expose = ["ApprovalMatrixTransport"]
+from = ["mindroom.approval_transport"]
+
+[[interfaces]]
 expose = [
     "_DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "ApprovalActionResult",
     "ApprovalDecision",
-    "ApprovalRuntimeBindings",
     "MatrixApprovalAction",
     "SentApprovalEvent",
     "ToolApprovalCall",
