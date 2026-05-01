@@ -28,6 +28,7 @@ from mindroom.oauth import (
     load_oauth_providers,
 )
 from mindroom.oauth import service as oauth_service
+from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.service import oauth_credentials_satisfy_identity_policy
 from mindroom.tool_system import plugin_imports
@@ -440,6 +441,47 @@ def test_plugin_oauth_provider_rejects_unrelated_tool_config_service_overlap(tmp
         load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
 
 
+def test_plugin_oauth_provider_rejects_client_config_token_service_overlap(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "mindroom.plugin.json").write_text(
+        '{"name": "oauth_plugin", "oauth_module": "oauth_provider.py"}',
+        encoding="utf-8",
+    )
+    (plugin_dir / "oauth_provider.py").write_text(
+        "\n".join(
+            [
+                "from mindroom.oauth import OAuthProvider",
+                "",
+                "def register_oauth_providers(settings, runtime_paths):",
+                "    del settings, runtime_paths",
+                "    return [OAuthProvider(",
+                "        id='plugin_weather',",
+                "        display_name='Plugin Weather',",
+                "        authorization_url='https://auth.example.test/authorize',",
+                "        token_url='https://auth.example.test/token',",
+                "        scopes=('plugin.read',),",
+                "        credential_service='plugin_weather_oauth',",
+                "        client_config_services=('google_drive_oauth',),",
+                "        client_id_env='PLUGIN_CLIENT_ID',",
+                "        client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "    )]",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            **_config_payload(),
+            "plugins": [{"path": str(plugin_dir)}],
+        },
+    )
+
+    with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
+        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+
+
 def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -824,6 +866,31 @@ def test_google_provider_oauth_client_config_wins_over_shared_config(tmp_path: P
         client_id="drive-client-id",
         client_secret="drive-client-secret",
         redirect_uri="https://drive.example.test/callback",
+    )
+
+
+def test_google_shared_oauth_client_config_uses_provider_redirect_uri(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": "shared-client-id",
+            "client_secret": "shared-client-secret",
+            "redirect_uri": "https://wrong.example.test/api/oauth/google_drive/callback",
+            "_source": "ui",
+        },
+    )
+
+    client_config = google_calendar_oauth_provider().client_config(runtime_paths)
+
+    assert client_config == OAuthClientConfig(
+        client_id="shared-client-id",
+        client_secret="shared-client-secret",
+        redirect_uri="https://mindroom.example.test/api/oauth/google_calendar/callback",
     )
 
 

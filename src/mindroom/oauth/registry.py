@@ -121,6 +121,7 @@ def _provider_registry(providers: Iterable[OAuthProvider]) -> dict[str, OAuthPro
         provider_services = [
             ("credential_service", provider.credential_service),
             ("tool_config_service", provider.tool_config_service),
+            *[("client_config_service", service) for service in provider.all_client_config_services],
         ]
         for role, service_name in provider_services:
             if service_name is None:
@@ -130,6 +131,8 @@ def _provider_registry(providers: Iterable[OAuthProvider]) -> dict[str, OAuthPro
                 service_owners[service_name] = (provider.id, role)
                 continue
             owner_provider_id, owner_role = owner
+            if owner_role == "client_config_service" and role == "client_config_service":
+                continue
             duplicate_services.append(
                 f"{service_name} ({owner_provider_id}.{owner_role}, {provider.id}.{role})",
             )

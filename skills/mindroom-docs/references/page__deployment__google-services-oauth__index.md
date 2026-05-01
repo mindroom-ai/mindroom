@@ -49,8 +49,12 @@ Store these fields on the client config service:
 ```
 
 `redirect_uri` is optional when `MINDROOM_PUBLIC_URL` or the local default origin is correct.
+Only provider-specific client config services use stored `redirect_uri`.
+The shared `google_oauth_client` service ignores `redirect_uri` and derives each provider's callback URI.
 Dashboard credential responses redact `client_secret`.
+Saving redacted client config preserves the existing `client_secret` when the field is omitted.
 Client config services are not worker-grantable and are never mirrored into worker containers.
+Client config services cannot be copied into ordinary credential services.
 
 ## Environment Variables
 

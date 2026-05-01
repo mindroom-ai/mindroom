@@ -143,7 +143,7 @@ class OAuthCredentialServices:
         for provider in self.providers.values():
             token_service = provider.credential_service == service
             tool_config_service = provider.tool_config_service == service
-            client_config_service = service in provider.client_config_services
+            client_config_service = service in provider.all_client_config_services
             if token_service or tool_config_service or client_config_service:
                 return OAuthCredentialServiceMatch(
                     provider=provider,
@@ -530,6 +530,8 @@ def resolve_request_credentials_target(
 
 def load_credentials_for_target(service: str, target: RequestCredentialsTarget) -> dict[str, Any] | None:
     """Load credentials for the resolved target, including scoped overlays when needed."""
+    if _service_uses_primary_runtime_global_store(service, target):
+        return target.base_manager.load_credentials(service)
     if target.worker_scope is None:
         return target.target_manager.load_credentials(service)
     if _service_uses_primary_runtime_store(service, target):
@@ -557,7 +559,15 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
 
 def _service_uses_primary_runtime_store(service: str, target: RequestCredentialsTarget) -> bool:
     policy = credential_service_policy(service, target.worker_scope)
-    return policy.uses_primary_runtime_scoped_credentials or policy.uses_local_shared_credentials
+    return (
+        policy.uses_primary_runtime_global_credentials
+        or policy.uses_primary_runtime_scoped_credentials
+        or policy.uses_local_shared_credentials
+    )
+
+
+def _service_uses_primary_runtime_global_store(service: str, target: RequestCredentialsTarget) -> bool:
+    return credential_service_policy(service, target.worker_scope).uses_primary_runtime_global_credentials
 
 
 def _worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:
@@ -571,6 +581,9 @@ def _worker_target_for_credentials_target(target: RequestCredentialsTarget) -> R
 
 
 def _save_credentials_for_target(service: str, credentials: dict[str, Any], target: RequestCredentialsTarget) -> None:
+    if _service_uses_primary_runtime_global_store(service, target):
+        target.base_manager.save_credentials(service, credentials)
+        return
     if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
         target.target_manager.save_credentials(service, credentials)
         return
@@ -600,6 +613,9 @@ def _primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget
 
 
 def _delete_credentials_for_target(service: str, target: RequestCredentialsTarget) -> None:
+    if _service_uses_primary_runtime_global_store(service, target):
+        target.base_manager.delete_credentials(service)
+        return
     if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
         target.target_manager.delete_credentials(service)
         return
@@ -676,6 +692,15 @@ def _reject_oauth_api_key_field(
         status_code=400,
         detail=f"OAuth field '{key_name}' must be managed through the OAuth connect flow.",
     )
+
+
+def _reject_oauth_client_config_copy(
+    source_match: OAuthCredentialServiceMatch | None,
+    destination_match: OAuthCredentialServiceMatch | None,
+) -> None:
+    if not _is_oauth_client_config_match(source_match) and not _is_oauth_client_config_match(destination_match):
+        return
+    raise HTTPException(status_code=400, detail="OAuth client config credentials cannot be copied.")
 
 
 def _dashboard_credentials_for_save(
@@ -758,13 +783,17 @@ class DashboardCredentialAccess:
 
     def credentials_for_save(self, service: str, config_values: dict[str, Any]) -> dict[str, Any]:
         """Return user-submitted credentials normalized for storage."""
-        return _dashboard_credentials_for_save(
+        match = self.match(service)
+        credentials = _dashboard_credentials_for_save(
             config_values,
-            strip_oauth_fields=(
-                _dashboard_may_edit_oauth_match(self.match(service))
-                and not _is_oauth_client_config_match(self.match(service))
-            ),
+            strip_oauth_fields=_dashboard_may_edit_oauth_match(match) and not _is_oauth_client_config_match(match),
         )
+        if _is_oauth_client_config_match(match) and "client_secret" not in credentials:
+            existing_credentials = load_credentials_for_target(service, self.target) or {}
+            existing_secret = existing_credentials.get("client_secret")
+            if isinstance(existing_secret, str):
+                credentials["client_secret"] = existing_secret
+        return credentials
 
     def list_services(self) -> list[str]:
         """List dashboard-visible services for the resolved target."""
@@ -995,8 +1024,11 @@ async def copy_credentials(
     """Copy credentials from one service to another."""
     service = _validated_service(service)
     source_service = _validated_service(source_service)
-    _reject_oauth_token_service(_oauth_service_match(request, service))
-    _reject_oauth_token_service(_oauth_service_match(request, source_service))
+    destination_match = _oauth_service_match(request, service)
+    source_match = _oauth_service_match(request, source_service)
+    _reject_oauth_token_service(destination_match)
+    _reject_oauth_token_service(source_match)
+    _reject_oauth_client_config_copy(source_match, destination_match)
     target = resolve_request_credentials_target(
         request,
         agent_name=agent_name,

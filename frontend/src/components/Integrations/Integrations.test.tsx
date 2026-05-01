@@ -472,6 +472,32 @@ describe("Integrations", () => {
     });
   });
 
+  it("opens OAuth client config dialog when client config is missing", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: false,
+      oauth_client_config_service: "google_drive_oauth_client",
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Configure client" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Configure client" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+      expect(
+        screen.getByText("Service: google_drive_oauth_client"),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("should filter integrations by search term", async () => {
     render(<Integrations />);
 

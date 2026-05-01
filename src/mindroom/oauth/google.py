@@ -120,7 +120,11 @@ def _google_redirect_env_names(provider_id: str) -> tuple[str, ...]:
 
 
 def _google_client_config_services(provider_id: str) -> tuple[str, ...]:
-    return (f"{provider_id}_oauth_client", "google_oauth_client")
+    return (f"{provider_id}_oauth_client",)
+
+
+def _google_shared_client_config_services() -> tuple[str, ...]:
+    return ("google_oauth_client",)
 
 
 def _google_domain_env_names(provider_id: str, suffix: str) -> tuple[str, ...]:

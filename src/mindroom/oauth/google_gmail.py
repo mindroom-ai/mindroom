@@ -8,6 +8,7 @@ from mindroom.oauth.google import (
     _google_domain_env_names,
     _google_provider_env_names,
     _google_redirect_env_names,
+    _google_shared_client_config_services,
     _google_token_parser,
 )
 from mindroom.oauth.providers import OAuthProvider
@@ -32,6 +33,7 @@ def google_gmail_oauth_provider() -> OAuthProvider:
         credential_service="google_gmail_oauth",
         tool_config_service="gmail",
         client_config_services=_google_client_config_services("google_gmail"),
+        shared_client_config_services=_google_shared_client_config_services(),
         client_id_env=client_id_env,
         client_secret_env=client_secret_env,
         redirect_uri_env=_google_redirect_env_names("google_gmail"),

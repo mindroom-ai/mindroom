@@ -50,6 +50,8 @@ For a single personal OAuth client, store shared Google OAuth app client config 
 
 For provider-specific client config, use `google_drive_oauth_client`, `google_calendar_oauth_client`, `google_sheets_oauth_client`, or `google_gmail_oauth_client`.
 Provider-specific client config wins over the shared `google_oauth_client` service.
+The shared `google_oauth_client` service supplies only the shared client ID and secret.
+MindRoom derives each provider's redirect URI from `MINDROOM_PUBLIC_URL` or the local default origin.
 MindRoom stores OAuth app client config separately from user OAuth tokens and never mirrors it into worker containers.
 
 Environment variables remain available as bootstrap and fallback.

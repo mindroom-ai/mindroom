@@ -64,6 +64,7 @@ class OAuthStatusResponse(BaseModel):
     display_name: str
     credential_service: str
     tool_config_service: str | None = None
+    client_config_service: str | None = None
     connected: bool
     has_client_config: bool
     has_service_account_config: bool = False
@@ -434,6 +435,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         display_name=provider.display_name,
         credential_service=provider.credential_service,
         tool_config_service=provider.tool_config_service,
+        client_config_service=provider.client_config_services[0] if provider.client_config_services else None,
         connected=connected,
         has_client_config=has_client_config,
         has_service_account_config=has_service_account_config,

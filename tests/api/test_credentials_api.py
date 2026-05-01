@@ -432,6 +432,105 @@ class TestCredentialsAPI:
         assert status_response.status_code == 200
         assert set(status_response.json()["key_names"]) == {"client_id", "redirect_uri"}
 
+    def test_oauth_client_config_save_preserves_existing_secret_when_omitted(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Editing redacted OAuth client config should not delete the existing secret."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "google_drive_oauth_client",
+            {
+                "client_id": "stored-client-id",
+                "client_secret": "stored-client-secret",
+                "redirect_uri": "https://old.example.test/callback",
+                "_source": "ui",
+            },
+        )
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "redirect_uri": "https://new.example.test/callback",
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert manager.load_credentials("google_drive_oauth_client") == {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "redirect_uri": "https://new.example.test/callback",
+            "_source": "ui",
+        }
+
+    def test_oauth_client_config_service_rejects_copy_to_regular_service(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth client secrets should not be copied into non-redacted services."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "google_drive_oauth_client",
+            {
+                "client_id": "stored-client-id",
+                "client_secret": "stored-client-secret",
+                "_source": "ui",
+            },
+        )
+
+        response = client.post("/api/credentials/copied_service/copy-from/google_drive_oauth_client")
+
+        assert response.status_code == 400
+        assert "OAuth client config credentials cannot be copied" in response.json()["detail"]
+        assert manager.load_credentials("copied_service") is None
+
+    def test_oauth_client_config_agent_save_uses_primary_runtime_store(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth client config is deployment config even when edited from an agent-scoped view."""
+        runtime_paths = _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("shared")
+        _publish_committed_runtime_config(client.app, config)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        worker_key = resolve_worker_key(
+            "shared",
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="general",
+                requester_id="@alice:example.org",
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
+            agent_name="general",
+        )
+        assert worker_key is not None
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client?agent_name=general",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "client_secret": "stored-client-secret",
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert manager.load_credentials("google_drive_oauth_client") == {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        }
+        assert manager.for_worker(worker_key).load_credentials("google_drive_oauth_client") is None
+
     def test_orphaned_oauth_credentials_reject_generic_routes(
         self,
         client: TestClient,

@@ -26,6 +26,7 @@ type OAuthStatus = {
   connected: boolean;
   hasClientConfig: boolean;
   hasServiceAccountConfig: boolean;
+  clientConfigService?: string;
   toolConfigService?: string;
   statusError?: string;
 };
@@ -91,6 +92,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
           : "not_connected",
       connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
+      oauth_client_config_service: status.clientConfigService,
       oauth_service_account_configured: status.hasServiceAccountConfig,
       config_service: status.toolConfigService,
     };
@@ -183,6 +185,10 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         connected: data.connected === true,
         hasClientConfig: data.has_client_config === true,
         hasServiceAccountConfig: data.has_service_account_config === true,
+        clientConfigService:
+          typeof data.client_config_service === "string"
+            ? data.client_config_service
+            : undefined,
         toolConfigService:
           typeof data.tool_config_service === "string"
             ? data.tool_config_service

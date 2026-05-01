@@ -29,6 +29,16 @@ OAUTH_CREDENTIAL_FIELDS = frozenset(
     },
 )
 
+OAUTH_CLIENT_CONFIG_CREDENTIAL_SERVICES = frozenset(
+    {
+        "google_oauth_client",
+        "google_calendar_oauth_client",
+        "google_drive_oauth_client",
+        "google_gmail_oauth_client",
+        "google_sheets_oauth_client",
+    },
+)
+
 LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
         "google_calendar",
@@ -47,16 +57,12 @@ LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
 UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
         "google_vertex_adc",
-        "google_oauth_client",
-        "google_calendar_oauth_client",
         "google_calendar_oauth",
-        "google_drive_oauth_client",
         "google_drive_oauth",
-        "google_gmail_oauth_client",
         "google_gmail_oauth",
-        "google_sheets_oauth_client",
         "google_sheets_oauth",
-    },
+    }
+    | OAUTH_CLIENT_CONFIG_CREDENTIAL_SERVICES,
 )
 
 
@@ -68,6 +74,7 @@ class CredentialServicePolicy:
     worker_scope: WorkerScope | None
     is_local_only_shared_service: bool
     uses_local_shared_credentials: bool
+    uses_primary_runtime_global_credentials: bool
     uses_primary_runtime_scoped_credentials: bool
     worker_grantable_supported: bool
 
@@ -75,12 +82,16 @@ class CredentialServicePolicy:
 def credential_service_policy(service: str, worker_scope: WorkerScope | None) -> CredentialServicePolicy:
     """Return credential placement policy for one service in one worker scope."""
     is_local_only = service in LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
+    is_primary_runtime_global = service in OAUTH_CLIENT_CONFIG_CREDENTIAL_SERVICES
     return CredentialServicePolicy(
         service=service,
         worker_scope=worker_scope,
         is_local_only_shared_service=is_local_only,
         uses_local_shared_credentials=worker_scope == "shared" and is_local_only,
-        uses_primary_runtime_scoped_credentials=worker_scope in {"user", "user_agent"} and is_local_only,
+        uses_primary_runtime_global_credentials=is_primary_runtime_global,
+        uses_primary_runtime_scoped_credentials=(
+            worker_scope in {"user", "user_agent"} and is_local_only and not is_primary_runtime_global
+        ),
         worker_grantable_supported=service not in UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     )
 

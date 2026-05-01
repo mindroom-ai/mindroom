@@ -158,6 +158,7 @@ export function Integrations() {
     helperText?: string | null;
     icon?: any;
     iconColor?: string;
+    useSelectedScope?: boolean;
   } | null>(null);
   const [filterMode, setFilterMode] = useState<
     "all" | "available" | "unconfigured" | "configured"
@@ -390,6 +391,50 @@ export function Integrations() {
     return true;
   };
 
+  const openOAuthClientConfigDialog = (integration: Integration) => {
+    if (!integration.oauth_client_config_service) {
+      return false;
+    }
+    setConfigDialog({
+      service: integration.oauth_client_config_service,
+      displayName: `${integration.name} OAuth Client`,
+      description: `Configure the OAuth app client used to connect ${integration.name}.`,
+      configFields: [
+        {
+          name: "client_id",
+          label: "Client ID",
+          type: "text",
+          required: true,
+          placeholder: "your-client-id.apps.googleusercontent.com",
+          description: "OAuth app client ID",
+        },
+        {
+          name: "client_secret",
+          label: "Client Secret",
+          type: "password",
+          required: false,
+          placeholder: "Leave blank to keep the saved secret",
+          description: "OAuth app client secret",
+        },
+        {
+          name: "redirect_uri",
+          label: "Redirect URI",
+          type: "text",
+          required: false,
+          placeholder: `${window.location.origin}/api/oauth/${integration.oauth_provider_id ?? integration.id}/callback`,
+          description: "Optional provider-specific redirect URI",
+        },
+      ],
+      isEditing: integration.oauth_client_configured === true,
+      docsUrl: integration.docs_url || null,
+      helperText: null,
+      icon: null,
+      iconColor: integration.icon_color || integration.iconColor || undefined,
+      useSelectedScope: false,
+    });
+    return true;
+  };
+
   const handleIntegrationAction = async (integration: Integration) => {
     if (blocksScopedDashboardCredentials(integration)) {
       toast({
@@ -420,6 +465,13 @@ export function Integrations() {
       if (
         integration.status === "connected" &&
         openToolConfigDialog(integration)
+      ) {
+        return;
+      }
+
+      if (
+        integration.oauth_client_configured === false &&
+        openOAuthClientConfigDialog(integration)
       ) {
         return;
       }
@@ -708,8 +760,13 @@ export function Integrations() {
       integration.oauth_service_account_configured !== true
     ) {
       return (
-        <Button disabled variant="outline" size="sm">
-          Needs client config
+        <Button
+          onClick={() => handleIntegrationAction(integration)}
+          disabled={loading || !integration.oauth_client_config_service}
+          variant="outline"
+          size="sm"
+        >
+          Configure client
         </Button>
       );
     }
@@ -1114,8 +1171,16 @@ export function Integrations() {
           helperText={configDialog.helperText}
           icon={configDialog.icon}
           iconColor={configDialog.iconColor}
-          agentName={effectiveScopeAgentName}
-          executionScope={selectedExecutionScope}
+          agentName={
+            configDialog.useSelectedScope === false
+              ? null
+              : effectiveScopeAgentName
+          }
+          executionScope={
+            configDialog.useSelectedScope === false
+              ? null
+              : selectedExecutionScope
+          }
           onSuccess={async () => {
             setConfigDialog(null);
             // Refetch tools to get updated status

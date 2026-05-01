@@ -231,6 +231,7 @@ class OAuthProvider:
     credential_service: str
     tool_config_service: str | None = None
     client_config_services: tuple[str, ...] = ()
+    shared_client_config_services: tuple[str, ...] = ()
     client_id_env: str | Sequence[str] | None = None
     client_secret_env: str | Sequence[str] | None = None
     redirect_uri_env: str | Sequence[str] | None = None
@@ -251,7 +252,7 @@ class OAuthProvider:
         validate_service_name(self.credential_service)
         if self.tool_config_service is not None:
             validate_service_name(self.tool_config_service)
-        for service in self.client_config_services:
+        for service in self.all_client_config_services:
             validate_service_name(service)
         if not self.scopes:
             msg = f"OAuth provider '{self.id}' must declare at least one scope"
@@ -260,6 +261,11 @@ class OAuthProvider:
         if not redirect_path.startswith("/"):
             msg = f"OAuth provider '{self.id}' default_redirect_path must start with '/'"
             raise ValueError(msg)
+
+    @property
+    def all_client_config_services(self) -> tuple[str, ...]:
+        """Return provider-specific then shared OAuth client config services."""
+        return (*self.client_config_services, *self.shared_client_config_services)
 
     @property
     def redirect_path(self) -> str:
@@ -310,24 +316,38 @@ class OAuthProvider:
         """Return stored OAuth app client settings before falling back to env."""
         manager = get_runtime_credentials_manager(runtime_paths)
         for service in self.client_config_services:
-            credentials = manager.load_credentials(service)
-            if not credentials:
-                continue
-            client_id = credentials.get("client_id")
-            client_secret = credentials.get("client_secret")
-            if not isinstance(client_id, str) or not client_id.strip():
-                continue
-            if not isinstance(client_secret, str) or not client_secret.strip():
-                continue
-            redirect_uri = credentials.get("redirect_uri")
-            return OAuthClientConfig(
-                client_id=client_id.strip(),
-                client_secret=client_secret.strip(),
-                redirect_uri=redirect_uri.strip()
-                if isinstance(redirect_uri, str) and redirect_uri.strip()
-                else self.default_redirect_uri(runtime_paths),
-            )
+            config = self._stored_client_config_from_service(runtime_paths, manager.load_credentials(service), True)
+            if config is not None:
+                return config
+        for service in self.shared_client_config_services:
+            config = self._stored_client_config_from_service(runtime_paths, manager.load_credentials(service), False)
+            if config is not None:
+                return config
         return None
+
+    def _stored_client_config_from_service(
+        self,
+        runtime_paths: RuntimePaths,
+        credentials: Mapping[str, Any] | None,
+        use_stored_redirect_uri: bool,
+    ) -> OAuthClientConfig | None:
+        """Return stored OAuth app client settings from one credential document."""
+        if not credentials:
+            return None
+        client_id = credentials.get("client_id")
+        client_secret = credentials.get("client_secret")
+        if not isinstance(client_id, str) or not client_id.strip():
+            return None
+        if not isinstance(client_secret, str) or not client_secret.strip():
+            return None
+        redirect_uri = credentials.get("redirect_uri") if use_stored_redirect_uri else None
+        return OAuthClientConfig(
+            client_id=client_id.strip(),
+            client_secret=client_secret.strip(),
+            redirect_uri=redirect_uri.strip()
+            if isinstance(redirect_uri, str) and redirect_uri.strip()
+            else self.default_redirect_uri(runtime_paths),
+        )
 
     def require_client_config(self, runtime_paths: RuntimePaths) -> OAuthClientConfig:
         """Return client settings or raise one safe user-facing configuration error."""
