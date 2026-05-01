@@ -45,11 +45,12 @@ class GoogleDriveTools(ScopedOAuthClientMixin, AgnoGoogleDriveTools):
                 kwargs["max_read_size"] = max_read_size
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
+        defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
             provided_creds=provided_creds,
             logger=logger,
-            defer_to_original_auth=self._has_initial_service_account_auth(kwargs),
+            defer_to_original_auth=defer_to_original_auth,
         )
         super().__init__(creds=creds, **kwargs)
         self._set_original_auth(AgnoGoogleDriveTools._auth)

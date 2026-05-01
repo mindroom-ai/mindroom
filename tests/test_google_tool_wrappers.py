@@ -179,6 +179,42 @@ def test_google_wrapper_skips_stored_oauth_when_service_account_env_is_configure
     assert tool.creds is None
 
 
+def test_google_wrapper_applies_env_file_service_account_to_upstream_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Service-account values from RuntimePaths must be visible to Agno auth."""
+    service_account_path = tmp_path / "service-account.json"
+    runtime_paths = replace(
+        runtime_paths,
+        env_file_values={
+            **runtime_paths.env_file_values,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": str(service_account_path),
+            "GOOGLE_DELEGATED_USER": "alice@example.com",
+        },
+    )
+
+    def fail_load_stored_credentials(_self: ScopedOAuthClientMixin) -> None:
+        raise AssertionError
+
+    monkeypatch.setattr(
+        ScopedOAuthClientMixin,
+        "_load_stored_credentials",
+        fail_load_stored_credentials,
+    )
+
+    tool = GmailTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+    )
+
+    assert tool.creds is None
+    assert tool.service_account_path == str(service_account_path)
+    assert tool.delegated_user == "alice@example.com"
+    assert tool._should_fallback_to_original_auth() is True
+
+
 def test_google_wrapper_service_account_fallback_wins_over_valid_cached_oauth(
     runtime_paths: RuntimePaths,
     tmp_path: Path,

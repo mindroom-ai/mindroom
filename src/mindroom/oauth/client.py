@@ -64,9 +64,17 @@ class ScopedOAuthClientMixin:
     _original_auth: Callable[[], None]
     creds: Any | None
 
-    def _has_initial_service_account_auth(self, kwargs: dict[str, Any]) -> bool:
-        """Return whether construction should skip stored OAuth credentials."""
-        return bool(kwargs.get("service_account_path") or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
+    def _apply_runtime_original_auth_kwargs(self, kwargs: dict[str, Any]) -> bool:
+        """Populate upstream Google auth kwargs from the resolved runtime env."""
+        if not kwargs.get("service_account_path"):
+            service_account_path = self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE")
+            if service_account_path:
+                kwargs["service_account_path"] = service_account_path
+        if not kwargs.get("delegated_user"):
+            delegated_user = self._runtime_paths.env_value("GOOGLE_DELEGATED_USER")
+            if delegated_user:
+                kwargs["delegated_user"] = delegated_user
+        return bool(kwargs.get("service_account_path"))
 
     def _initialize_oauth_client(
         self,
