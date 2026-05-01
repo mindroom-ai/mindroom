@@ -17,6 +17,9 @@ from mindroom.matrix.identity import (
     _ThreadStateKey,
     extract_agent_name,
     is_agent_id,
+    parse_current_matrix_user_id,
+    parse_historical_matrix_user_id,
+    try_parse_historical_matrix_user_id,
 )
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import agent_username_localpart
@@ -53,6 +56,53 @@ class TestMatrixID:
         assert mid.domain == "localhost"
         assert mid.full_id == "@mindroom_calculator:localhost"
 
+    @pytest.mark.parametrize(
+        "matrix_id",
+        [
+            "@alice:example.org",
+            "@alice.foo_bar=bot-/+123:example.org:8448",
+            "@alice:1.2.3.4",
+            "@alice:[1234:5678::abcd]",
+            "@alice:[1234:5678::abcd]:5678",
+        ],
+    )
+    def test_parse_valid_matrix_user_id_grammar(self, matrix_id: str) -> None:
+        """Current Matrix user IDs should parse when they match the spec grammar."""
+        assert MatrixID.parse(matrix_id).full_id == matrix_id
+        assert parse_current_matrix_user_id(matrix_id) == matrix_id
+
+    @pytest.mark.parametrize(
+        "matrix_id",
+        [
+            "@Alice:example.org",
+            "@a!b:example.org",
+            "@alice example:example.org",
+            "@alice\tbob:example.org",
+            "@alice\nbob:example.org",
+            "@álîçé:example.org",
+            "@:example.org",
+        ],
+    )
+    def test_parse_accepts_historical_matrix_user_ids(self, matrix_id: str) -> None:
+        """Matrix-originated historical user IDs should remain parseable."""
+        assert MatrixID.parse(matrix_id).full_id == matrix_id
+
+    @pytest.mark.parametrize(
+        "matrix_id",
+        [
+            "@Alice:example.org",
+            "@a!b:example.org",
+            "@alice example:example.org",
+            "@alice\tbob:example.org",
+            "@alice\nbob:example.org",
+            "@álîçé:example.org",
+            "@:example.org",
+        ],
+    )
+    def test_historical_matrix_user_id_accepts_historical_localparts(self, matrix_id: str) -> None:
+        """Identity binding should accept historical Matrix localparts."""
+        assert parse_historical_matrix_user_id(matrix_id) == matrix_id
+
     def test_parse_invalid_matrix_id(self) -> None:
         """Test parsing invalid Matrix IDs."""
         with pytest.raises(ValueError, match="Invalid Matrix ID"):
@@ -60,6 +110,63 @@ class TestMatrixID:
 
         with pytest.raises(ValueError, match="Invalid Matrix ID, missing domain"):
             MatrixID.parse("@nodomainpart")
+
+        with pytest.raises(ValueError, match="Invalid Matrix ID localpart"):
+            MatrixID.parse("@alice\x00:example.org")
+
+    @pytest.mark.parametrize(
+        "matrix_id",
+        [
+            "@:example.org",
+            "@Alice:example.org",
+            "@alice example:example.org",
+            "@alice:example.org extra",
+            "@alice:",
+            "@alice:example.org:",
+            "@alice:example.org:123456",
+            "@alice:example.org.",
+            "@alice:example..org",
+            "@alice:.example.org",
+            "@alice:[1234:5678::abcd",
+            "@alice:[1234:5678::abcd]extra",
+            "@alice:[::::]",
+            "@alice:[fe80::1%eth0]",
+            "@alice:exa mple.org",
+            "@" + ("a" * 250) + ":example.org",
+        ],
+    )
+    def test_current_matrix_user_id_rejects_invalid_current_grammar(self, matrix_id: str) -> None:
+        """Malformed Matrix user IDs must fail before identity-sensitive code trusts them."""
+        with pytest.raises(ValueError, match="Invalid Matrix ID"):
+            parse_current_matrix_user_id(matrix_id)
+
+    @pytest.mark.parametrize(
+        "matrix_id",
+        [
+            "@alice:example.org extra",
+            "@alice:",
+            "@alice:example.org:",
+            "@alice:example.org:123456",
+            "@alice:example.org.",
+            "@alice:example..org",
+            "@alice:.example.org",
+            "@alice:[::::]",
+            "@alice:[fe80::1%eth0]",
+            "@" + ("a" * 250) + ":example.org",
+        ],
+    )
+    def test_historical_matrix_user_id_rejects_invalid_server_or_shape(self, matrix_id: str) -> None:
+        """Historical localparts do not loosen server-name or length checks."""
+        with pytest.raises(ValueError, match="Invalid Matrix ID"):
+            parse_historical_matrix_user_id(matrix_id)
+
+    def test_historical_matrix_user_id_rejects_surrogate_localpart(self) -> None:
+        """Historical localparts still reject surrogate code points."""
+        matrix_id = "@alice\ud800:example.org"
+        with pytest.raises(ValueError, match="Invalid Matrix ID localpart"):
+            parse_historical_matrix_user_id(matrix_id)
+
+        assert try_parse_historical_matrix_user_id(matrix_id) is None
 
     def test_from_agent(self, tmp_path: Path) -> None:
         """Test creating MatrixID from agent name."""

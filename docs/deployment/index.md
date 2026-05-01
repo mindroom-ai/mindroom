@@ -14,6 +14,7 @@ MindRoom can be deployed in various ways depending on your needs.
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
 | [Docker (single container)](docker.md) | Single MindRoom runtime or when you already have Matrix |
 | [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
+| [Trusted upstream browser auth](trusted-upstream-auth.md) | Hosted private agents behind an authenticated access layer |
 | Direct | Development, simple setups |
 
 ## Bridges
@@ -31,6 +32,7 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 - [Google Services OAuth (Individual Setup)](google-services-user-oauth.md) - single-user bring-your-own OAuth app setup
 
 For private personal-agent tools, use the generic [OAuth Framework](../oauth-framework.md) and the Google Drive section in the individual setup guide.
+For hosted multi-user private agents, also configure [Trusted Upstream Browser Auth](trusted-upstream-auth.md) so agent-issued OAuth links authenticate as the requester that triggered them.
 
 ## Quick Start
 

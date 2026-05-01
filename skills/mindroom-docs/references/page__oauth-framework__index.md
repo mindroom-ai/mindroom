@@ -9,6 +9,12 @@ Dashboard OAuth state is opaque, time-limited, single-use, and bound to the auth
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
 That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal.
+`MINDROOM_OWNER_USER_ID` is a single-owner shortcut and is not suitable for a hosted multi-user private-agent deployment.
+Hosted deployments that put MindRoom behind an external access layer should enable trusted upstream auth and configure the exact headers MindRoom may trust.
+When trusted upstream auth is enabled, MindRoom reads the configured stable user ID and optional email headers into `request.scope["auth_user"]`.
+For Matrix-backed private agents, the trusted identity must include a configured Matrix user ID header.
+If a browser request cannot map to the requester stored in the conversation connect token, the OAuth authorize or callback path fails closed and no credential is saved.
+The access layer must strip any client-supplied copies of the trusted headers before injecting verified values.
 
 Plugins may declare an `oauth_module` in `mindroom.plugin.json`.
 That module exposes `register_oauth_providers(settings, runtime_paths)` and returns `OAuthProvider` objects.

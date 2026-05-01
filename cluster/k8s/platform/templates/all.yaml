@@ -12,6 +12,7 @@ metadata:
   name: platform-config
   namespace: mindroom-{{ .Values.environment }}
 {{ $prov := .Values.provisioner | default (dict) }}
+{{ $trustedUpstreamAuth := $prov.trustedUpstreamAuth | default (dict) }}
 data:
   PLATFORM_DOMAIN: {{ .Values.domain }}
   ENVIRONMENT: {{ .Values.environment }}
@@ -22,6 +23,10 @@ data:
   INSTANCE_MINDROOM_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceMindroomImagePullPolicy | default "" | quote }}
   INSTANCE_SYNAPSE_IMAGE: {{ .Values.provisioner.instanceSynapseImage | default "" | quote }}
   INSTANCE_SYNAPSE_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceSynapseImagePullPolicy | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED: {{ $trustedUpstreamAuth.enabled | default "false" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER: {{ $trustedUpstreamAuth.userIdHeader | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER: {{ $trustedUpstreamAuth.emailHeader | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER: {{ $trustedUpstreamAuth.matrixUserIdHeader | default "" | quote }}
   DO_NOT_TRACK: "1"
   NEXT_TELEMETRY_DISABLED: "1"
   TURBO_TELEMETRY_DISABLED: "1"

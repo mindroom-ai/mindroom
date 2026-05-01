@@ -4,13 +4,14 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method                                                                                         | Best For                                                           |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally                |
-| Full Stack (Docker Compose)                                                                    | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)             | Single MindRoom runtime or when you already have Matrix            |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                        | Multi-tenant SaaS, production                                      |
-| Direct                                                                                         | Development, simple setups                                         |
+| Method                                                                                                | Best For                                                           |
+| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/index.md)        | Simplest setup: run only `uvx mindroom run` locally                |
+| Full Stack (Docker Compose)                                                                           | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)                    | Single MindRoom runtime or when you already have Matrix            |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                               | Multi-tenant SaaS, production                                      |
+| [Trusted upstream browser auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/index.md) | Hosted private agents behind an authenticated access layer         |
+| Direct                                                                                                | Development, simple setups                                         |
 
 ## Bridges
 
@@ -26,7 +27,7 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 - [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md) - one-time setup for shared/team deployments
 - [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md) - single-user bring-your-own OAuth app setup
 
-For private personal-agent tools, use the generic [OAuth Framework](https://docs.mindroom.chat/oauth-framework/index.md) and the Google Drive section in the individual setup guide.
+For private personal-agent tools, use the generic [OAuth Framework](https://docs.mindroom.chat/oauth-framework/index.md) and the Google Drive section in the individual setup guide. For hosted multi-user private agents, also configure [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/index.md) so agent-issued OAuth links authenticate as the requester that triggered them.
 
 ## Quick Start
 

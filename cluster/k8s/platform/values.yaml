@@ -33,6 +33,11 @@ provisioner:
   instanceMindroomImagePullPolicy: ""
   instanceSynapseImage: ""
   instanceSynapseImagePullPolicy: ""
+  trustedUpstreamAuth:
+    enabled: "false"
+    userIdHeader: ""
+    emailHeader: ""
+    matrixUserIdHeader: ""
 
 # Optional AI API keys
 apiKeys:

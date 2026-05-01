@@ -6,8 +6,14 @@
 {{- $workerImagePullPolicy := .Values.kubernetesWorkerImagePullPolicy | default .Values.mindroom_image_pull_policy | default "Always" -}}
 {{- $storageAccessMode := .Values.storageAccessMode | default "ReadWriteOnce" -}}
 {{- $controlPlaneNodeName := .Values.controlPlaneNodeName | default "" -}}
+{{- $trustedUpstreamAuth := .Values.trustedUpstreamAuth | default (dict) -}}
+{{- $trustedUpstreamAuthEnabledValue := lower (toString ($trustedUpstreamAuth.enabled | default false)) -}}
+{{- $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") -}}
 {{- if and (eq $workerBackend "kubernetes") (ne $storageAccessMode "ReadWriteMany") (eq $controlPlaneNodeName "") -}}
 {{- fail "workerBackend=kubernetes with shared storage requires either storageAccessMode=ReadWriteMany or controlPlaneNodeName to keep the control plane and workers on one node" -}}
+{{- end -}}
+{{- if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.userIdHeader | default "")) -}}
+{{- fail "trustedUpstreamAuth.userIdHeader is required when trustedUpstreamAuth.enabled=true" -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -113,6 +119,20 @@ spec:
           value: "/etc/secrets/supabase_service_key"
         - name: SUPABASE_ANON_KEY
           value: {{ .Values.supabaseAnonKey | quote }}
+        {{- if $trustedUpstreamAuthEnabled }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED
+          value: "true"
+        - name: MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER
+          value: {{ $trustedUpstreamAuth.userIdHeader | quote }}
+        {{- if $trustedUpstreamAuth.emailHeader }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER
+          value: {{ $trustedUpstreamAuth.emailHeader | quote }}
+        {{- end }}
+        {{- if $trustedUpstreamAuth.matrixUserIdHeader }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER
+          value: {{ $trustedUpstreamAuth.matrixUserIdHeader | quote }}
+        {{- end }}
+        {{- end }}
         - name: MINDROOM_PLATFORM_LOGIN_URL
           value: "https://app.{{ .Values.baseDomain }}/auth/login"
         - name: OPENROUTER_API_KEY_FILE

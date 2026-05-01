@@ -40,5 +40,11 @@ supabaseUrl: ""
 supabaseAnonKey: ""
 supabaseServiceKey: ""
 
+trustedUpstreamAuth:
+  enabled: "false"
+  userIdHeader: ""
+  emailHeader: ""
+  matrixUserIdHeader: ""
+
 # Matrix admin user (leave empty and set via --set or Secret)
 matrix_admin_password: ""

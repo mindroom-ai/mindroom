@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar
@@ -13,11 +15,18 @@ from mindroom.matrix.state import managed_account_usernames
 if TYPE_CHECKING:
     from mindroom.config.main import Config
 
+_CURRENT_USER_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/+-]+$")
+_SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
+_SERVER_IPV6_LITERAL_PATTERN = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
+
 __all__ = [
     "MatrixID",
     "active_internal_sender_ids",
     "extract_agent_name",
     "is_agent_id",
+    "parse_current_matrix_user_id",
+    "parse_historical_matrix_user_id",
+    "try_parse_historical_matrix_user_id",
 ]
 
 
@@ -107,7 +116,12 @@ class _ThreadStateKey:
 
 @lru_cache(maxsize=512)
 def _parse_matrix_id(matrix_id: str) -> MatrixID:
-    """Cached wrapper around MatrixID.parse for performance."""
+    """Cached structural Matrix user ID parser.
+
+    Matrix-originated event and member data can contain historical user IDs whose
+    localparts do not match the current creation grammar, so this parser stays
+    tolerant and leaves strict validation to explicit auth-boundary helpers.
+    """
     if not matrix_id.startswith("@"):
         msg = f"Invalid Matrix ID: {matrix_id}"
         raise ValueError(msg)
@@ -119,7 +133,112 @@ def _parse_matrix_id(matrix_id: str) -> MatrixID:
         msg = f"Invalid Matrix ID format: {matrix_id}"
         raise ValueError(msg)
 
-    return MatrixID(username=parts[0], domain=parts[1])
+    username, domain = parts
+    if "\x00" in username:
+        msg = f"Invalid Matrix ID localpart: {matrix_id}"
+        raise ValueError(msg)
+
+    return MatrixID(username=username, domain=domain)
+
+
+def parse_current_matrix_user_id(matrix_id: str) -> str:
+    """Return a canonical current-grammar Matrix user ID, or raise ValueError."""
+    parsed = MatrixID.parse(matrix_id)
+    if not _CURRENT_USER_LOCALPART_PATTERN.fullmatch(parsed.username):
+        msg = f"Invalid Matrix ID localpart: {matrix_id}"
+        raise ValueError(msg)
+    _validate_matrix_user_id_common(parsed, matrix_id)
+    return parsed.full_id
+
+
+def parse_historical_matrix_user_id(matrix_id: str) -> str:
+    """Return a canonical Matrix user ID while accepting historical localparts."""
+    parsed = MatrixID.parse(matrix_id)
+    _validate_matrix_user_id_common(parsed, matrix_id)
+    return parsed.full_id
+
+
+def try_parse_historical_matrix_user_id(value: str | None) -> str | None:
+    """Return a canonical Matrix user ID when a nullable value parses."""
+    if value is None:
+        return None
+    try:
+        return parse_historical_matrix_user_id(value)
+    except ValueError:
+        return None
+
+
+def _validate_matrix_user_id_common(parsed: MatrixID, matrix_id: str) -> None:
+    if _contains_surrogate(parsed.username):
+        msg = f"Invalid Matrix ID localpart: {matrix_id}"
+        raise ValueError(msg)
+    if not _valid_current_server_name(parsed.domain):
+        msg = f"Invalid Matrix ID server name: {matrix_id}"
+        raise ValueError(msg)
+    try:
+        encoded_matrix_id = matrix_id.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        msg = f"Invalid Matrix ID: {matrix_id}"
+        raise ValueError(msg) from exc
+    if len(encoded_matrix_id) > 255:
+        msg = f"Invalid Matrix ID length: {matrix_id}"
+        raise ValueError(msg)
+
+
+def _contains_surrogate(value: str) -> bool:
+    return any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+
+
+def _valid_current_server_name(server_name: str) -> bool:
+    """Return whether a value matches the Matrix server_name grammar."""
+    if not server_name:
+        return False
+
+    if server_name.startswith("["):
+        return _valid_bracketed_ipv6_server_name(server_name)
+
+    if ":" in server_name:
+        host, port = server_name.rsplit(":", 1)
+        return _valid_unbracketed_server_host(host) and _valid_port(port)
+
+    return _valid_unbracketed_server_host(server_name)
+
+
+def _valid_unbracketed_server_host(host: str) -> bool:
+    if not host or len(host) > 255:
+        return False
+    return all(_SERVER_DNS_LABEL_PATTERN.fullmatch(label) is not None for label in host.split("."))
+
+
+def _valid_bracketed_ipv6_server_name(server_name: str) -> bool:
+    host, port = _split_bracketed_server_name(server_name)
+    if host is None or not _valid_port(port):
+        return False
+    ipv6_literal = host[1:-1]
+    if _SERVER_IPV6_LITERAL_PATTERN.fullmatch(ipv6_literal) is None:
+        return False
+    try:
+        ipaddress.IPv6Address(ipv6_literal)
+    except ValueError:
+        return False
+    return True
+
+
+def _split_bracketed_server_name(server_name: str) -> tuple[str | None, str | None]:
+    closing_bracket_index = server_name.find("]")
+    if closing_bracket_index == -1:
+        return None, None
+    host = server_name[: closing_bracket_index + 1]
+    remainder = server_name[closing_bracket_index + 1 :]
+    if not remainder:
+        return host, None
+    if not remainder.startswith(":"):
+        return None, None
+    return host, remainder[1:]
+
+
+def _valid_port(port: str | None) -> bool:
+    return port is None or (1 <= len(port) <= 5 and port.isdecimal() and int(port) <= 65535)
 
 
 def is_agent_id(matrix_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
@@ -134,7 +253,10 @@ def extract_agent_name(sender_id: str, config: Config, runtime_paths: RuntimePat
     """
     if not sender_id.startswith("@") or ":" not in sender_id:
         return None
-    mid = MatrixID.parse(sender_id)
+    try:
+        mid = MatrixID.parse(sender_id)
+    except ValueError:
+        return None
     return mid.agent_name(config, runtime_paths)
 
 

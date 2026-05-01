@@ -56,6 +56,7 @@
 - [Telegram](https://docs.mindroom.chat/deployment/bridges/telegram/index.md)
 - [Google Services OAuth (Admin)](https://docs.mindroom.chat/deployment/google-services-oauth/index.md)
 - [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/index.md)
+- [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/index.md)
 - [Docker](https://docs.mindroom.chat/deployment/docker/index.md)
 - [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)
 - [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)

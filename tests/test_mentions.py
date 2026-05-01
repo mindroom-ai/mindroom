@@ -291,6 +291,23 @@ class TestMentionParsing:
             "@bas.nijholt:chat-mindroom.example.com</a> -- noted.</p>\n"
         )
 
+    def test_format_message_with_full_matrix_user_id_excludes_sentence_period(self) -> None:
+        """Sentence punctuation should not become part of a full Matrix ID mention."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Ping @alice:matrix.org.",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "Ping @alice:matrix.org."
+        assert content["m.mentions"]["user_ids"] == ["@alice:matrix.org"]
+        assert (
+            content["formatted_body"]
+            == '<p>Ping <a href="https://matrix.to/#/@alice:matrix.org">@alice:matrix.org</a>.</p>\n'
+        )
+
     def test_format_message_with_agent_and_full_matrix_user_id_preserves_both_mentions(self) -> None:
         """Agent mentions and explicit full Matrix user IDs should coexist cleanly."""
         config = _make_config(_default_runtime_paths())
