@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar
@@ -12,6 +13,10 @@ from mindroom.matrix.state import managed_account_usernames
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+
+_USER_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/+-]+$")
+_SERVER_HOSTNAME_PATTERN = re.compile(r"^[A-Za-z0-9.-]{1,255}$")
+_SERVER_IPV6_PATTERN = re.compile(r"^\[[0-9A-Fa-f:.]{2,45}\]$")
 
 __all__ = [
     "MatrixID",
@@ -119,7 +124,51 @@ def _parse_matrix_id(matrix_id: str) -> MatrixID:
         msg = f"Invalid Matrix ID format: {matrix_id}"
         raise ValueError(msg)
 
-    return MatrixID(username=parts[0], domain=parts[1])
+    username, domain = parts
+    if not _USER_LOCALPART_PATTERN.fullmatch(username):
+        msg = f"Invalid Matrix ID localpart: {matrix_id}"
+        raise ValueError(msg)
+    if not _valid_server_name(domain):
+        msg = f"Invalid Matrix ID server name: {matrix_id}"
+        raise ValueError(msg)
+    if len(matrix_id.encode("utf-8")) > 255:
+        msg = f"Invalid Matrix ID length: {matrix_id}"
+        raise ValueError(msg)
+
+    return MatrixID(username=username, domain=domain)
+
+
+def _valid_server_name(server_name: str) -> bool:
+    """Return whether a value matches the Matrix server_name grammar."""
+    if not server_name:
+        return False
+
+    if server_name.startswith("["):
+        host, port = _split_bracketed_server_name(server_name)
+        return host is not None and _SERVER_IPV6_PATTERN.fullmatch(host) is not None and _valid_port(port)
+
+    if ":" in server_name:
+        host, port = server_name.rsplit(":", 1)
+        return bool(host) and _SERVER_HOSTNAME_PATTERN.fullmatch(host) is not None and _valid_port(port)
+
+    return _SERVER_HOSTNAME_PATTERN.fullmatch(server_name) is not None
+
+
+def _split_bracketed_server_name(server_name: str) -> tuple[str | None, str | None]:
+    closing_bracket_index = server_name.find("]")
+    if closing_bracket_index == -1:
+        return None, None
+    host = server_name[: closing_bracket_index + 1]
+    remainder = server_name[closing_bracket_index + 1 :]
+    if not remainder:
+        return host, None
+    if not remainder.startswith(":"):
+        return None, None
+    return host, remainder[1:]
+
+
+def _valid_port(port: str | None) -> bool:
+    return port is None or (1 <= len(port) <= 5 and port.isdecimal() and int(port) <= 65535)
 
 
 def is_agent_id(matrix_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
@@ -134,7 +183,10 @@ def extract_agent_name(sender_id: str, config: Config, runtime_paths: RuntimePat
     """
     if not sender_id.startswith("@") or ":" not in sender_id:
         return None
-    mid = MatrixID.parse(sender_id)
+    try:
+        mid = MatrixID.parse(sender_id)
+    except ValueError:
+        return None
     return mid.agent_name(config, runtime_paths)
 
 

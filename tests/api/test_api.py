@@ -3888,6 +3888,39 @@ def test_trusted_upstream_auth_requires_configured_user_header(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
+    "matrix_user_id",
+    [
+        "@alice:example.org extra",
+        "@alice:",
+        "@:example.org",
+    ],
+)
+def test_trusted_upstream_auth_rejects_invalid_matrix_user_id(tmp_path: Path, matrix_user_id: str) -> None:
+    """Trusted upstream Matrix IDs must parse with the strict Matrix user ID grammar."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+        },
+    )
+    api_app = _trusted_auth_test_app(runtime_paths)
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                "X-Trusted-User": "alice",
+                "X-Trusted-Matrix-User": matrix_user_id,
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid trusted upstream Matrix user id"
+
+
+@pytest.mark.parametrize(
     "path",
     [
         "/api/homeassistant/callback?code=test-code&state=missing",

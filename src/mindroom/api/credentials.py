@@ -164,20 +164,11 @@ def _request_auth_user(request: Request) -> dict[str, Any] | None:
     return auth_user if isinstance(auth_user, dict) else None
 
 
-def _request_uses_trusted_upstream_auth(request: Request) -> bool:
-    auth_user = _request_auth_user(request)
-    return auth_user is not None and auth_user.get("auth_source") == "trusted_upstream"
-
-
-def _trusted_upstream_matrix_user_id_for_request(request: Request) -> str | None:
-    auth_user = _request_auth_user(request)
-    if auth_user is None or auth_user.get("auth_source") != "trusted_upstream":
-        return None
-    matrix_user_id = auth_user.get("matrix_user_id")
-    if not isinstance(matrix_user_id, str):
+def _parse_matrix_user_id(value: str | None) -> str | None:
+    if value is None:
         return None
     try:
-        return MatrixID.parse(matrix_user_id).full_id
+        return MatrixID.parse(value).full_id
     except ValueError:
         return None
 
@@ -192,15 +183,13 @@ def _require_auth_user_id(request: Request) -> str:
 
 def dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
     """Return the requester identity dashboard-scoped worker credentials should use."""
-    trusted_matrix_user_id = _trusted_upstream_matrix_user_id_for_request(request)
-    if trusted_matrix_user_id:
-        return trusted_matrix_user_id
-    if _request_uses_trusted_upstream_auth(request):
-        return None
+    auth_user = _request_auth_user(request) or {}
+    if auth_user.get("auth_source") == "trusted_upstream":
+        matrix_user_id = auth_user.get("matrix_user_id")
+        return _parse_matrix_user_id(matrix_user_id) if isinstance(matrix_user_id, str) else None
     owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
     if owner_user_id:
         return owner_user_id
-    auth_user = _request_auth_user(request) or {}
     user_id = auth_user.get("user_id")
     return user_id if isinstance(user_id, str) and user_id else None
 
@@ -211,13 +200,8 @@ def _reject_unbound_private_dashboard_requester(
 ) -> None:
     if execution_scope not in {"user", "user_agent"}:
         return
-    if execution_identity.requester_id is not None:
-        try:
-            MatrixID.parse(execution_identity.requester_id)
-        except ValueError:
-            pass
-        else:
-            return
+    if _parse_matrix_user_id(execution_identity.requester_id):
+        return
     raise HTTPException(
         status_code=400,
         detail=(

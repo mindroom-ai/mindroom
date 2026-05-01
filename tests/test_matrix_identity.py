@@ -53,6 +53,20 @@ class TestMatrixID:
         assert mid.domain == "localhost"
         assert mid.full_id == "@mindroom_calculator:localhost"
 
+    @pytest.mark.parametrize(
+        "matrix_id",
+        [
+            "@alice:example.org",
+            "@alice.foo_bar=bot-/+123:example.org:8448",
+            "@alice:1.2.3.4",
+            "@alice:[1234:5678::abcd]",
+            "@alice:[1234:5678::abcd]:5678",
+        ],
+    )
+    def test_parse_valid_matrix_user_id_grammar(self, matrix_id: str) -> None:
+        """Current Matrix user IDs should parse when they match the spec grammar."""
+        assert MatrixID.parse(matrix_id).full_id == matrix_id
+
     def test_parse_invalid_matrix_id(self) -> None:
         """Test parsing invalid Matrix IDs."""
         with pytest.raises(ValueError, match="Invalid Matrix ID"):
@@ -60,6 +74,27 @@ class TestMatrixID:
 
         with pytest.raises(ValueError, match="Invalid Matrix ID, missing domain"):
             MatrixID.parse("@nodomainpart")
+
+    @pytest.mark.parametrize(
+        "matrix_id",
+        [
+            "@:example.org",
+            "@Alice:example.org",
+            "@alice example:example.org",
+            "@alice:example.org extra",
+            "@alice:",
+            "@alice:example.org:",
+            "@alice:example.org:123456",
+            "@alice:[1234:5678::abcd",
+            "@alice:[1234:5678::abcd]extra",
+            "@alice:exa mple.org",
+            "@" + ("a" * 250) + ":example.org",
+        ],
+    )
+    def test_parse_rejects_invalid_matrix_user_id_grammar(self, matrix_id: str) -> None:
+        """Malformed Matrix user IDs must fail before identity-sensitive code trusts them."""
+        with pytest.raises(ValueError, match="Invalid Matrix ID"):
+            MatrixID.parse(matrix_id)
 
     def test_from_agent(self, tmp_path: Path) -> None:
         """Test creating MatrixID from agent name."""

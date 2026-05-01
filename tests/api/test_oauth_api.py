@@ -1327,6 +1327,42 @@ def test_agent_connect_token_rejects_missing_trusted_upstream_identity(tmp_path:
     assert "trusted upstream identity header" in authorize_response.json()["detail"]
 
 
+def test_agent_connect_token_rejects_trusted_upstream_identity_without_matrix_mapping(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        _trusted_upstream_oauth_env() | {"MINDROOM_OWNER_USER_ID": "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                headers=_trusted_upstream_headers(matrix_user_id=""),
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 403
+    assert "current user" in authorize_response.json()["detail"]
+
+
 def test_agent_connect_token_callback_rejects_missing_trusted_upstream_identity(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
