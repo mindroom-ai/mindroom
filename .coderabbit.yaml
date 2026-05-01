@@ -1,0 +1,95 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+early_access: false
+enable_free_tier: true
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  review_details: true
+  poem: false
+  path_filters:
+    - "**/*"
+    - "!mindroom_data/**"
+    - "!tests/mindroom_data/**"
+    - "!.venv/**"
+    - "!**/node_modules/**"
+    - "!**/.next/**"
+    - "!frontend/dist/**"
+    - "!**/coverage/**"
+    - "!**/htmlcov/**"
+    - "!skills/mindroom-docs/references/llms-full.txt"
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        Review as a pragmatic blocker-focused reviewer for MindRoom.
+        Prioritize correctness, security, data privacy, Matrix protocol behavior, concurrency, config migration safety, deployment safety, and test coverage.
+        Prefer small direct fixes that match existing patterns.
+        Do not suggest backward-compatibility wrappers unless the changed surface is explicitly a compatibility contract.
+        Do not claim a model identifier is invalid just because it is unfamiliar; ask for source verification when current model names matter.
+    - path: "**/*.py"
+      instructions: |
+        Prefer typed dataclasses or Pydantic models over dictionaries for structured data.
+        Avoid getattr and hasattr probes that weaken typed interfaces.
+        Avoid broad try/except blocks unless the boundary genuinely needs user-facing failure handling.
+        Keep imports at module top unless avoiding a real circular import.
+        If tests or mocks fail, recommend fixing them to use proper typed objects or stricter mocks instead of adding production fallback branches.
+    - path: "frontend/**/*"
+      instructions: |
+        Match the existing Vite and React dashboard patterns.
+        Keep operational interfaces dense, scannable, responsive, and free of decorative landing-page treatment.
+        Verify user-facing layout changes across desktop and mobile viewports when possible.
+    - path: "saas-platform/platform-frontend/**/*"
+      instructions: |
+        Match the existing Next.js 15 portal patterns and centralized API client.
+        Treat auth, subscription state, and instance-management flows as high-risk user-facing behavior.
+        Verify user-facing layout changes across desktop and mobile viewports when possible.
+    - path: "saas-platform/platform-backend/**/*"
+      instructions: |
+        Treat SSO cookies, Supabase RLS assumptions, subscription state, and Kubernetes provisioning as high-risk behavior.
+        Prefer explicit typed request and response models over unstructured dictionaries.
+    - path: "cluster/**/*"
+      instructions: |
+        Treat Kubernetes, Helm, Terraform, and local-stack changes as deployment-sensitive.
+        Flag committed secrets, unsafe defaults, namespace mistakes, and drift from provisioner-owned deployment flows.
+    - path: "local/**/*"
+      instructions: |
+        Treat Kubernetes, Helm, Terraform, and local-stack changes as deployment-sensitive.
+        Flag committed secrets, unsafe defaults, namespace mistakes, and drift from provisioner-owned deployment flows.
+    - path: "docs/**/*.md"
+      instructions: |
+        Preserve the repository Markdown style of one sentence per line.
+        Do not recommend hand-editing generated CLI documentation sections; update the source or generator instead.
+    - path: "README.md"
+      instructions: |
+        Preserve the repository Markdown style of one sentence per line.
+        Do not recommend hand-editing generated CLI documentation sections; update the source or generator instead.
+    - path: "skills/**/*.md"
+      instructions: |
+        Preserve the repository Markdown style of one sentence per line.
+        Do not recommend hand-editing generated CLI documentation sections; update the source or generator instead.
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+    ignore_usernames:
+      - "dependabot[bot]"
+      - "renovate[bot]"
+
+chat:
+  auto_reply: false
+  allow_non_org_members: true
+
+knowledge_base:
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "CLAUDE.md"
+      - "**/AGENTS.md"
