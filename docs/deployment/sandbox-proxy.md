@@ -148,6 +148,7 @@ Important notes for this mode:
 - If you must keep `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
 - `kubernetesWorkerImage` and `kubernetesWorkerImagePullPolicy` default to the main MindRoom image settings when left empty.
 - The chart creates the worker-manager ServiceAccount, Role, RoleBinding, and worker-specific NetworkPolicy rules automatically when this backend is enabled.
+
   The runtime and hosted instance charts grant narrow access to one worker-auth Secret in shared runtime namespaces, while explicitly separate runtime worker namespaces may use per-worker auth Secret CRUD.
 - The primary runtime does not need `MINDROOM_SANDBOX_PROXY_URL` in this mode because worker endpoints come from the Kubernetes worker handles.
 - Dynamic worker pods default to `enableServiceLinks: false` so Kubernetes does not inject sibling Service names into the runner environment.
@@ -328,6 +329,7 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 
 - The worker runtime never gets the primary runtime API key files, Matrix client state, or orchestrator authority.
 - The sandbox token authenticates proxy traffic, so use a strong random value.
+
   Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
 - The worker container `securityContext` drops all capabilities and disables privilege escalation.
