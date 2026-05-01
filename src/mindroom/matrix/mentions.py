@@ -1,13 +1,12 @@
 """Matrix mention utilities."""
 
-import ipaddress
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
-from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix_identifiers import mindroom_namespace
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
@@ -17,8 +16,6 @@ if TYPE_CHECKING:
 
 _AGENT_MENTION_PATTERN = re.compile(r"@(mindroom_)?(\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
 _FULL_MATRIX_ID_CANDIDATE_PATTERN = re.compile(r"(?<![-A-Za-z0-9._=/+])@\S+")
-_DNS_LABEL_PATTERN = re.compile(r"[A-Za-z0-9-]+")
-_MATRIX_USER_ID_LOCALPART_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._=/-+")
 
 
 @dataclass(frozen=True)
@@ -277,70 +274,10 @@ def _extract_longest_valid_matrix_user_id(token: str) -> str | None:
 def _is_valid_explicit_matrix_user_id(candidate: str) -> bool:
     """Return whether one candidate string is a valid explicit Matrix user ID."""
     try:
-        matrix_id = MatrixID.parse(candidate)
+        parse_current_matrix_user_id(candidate)
     except ValueError:
         return False
-
-    if not matrix_id.username or len(candidate.encode("utf-8")) > 255:
-        return False
-    if any(character not in _MATRIX_USER_ID_LOCALPART_CHARACTERS for character in matrix_id.username):
-        return False
-    return _is_valid_matrix_server_name(matrix_id.domain)
-
-
-def _is_valid_matrix_server_name(server_name: str) -> bool:
-    """Return whether one Matrix server name matches hostname/IP plus optional port."""
-    split = _split_server_name_and_port(server_name)
-    if split is None:
-        return False
-    host, port = split
-    if port is not None and (not port.isdigit() or len(port) > 5):
-        return False
-    if host.startswith("["):
-        is_valid_ipv6_host = host.endswith("]")
-        if is_valid_ipv6_host:
-            try:
-                ipaddress.IPv6Address(host[1:-1])
-            except ValueError:
-                is_valid_ipv6_host = False
-        return is_valid_ipv6_host
-    try:
-        ipaddress.IPv4Address(host)
-    except ValueError:
-        is_valid_host = _is_valid_dns_name(host)
-    else:
-        is_valid_host = True
-    return is_valid_host
-
-
-def _split_server_name_and_port(server_name: str) -> tuple[str, str | None] | None:
-    """Split a Matrix server name into host and optional port."""
-    if not server_name:
-        return None
-
-    if server_name.startswith("["):
-        closing_index = server_name.find("]")
-        if closing_index == -1:
-            return None
-        host = server_name[: closing_index + 1]
-        remainder = server_name[closing_index + 1 :]
-        port = remainder[1:] if remainder.startswith(":") else None
-        if remainder and port is None:
-            return None
-    elif ":" in server_name:
-        host, port = server_name.rsplit(":", 1)
-    else:
-        host, port = server_name, None
-
-    if not host or port == "":
-        return None
-    return host, port
-
-
-def _is_valid_dns_name(host: str) -> bool:
-    """Return whether one host string is a valid DNS name."""
-    labels = host.split(".")
-    return bool(host) and all(label and _DNS_LABEL_PATTERN.fullmatch(label) for label in labels)
+    return True
 
 
 def _find_matching_agent_name_for_localpart(

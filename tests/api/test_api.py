@@ -3142,6 +3142,30 @@ def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
     assert "&amp;execution_scope" not in response.text
 
 
+def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
+    api_key_client: TestClient,
+) -> None:
+    """Trusted-upstream setup errors should stay visible on frontend auth checks."""
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    main._app_context(api_key_client.app).auth_state = auth.ApiAuthState(
+        runtime_paths=runtime_paths,
+        settings=auth.ApiAuthSettings(
+            platform_login_url=None,
+            supabase_url=None,
+            supabase_anon_key=None,
+            account_id=None,
+            mindroom_api_key="test-key",
+            trusted_upstream=auth.TrustedUpstreamAuthSettings(enabled=True),
+        ),
+        supabase_auth=None,
+    )
+
+    response = api_key_client.get("/login?next=/agents")
+
+    assert response.status_code == 500
+    assert "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER" in response.json()["detail"]
+
+
 def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClient) -> None:
     """A valid standalone auth session cookie should work without bearer headers."""
     response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
@@ -3869,6 +3893,32 @@ def test_trusted_upstream_headers_populate_auth_user_when_enabled(tmp_path: Path
     }
 
 
+@pytest.mark.parametrize("matrix_user_id", ["@Alice:example.org", "@:example.org"])
+def test_trusted_upstream_auth_accepts_historical_matrix_user_id(tmp_path: Path, matrix_user_id: str) -> None:
+    """Trusted Matrix identities may use historical Matrix localparts."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+        },
+    )
+    api_app = _trusted_auth_test_app(runtime_paths)
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                "X-Trusted-User": "alice",
+                "X-Trusted-Matrix-User": matrix_user_id,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["matrix_user_id"] == matrix_user_id
+
+
 def test_trusted_upstream_auth_requires_configured_user_header(tmp_path: Path) -> None:
     """A trusted upstream deployment must fail closed when the user id header is absent."""
     runtime_paths = _runtime_paths(
@@ -3892,11 +3942,12 @@ def test_trusted_upstream_auth_requires_configured_user_header(tmp_path: Path) -
     [
         "@alice:example.org extra",
         "@alice:",
-        "@:example.org",
+        "@alice:[::::]",
+        "@alice:example.org.",
     ],
 )
 def test_trusted_upstream_auth_rejects_invalid_matrix_user_id(tmp_path: Path, matrix_user_id: str) -> None:
-    """Trusted upstream Matrix IDs must parse with the strict Matrix user ID grammar."""
+    """Trusted upstream Matrix IDs must still be concrete Matrix user IDs."""
     runtime_paths = _runtime_paths(
         tmp_path,
         process_env={

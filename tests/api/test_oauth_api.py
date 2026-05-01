@@ -1262,6 +1262,53 @@ def test_agent_connect_token_uses_trusted_upstream_matrix_requester(tmp_path: Pa
     assert standalone_credentials is None
 
 
+@pytest.mark.parametrize("matrix_user_id", ["@Alice:example.org", "@:example.org"])
+def test_agent_connect_token_accepts_historical_trusted_upstream_matrix_requester(
+    tmp_path: Path,
+    matrix_user_id: str,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=matrix_user_id,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                headers=_trusted_upstream_headers(matrix_user_id=matrix_user_id),
+                follow_redirects=False,
+            )
+            state = _state_from_auth_url(authorize_response.headers["location"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                headers=_trusted_upstream_headers(matrix_user_id=matrix_user_id),
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 307
+    assert callback_response.status_code == 307
+    manager = get_runtime_credentials_manager(runtime_paths)
+    matrix_credentials = manager.for_primary_runtime_scope(matrix_user_id, "general").load_credentials(
+        provider.credential_service,
+    )
+    assert matrix_credentials is not None
+    assert matrix_credentials["token"] == "google_drive-access-token"
+
+
 def test_agent_connect_token_rejects_trusted_upstream_requester_mismatch(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
@@ -1324,6 +1371,42 @@ def test_agent_connect_token_rejects_missing_trusted_upstream_identity(tmp_path:
             )
 
     assert authorize_response.status_code == 401
+    assert "trusted upstream identity header" in authorize_response.json()["detail"]
+
+
+def test_agent_connect_token_missing_trusted_identity_does_not_redirect_to_standalone_login(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        _trusted_upstream_oauth_env() | {"MINDROOM_API_KEY": "dashboard-secret"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    assert connect_token is not None
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            authorize_response = client.get(
+                f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
+                f"&connect_token={connect_token}",
+                follow_redirects=False,
+            )
+
+    assert authorize_response.status_code == 401
+    assert "location" not in authorize_response.headers
     assert "trusted upstream identity header" in authorize_response.json()["detail"]
 
 

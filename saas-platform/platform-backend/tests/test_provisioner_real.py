@@ -140,6 +140,13 @@ class TestProvisionerCommandValidation:
             patch("backend.routes.provisioner.INSTANCE_MINDROOM_IMAGE_PULL_POLICY", "IfNotPresent"),
             patch("backend.routes.provisioner.INSTANCE_SYNAPSE_IMAGE", "matrixdotorg/synapse:latest"),
             patch("backend.routes.provisioner.INSTANCE_SYNAPSE_IMAGE_PULL_POLICY", "IfNotPresent"),
+            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED", "true"),
+            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER", "X-MindRoom-User-Id"),
+            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER", "X-MindRoom-User-Email"),
+            patch(
+                "backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER",
+                "X-MindRoom-Matrix-User-Id",
+            ),
             patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
             patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
         ):
@@ -169,6 +176,10 @@ class TestProvisionerCommandValidation:
         assert set_args["mindroom_image_pull_policy"] == "IfNotPresent"
         assert set_args["synapse_image"] == "matrixdotorg/synapse:latest"
         assert set_args["synapse_image_pull_policy"] == "IfNotPresent"
+        assert set_args["trustedUpstreamAuth.enabled"] == "true"
+        assert set_args["trustedUpstreamAuth.userIdHeader"] == "X-MindRoom-User-Id"
+        assert set_args["trustedUpstreamAuth.emailHeader"] == "X-MindRoom-User-Email"
+        assert set_args["trustedUpstreamAuth.matrixUserIdHeader"] == "X-MindRoom-Matrix-User-Id"
 
     @pytest.mark.asyncio
     async def test_kubectl_scale_command_uses_correct_syntax(self):

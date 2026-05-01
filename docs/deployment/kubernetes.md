@@ -52,6 +52,20 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set supabaseServiceKey="your-service-key"
 ```
 
+Only enable trusted upstream auth when the instance is behind a verified access layer that strips client-supplied copies of those headers and injects authenticated values itself:
+
+```bash
+helm upgrade --install instance-1 ./cluster/k8s/instance \
+  --namespace mindroom-instances \
+  --reuse-values \
+  --set-string trustedUpstreamAuth.enabled=true \
+  --set trustedUpstreamAuth.userIdHeader=X-MindRoom-User-Id \
+  --set trustedUpstreamAuth.emailHeader=X-MindRoom-User-Email \
+  --set trustedUpstreamAuth.matrixUserIdHeader=X-MindRoom-Matrix-User-Id
+```
+
+When using the provisioner, configure the platform chart with `provisioner.trustedUpstreamAuth.enabled="true"` and the matching `provisioner.trustedUpstreamAuth.*Header` values.
+
 ## Runtime-Only Deployment
 
 Use the runtime chart when you already operate the surrounding platform and only want Kubernetes to run the MindRoom runtime.

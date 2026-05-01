@@ -30,16 +30,35 @@ MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER=X-MindRoom-Matrix-User-Id
 `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER` is required when trusted upstream auth is enabled.
 The user ID value must be stable for the authenticated browser user.
 `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is optional and is stored in `request.scope["auth_user"]["email"]` when present.
-`MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` is optional for shared dashboard access but required for private `user` and `user_agent` OAuth flows unless you configure an email mapping template.
+MindRoom does not derive Matrix IDs from email.
+`MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` is optional for shared dashboard access but required for private `user` and `user_agent` OAuth flows.
+The Matrix user ID value must be the requester identity used by Matrix-backed tool execution.
 
-Use an email mapping template only when your Matrix IDs are deterministically derived from email:
+## Instance Chart
 
-```bash
-MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE=@{localpart}:matrix.example.com
+For the hosted instance chart, configure the equivalent values:
+
+```yaml
+trustedUpstreamAuth:
+  enabled: "true"
+  userIdHeader: X-MindRoom-User-Id
+  emailHeader: X-MindRoom-User-Email
+  matrixUserIdHeader: X-MindRoom-Matrix-User-Id
 ```
 
-The template can use `{user_id}`, `{email}`, `{localpart}`, and `{domain}`.
-MindRoom only accepts the result when it looks like a Matrix user ID.
+The chart renders these values as the `MINDROOM_TRUSTED_UPSTREAM_*` runtime environment variables.
+When using the platform provisioner, configure the platform chart with matching provisioner values:
+
+```yaml
+provisioner:
+  trustedUpstreamAuth:
+    enabled: "true"
+    userIdHeader: X-MindRoom-User-Id
+    emailHeader: X-MindRoom-User-Email
+    matrixUserIdHeader: X-MindRoom-Matrix-User-Id
+```
+
+The platform chart renders these as `INSTANCE_TRUSTED_UPSTREAM_*` variables on the provisioner deployment.
 
 ## Security Boundary
 

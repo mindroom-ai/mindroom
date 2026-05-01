@@ -16,6 +16,10 @@ from backend.config import (
     INSTANCE_SYNAPSE_IMAGE,
     INSTANCE_SYNAPSE_IMAGE_PULL_POLICY,
     INSTANCE_STORAGE_CLASS_NAME,
+    INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED,
+    INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER,
+    INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER,
+    INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER,
     OPENAI_API_KEY,
     OPENROUTER_API_KEY,
     PLATFORM_DOMAIN,
@@ -236,6 +240,17 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             helm_args += ["--set", f"synapse_image={INSTANCE_SYNAPSE_IMAGE}"]
         if INSTANCE_SYNAPSE_IMAGE_PULL_POLICY:
             helm_args += ["--set", f"synapse_image_pull_policy={INSTANCE_SYNAPSE_IMAGE_PULL_POLICY}"]
+        if INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED:
+            helm_args += ["--set", f"trustedUpstreamAuth.enabled={INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED}"]
+        if INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER:
+            helm_args += ["--set", f"trustedUpstreamAuth.userIdHeader={INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER}"]
+        if INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER:
+            helm_args += ["--set", f"trustedUpstreamAuth.emailHeader={INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER}"]
+        if INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER:
+            helm_args += [
+                "--set",
+                f"trustedUpstreamAuth.matrixUserIdHeader={INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER}",
+            ]
 
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:

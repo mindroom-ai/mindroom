@@ -17,7 +17,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
-from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 
 if TYPE_CHECKING:
@@ -66,7 +66,6 @@ class TrustedUpstreamAuthSettings:
     user_id_header: str | None = None
     email_header: str | None = None
     matrix_user_id_header: str | None = None
-    email_to_matrix_user_id_template: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,10 +116,6 @@ def build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> Trusted
         user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER"),
         email_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER"),
         matrix_user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"),
-        email_to_matrix_user_id_template=_env_text(
-            runtime_paths,
-            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
-        ),
     )
 
 
@@ -216,40 +211,6 @@ def _get_configured_header(request: Request, header_name: str | None) -> str | N
     return stripped or None
 
 
-def _parse_matrix_user_id(value: str | None) -> str | None:
-    """Return a canonical Matrix user ID when the value parses."""
-    if value is None:
-        return None
-    try:
-        return MatrixID.parse(value).full_id
-    except ValueError:
-        return None
-
-
-def _matrix_user_id_from_email_template(
-    *,
-    template: str | None,
-    user_id: str,
-    email: str | None,
-) -> str | None:
-    """Return a Matrix user id formatted from a trusted email mapping template."""
-    if template is None:
-        return None
-    if email is None or "@" not in email:
-        return None
-    localpart, domain = email.split("@", 1)
-    try:
-        matrix_user_id = template.format(
-            user_id=user_id,
-            email=email,
-            localpart=localpart,
-            domain=domain,
-        )
-    except (KeyError, IndexError, ValueError):
-        return None
-    return _parse_matrix_user_id(matrix_user_id)
-
-
 def _trusted_upstream_auth_user(
     request: Request,
     settings: TrustedUpstreamAuthSettings,
@@ -272,15 +233,9 @@ def _trusted_upstream_auth_user(
 
     email = _get_configured_header(request, settings.email_header)
     matrix_user_id = _get_configured_header(request, settings.matrix_user_id_header)
-    parsed_matrix_user_id = _parse_matrix_user_id(matrix_user_id)
+    parsed_matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id)
     if matrix_user_id is not None and parsed_matrix_user_id is None:
         raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
-    if parsed_matrix_user_id is None:
-        parsed_matrix_user_id = _matrix_user_id_from_email_template(
-            template=settings.email_to_matrix_user_id_template,
-            user_id=user_id,
-            email=email,
-        )
 
     auth_user = {
         "user_id": user_id,
@@ -363,7 +318,9 @@ def request_has_frontend_access(request: Request) -> bool:
     mindroom_api_key = auth_state.settings.mindroom_api_key
     try:
         trusted_auth_user = _trusted_upstream_auth_user(request, auth_state.settings.trusted_upstream)
-    except HTTPException:
+    except HTTPException as exc:
+        if exc.status_code >= 500:
+            raise
         return False
     if trusted_auth_user is not None:
         request.scope["auth_user"] = trusted_auth_user
@@ -404,6 +361,8 @@ def _request_path_with_query(request: Request) -> str:
 def login_redirect_for_request(request: Request, *, next_path: str | None = None) -> RedirectResponse | None:
     """Return the dashboard login redirect for one browser request when configured."""
     auth_settings = request_auth_state(request).settings
+    if auth_settings.trusted_upstream.enabled:
+        return None
     if auth_settings.supabase_url and auth_settings.supabase_anon_key and auth_settings.platform_login_url:
         redirect_to = quote(str(request.url), safe="")
         return RedirectResponse(f"{auth_settings.platform_login_url}?redirect_to={redirect_to}")

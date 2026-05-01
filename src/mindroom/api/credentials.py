@@ -32,7 +32,7 @@ from mindroom.credentials import (
     save_scoped_credentials,
     validate_service_name,
 )
-from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
@@ -164,15 +164,6 @@ def _request_auth_user(request: Request) -> dict[str, Any] | None:
     return auth_user if isinstance(auth_user, dict) else None
 
 
-def _parse_matrix_user_id(value: str | None) -> str | None:
-    if value is None:
-        return None
-    try:
-        return MatrixID.parse(value).full_id
-    except ValueError:
-        return None
-
-
 def _require_auth_user_id(request: Request) -> str:
     auth_user = _request_auth_user(request) or {}
     user_id = auth_user.get("user_id")
@@ -186,7 +177,7 @@ def dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimeP
     auth_user = _request_auth_user(request) or {}
     if auth_user.get("auth_source") == "trusted_upstream":
         matrix_user_id = auth_user.get("matrix_user_id")
-        return _parse_matrix_user_id(matrix_user_id) if isinstance(matrix_user_id, str) else None
+        return try_parse_historical_matrix_user_id(matrix_user_id) if isinstance(matrix_user_id, str) else None
     owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
     if owner_user_id:
         return owner_user_id
@@ -200,7 +191,7 @@ def _reject_unbound_private_dashboard_requester(
 ) -> None:
     if execution_scope not in {"user", "user_agent"}:
         return
-    if _parse_matrix_user_id(execution_identity.requester_id):
+    if try_parse_historical_matrix_user_id(execution_identity.requester_id):
         return
     raise HTTPException(
         status_code=400,
