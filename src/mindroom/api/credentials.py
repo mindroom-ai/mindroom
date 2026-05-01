@@ -38,7 +38,6 @@ from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
-    local_shared_credential_allowlist,
     require_worker_key_for_scope,
     resolve_worker_target,
     unsupported_shared_only_integration_message,
@@ -532,8 +531,10 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
         )
 
     shared_manager = target.base_manager.shared_manager()
-    local_allowlist = local_shared_credential_allowlist(service, target.worker_scope)
-    allowed_shared_services = local_allowlist or target.allowed_shared_services or frozenset()
+    policy = credential_service_policy(service, target.worker_scope)
+    allowed_shared_services = (
+        frozenset({service}) if policy.uses_local_shared_credentials else target.allowed_shared_services or frozenset()
+    )
     shared_credentials = load_worker_grantable_shared_credentials(
         service,
         shared_manager=shared_manager,
