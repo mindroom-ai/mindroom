@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
@@ -26,14 +26,20 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
     """Create an isolated runtime context for Google tool wrapper tests."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
-    return resolve_runtime_paths(
+    paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path,
-        process_env={
-            "GOOGLE_CLIENT_ID": "client-id",
-            "GOOGLE_CLIENT_SECRET": "client-secret",
+        process_env={},
+    )
+    get_runtime_credentials_manager(paths).save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "ui",
         },
     )
+    return paths
 
 
 @pytest.mark.parametrize("worker_scope", ["user", "user_agent"])

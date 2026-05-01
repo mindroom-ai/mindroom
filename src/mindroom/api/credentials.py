@@ -20,6 +20,7 @@ from mindroom.credential_policy import (
     credential_service_policy,
     dashboard_may_edit_oauth_service,
     filter_oauth_credential_fields,
+    is_oauth_client_config_service,
     looks_like_oauth_credentials,
 )
 from mindroom.credentials import (
@@ -54,6 +55,8 @@ router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
 _OAUTH_TOKEN_CREDENTIALS_ERROR = "OAuth token credentials must be managed through the OAuth connect flow."  # noqa: S105
+_OAUTH_CLIENT_CONFIG_FIELDS = frozenset({"client_id", "client_secret", "redirect_uri"})
+_OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS = _OAUTH_CLIENT_CONFIG_FIELDS - {"client_secret"}
 _PENDING_OAUTH_STATE_KIND = "dashboard_oauth_state"
 
 
@@ -81,6 +84,12 @@ def _filter_credentials_for_response(credentials: dict[str, Any], *, is_oauth_se
     if not is_oauth_service and not looks_like_oauth_credentials(credentials):
         return filtered
     return filter_oauth_credential_fields(credentials)
+
+
+def _filter_oauth_client_config_for_response(credentials: dict[str, Any]) -> dict[str, Any]:
+    """Return OAuth app client config without client secret material."""
+    filtered = _filter_internal_keys(credentials)
+    return {key: value for key, value in filtered.items() if key in _OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS}
 
 
 def _validated_service(service: str) -> str:
@@ -122,6 +131,7 @@ class OAuthCredentialServiceMatch:
     provider: OAuthProvider
     token_service: bool
     tool_config_service: bool
+    client_config_service: bool
 
 
 @dataclass(frozen=True)
@@ -135,11 +145,13 @@ class OAuthCredentialServices:
         for provider in self.providers.values():
             token_service = provider.credential_service == service
             tool_config_service = provider.tool_config_service == service
-            if token_service or tool_config_service:
+            client_config_service = service in provider.all_client_config_services
+            if token_service or tool_config_service or client_config_service:
                 return OAuthCredentialServiceMatch(
                     provider=provider,
                     token_service=token_service,
                     tool_config_service=tool_config_service,
+                    client_config_service=client_config_service,
                 )
         return None
 
@@ -149,9 +161,11 @@ class OAuthCredentialServices:
             _reject_oauth_token_service(self.match(service))
 
     def allows_private_scope_for(self, service: str) -> bool:
-        """Return whether this OAuth tool config service can target a private scope."""
+        """Return whether this OAuth config service can target a private scope."""
+        if is_oauth_client_config_service(service):
+            return True
         match = self.match(service)
-        return _dashboard_may_edit_oauth_match(match)
+        return match is not None and match.tool_config_service and _dashboard_may_edit_oauth_match(match)
 
     def dashboard_may_show_service(self, service: str) -> bool:
         """Return whether a service may appear in dashboard credential listings."""
@@ -520,6 +534,8 @@ def resolve_request_credentials_target(
 
 def load_credentials_for_target(service: str, target: RequestCredentialsTarget) -> dict[str, Any] | None:
     """Load credentials for the resolved target, including scoped overlays when needed."""
+    if _service_uses_primary_runtime_global_store(service, target):
+        return target.base_manager.load_credentials(service)
     if target.worker_scope is None:
         return target.target_manager.load_credentials(service)
     if _service_uses_primary_runtime_store(service, target):
@@ -547,7 +563,15 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
 
 def _service_uses_primary_runtime_store(service: str, target: RequestCredentialsTarget) -> bool:
     policy = credential_service_policy(service, target.worker_scope)
-    return policy.uses_primary_runtime_scoped_credentials or policy.uses_local_shared_credentials
+    return (
+        policy.uses_primary_runtime_global_credentials
+        or policy.uses_primary_runtime_scoped_credentials
+        or policy.uses_local_shared_credentials
+    )
+
+
+def _service_uses_primary_runtime_global_store(service: str, target: RequestCredentialsTarget) -> bool:
+    return credential_service_policy(service, target.worker_scope).uses_primary_runtime_global_credentials
 
 
 def _worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:
@@ -561,6 +585,9 @@ def _worker_target_for_credentials_target(target: RequestCredentialsTarget) -> R
 
 
 def _save_credentials_for_target(service: str, credentials: dict[str, Any], target: RequestCredentialsTarget) -> None:
+    if _service_uses_primary_runtime_global_store(service, target):
+        target.base_manager.save_credentials(service, credentials)
+        return
     if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
         target.target_manager.save_credentials(service, credentials)
         return
@@ -590,6 +617,9 @@ def _primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget
 
 
 def _delete_credentials_for_target(service: str, target: RequestCredentialsTarget) -> None:
+    if _service_uses_primary_runtime_global_store(service, target):
+        target.base_manager.delete_credentials(service)
+        return
     if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
         target.target_manager.delete_credentials(service)
         return
@@ -630,10 +660,23 @@ def _reject_oauth_token_service(
 def _dashboard_may_edit_oauth_match(oauth_service_match: OAuthCredentialServiceMatch | None) -> bool:
     if oauth_service_match is None:
         return False
+    if oauth_service_match.client_config_service:
+        return True
     return dashboard_may_edit_oauth_service(
         token_service=oauth_service_match.token_service,
         tool_config_service=oauth_service_match.tool_config_service,
     )
+
+
+def _is_oauth_client_config_match(oauth_service_match: OAuthCredentialServiceMatch | None) -> bool:
+    return oauth_service_match is not None and oauth_service_match.client_config_service
+
+
+def _is_oauth_client_config_service(
+    service: str,
+    oauth_service_match: OAuthCredentialServiceMatch | None,
+) -> bool:
+    return _is_oauth_client_config_match(oauth_service_match) or is_oauth_client_config_service(service)
 
 
 def _reject_oauth_credentials_document(credentials: dict[str, Any]) -> None:
@@ -642,11 +685,24 @@ def _reject_oauth_credentials_document(credentials: dict[str, Any]) -> None:
     raise HTTPException(status_code=400, detail=_OAUTH_TOKEN_CREDENTIALS_ERROR)
 
 
-def _reject_oauth_api_key_field(
+def _reject_oauth_api_key_read_field(
+    service: str,
     oauth_service_match: OAuthCredentialServiceMatch | None,
     *,
     key_name: str,
 ) -> None:
+    if _is_oauth_client_config_service(service, oauth_service_match):
+        if key_name == "client_secret":
+            raise HTTPException(
+                status_code=400,
+                detail="OAuth client secret must be managed through the credentials document route.",
+            )
+        if key_name not in _OAUTH_CLIENT_CONFIG_RESPONSE_FIELDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"OAuth client config field '{key_name}' is not readable through the API key route.",
+            )
+        return
     if not _dashboard_may_edit_oauth_match(oauth_service_match):
         return
     if key_name not in OAUTH_CREDENTIAL_FIELDS:
@@ -655,6 +711,34 @@ def _reject_oauth_api_key_field(
         status_code=400,
         detail=f"OAuth field '{key_name}' must be managed through the OAuth connect flow.",
     )
+
+
+def _reject_oauth_api_key_write_field(
+    service: str,
+    oauth_service_match: OAuthCredentialServiceMatch | None,
+    *,
+    key_name: str,
+) -> None:
+    if _is_oauth_client_config_service(service, oauth_service_match):
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth client config credentials must be managed through the credentials document route.",
+        )
+    _reject_oauth_api_key_read_field(service, oauth_service_match, key_name=key_name)
+
+
+def _reject_oauth_client_config_copy(
+    source_service: str,
+    source_match: OAuthCredentialServiceMatch | None,
+    destination_service: str,
+    destination_match: OAuthCredentialServiceMatch | None,
+) -> None:
+    if not _is_oauth_client_config_service(
+        source_service,
+        source_match,
+    ) and not _is_oauth_client_config_service(destination_service, destination_match):
+        return
+    raise HTTPException(status_code=400, detail="OAuth client config credentials cannot be copied.")
 
 
 def _dashboard_credentials_for_save(
@@ -667,6 +751,38 @@ def _dashboard_credentials_for_save(
         credentials = filter_oauth_credential_fields(credentials)
     credentials["_source"] = "ui"
     return credentials
+
+
+def _reject_non_client_config_fields(credentials: dict[str, Any]) -> None:
+    invalid_fields = sorted(
+        key for key in credentials if not key.startswith("_") and key not in _OAUTH_CLIENT_CONFIG_FIELDS
+    )
+    if invalid_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=f"OAuth client config does not support fields: {', '.join(invalid_fields)}.",
+        )
+
+
+def _reject_invalid_client_config_field_values(credentials: dict[str, Any]) -> None:
+    redirect_uri = credentials.get("redirect_uri")
+    if redirect_uri is not None and not isinstance(redirect_uri, str):
+        raise HTTPException(status_code=400, detail="redirect_uri must be a string for OAuth client config.")
+
+
+def _require_or_preserve_oauth_client_config_field(
+    credentials: dict[str, Any],
+    existing_credentials: dict[str, Any],
+    field_name: str,
+) -> None:
+    submitted_value = credentials.get(field_name)
+    if isinstance(submitted_value, str) and submitted_value.strip():
+        return
+    existing_value = existing_credentials.get(field_name)
+    if isinstance(existing_value, str) and existing_value.strip():
+        credentials[field_name] = existing_value
+        return
+    raise HTTPException(status_code=400, detail=f"{field_name} is required for OAuth client config.")
 
 
 @dataclass(frozen=True)
@@ -728,6 +844,8 @@ class DashboardCredentialAccess:
 
     def response_credentials(self, service: str, credentials: dict[str, Any]) -> dict[str, Any]:
         """Return credentials filtered for dashboard responses."""
+        if _is_oauth_client_config_service(service, self.match(service)):
+            return _filter_oauth_client_config_for_response(credentials)
         return _filter_credentials_for_response(
             credentials,
             is_oauth_service=_dashboard_may_edit_oauth_match(self.match(service)),
@@ -735,10 +853,20 @@ class DashboardCredentialAccess:
 
     def credentials_for_save(self, service: str, config_values: dict[str, Any]) -> dict[str, Any]:
         """Return user-submitted credentials normalized for storage."""
-        return _dashboard_credentials_for_save(
+        match = self.match(service)
+        credentials = _dashboard_credentials_for_save(
             config_values,
-            strip_oauth_fields=_dashboard_may_edit_oauth_match(self.match(service)),
+            strip_oauth_fields=_dashboard_may_edit_oauth_match(match)
+            and not _is_oauth_client_config_service(service, match),
         )
+        if _is_oauth_client_config_service(service, match):
+            _reject_non_client_config_fields(credentials)
+            _reject_invalid_client_config_field_values(credentials)
+            existing_credentials = load_credentials_for_target(service, self.target) or {}
+            _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_id")
+            _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_secret")
+            return credentials
+        return credentials
 
     def list_services(self) -> list[str]:
         """List dashboard-visible services for the resolved target."""
@@ -749,6 +877,11 @@ class DashboardCredentialAccess:
                 if self.oauth_services.dashboard_may_show_service(service)
             ]
         worker_services = set(self.target.target_manager.list_services())
+        primary_runtime_global_services = {
+            service
+            for service in self.target.base_manager.list_services()
+            if credential_service_policy(service, self.target.worker_scope).uses_primary_runtime_global_credentials
+        }
         primary_runtime_services = _primary_runtime_scoped_services_for_target(self.target)
         shared_manager = self.target.base_manager.shared_manager()
         shared_services = set(
@@ -763,7 +896,7 @@ class DashboardCredentialAccess:
                 for service in shared_manager.list_services()
                 if credential_service_policy(service, self.target.worker_scope).uses_local_shared_credentials
             }
-        services = worker_services | primary_runtime_services | shared_services
+        services = worker_services | primary_runtime_global_services | primary_runtime_services | shared_services
         services -= set(unsupported_shared_only_integration_names(sorted(services), self.target.worker_scope))
         return sorted(service for service in services if self.oauth_services.dashboard_may_show_service(service))
 
@@ -864,16 +997,18 @@ async def set_api_key(
     request_service = _validated_service(payload.service)
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
-    oauth_service_match = _oauth_service_match(http_request, service)
-    _reject_oauth_token_service(oauth_service_match)
-    _reject_oauth_api_key_field(oauth_service_match, key_name=payload.key_name)
+    access = DashboardCredentialAccess.resolve(
+        http_request,
+        agent_name=agent_name,
+        service_names=(service,),
+    )
+    _reject_oauth_api_key_write_field(service, access.match(service), key_name=payload.key_name)
 
-    target = resolve_request_credentials_target(http_request, agent_name=agent_name, service_names=(service,))
-    credentials = load_credentials_for_target(service, target) or {}
-    _reject_oauth_credentials_document(credentials)
+    credentials = access.load(service) or {}
+    access.reject_stored_oauth_credentials(credentials)
     credentials[payload.key_name] = payload.api_key
     credentials["_source"] = "ui"
-    _save_credentials_for_target(service, credentials, target)
+    access.save(service, credentials)
 
     return {"status": "success", "message": f"API key set for {service}"}
 
@@ -888,13 +1023,21 @@ async def get_api_key(
 ) -> dict[str, Any]:
     """Get API key metadata for a service, and optionally the full key value."""
     service = _validated_service(service)
-    oauth_service_match = _oauth_service_match(request, service)
-    _reject_oauth_token_service(oauth_service_match)
-    _reject_oauth_api_key_field(oauth_service_match, key_name=key_name)
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
-    credentials = load_credentials_for_target(service, target) or {}
-    _reject_oauth_credentials_document(credentials)
+    access = DashboardCredentialAccess.resolve(
+        request,
+        agent_name=agent_name,
+        service_names=(service,),
+    )
+    oauth_match = access.match(service)
+    _reject_oauth_api_key_read_field(service, oauth_match, key_name=key_name)
+    credentials = access.load(service) or {}
+    access.reject_stored_oauth_credentials(credentials)
     api_key = credentials.get(key_name)
+    if _is_oauth_client_config_service(service, oauth_match) and api_key is not None and not isinstance(api_key, str):
+        raise HTTPException(
+            status_code=400,
+            detail=f"OAuth client config field '{key_name}' is not a readable string.",
+        )
 
     if api_key:
         source = credentials.get("_source")
@@ -969,8 +1112,11 @@ async def copy_credentials(
     """Copy credentials from one service to another."""
     service = _validated_service(service)
     source_service = _validated_service(source_service)
-    _reject_oauth_token_service(_oauth_service_match(request, service))
-    _reject_oauth_token_service(_oauth_service_match(request, source_service))
+    destination_match = _oauth_service_match(request, service)
+    source_match = _oauth_service_match(request, source_service)
+    _reject_oauth_token_service(destination_match)
+    _reject_oauth_token_service(source_match)
+    _reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
     target = resolve_request_credentials_target(
         request,
         agent_name=agent_name,

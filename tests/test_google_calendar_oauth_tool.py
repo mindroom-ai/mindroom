@@ -27,8 +27,6 @@ def _runtime_paths(tmp_path: Path, extra_env: dict[str, str] | None = None) -> c
         storage_path=tmp_path / "mindroom_data",
         process_env={
             "MINDROOM_PUBLIC_URL": "https://mindroom.example.test",
-            "GOOGLE_CALENDAR_CLIENT_ID": "client-id",
-            "GOOGLE_CALENDAR_CLIENT_SECRET": "client-secret",
             **(extra_env or {}),
         },
     )

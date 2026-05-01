@@ -13,7 +13,7 @@ from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.oauth.providers import OAuthProvider
+    from mindroom.oauth.providers import OAuthClientConfig, OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
@@ -186,7 +186,10 @@ def oauth_credentials_usable(  # noqa: PLR0911
     now: float | None = None,
 ) -> bool:
     """Return whether stored OAuth credentials can currently authenticate provider calls."""
-    if not credentials or provider.client_config(runtime_paths) is None:
+    client_config = provider.client_config(runtime_paths)
+    if not credentials or client_config is None:
+        return False
+    if not oauth_credentials_match_client_id(client_config, credentials):
         return False
     if not oauth_credentials_have_required_scopes(provider, credentials):
         return False
@@ -209,6 +212,15 @@ def oauth_credentials_usable(  # noqa: PLR0911
     if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
         return False
     return has_refresh_token
+
+
+def oauth_credentials_match_client_id(
+    client_config: OAuthClientConfig,
+    credentials: dict[str, object],
+) -> bool:
+    """Return whether token credentials belong to the active OAuth app client."""
+    stored_client_id = credentials.get("client_id")
+    return isinstance(stored_client_id, str) and stored_client_id.strip() == client_config.client_id
 
 
 def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials: dict[str, object]) -> bool:

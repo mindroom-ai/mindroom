@@ -14,7 +14,8 @@ from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
 from httpx import HTTPError
 
-from mindroom.credentials import validate_service_name
+from mindroom.credential_policy import is_oauth_client_config_service
+from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
 
 warnings.filterwarnings(
     "ignore",
@@ -68,6 +69,14 @@ class OAuthClientConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class OAuthClientConfigResolution:
+    """Resolved OAuth client settings plus the credential service that supplied them."""
+
+    config: OAuthClientConfig
+    service: str
+
+
+@dataclass(frozen=True, slots=True)
 class OAuthTokenResult:
     """Normalized token payload plus optional verified identity claims."""
 
@@ -101,10 +110,6 @@ def _normalize_env_names(names: str | Sequence[str] | None) -> tuple[str, ...]:
     if isinstance(names, str):
         return (names,)
     return tuple(name for name in names if name)
-
-
-def _env_prefix(provider_id: str) -> str:
-    return "".join(char if char.isalnum() else "_" for char in provider_id.upper())
 
 
 def _split_csv(value: str | None) -> tuple[str, ...]:
@@ -183,8 +188,15 @@ def _default_token_parser(
     return OAuthTokenResult(token_data=token_data, claims=claims, claims_verified=False)
 
 
-def _token_result_with_core_metadata(provider: OAuthProvider, result: OAuthTokenResult) -> OAuthTokenResult:
+def _token_result_with_core_metadata(
+    provider: OAuthProvider,
+    result: OAuthTokenResult,
+    *,
+    client_id: str | None = None,
+) -> OAuthTokenResult:
     token_data = dict(result.token_data)
+    if client_id is not None:
+        token_data["client_id"] = client_id
     token_data["_source"] = "oauth"
     token_data["_oauth_provider"] = provider.id
     if not isinstance(token_data.get("scopes"), list):
@@ -230,9 +242,8 @@ class OAuthProvider:
     scopes: tuple[str, ...]
     credential_service: str
     tool_config_service: str | None = None
-    client_id_env: str | Sequence[str] | None = None
-    client_secret_env: str | Sequence[str] | None = None
-    redirect_uri_env: str | Sequence[str] | None = None
+    client_config_services: tuple[str, ...] = ()
+    shared_client_config_services: tuple[str, ...] = ()
     default_redirect_path: str | None = None
     extra_auth_params: Mapping[str, str] = field(default_factory=dict)
     allowed_email_domains: tuple[str, ...] = ()
@@ -248,8 +259,28 @@ class OAuthProvider:
         """Validate provider identifiers and redirect path shape."""
         validate_service_name(self.id)
         validate_service_name(self.credential_service)
+        if is_oauth_client_config_service(self.credential_service):
+            msg = (
+                f"OAuth provider '{self.id}' credential_service '{self.credential_service}' "
+                "must not end with '_oauth_client'"
+            )
+            raise ValueError(msg)
         if self.tool_config_service is not None:
             validate_service_name(self.tool_config_service)
+            if is_oauth_client_config_service(self.tool_config_service):
+                msg = (
+                    f"OAuth provider '{self.id}' tool_config_service '{self.tool_config_service}' "
+                    "must not end with '_oauth_client'"
+                )
+                raise ValueError(msg)
+        for service in self.all_client_config_services:
+            validate_service_name(service)
+            if not is_oauth_client_config_service(service):
+                msg = f"OAuth provider '{self.id}' client config service '{service}' must end with '_oauth_client'"
+                raise ValueError(msg)
+        if not self.all_client_config_services:
+            msg = f"OAuth provider '{self.id}' must declare at least one client config service"
+            raise ValueError(msg)
         if not self.scopes:
             msg = f"OAuth provider '{self.id}' must declare at least one scope"
             raise ValueError(msg)
@@ -259,45 +290,55 @@ class OAuthProvider:
             raise ValueError(msg)
 
     @property
+    def all_client_config_services(self) -> tuple[str, ...]:
+        """Return provider-specific then shared OAuth client config services."""
+        return (*self.client_config_services, *self.shared_client_config_services)
+
+    @property
     def redirect_path(self) -> str:
         """Return the relative MindRoom callback path for this provider."""
         return self.default_redirect_path or f"/api/oauth/{self.id}/callback"
 
-    @property
-    def normalized_client_id_env(self) -> tuple[str, ...]:
-        """Return client ID environment variable names in lookup order."""
-        explicit = _normalize_env_names(self.client_id_env)
-        if explicit:
-            return explicit
-        return (f"MINDROOM_OAUTH_{_env_prefix(self.id)}_CLIENT_ID",)
-
-    @property
-    def normalized_client_secret_env(self) -> tuple[str, ...]:
-        """Return client secret environment variable names in lookup order."""
-        explicit = _normalize_env_names(self.client_secret_env)
-        if explicit:
-            return explicit
-        return (f"MINDROOM_OAUTH_{_env_prefix(self.id)}_CLIENT_SECRET",)
-
-    @property
-    def normalized_redirect_uri_env(self) -> tuple[str, ...]:
-        """Return redirect URI environment variable names in lookup order."""
-        explicit = _normalize_env_names(self.redirect_uri_env)
-        if explicit:
-            return explicit
-        return (f"MINDROOM_OAUTH_{_env_prefix(self.id)}_REDIRECT_URI",)
-
     def client_config(self, runtime_paths: RuntimePaths) -> OAuthClientConfig | None:
         """Return resolved client settings or None when the provider is not configured."""
-        client_id = _runtime_env_value(runtime_paths, self.normalized_client_id_env)
-        client_secret = _runtime_env_value(runtime_paths, self.normalized_client_secret_env)
-        if not client_id or not client_secret:
+        resolution = self.client_config_resolution(runtime_paths)
+        return resolution.config if resolution is not None else None
+
+    def client_config_resolution(self, runtime_paths: RuntimePaths) -> OAuthClientConfigResolution | None:
+        """Return stored OAuth app client settings and the supplying credential service."""
+        manager = get_runtime_credentials_manager(runtime_paths)
+        for service in self.client_config_services:
+            config = self._stored_client_config_from_service(runtime_paths, manager.load_credentials(service), True)
+            if config is not None:
+                return OAuthClientConfigResolution(config=config, service=service)
+        for service in self.shared_client_config_services:
+            config = self._stored_client_config_from_service(runtime_paths, manager.load_credentials(service), False)
+            if config is not None:
+                return OAuthClientConfigResolution(config=config, service=service)
+        return None
+
+    def _stored_client_config_from_service(
+        self,
+        runtime_paths: RuntimePaths,
+        credentials: Mapping[str, Any] | None,
+        use_stored_redirect_uri: bool,
+    ) -> OAuthClientConfig | None:
+        """Return stored OAuth app client settings from one credential document."""
+        if not credentials:
             return None
-        redirect_uri = _runtime_env_value(runtime_paths, self.normalized_redirect_uri_env)
+        client_id = credentials.get("client_id")
+        client_secret = credentials.get("client_secret")
+        if not isinstance(client_id, str) or not client_id.strip():
+            return None
+        if not isinstance(client_secret, str) or not client_secret.strip():
+            return None
+        redirect_uri = credentials.get("redirect_uri") if use_stored_redirect_uri else None
         return OAuthClientConfig(
-            client_id=client_id,
-            client_secret=client_secret,
-            redirect_uri=redirect_uri or self.default_redirect_uri(runtime_paths),
+            client_id=client_id.strip(),
+            client_secret=client_secret.strip(),
+            redirect_uri=redirect_uri.strip()
+            if isinstance(redirect_uri, str) and redirect_uri.strip()
+            else self.default_redirect_uri(runtime_paths),
         )
 
     def require_client_config(self, runtime_paths: RuntimePaths) -> OAuthClientConfig:
@@ -305,8 +346,8 @@ class OAuthProvider:
         client_config = self.client_config(runtime_paths)
         if client_config is not None:
             return client_config
-        env_names = ", ".join((*self.normalized_client_id_env, *self.normalized_client_secret_env))
-        msg = f"OAuth provider '{self.id}' is not configured. Set {env_names}."
+        services = ", ".join(self.all_client_config_services) or "a *_oauth_client credential service"
+        msg = f"OAuth provider '{self.id}' is not configured. Store client_id and client_secret in {services}."
         raise OAuthProviderNotConfiguredError(msg)
 
     def default_redirect_uri(self, runtime_paths: RuntimePaths) -> str:
@@ -344,8 +385,12 @@ class OAuthProvider:
         if self.token_exchanger is not None:
             result = self.token_exchanger(self, code, client_config, runtime_paths)
             if isinstance(result, OAuthTokenResult):
-                return _token_result_with_core_metadata(self, result)
-            return _token_result_with_core_metadata(self, await cast("Awaitable[OAuthTokenResult]", result))
+                return _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
+            return _token_result_with_core_metadata(
+                self,
+                await cast("Awaitable[OAuthTokenResult]", result),
+                client_id=client_config.client_id,
+            )
 
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
@@ -368,7 +413,11 @@ class OAuthProvider:
             msg = "OAuth token exchange failed"
             raise OAuthProviderError(msg)
         parser = self.token_parser or _default_token_parser
-        return _token_result_with_core_metadata(self, parser(self, token_response, client_config, runtime_paths))
+        return _token_result_with_core_metadata(
+            self,
+            parser(self, token_response, client_config, runtime_paths),
+            client_id=client_config.client_id,
+        )
 
     async def refresh_token_data(
         self,
@@ -407,6 +456,7 @@ class OAuthProvider:
         parsed = _token_result_with_core_metadata(
             self,
             (self.token_parser or _default_token_parser)(self, merged_response, client_config, runtime_paths),
+            client_id=client_config.client_id,
         )
         refreshed = dict(parsed.token_data)
         if "refresh_token" not in parsed.token_data:

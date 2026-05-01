@@ -1653,12 +1653,17 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=app_runtime_paths.config_path,
         storage_path=app_runtime_paths.storage_root,
-        process_env={
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
-        },
+        process_env={},
     )
     manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_drive_oauth_client",
+        {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "ui",
+        },
+    )
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",

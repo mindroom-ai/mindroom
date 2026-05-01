@@ -79,6 +79,7 @@ const {
   mockGoogleGmailLoadStatus,
   mockSpotifyLoadStatus,
   mockPlexLoadStatus,
+  mockEnhancedConfigDialogProps,
 } = vi.hoisted(() => ({
   mockUseTools: vi.fn(),
   mockGoogleDriveOnAction: vi.fn(),
@@ -105,6 +106,7 @@ const {
   mockPlexLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "connected", connected: true }),
+  mockEnhancedConfigDialogProps: vi.fn(),
 }));
 
 function createDeferred() {
@@ -170,13 +172,15 @@ vi.mock("@/lib/api", () => ({
 
 // Mock EnhancedConfigDialog
 vi.mock("./EnhancedConfigDialog", () => ({
-  EnhancedConfigDialog: ({ onSuccess, service }: any) => {
+  EnhancedConfigDialog: ({ configFields, onSuccess, service }: any) => {
+    mockEnhancedConfigDialogProps({ configFields, service });
     // Auto-call success when dialog opens
     setTimeout(() => onSuccess?.(), 0);
     return (
       <>
         <div>Enhanced Config Dialog</div>
         <div>Service: {service}</div>
+        <div>Fields: {JSON.stringify(configFields)}</div>
       </>
     );
   },
@@ -362,6 +366,7 @@ describe("Integrations", () => {
     mockPlexOnAction.mockResolvedValue(undefined);
     mockPlexOnDisconnect.mockResolvedValue(undefined);
     mockGenericOAuthOnAction.mockResolvedValue(undefined);
+    mockEnhancedConfigDialogProps.mockClear();
     mockGenericOAuthLoadStatus.mockResolvedValue({
       status: "available",
       connected: false,
@@ -469,6 +474,105 @@ describe("Integrations", () => {
         screen.getByRole("button", { name: "Retry status" }),
       ).toBeInTheDocument();
       expect(screen.queryByText("Needs client config")).not.toBeInTheDocument();
+    });
+  });
+
+  it("opens OAuth client config dialog when client config is missing", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: false,
+      oauth_client_config_service: "google_drive_oauth_client",
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Configure client" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Configure client" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+      expect(
+        screen.getByText("Service: google_drive_oauth_client"),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
+        /"required":true/,
+      );
+    });
+  });
+
+  it("opens OAuth client config dialog for existing client config", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: true,
+      oauth_client_config_service: "google_drive_oauth_client",
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Edit client" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getAllByRole("button", { name: "Connect" }).length,
+      ).toBeGreaterThan(0);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit client" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+      expect(
+        screen.getByText("Service: google_drive_oauth_client"),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
+        /"required":false/,
+      );
+    });
+  });
+
+  it("omits redirect URI from shared OAuth client config dialog", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: true,
+      oauth_client_config_service: "google_oauth_client",
+      oauth_client_redirect_uri_supported: false,
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Edit client" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit client" }));
+
+    await waitFor(() => {
+      expect(mockEnhancedConfigDialogProps).toHaveBeenCalledWith(
+        expect.objectContaining({
+          service: "google_oauth_client",
+          configFields: [
+            expect.objectContaining({ name: "client_id" }),
+            expect.objectContaining({ name: "client_secret" }),
+          ],
+        }),
+      );
+      const dialogCalls = mockEnhancedConfigDialogProps.mock.calls;
+      expect(dialogCalls[dialogCalls.length - 1]?.[0].configFields).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "redirect_uri" }),
+        ]),
+      );
     });
   });
 

@@ -8,7 +8,7 @@ import pytest
 from agno.tools.gmail import GmailTools as AgnoGmailTools
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.oauth.providers import OAuthConnectionRequired
 
@@ -42,14 +42,18 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
     """Create an isolated runtime context for Gmail tool tests."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
-    return resolve_runtime_paths(
+    paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path,
-        process_env={
-            "GOOGLE_GMAIL_CLIENT_ID": "test_client_id",
-            "GOOGLE_GMAIL_CLIENT_SECRET": "test_client_secret",
+    )
+    get_runtime_credentials_manager(paths).save_credentials(
+        "google_gmail_oauth_client",
+        {
+            "client_id": "test_client_id",
+            "client_secret": "test_client_secret",
         },
     )
+    return paths
 
 
 class TestGmailTools:

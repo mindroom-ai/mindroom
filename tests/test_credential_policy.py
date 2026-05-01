@@ -47,7 +47,6 @@ def test_local_shared_service_policy(service: str, worker_scope: str, expected: 
 @pytest.mark.parametrize(
     "service",
     [
-        "google_oauth_client",
         "google_calendar_oauth",
         "google_drive_oauth",
         "google_gmail_oauth",
@@ -68,6 +67,26 @@ def test_credential_service_policy_classifies_google_oauth_user_scope() -> None:
     assert policy.worker_scope == "user"
     assert policy.is_local_only_shared_service is True
     assert policy.uses_primary_runtime_scoped_credentials is True
+    assert policy.uses_local_shared_credentials is False
+    assert policy.worker_grantable_supported is False
+
+
+def test_credential_service_policy_classifies_oauth_client_config_as_global_primary_runtime() -> None:
+    """OAuth app client config should stay in one primary-runtime deployment store."""
+    policy = credential_service_policy("google_drive_oauth_client", "user_agent")
+
+    assert policy.uses_primary_runtime_global_credentials is True
+    assert policy.uses_primary_runtime_scoped_credentials is False
+    assert policy.uses_local_shared_credentials is False
+    assert policy.worker_grantable_supported is False
+
+
+def test_credential_service_policy_classifies_plugin_oauth_client_config_as_global_primary_runtime() -> None:
+    """Plugin OAuth app client config should use the same local-only placement policy."""
+    policy = credential_service_policy("acme_oauth_client", "shared")
+
+    assert policy.uses_primary_runtime_global_credentials is True
+    assert policy.uses_primary_runtime_scoped_credentials is False
     assert policy.uses_local_shared_credentials is False
     assert policy.worker_grantable_supported is False
 

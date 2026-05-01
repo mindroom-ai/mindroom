@@ -201,4 +201,23 @@ describe("Generic OAuth integration provider", () => {
       oauth_client_configured: false,
     });
   });
+
+  it("maps OAuth client config service from provider status", async () => {
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        connected: false,
+        has_client_config: false,
+        has_service_account_config: false,
+        client_config_service: "google_drive_oauth_client",
+      }),
+    });
+
+    const status = await integrationProviders.google_drive.loadStatus!();
+
+    expect(status).toMatchObject({
+      oauth_client_configured: false,
+      oauth_client_config_service: "google_drive_oauth_client",
+    });
+  });
 });

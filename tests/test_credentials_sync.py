@@ -98,7 +98,7 @@ class TestCredentialsSync:
         temp_credentials_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Generic Google OAuth client config should stay in runtime env, not shared credentials."""
+        """Legacy Google OAuth client env vars should not seed stored client config."""
         monkeypatch.setenv("GOOGLE_CLIENT_ID", "client-id")
         monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "client-secret")
 

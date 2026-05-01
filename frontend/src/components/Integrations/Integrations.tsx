@@ -38,6 +38,7 @@ import {
   useTools,
   mapToolToIntegration,
   type ToolInfo,
+  type ToolFieldSchema,
 } from "@/hooks/useTools";
 import { useConfigStore } from "@/store/configStore";
 import { getIconForTool } from "./iconMapping";
@@ -158,6 +159,7 @@ export function Integrations() {
     helperText?: string | null;
     icon?: any;
     iconColor?: string;
+    useSelectedScope?: boolean;
   } | null>(null);
   const [filterMode, setFilterMode] = useState<
     "all" | "available" | "unconfigured" | "configured"
@@ -390,6 +392,56 @@ export function Integrations() {
     return true;
   };
 
+  const openOAuthClientConfigDialog = (integration: Integration) => {
+    if (!integration.oauth_client_config_service) {
+      return false;
+    }
+    const configFields: ToolFieldSchema[] = [
+      {
+        name: "client_id",
+        label: "Client ID",
+        type: "text",
+        required: true,
+        placeholder: "your-client-id.apps.googleusercontent.com",
+        description: "OAuth app client ID",
+      },
+      {
+        name: "client_secret",
+        label: "Client Secret",
+        type: "password",
+        required: integration.oauth_client_configured !== true,
+        placeholder:
+          integration.oauth_client_configured === true
+            ? "Leave blank to keep the saved secret"
+            : "OAuth app client secret",
+        description: "OAuth app client secret",
+      },
+    ];
+    if (integration.oauth_client_redirect_uri_supported === true) {
+      configFields.push({
+        name: "redirect_uri",
+        label: "Redirect URI",
+        type: "text",
+        required: false,
+        placeholder: `${window.location.origin}/api/oauth/${integration.oauth_provider_id ?? integration.id}/callback`,
+        description: "Optional provider-specific redirect URI",
+      });
+    }
+    setConfigDialog({
+      service: integration.oauth_client_config_service,
+      displayName: `${integration.name} OAuth Client`,
+      description: `Configure the OAuth app client used to connect ${integration.name}.`,
+      configFields,
+      isEditing: integration.oauth_client_configured === true,
+      docsUrl: integration.docs_url || null,
+      helperText: null,
+      icon: null,
+      iconColor: integration.icon_color || integration.iconColor || undefined,
+      useSelectedScope: false,
+    });
+    return true;
+  };
+
   const handleIntegrationAction = async (integration: Integration) => {
     if (blocksScopedDashboardCredentials(integration)) {
       toast({
@@ -420,6 +472,13 @@ export function Integrations() {
       if (
         integration.status === "connected" &&
         openToolConfigDialog(integration)
+      ) {
+        return;
+      }
+
+      if (
+        integration.oauth_client_configured === false &&
+        openOAuthClientConfigDialog(integration)
       ) {
         return;
       }
@@ -552,6 +611,23 @@ export function Integrations() {
         />
       );
     }
+
+    const canEditOAuthClientConfig =
+      integration.setup_type === "oauth" &&
+      integration.oauth_client_configured === true &&
+      integration.oauth_service_account_configured !== true &&
+      Boolean(integration.oauth_client_config_service);
+    const oauthClientConfigButton = canEditOAuthClientConfig ? (
+      <Button
+        onClick={() => openOAuthClientConfigDialog(integration)}
+        disabled={loading}
+        variant="outline"
+        size="sm"
+      >
+        <Settings className="h-4 w-4 mr-1" />
+        Edit client
+      </Button>
+    ) : null;
 
     // Handle tools with delegated authentication
     const tool = integration;
@@ -690,6 +766,7 @@ export function Integrations() {
           <Button disabled variant="outline" size="sm">
             Status unavailable
           </Button>
+          {oauthClientConfigButton}
           <Button
             onClick={() => void loadIntegrations(false)}
             disabled={loading}
@@ -704,12 +781,42 @@ export function Integrations() {
 
     if (
       integration.setup_type === "oauth" &&
+      integration.status !== "connected" &&
+      canEditOAuthClientConfig
+    ) {
+      return (
+        <div className="flex gap-2 items-center">
+          <Button
+            onClick={() => handleIntegrationAction(integration)}
+            disabled={loading}
+            size="sm"
+            className="flex items-center gap-2"
+          >
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <ExternalLink className="h-4 w-4" />
+            )}
+            Connect
+          </Button>
+          {oauthClientConfigButton}
+        </div>
+      );
+    }
+
+    if (
+      integration.setup_type === "oauth" &&
       integration.oauth_client_configured === false &&
       integration.oauth_service_account_configured !== true
     ) {
       return (
-        <Button disabled variant="outline" size="sm">
-          Needs client config
+        <Button
+          onClick={() => handleIntegrationAction(integration)}
+          disabled={loading || !integration.oauth_client_config_service}
+          variant="outline"
+          size="sm"
+        >
+          Configure client
         </Button>
       );
     }
@@ -726,6 +833,7 @@ export function Integrations() {
           >
             Edit
           </Button>
+          {oauthClientConfigButton}
           <Button
             onClick={() => handleDisconnect(integration)}
             disabled={loading}
@@ -1114,8 +1222,16 @@ export function Integrations() {
           helperText={configDialog.helperText}
           icon={configDialog.icon}
           iconColor={configDialog.iconColor}
-          agentName={effectiveScopeAgentName}
-          executionScope={selectedExecutionScope}
+          agentName={
+            configDialog.useSelectedScope === false
+              ? null
+              : effectiveScopeAgentName
+          }
+          executionScope={
+            configDialog.useSelectedScope === false
+              ? null
+              : selectedExecutionScope
+          }
           onSuccess={async () => {
             setConfigDialog(null);
             // Refetch tools to get updated status

@@ -14,6 +14,7 @@ from mindroom.api import main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 
 
@@ -392,6 +393,463 @@ class TestCredentialsAPI:
         assert "OAuth token credentials" in token_response.json()["detail"]
         assert token_status_response.status_code == 400
         assert "OAuth token credentials" in token_status_response.json()["detail"]
+
+    def test_oauth_client_config_service_redacts_secret_fields(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth app client config services should be editable without echoing secrets."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "client_secret": "stored-client-secret",
+                    "redirect_uri": "https://stored.example.test/callback",
+                },
+            },
+        )
+        get_response = client.get("/api/credentials/google_drive_oauth_client")
+        status_response = client.get("/api/credentials/google_drive_oauth_client/status")
+
+        assert response.status_code == 200
+        assert manager.load_credentials("google_drive_oauth_client") == {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "redirect_uri": "https://stored.example.test/callback",
+            "_source": "ui",
+        }
+        assert get_response.status_code == 200
+        assert get_response.json() == {
+            "service": "google_drive_oauth_client",
+            "credentials": {
+                "client_id": "stored-client-id",
+                "redirect_uri": "https://stored.example.test/callback",
+            },
+        }
+        assert status_response.status_code == 200
+        assert set(status_response.json()["key_names"]) == {"client_id", "redirect_uri"}
+
+    def test_oauth_client_config_save_preserves_existing_secret_when_omitted(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Editing redacted OAuth client config should not delete the existing secret."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "google_drive_oauth_client",
+            {
+                "client_id": "stored-client-id",
+                "client_secret": "stored-client-secret",
+                "redirect_uri": "https://old.example.test/callback",
+                "_source": "ui",
+            },
+        )
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "redirect_uri": "https://new.example.test/callback",
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert manager.load_credentials("google_drive_oauth_client") == {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "redirect_uri": "https://new.example.test/callback",
+            "_source": "ui",
+        }
+
+        blank_response = client.post(
+            "/api/credentials/google_drive_oauth_client",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "client_secret": "",
+                    "redirect_uri": "https://blank.example.test/callback",
+                },
+            },
+        )
+
+        assert blank_response.status_code == 200
+        assert manager.load_credentials("google_drive_oauth_client") == {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "redirect_uri": "https://blank.example.test/callback",
+            "_source": "ui",
+        }
+
+    def test_oauth_client_config_save_rejects_missing_first_time_secret(
+        self,
+        client: TestClient,
+    ) -> None:
+        """First-time OAuth client config saves should require usable client secret material."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "client_secret": "",
+                },
+            },
+        )
+
+        assert response.status_code == 400
+        assert "client_secret is required" in response.json()["detail"]
+        assert manager.load_credentials("google_drive_oauth_client") is None
+
+    def test_oauth_client_config_save_rejects_missing_first_time_client_id(
+        self,
+        client: TestClient,
+    ) -> None:
+        """First-time OAuth client config saves should require usable client ID material."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client",
+            json={
+                "credentials": {
+                    "client_secret": "stored-client-secret",
+                },
+            },
+        )
+
+        assert response.status_code == 400
+        assert "client_id is required" in response.json()["detail"]
+        assert manager.load_credentials("google_drive_oauth_client") is None
+
+    def test_oauth_client_config_rejects_non_client_config_fields(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth client config services should not store token material."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "client_secret": "stored-client-secret",
+                    "refresh_token": "smuggled-refresh-token",
+                },
+            },
+        )
+
+        assert response.status_code == 400
+        assert "refresh_token" in response.json()["detail"]
+        assert manager.load_credentials("google_drive_oauth_client") is None
+
+    def test_oauth_client_config_rejects_non_string_redirect_uri(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth client redirect URI should not store values the generic API-key route cannot mask."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "client_secret": "stored-client-secret",
+                    "redirect_uri": 123,
+                },
+            },
+        )
+
+        assert response.status_code == 400
+        assert "redirect_uri must be a string" in response.json()["detail"]
+        assert manager.load_credentials("google_drive_oauth_client") is None
+
+    def test_oauth_client_config_api_key_read_rejects_legacy_non_string_field(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Malformed legacy client config fields should fail as 400 instead of API-key masking errors."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "google_drive_oauth_client",
+            {
+                "client_id": "stored-client-id",
+                "client_secret": "stored-client-secret",
+                "redirect_uri": 123,
+                "_source": "ui",
+            },
+        )
+
+        response = client.get(
+            "/api/credentials/google_drive_oauth_client/api-key?key_name=redirect_uri&include_value=true",
+        )
+
+        assert response.status_code == 400
+        assert "not a readable string" in response.json()["detail"]
+
+    def test_stored_oauth_client_config_token_fields_are_not_readable(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Legacy malformed client config documents should not expose token material."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "google_drive_oauth_client",
+            {
+                "client_id": "stored-client-id",
+                "client_secret": "stored-client-secret",
+                "refresh_token": "smuggled-refresh-token",
+                "_source": "ui",
+            },
+        )
+
+        get_response = client.get("/api/credentials/google_drive_oauth_client")
+        api_key_response = client.get(
+            "/api/credentials/google_drive_oauth_client/api-key?key_name=refresh_token&include_value=true",
+        )
+
+        assert get_response.status_code == 200
+        assert get_response.json() == {
+            "service": "google_drive_oauth_client",
+            "credentials": {
+                "client_id": "stored-client-id",
+            },
+        }
+        assert api_key_response.status_code == 400
+        assert "OAuth client config field" in api_key_response.json()["detail"]
+
+    def test_oauth_client_config_rejects_api_key_partial_writes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth client config should not be created through single-field API key writes."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client/api-key",
+            json={
+                "service": "google_drive_oauth_client",
+                "api_key": "stored-client-id",
+                "key_name": "client_id",
+            },
+        )
+
+        assert response.status_code == 400
+        assert "OAuth client config credentials" in response.json()["detail"]
+        assert manager.load_credentials("google_drive_oauth_client") is None
+
+    def test_oauth_client_config_service_rejects_copy_to_regular_service(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth client secrets should not be copied into non-redacted services."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "google_drive_oauth_client",
+            {
+                "client_id": "stored-client-id",
+                "client_secret": "stored-client-secret",
+                "_source": "ui",
+            },
+        )
+
+        response = client.post("/api/credentials/copied_service/copy-from/google_drive_oauth_client")
+
+        assert response.status_code == 400
+        assert "OAuth client config credentials cannot be copied" in response.json()["detail"]
+        assert manager.load_credentials("copied_service") is None
+
+    def test_orphaned_oauth_client_config_service_redacts_and_rejects_copy(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth client config suffix should protect secrets without a loaded provider."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "acme_oauth_client",
+            {
+                "client_id": "stored-client-id",
+                "client_secret": "stored-client-secret",
+                "_source": "ui",
+            },
+        )
+
+        get_response = client.get("/api/credentials/acme_oauth_client")
+        api_key_response = client.get(
+            "/api/credentials/acme_oauth_client/api-key?key_name=client_secret&include_value=true",
+        )
+        copy_response = client.post("/api/credentials/copied_service/copy-from/acme_oauth_client")
+
+        assert get_response.status_code == 200
+        assert get_response.json() == {
+            "service": "acme_oauth_client",
+            "credentials": {
+                "client_id": "stored-client-id",
+            },
+        }
+        assert api_key_response.status_code == 400
+        assert "OAuth client secret" in api_key_response.json()["detail"]
+        assert copy_response.status_code == 400
+        assert "OAuth client config credentials cannot be copied" in copy_response.json()["detail"]
+        assert manager.load_credentials("copied_service") is None
+
+    def test_oauth_client_config_agent_save_uses_primary_runtime_store(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth client config is deployment config even when edited from an agent-scoped view."""
+        runtime_paths = _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("shared")
+        _publish_committed_runtime_config(client.app, config)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        worker_key = resolve_worker_key(
+            "shared",
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="general",
+                requester_id="@alice:example.org",
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
+            agent_name="general",
+        )
+        assert worker_key is not None
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client?agent_name=general",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "client_secret": "stored-client-secret",
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert manager.load_credentials("google_drive_oauth_client") == {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        }
+        assert manager.for_worker(worker_key).load_credentials("google_drive_oauth_client") is None
+
+        list_response = client.get("/api/credentials/list?agent_name=general")
+
+        assert list_response.status_code == 200
+        assert "google_drive_oauth_client" in list_response.json()
+
+    def test_oauth_client_config_private_agent_save_uses_primary_runtime_store(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth client config may be edited from private agent scopes but stays global."""
+        runtime_paths = _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("user_agent")
+        _publish_committed_runtime_config(client.app, config)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        worker_key = resolve_worker_key(
+            "user_agent",
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="general",
+                requester_id="@alice:example.org",
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
+            agent_name="general",
+        )
+        assert worker_key is not None
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client?agent_name=general",
+            json={
+                "credentials": {
+                    "client_id": "stored-client-id",
+                    "client_secret": "stored-client-secret",
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert manager.load_credentials("google_drive_oauth_client") == {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        }
+        assert manager.for_worker(worker_key).load_credentials("google_drive_oauth_client") is None
+
+    def test_plugin_oauth_client_config_agent_save_uses_primary_runtime_store(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Plugin OAuth client config should not use worker credential storage."""
+        runtime_paths = _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("shared")
+        _publish_committed_runtime_config(client.app, config)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        provider = OAuthProvider(
+            id="acme",
+            display_name="Acme",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",  # noqa: S106
+            scopes=("acme.read",),
+            credential_service="acme_oauth",
+            client_config_services=("acme_oauth_client",),
+        )
+        worker_key = resolve_worker_key(
+            "shared",
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="general",
+                requester_id="@alice:example.org",
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
+            agent_name="general",
+        )
+        assert worker_key is not None
+
+        with patch.object(credentials_api, "load_oauth_providers_for_snapshot", return_value={"acme": provider}):
+            response = client.post(
+                "/api/credentials/acme_oauth_client?agent_name=general",
+                json={
+                    "credentials": {
+                        "client_id": "stored-client-id",
+                        "client_secret": "stored-client-secret",
+                    },
+                },
+            )
+
+        assert response.status_code == 200
+        assert manager.load_credentials("acme_oauth_client") == {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        }
+        assert manager.for_worker(worker_key).load_credentials("acme_oauth_client") is None
 
     def test_orphaned_oauth_credentials_reject_generic_routes(
         self,

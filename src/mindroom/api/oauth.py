@@ -64,6 +64,8 @@ class OAuthStatusResponse(BaseModel):
     display_name: str
     credential_service: str
     tool_config_service: str | None = None
+    client_config_service: str | None = None
+    client_config_redirect_uri_supported: bool = False
     connected: bool
     has_client_config: bool
     has_service_account_config: bool = False
@@ -255,6 +257,14 @@ def _same_external_identity(existing_credentials: dict[str, Any] | None, token_d
     return existing_email is not None and existing_email == new_email
 
 
+def _same_oauth_client(existing_credentials: dict[str, Any] | None, token_data: dict[str, Any]) -> bool:
+    existing_client_id = (existing_credentials or {}).get("client_id")
+    if not isinstance(existing_client_id, str) or not existing_client_id.strip():
+        return False
+    token_client_id = token_data.get("client_id")
+    return isinstance(token_client_id, str) and token_client_id.strip() == existing_client_id.strip()
+
+
 def _token_data_preserving_refresh_token(
     existing_credentials: dict[str, Any] | None,
     safe_token_data: dict[str, Any],
@@ -266,6 +276,7 @@ def _token_data_preserving_refresh_token(
         and isinstance(existing_refresh_token, str)
         and existing_refresh_token
         and _same_external_identity(existing_credentials, token_data)
+        and _same_oauth_client(existing_credentials, token_data)
     ):
         token_data["refresh_token"] = existing_refresh_token
     return token_data
@@ -426,14 +437,26 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         )
         or {}
     )
-    has_client_config = provider.client_config(runtime_paths) is not None
+    client_config_resolution = provider.client_config_resolution(runtime_paths)
+    has_client_config = client_config_resolution is not None
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     connected = has_service_account_config or oauth_credentials_usable(provider, runtime_paths, credentials)
+    if client_config_resolution is not None:
+        client_config_service = client_config_resolution.service
+    elif provider.all_client_config_services:
+        client_config_service = provider.all_client_config_services[0]
+    else:
+        client_config_service = None
+    client_config_redirect_uri_supported = (
+        client_config_service is not None and client_config_service in provider.client_config_services
+    )
     return OAuthStatusResponse(
         provider=provider.id,
         display_name=provider.display_name,
         credential_service=provider.credential_service,
         tool_config_service=provider.tool_config_service,
+        client_config_service=client_config_service,
+        client_config_redirect_uri_supported=client_config_redirect_uri_supported,
         connected=connected,
         has_client_config=has_client_config,
         has_service_account_config=has_service_account_config,
