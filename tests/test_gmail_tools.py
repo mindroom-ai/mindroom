@@ -23,6 +23,7 @@ def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
         "token": "test_access_token",
         "refresh_token": "test_refresh_token",
         "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "test_client_id",
         "client_secret": "test_client_secret",
         "scopes": [
             "openid",

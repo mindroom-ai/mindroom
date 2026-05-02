@@ -1380,6 +1380,7 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
+            "client_id": "client-id",
             "_id_token": "old-raw-id-token",
             "id_token": "old-standard-id-token",
             "client_secret": "old-client-secret",
@@ -2286,6 +2287,7 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
         {
             "token": "stored-token",
             "refresh_token": "stored-refresh-token",
+            "client_id": "client-id",
             "scopes": list(provider.scopes),
             "_source": "oauth",
             "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
@@ -2715,6 +2717,7 @@ def test_oauth_credentials_usable_accepts_expired_access_token_with_refresh(tmp_
         {
             "token": "expired-access-token",
             "refresh_token": "stored-refresh-token",
+            "client_id": "client-id",
             "expires_at": 1.0,
             "scopes": list(provider.scopes),
             "_source": "oauth",
