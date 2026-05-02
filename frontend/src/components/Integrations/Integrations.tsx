@@ -62,6 +62,10 @@ const titleFromProviderId = (providerId: string) =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
 
+const oauthRedirectPlaceholderOrigin = () =>
+  new URL(API_BASE_URL || window.location.origin, window.location.origin)
+    .origin;
+
 export function Integrations() {
   const { agents, agentPoliciesByAgent } = useConfigStore();
   const [scopeAgentName, setScopeAgentName] = useState<string | null>(null);
@@ -423,7 +427,9 @@ export function Integrations() {
         label: "Redirect URI",
         type: "text",
         required: false,
-        placeholder: `${window.location.origin}/api/oauth/${integration.oauth_provider_id ?? integration.id}/callback`,
+        placeholder: `${oauthRedirectPlaceholderOrigin()}/api/oauth/${
+          integration.oauth_provider_id ?? integration.id
+        }/callback`,
         description: "Optional provider-specific redirect URI",
       });
     }

@@ -576,6 +576,42 @@ describe("Integrations", () => {
     });
   });
 
+  it("uses the API origin for OAuth client redirect URI placeholders", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: false,
+      oauth_client_config_service: "google_drive_oauth_client",
+      oauth_client_redirect_uri_supported: true,
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Configure client" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Configure client" }));
+
+    await waitFor(() => {
+      const dialogCalls = mockEnhancedConfigDialogProps.mock.calls;
+      const configFields =
+        dialogCalls[dialogCalls.length - 1]?.[0].configFields;
+
+      expect(configFields).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "redirect_uri",
+            placeholder:
+              "http://localhost:8080/api/oauth/google_drive/callback",
+          }),
+        ]),
+      );
+    });
+  });
+
   it("should filter integrations by search term", async () => {
     render(<Integrations />);
 
