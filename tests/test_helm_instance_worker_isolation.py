@@ -100,6 +100,20 @@ def test_instance_chart_disables_service_links_for_dynamic_worker_pods_by_defaul
     assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
 
 
+def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:
+    """Hosted instances should derive OAuth callbacks from their public dashboard origin."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "customer=tenant42",
+        "baseDomain=example.test",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-tenant42")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+
+    assert env_values["MINDROOM_PUBLIC_URL"] == "https://tenant42.example.test"
+
+
 def test_instance_chart_worker_manager_can_only_patch_own_worker_auth_secret() -> None:
     """Shared-namespace instances must not get cross-tenant Secret permissions."""
     docs = _render_instance_chart()

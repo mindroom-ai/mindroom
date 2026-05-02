@@ -17,7 +17,7 @@ from agno.tools.function import Function
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google_drive import GOOGLE_DRIVE_OAUTH_SCOPES
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -49,6 +49,27 @@ class MinimalModel(Model):
         **_kwargs: object,
     ) -> ModelResponse:
         return response
+
+
+def _runtime_paths_with_google_drive_client(
+    tmp_path: Path,
+    process_env: dict[str, str] | None = None,
+    *,
+    redirect_uri: str | None = None,
+) -> constants.RuntimePaths:
+    runtime_paths = constants.resolve_runtime_paths(
+        storage_path=tmp_path / "mindroom_data",
+        process_env=process_env or {},
+    )
+    credentials = {
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "_source": "ui",
+    }
+    if redirect_uri is not None:
+        credentials["redirect_uri"] = redirect_uri
+    get_runtime_credentials_manager(runtime_paths).save_credentials("google_drive_oauth_client", credentials)
+    return runtime_paths
 
 
 def test_google_drive_missing_credentials_returns_connect_instruction(tmp_path: Path) -> None:
@@ -120,13 +141,9 @@ def test_google_drive_model_functions_do_not_collide_with_local_file_tools(tmp_p
 
 
 def test_google_drive_connect_instruction_uses_redirect_uri_public_origin(tmp_path: Path) -> None:
-    runtime_paths = constants.resolve_runtime_paths(
-        storage_path=tmp_path / "mindroom_data",
-        process_env={
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
-            "GOOGLE_DRIVE_REDIRECT_URI": "https://mindroom.example.test/api/oauth/google_drive/callback",
-        },
+    runtime_paths = _runtime_paths_with_google_drive_client(
+        tmp_path,
+        redirect_uri="https://mindroom.example.test/api/oauth/google_drive/callback",
     )
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     execution_identity = ToolExecutionIdentity(
@@ -156,13 +173,7 @@ def test_google_drive_connect_instruction_uses_redirect_uri_public_origin(tmp_pa
 
 
 def test_google_drive_credentials_restore_stored_expiry(tmp_path: Path) -> None:
-    runtime_paths = constants.resolve_runtime_paths(
-        storage_path=tmp_path / "mindroom_data",
-        process_env={
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
-        },
-    )
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
@@ -174,6 +185,7 @@ def test_google_drive_credentials_restore_stored_expiry(tmp_path: Path) -> None:
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
+            "client_id": "client-id",
             "expires_at": expires_at,
         },
     )
@@ -182,11 +194,9 @@ def test_google_drive_credentials_restore_stored_expiry(tmp_path: Path) -> None:
 
 
 def test_google_drive_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:
-    runtime_paths = constants.resolve_runtime_paths(
-        storage_path=tmp_path / "mindroom_data",
+    runtime_paths = _runtime_paths_with_google_drive_client(
+        tmp_path,
         process_env={
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
             "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "service-account.json"),
         },
     )
@@ -201,13 +211,7 @@ def test_google_drive_service_account_env_uses_upstream_auth(tmp_path: Path) -> 
 
 
 def test_google_drive_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
-    runtime_paths = constants.resolve_runtime_paths(
-        storage_path=tmp_path / "mindroom_data",
-        process_env={
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
-        },
-    )
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     expected_value = "access-token"
     credentials_manager.save_credentials(
@@ -239,13 +243,7 @@ def test_google_drive_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
 
 
 def test_google_drive_rejects_stored_token_missing_required_scopes(tmp_path: Path) -> None:
-    runtime_paths = constants.resolve_runtime_paths(
-        storage_path=tmp_path / "mindroom_data",
-        process_env={
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
-        },
-    )
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     credentials_manager.save_credentials(
         "google_drive_oauth",
@@ -269,11 +267,9 @@ def test_google_drive_rejects_stored_token_missing_required_scopes(tmp_path: Pat
 
 
 def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp_path: Path) -> None:
-    runtime_paths = constants.resolve_runtime_paths(
-        storage_path=tmp_path / "mindroom_data",
+    runtime_paths = _runtime_paths_with_google_drive_client(
+        tmp_path,
         process_env={
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
             "GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS": "example.com",
         },
     )
@@ -304,11 +300,9 @@ def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp
 
 
 def test_google_drive_rejects_stored_token_missing_claims_when_identity_policy_configured(tmp_path: Path) -> None:
-    runtime_paths = constants.resolve_runtime_paths(
-        storage_path=tmp_path / "mindroom_data",
+    runtime_paths = _runtime_paths_with_google_drive_client(
+        tmp_path,
         process_env={
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
             "GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS": "example.com",
         },
     )
@@ -368,14 +362,40 @@ def test_google_drive_stored_token_without_client_config_connects_on_invocation(
     assert result["connect_url"].startswith("https://mindroom.example.test/api/oauth/google_drive/authorize")
 
 
-def test_google_drive_saved_numeric_config_is_coerced_before_tool_init(tmp_path: Path) -> None:
-    runtime_paths = constants.resolve_runtime_paths(
-        storage_path=tmp_path / "mindroom_data",
-        process_env={
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
+def test_google_drive_mismatched_client_id_connects_on_invocation(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(
+        tmp_path,
+        {"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    credentials_manager.save_credentials(
+        "google_drive_oauth",
+        {
+            "token": "access-token",
+            "refresh_token": "refresh-token",
+            "client_id": "old-client-id",
+            "scopes": list(GOOGLE_DRIVE_OAUTH_SCOPES),
+            "_source": "oauth",
         },
     )
+
+    tool = get_tool_by_name(
+        "google_drive",
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        disable_sandbox_proxy=True,
+    )
+    assert isinstance(tool, GoogleDriveTools)
+
+    result = json.loads(tool.search_files(query="name contains 'plan'", max_results=1))
+
+    assert result["oauth_connection_required"] is True
+    assert result["provider"] == "google_drive"
+
+
+def test_google_drive_saved_numeric_config_is_coerced_before_tool_init(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     credentials_manager.save_credentials(
         "google_drive",
@@ -398,13 +418,7 @@ def test_google_drive_saved_numeric_config_is_coerced_before_tool_init(tmp_path:
 
 
 def test_google_drive_blank_numeric_config_uses_tool_default(tmp_path: Path) -> None:
-    runtime_paths = constants.resolve_runtime_paths(
-        storage_path=tmp_path / "mindroom_data",
-        process_env={
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
-        },
-    )
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     credentials_manager.save_credentials(
         "google_drive",

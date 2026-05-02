@@ -141,6 +141,15 @@ def test_mem0_and_knowledge_signatures_use_openai_model_defaults() -> None:
     )
 
 
+def test_mem0_openai_signature_separates_implicit_and_explicit_dimensions() -> None:
+    """Implicit OpenAI dimensions and explicit shortened dimensions should not share collections."""
+    assert effective_mem0_embedder_signature("openai", "text-embedding-3-large") != effective_mem0_embedder_signature(
+        "openai",
+        "text-embedding-3-large",
+        dimensions=1536,
+    )
+
+
 def test_mem0_custom_openai_compatible_signature_keeps_implicit_dimensions_unset() -> None:
     """Custom OpenAI-compatible models should not be keyed as explicit 1536-d vectors."""
     assert effective_mem0_embedder_signature(
@@ -163,4 +172,20 @@ def test_mem0_custom_openai_compatible_signature_keeps_implicit_dimensions_unset
         "gemini-embedding-001",
         "http://example.com/v1",
         "1536",
+    )
+
+
+def test_mem0_openai_signature_does_not_guess_unknown_model_dimensions() -> None:
+    """Unknown OpenAI-compatible models should only include dimensions when configured."""
+    assert effective_mem0_embedder_signature("openai", "custom-embedding-model") == (
+        "openai",
+        "custom-embedding-model",
+        "",
+        "",
+    )
+    assert effective_mem0_embedder_signature("openai", "custom-embedding-model", dimensions=1024) == (
+        "openai",
+        "custom-embedding-model",
+        "",
+        "1024",
     )

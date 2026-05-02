@@ -654,7 +654,7 @@ Expected outcome: Attachment metadata survives the tool boundary and context sco
 Expected outcome: UI availability, required credentials, and runtime capability do not contradict each other for the same integration.
 
 - [ ] `INT-009` Exercise Google provider connect, callback, status, and disconnect through `/api/oauth/google_drive/*`, `/api/oauth/google_calendar/*`, `/api/oauth/google_sheets/*`, or `/api/oauth/google_gmail/*`.
-Expected outcome: OAuth client credentials are read from the runtime environment, scoped tokens and settings stay separated, and disconnect clears only the provider token service for the selected scope while preserving editable tool settings.
+Expected outcome: OAuth client credentials are read from stored client config services such as `google_oauth_client` or a provider-specific `*_oauth_client` service, scoped tokens and settings stay separated, and disconnect clears only the provider token service for the selected scope while preserving editable tool settings.
 
 - [ ] `INT-010` Exercise Home Assistant via both OAuth and long-lived-token setup, then call `/api/homeassistant/entities` and `/api/homeassistant/service`.
 Expected outcome: Both connection modes persist usable credentials, entity listing reflects the live instance, and service calls succeed or fail clearly against the actual Home Assistant runtime.

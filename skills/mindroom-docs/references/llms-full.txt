@@ -8400,9 +8400,9 @@ def register_oauth_providers(settings, runtime_paths):
             scopes=("files.read",),
             credential_service="acme_drive_oauth",
             tool_config_service="acme_drive",
-            client_id_env=settings.get("client_id_env", "ACME_DRIVE_CLIENT_ID"),
-            client_secret_env=settings.get("client_secret_env", "ACME_DRIVE_CLIENT_SECRET"),
-            redirect_uri_env=settings.get("redirect_uri_env", "ACME_DRIVE_REDIRECT_URI"),
+            client_config_services=(
+                settings.get("client_config_service", "acme_drive_oauth_client"),
+            ),
             allowed_email_domains=tuple(settings.get("allowed_email_domains", [])),
             allowed_hosted_domains=tuple(settings.get("allowed_hosted_domains", [])),
         ),
@@ -8747,17 +8747,17 @@ plugins:
 
 # OAuth Integration Framework
 
-MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account. Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client environment variables, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
+MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account. Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
 The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`. Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider. Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery. Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result. That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials. Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal. `MINDROOM_OWNER_USER_ID` is a single-owner shortcut and is not suitable for a hosted multi-user private-agent deployment. Hosted deployments that put MindRoom behind an external access layer should enable trusted upstream auth and configure the exact headers MindRoom may trust. When trusted upstream auth is enabled, MindRoom reads the configured stable user ID and optional email headers into `request.scope["auth_user"]`. For Matrix-backed private agents, the trusted identity must resolve to a Matrix user ID either from a configured Matrix user ID header or from `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE`. The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER`. If a browser request cannot map to the requester stored in the conversation connect token, the OAuth authorize or callback path fails closed and no credential is saved. The access layer must strip any client-supplied copies of the trusted headers before injecting verified values.
 
 Plugins may declare an `oauth_module` in `mindroom.plugin.json`. That module exposes `register_oauth_providers(settings, runtime_paths)` and returns `OAuthProvider` objects. This keeps FastAPI routing and state handling in core while still letting plugin authors define provider IDs, scopes, token exchange details, optional claim validators, and tool metadata.
 
-OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`. For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime. If MindRoom cannot resolve the authenticated dashboard user to the requester carried by a conversation-issued link, the link fails closed and no credential is saved. Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`. That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections. Storage, API routing, OAuth provider loading, and worker identity derivation stay in their existing modules. Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent. Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need Google OAuth client config or user refresh tokens. OAuth token documents and editable tool setting documents should be separate services. The OAuth callback writes only the provider's `credential_service`, while dashboard configuration reads and writes the provider's `tool_config_service` when one is declared. Generic credentials endpoints do not return OAuth token fields and reject direct writes to OAuth token services.
+OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`. For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime. If MindRoom cannot resolve the authenticated dashboard user to the requester carried by a conversation-issued link, the link fails closed and no credential is saved. Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`. That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections. Storage, API routing, OAuth provider loading, and worker identity derivation stay in their existing modules. Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent. Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need Google OAuth client config or user refresh tokens. OAuth token documents and editable tool setting documents should be separate services. The OAuth callback writes only the provider's `credential_service`, while dashboard configuration reads and writes the provider's `tool_config_service` when one is declared. OAuth app client config is stored separately from both of those services. Providers declare `client_config_services` in lookup order, and MindRoom reads `client_id`, `client_secret`, and optional `redirect_uri` from those services. Providers can also declare shared client config services for shared app IDs and secrets. Every client config service name must end with `_oauth_client` so credential placement and worker allowlist validation can identify plugin client config services without loading provider code. Shared client config services do not supply redirect URIs because each provider must use its own callback route. Client config services are local-only deployment configuration and cannot be mirrored into worker containers. Generic credential responses redact `client_secret` for client config services. Generic credential saves preserve the existing `client_secret` only when the saved `client_id` is unchanged. Changing `client_id` requires submitting the matching new `client_secret`. First-time client config saves require both fields to be non-empty. Client config services cannot be copied through the generic copy route. Generic credentials endpoints do not return OAuth token fields and reject direct writes to OAuth token services.
 
 Identity restrictions are provider settings, not MindRoom policy. Providers can enforce allowed email domains, allowed hosted-domain claims, and custom claim validators. If a configured restriction cannot be checked from verified provider claims, the callback fails closed and no credential is saved.
 
-Built-in Google providers use the generic framework for Drive, Calendar, Sheets, and Gmail. Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
+Built-in Google providers use the generic framework for Drive, Calendar, Sheets, and Gmail. Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`. Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service. The shared `google_oauth_client` service supplies only `client_id` and `client_secret`; MindRoom derives the provider-specific redirect URI.
 
 # Knowledge Bases
 
@@ -11584,16 +11584,16 @@ Important data locations:
 
 # Google Services OAuth
 
-MindRoom uses the generic OAuth framework for Google tools. Each Google service has its own provider ID, callback URL, token service, and editable tool settings service. There is no bundled `/api/google/*` OAuth flow.
+MindRoom uses the generic OAuth framework for Google tools. Each Google service has its own provider ID, callback URL, token service, OAuth client config service, and editable tool settings service. There is no bundled `/api/google/*` OAuth flow.
 
 ## Providers
 
-| Tool            | Provider ID       | Callback path                         | Token service           | Settings service  | Scopes                                                    |
-| --------------- | ----------------- | ------------------------------------- | ----------------------- | ----------------- | --------------------------------------------------------- |
-| Google Drive    | `google_drive`    | `/api/oauth/google_drive/callback`    | `google_drive_oauth`    | `google_drive`    | Drive read-only plus OpenID email/profile                 |
-| Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar` | Calendar read/write plus OpenID email/profile             |
-| Google Sheets   | `google_sheets`   | `/api/oauth/google_sheets/callback`   | `google_sheets_oauth`   | `google_sheets`   | Sheets read/write, plus OpenID email/profile              |
-| Gmail           | `google_gmail`    | `/api/oauth/google_gmail/callback`    | `google_gmail_oauth`    | `gmail`           | Gmail readonly, modify, compose plus OpenID email/profile |
+| Tool            | Provider ID       | Callback path                         | Token service           | Client config service          | Settings service  | Scopes                                                    |
+| --------------- | ----------------- | ------------------------------------- | ----------------------- | ------------------------------ | ----------------- | --------------------------------------------------------- |
+| Google Drive    | `google_drive`    | `/api/oauth/google_drive/callback`    | `google_drive_oauth`    | `google_drive_oauth_client`    | `google_drive`    | Drive read-only plus OpenID email/profile                 |
+| Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar_oauth_client` | `google_calendar` | Calendar read/write plus OpenID email/profile             |
+| Google Sheets   | `google_sheets`   | `/api/oauth/google_sheets/callback`   | `google_sheets_oauth`   | `google_sheets_oauth_client`   | `google_sheets`   | Sheets read/write, plus OpenID email/profile              |
+| Gmail           | `google_gmail`    | `/api/oauth/google_gmail/callback`    | `google_gmail_oauth`    | `google_gmail_oauth_client`    | `gmail`           | Gmail readonly, modify, compose plus OpenID email/profile |
 
 ## Google Cloud Setup
 
@@ -11610,31 +11610,25 @@ http://localhost:8765/api/oauth/google_gmail/callback
 
 For production, replace the origin with your public MindRoom origin.
 
+## Stored Client Config
+
+OAuth app client config is stored through normal credential storage, separate from user OAuth tokens and editable tool settings. Use one provider-specific service when one Google Cloud OAuth client should apply to only that provider. Use `google_oauth_client` when one shared Google Cloud OAuth client should apply to every Google provider. Provider-specific services win over `google_oauth_client`.
+
+Store these fields on the client config service:
+
+```
+{
+  "client_id": "your-client-id.apps.googleusercontent.com",
+  "client_secret": "your-client-secret",
+  "redirect_uri": "https://mindroom.example.com/api/oauth/google_drive/callback"
+}
+```
+
+`redirect_uri` is optional when `MINDROOM_PUBLIC_URL` or the local default origin is correct. Only provider-specific client config services use stored `redirect_uri`. The shared `google_oauth_client` service ignores `redirect_uri` and derives each provider's callback URI. Dashboard credential responses redact `client_secret`. Saving redacted client config may omit or blank `client_secret` only when `client_id` is unchanged. Changing `client_id` requires submitting the matching new `client_secret`. First-time client config saves require `client_id` and `client_secret`. Client config services are not worker-grantable and are never mirrored into worker containers. Client config services cannot be copied into ordinary credential services.
+
 ## Environment Variables
 
-You can configure each provider independently:
-
-```
-GOOGLE_DRIVE_CLIENT_ID=...
-GOOGLE_DRIVE_CLIENT_SECRET=...
-GOOGLE_DRIVE_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_drive/callback
-
-GOOGLE_CALENDAR_CLIENT_ID=...
-GOOGLE_CALENDAR_CLIENT_SECRET=...
-GOOGLE_CALENDAR_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_calendar/callback
-
-GOOGLE_SHEETS_CLIENT_ID=...
-GOOGLE_SHEETS_CLIENT_SECRET=...
-GOOGLE_SHEETS_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_sheets/callback
-
-GOOGLE_GMAIL_CLIENT_ID=...
-GOOGLE_GMAIL_CLIENT_SECRET=...
-GOOGLE_GMAIL_REDIRECT_URI=https://mindroom.example.com/api/oauth/google_gmail/callback
-```
-
-The providers also accept shared `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` as a fallback. Use service-specific variables when different Google Cloud OAuth clients or restrictions are needed.
-
-Optional restrictions are service-specific:
+Optional account restrictions are service-specific:
 
 ```
 GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.com
@@ -11681,31 +11675,24 @@ http://localhost:8765/api/oauth/google_gmail/callback
 
 ## Configure MindRoom
 
-For a single personal OAuth client, set the shared fallback client variables:
+For a single personal OAuth client, store shared Google OAuth app client config under `google_oauth_client` through the dashboard credentials API or raw credentials editor:
 
 ```
-GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-client-secret
+{
+  "client_id": "your-client-id.apps.googleusercontent.com",
+  "client_secret": "your-client-secret"
+}
 ```
+
+For provider-specific client config, use `google_drive_oauth_client`, `google_calendar_oauth_client`, `google_sheets_oauth_client`, or `google_gmail_oauth_client`. Provider-specific client config wins over the shared `google_oauth_client` service. The shared `google_oauth_client` service supplies only the shared client ID and secret. MindRoom derives each provider's redirect URI from `MINDROOM_PUBLIC_URL` or the local default origin. MindRoom stores OAuth app client config separately from user OAuth tokens and never mirrors it into worker containers. First-time dashboard client setup requires `client_id` and `client_secret`. Later edits may leave `client_secret` blank only when `client_id` is unchanged. Changing `client_id` requires submitting the matching new `client_secret`.
 
 When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`. Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents. Use [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/index.md) for those deployments.
-
-For explicit service-specific redirect URIs, set:
-
-```
-GOOGLE_DRIVE_REDIRECT_URI=http://localhost:8765/api/oauth/google_drive/callback
-GOOGLE_CALENDAR_REDIRECT_URI=http://localhost:8765/api/oauth/google_calendar/callback
-GOOGLE_SHEETS_REDIRECT_URI=http://localhost:8765/api/oauth/google_sheets/callback
-GOOGLE_GMAIL_REDIRECT_URI=http://localhost:8765/api/oauth/google_gmail/callback
-```
-
-You may instead set `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_SHEETS_CLIENT_ID`, or `GOOGLE_GMAIL_CLIENT_ID` with matching secrets.
 
 ## Connect
 
 Open the MindRoom dashboard and connect the integration required by each tool. If an agent tries a Google tool before it is connected, the tool result includes a MindRoom connect URL for that exact provider and agent scope. After the browser OAuth flow completes, retry the original request.
 
-OAuth tokens are stored under provider token services such as `google_drive_oauth`. Editable tool settings are stored separately under services such as `google_drive`, `google_calendar`, `google_sheets`, and `gmail`.
+OAuth tokens are stored under provider token services such as `google_drive_oauth`. Editable tool settings are stored separately under services such as `google_drive`, `google_calendar`, `google_sheets`, and `gmail`. OAuth app client config is stored separately under services such as `google_oauth_client` or `google_drive_oauth_client`.
 
 # Trusted Upstream Browser Auth
 

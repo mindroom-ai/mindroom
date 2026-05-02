@@ -18,6 +18,7 @@ export interface ToolFieldSchema {
   default?: unknown;
   placeholder?: string | null;
   description?: string | null;
+  requiredWhenFieldChanges?: string | null;
   options?: Array<{ label: string; value: string }> | null;
   validation?: Record<string, unknown> | null;
 }

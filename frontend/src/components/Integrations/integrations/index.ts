@@ -26,6 +26,8 @@ type OAuthStatus = {
   connected: boolean;
   hasClientConfig: boolean;
   hasServiceAccountConfig: boolean;
+  clientConfigService?: string;
+  clientConfigRedirectUriSupported: boolean;
   toolConfigService?: string;
   statusError?: string;
 };
@@ -91,6 +93,9 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
           : "not_connected",
       connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
+      oauth_client_config_service: status.clientConfigService,
+      oauth_client_redirect_uri_supported:
+        status.clientConfigRedirectUriSupported,
       oauth_service_account_configured: status.hasServiceAccountConfig,
       config_service: status.toolConfigService,
     };
@@ -175,6 +180,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
           connected: false,
           hasClientConfig: false,
           hasServiceAccountConfig: false,
+          clientConfigRedirectUriSupported: false,
           statusError: detail,
         };
       }
@@ -183,6 +189,12 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         connected: data.connected === true,
         hasClientConfig: data.has_client_config === true,
         hasServiceAccountConfig: data.has_service_account_config === true,
+        clientConfigRedirectUriSupported:
+          data.client_config_redirect_uri_supported === true,
+        clientConfigService:
+          typeof data.client_config_service === "string"
+            ? data.client_config_service
+            : undefined,
         toolConfigService:
           typeof data.tool_config_service === "string"
             ? data.tool_config_service
@@ -194,6 +206,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         connected: false,
         hasClientConfig: false,
         hasServiceAccountConfig: false,
+        clientConfigRedirectUriSupported: false,
         statusError: `Failed to load ${this.integration.name} OAuth status.`,
       };
     }

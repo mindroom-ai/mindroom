@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -27,7 +28,9 @@ from mindroom.oauth import (
     OAuthTokenResult,
     load_oauth_providers,
 )
+from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
+from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.service import oauth_credentials_satisfy_identity_policy
 from mindroom.tool_system import plugin_imports
@@ -40,11 +43,24 @@ from mindroom.tool_system.worker_routing import (
 
 
 def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) -> constants.RuntimePaths:
-    return constants.resolve_primary_runtime_paths(
+    runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
         process_env=process_env or {},
     )
+    process_env = process_env or {}
+    client_id = process_env.get("TEST_OAUTH_CLIENT_ID")
+    client_secret = process_env.get("TEST_OAUTH_CLIENT_SECRET")
+    if client_id and client_secret:
+        get_runtime_credentials_manager(runtime_paths).save_credentials(
+            "test_drive_oauth_client",
+            {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "_source": "ui",
+            },
+        )
+    return runtime_paths
 
 
 def _config_payload(worker_scope: str = "user_agent") -> dict[str, Any]:
@@ -111,17 +127,21 @@ def _fake_provider(
     allowed_email_domains: tuple[str, ...] = (),
     allowed_hosted_domains: tuple[str, ...] = (),
     scopes: tuple[str, ...] = ("scope.read",),
+    client_config_services: tuple[str, ...] = ("test_drive_oauth_client",),
+    shared_client_config_services: tuple[str, ...] = (),
 ) -> OAuthProvider:
     async def _exchange(
         provider: OAuthProvider,
         code: str,
-        _client_config: object,
+        client_config: object,
         _runtime_paths: object,
     ) -> OAuthTokenResult:
         assert code == "test-code"
+        assert isinstance(client_config, OAuthClientConfig)
         token_data = {
             "token": f"{provider.id}-access-token",
             "token_uri": provider.token_url,
+            "client_id": client_config.client_id,
             "scopes": list(provider.scopes),
             "_source": "oauth",
             "_oauth_provider": provider.id,
@@ -147,8 +167,8 @@ def _fake_provider(
         scopes=scopes,
         credential_service=credential_service,
         tool_config_service=tool_config_service,
-        client_id_env="TEST_OAUTH_CLIENT_ID",
-        client_secret_env="TEST_OAUTH_CLIENT_SECRET",
+        client_config_services=client_config_services,
+        shared_client_config_services=shared_client_config_services,
         allowed_email_domains=allowed_email_domains,
         allowed_hosted_domains=allowed_hosted_domains,
         status_capabilities=("Test files",),
@@ -234,8 +254,7 @@ def test_plugin_config_registers_oauth_provider(tmp_path: Path) -> None:
                 "        token_url='https://auth.example.test/token',",
                 "        scopes=('plugin.read',),",
                 "        credential_service=settings['credential_service'],",
-                "        client_id_env='PLUGIN_CLIENT_ID',",
-                "        client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "        client_config_services=(f\"{settings['provider_id']}_oauth_client\",),",
                 "    )]",
             ],
         ),
@@ -285,8 +304,7 @@ def test_plugin_oauth_provider_rejects_duplicate_service_names(tmp_path: Path) -
                 "            token_url='https://auth.example.test/one/token',",
                 "            scopes=('plugin.read',),",
                 "            credential_service='plugin_oauth',",
-                "            client_id_env='PLUGIN_CLIENT_ID',",
-                "            client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "            client_config_services=('plugin_one_oauth_client',),",
                 "        ),",
                 "        OAuthProvider(",
                 "            id='plugin_two',",
@@ -295,8 +313,7 @@ def test_plugin_oauth_provider_rejects_duplicate_service_names(tmp_path: Path) -
                 "            token_url='https://auth.example.test/two/token',",
                 "            scopes=('plugin.read',),",
                 "            credential_service='plugin_oauth',",
-                "            client_id_env='PLUGIN_CLIENT_ID',",
-                "            client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "            client_config_services=('plugin_two_oauth_client',),",
                 "        ),",
                 "    ]",
             ],
@@ -313,6 +330,18 @@ def test_plugin_oauth_provider_rejects_duplicate_service_names(tmp_path: Path) -
 
     with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
         load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+
+
+def test_oauth_provider_requires_client_config_service() -> None:
+    with pytest.raises(ValueError, match="must declare at least one client config service"):
+        OAuthProvider(
+            id="plugin_drive",
+            display_name="Plugin Drive",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",
+            scopes=("plugin.read",),
+            credential_service="plugin_drive_oauth",
+        )
 
 
 def test_plugin_oauth_provider_rejects_tool_config_overlap(tmp_path: Path) -> None:
@@ -336,8 +365,7 @@ def test_plugin_oauth_provider_rejects_tool_config_overlap(tmp_path: Path) -> No
                 "        token_url='https://auth.example.test/token',",
                 "        scopes=('plugin.read',),",
                 "        credential_service='google_drive',",
-                "        client_id_env='PLUGIN_CLIENT_ID',",
-                "        client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "        client_config_services=('plugin_drive_oauth_client',),",
                 "    )]",
             ],
         ),
@@ -376,8 +404,7 @@ def test_plugin_oauth_provider_rejects_ordinary_tool_credential_service_overlap(
                 "        token_url='https://auth.example.test/token',",
                 "        scopes=('plugin.read',),",
                 "        credential_service='openweather',",
-                "        client_id_env='PLUGIN_CLIENT_ID',",
-                "        client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "        client_config_services=('plugin_weather_oauth_client',),",
                 "    )]",
             ],
         ),
@@ -417,8 +444,7 @@ def test_plugin_oauth_provider_rejects_unrelated_tool_config_service_overlap(tmp
                 "        scopes=('plugin.read',),",
                 "        credential_service='plugin_weather_oauth',",
                 "        tool_config_service='openweather',",
-                "        client_id_env='PLUGIN_CLIENT_ID',",
-                "        client_secret_env='PLUGIN_CLIENT_SECRET',",
+                "        client_config_services=('plugin_weather_oauth_client',),",
                 "    )]",
             ],
         ),
@@ -434,6 +460,128 @@ def test_plugin_oauth_provider_rejects_unrelated_tool_config_service_overlap(tmp
 
     with pytest.raises(plugin_imports.PluginValidationError, match="overlap existing tool service"):
         load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+
+
+def test_plugin_oauth_provider_rejects_client_config_token_service_overlap(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "mindroom.plugin.json").write_text(
+        '{"name": "oauth_plugin", "oauth_module": "oauth_provider.py"}',
+        encoding="utf-8",
+    )
+    (plugin_dir / "oauth_provider.py").write_text(
+        "\n".join(
+            [
+                "from mindroom.oauth import OAuthProvider",
+                "",
+                "def register_oauth_providers(settings, runtime_paths):",
+                "    del settings, runtime_paths",
+                "    return [OAuthProvider(",
+                "        id='plugin_weather',",
+                "        display_name='Plugin Weather',",
+                "        authorization_url='https://auth.example.test/authorize',",
+                "        token_url='https://auth.example.test/token',",
+                "        scopes=('plugin.read',),",
+                "        credential_service='plugin_weather_oauth_client',",
+                "        client_config_services=('plugin_weather_oauth_client',),",
+                "    )]",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            **_config_payload(),
+            "plugins": [{"path": str(plugin_dir)}],
+        },
+    )
+
+    with pytest.raises(ValueError, match=r"credential_service.*must not end with '_oauth_client'"):
+        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+
+
+def test_plugin_oauth_provider_rejects_provider_specific_client_config_reuse(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "mindroom.plugin.json").write_text(
+        '{"name": "oauth_plugin", "oauth_module": "oauth_provider.py"}',
+        encoding="utf-8",
+    )
+    (plugin_dir / "oauth_provider.py").write_text(
+        "\n".join(
+            [
+                "from mindroom.oauth import OAuthProvider",
+                "",
+                "def register_oauth_providers(settings, runtime_paths):",
+                "    del settings, runtime_paths",
+                "    return [OAuthProvider(",
+                "        id='plugin_weather',",
+                "        display_name='Plugin Weather',",
+                "        authorization_url='https://auth.example.test/authorize',",
+                "        token_url='https://auth.example.test/token',",
+                "        scopes=('plugin.read',),",
+                "        credential_service='plugin_weather_oauth',",
+                "        client_config_services=('google_drive_oauth_client',),",
+                "    )]",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            **_config_payload(),
+            "plugins": [{"path": str(plugin_dir)}],
+        },
+    )
+
+    with pytest.raises(plugin_imports.PluginValidationError, match="Duplicate OAuth provider service name"):
+        load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+
+
+def test_plugin_oauth_provider_allows_explicit_shared_client_config_reuse() -> None:
+    first_provider = _fake_provider(
+        "first_provider",
+        credential_service="first_provider_oauth",
+        client_config_services=(),
+        shared_client_config_services=("shared_oauth_client",),
+    )
+    second_provider = _fake_provider(
+        "second_provider",
+        credential_service="second_provider_oauth",
+        client_config_services=(),
+        shared_client_config_services=("shared_oauth_client",),
+    )
+
+    providers = oauth_registry._provider_registry([first_provider, second_provider])
+
+    assert set(providers) == {"first_provider", "second_provider"}
+
+
+def test_plugin_oauth_provider_rejects_client_config_tool_service_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(oauth_registry.TOOL_METADATA, "acme_oauth_client", SimpleNamespace(auth_provider=None))
+    provider = _fake_provider(
+        "plugin_weather",
+        credential_service="plugin_weather_oauth",
+        client_config_services=("acme_oauth_client",),
+    )
+
+    with pytest.raises(plugin_imports.PluginValidationError, match="overlap existing tool service"):
+        oauth_registry._provider_registry([provider])
+
+
+def test_oauth_provider_rejects_client_config_suffix_for_token_service() -> None:
+    with pytest.raises(ValueError, match=r"credential_service.*must not end with '_oauth_client'"):
+        _fake_provider(credential_service="bad_oauth_client")
+
+
+def test_oauth_provider_rejects_client_config_suffix_for_tool_config_service() -> None:
+    with pytest.raises(ValueError, match=r"tool_config_service.*must not end with '_oauth_client'"):
+        _fake_provider(
+            credential_service="bad_oauth",
+            tool_config_service="bad_oauth_client",
+        )
 
 
 def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -> None:
@@ -469,6 +617,33 @@ def test_connect_generates_authorization_url_with_opaque_state(tmp_path: Path) -
     assert params["state"][0] in state_store.read_text(encoding="utf-8")
 
 
+def test_connect_uses_stored_oauth_client_config(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider(client_config_services=("test_drive_oauth_client",))
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "test_drive_oauth_client",
+        {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+
+    assert response.status_code == 200
+    params = parse_qs(urlparse(response.json()["auth_url"]).query)
+    assert params["client_id"] == ["stored-client-id"]
+
+
 def test_provider_exchange_and_refresh_use_oauth_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -485,8 +660,7 @@ def test_provider_exchange_and_refresh_use_oauth_client(
         token_url=provider.token_url,
         scopes=provider.scopes,
         credential_service=provider.credential_service,
-        client_id_env=provider.client_id_env,
-        client_secret_env=provider.client_secret_env,
+        client_config_services=provider.client_config_services,
     )
     seen: dict[str, Any] = {}
 
@@ -578,8 +752,7 @@ def test_custom_token_exchanger_metadata_is_stamped_by_core(tmp_path: Path) -> N
         token_url="https://auth.example.test/custom/token",
         scopes=("scope.read",),
         credential_service="custom_drive_oauth",
-        client_id_env="TEST_OAUTH_CLIENT_ID",
-        client_secret_env="TEST_OAUTH_CLIENT_SECRET",
+        client_config_services=("test_drive_oauth_client",),
         token_exchanger=_exchange,
     )
 
@@ -588,6 +761,7 @@ def test_custom_token_exchanger_metadata_is_stamped_by_core(tmp_path: Path) -> N
 
     assert safe_result.token_data["_source"] == "oauth"
     assert safe_result.token_data["_oauth_provider"] == provider.id
+    assert safe_result.token_data["client_id"] == "client-id"
     assert safe_result.token_data["scopes"] == ["scope.read"]
 
 
@@ -599,8 +773,7 @@ def test_safe_token_result_drops_raw_id_token() -> None:
         token_url="https://auth.example.test/custom/token",
         scopes=("mail.read",),
         credential_service="custom_mail_oauth",
-        client_id_env="TEST_OAUTH_CLIENT_ID",
-        client_secret_env="TEST_OAUTH_CLIENT_SECRET",
+        client_config_services=("custom_mail_oauth_client",),
     )
 
     safe_result = provider.token_result_with_safe_claims(
@@ -635,8 +808,7 @@ def test_safe_token_result_does_not_persist_unverified_claims() -> None:
         token_url="https://auth.example.test/custom/token",
         scopes=("mail.read",),
         credential_service="custom_mail_oauth",
-        client_id_env="TEST_OAUTH_CLIENT_ID",
-        client_secret_env="TEST_OAUTH_CLIENT_SECRET",
+        client_config_services=("custom_mail_oauth_client",),
     )
 
     safe_result = provider.token_result_with_safe_claims(
@@ -664,8 +836,7 @@ def test_safe_token_result_preserves_verified_claims_for_custom_validator(tmp_pa
         token_url="https://auth.example.test/custom/token",
         scopes=("mail.read",),
         credential_service="custom_mail_oauth",
-        client_id_env="TEST_OAUTH_CLIENT_ID",
-        client_secret_env="TEST_OAUTH_CLIENT_SECRET",
+        client_config_services=("custom_mail_oauth_client",),
         claim_validator=_validate_org,
     )
     runtime_paths = _runtime_paths(tmp_path, {})
@@ -715,6 +886,99 @@ def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp
     assert "_id_token" not in result.token_data
     assert result.claims["email"] == "alice@example.com"
     assert result.claims_verified is True
+
+
+def test_google_oauth_client_config_prefers_stored_provider_config(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_drive_oauth_client",
+        {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "redirect_uri": "https://stored.example.test/callback",
+            "_source": "ui",
+        },
+    )
+
+    client_config = google_drive_oauth_provider().client_config(runtime_paths)
+
+    assert client_config == OAuthClientConfig(
+        client_id="stored-client-id",
+        client_secret="stored-client-secret",
+        redirect_uri="https://stored.example.test/callback",
+    )
+
+
+def test_google_oauth_client_config_ignores_env(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "GOOGLE_CLIENT_ID": "env-client-id",
+            "GOOGLE_CLIENT_SECRET": "env-client-secret",
+            "MINDROOM_PUBLIC_URL": "https://mindroom.example.test",
+        },
+    )
+
+    client_config = google_drive_oauth_provider().client_config(runtime_paths)
+
+    assert client_config is None
+
+
+def test_google_provider_oauth_client_config_wins_over_shared_config(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": "shared-client-id",
+            "client_secret": "shared-client-secret",
+            "redirect_uri": "https://shared.example.test/callback",
+            "_source": "ui",
+        },
+    )
+    manager.save_credentials(
+        "google_drive_oauth_client",
+        {
+            "client_id": "drive-client-id",
+            "client_secret": "drive-client-secret",
+            "redirect_uri": "https://drive.example.test/callback",
+            "_source": "ui",
+        },
+    )
+
+    client_config = google_drive_oauth_provider().client_config(runtime_paths)
+
+    assert client_config == OAuthClientConfig(
+        client_id="drive-client-id",
+        client_secret="drive-client-secret",
+        redirect_uri="https://drive.example.test/callback",
+    )
+
+
+def test_google_shared_oauth_client_config_uses_provider_redirect_uri(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_oauth_client",
+        {
+            "client_id": "shared-client-id",
+            "client_secret": "shared-client-secret",
+            "redirect_uri": "https://wrong.example.test/api/oauth/google_drive/callback",
+            "_source": "ui",
+        },
+    )
+
+    client_config = google_calendar_oauth_provider().client_config(runtime_paths)
+
+    assert client_config == OAuthClientConfig(
+        client_id="shared-client-id",
+        client_secret="shared-client-secret",
+        redirect_uri="https://mindroom.example.test/api/oauth/google_calendar/callback",
+    )
 
 
 def test_google_drive_refresh_parser_rejects_unverified_existing_claim_summary(tmp_path: Path) -> None:
@@ -772,9 +1036,16 @@ def test_default_redirect_uri_uses_public_mindroom_origin(tmp_path: Path) -> Non
     runtime_paths = _runtime_paths(
         tmp_path,
         {
-            "GOOGLE_DRIVE_CLIENT_ID": "client-id",
-            "GOOGLE_DRIVE_CLIENT_SECRET": "client-secret",
             "MINDROOM_PUBLIC_URL": "https://prod.example",
+        },
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_drive_oauth_client",
+        {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "ui",
         },
     )
     provider = google_drive_oauth_provider()
@@ -894,6 +1165,110 @@ def test_callback_stores_credentials_in_scoped_target(tmp_path: Path) -> None:
     assert manager.for_worker(_worker_key_for_standalone_user()).load_credentials(provider.credential_service) is None
 
 
+def test_callback_uses_stored_oauth_client_config(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+        client_config_services=("google_drive_oauth_client",),
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_drive_oauth_client",
+        {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
+    scoped_credentials = scoped_manager.load_credentials(provider.credential_service)
+    assert scoped_credentials is not None
+    assert scoped_credentials["client_id"] == "stored-client-id"
+    assert scoped_credentials["token"] == "google_drive-access-token"
+
+
+@pytest.mark.parametrize("existing_token_client_id", ["old-client-id", None], ids=["previous-client", "unknown-client"])
+def test_callback_does_not_preserve_refresh_token_from_previous_client(
+    tmp_path: Path,
+    existing_token_client_id: str | None,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+        client_config_services=("google_drive_oauth_client",),
+        include_refresh_token=False,
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_drive_oauth_client",
+        {
+            "client_id": "new-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        },
+    )
+    existing_token_credentials = {
+        "token": "old-access-token",
+        "refresh_token": "old-refresh-token",
+        "scopes": list(provider.scopes),
+        "_source": "oauth",
+        "_oauth_provider": provider.id,
+        "_oauth_claims": {
+            "sub": "subject-1",
+            "email": "alice@example.com",
+        },
+        "_oauth_claims_verified": True,
+    }
+    if existing_token_client_id is not None:
+        existing_token_credentials["client_id"] = existing_token_client_id
+    manager.for_primary_runtime_scope("@alice:example.org", "general").save_credentials(
+        provider.credential_service,
+        existing_token_credentials,
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    scoped_credentials = manager.for_primary_runtime_scope("@alice:example.org", "general").load_credentials(
+        provider.credential_service,
+    )
+    assert scoped_credentials is not None
+    assert scoped_credentials["client_id"] == "new-client-id"
+    assert "refresh_token" not in scoped_credentials
+
+
 def test_user_scope_oauth_token_not_in_worker_path(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -1005,6 +1380,7 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
+            "client_id": "client-id",
             "_id_token": "old-raw-id-token",
             "id_token": "old-standard-id-token",
             "client_secret": "old-client-secret",
@@ -1911,6 +2287,7 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
         {
             "token": "stored-token",
             "refresh_token": "stored-refresh-token",
+            "client_id": "client-id",
             "scopes": list(provider.scopes),
             "_source": "oauth",
             "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
@@ -2020,6 +2397,139 @@ def test_status_requires_client_config_for_connected_true(tmp_path: Path) -> Non
     assert status_response.status_code == 200
     assert status_response.json()["has_client_config"] is False
     assert status_response.json()["connected"] is False
+
+
+def test_status_rejects_stored_token_without_client_id(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(client_config_services=("test_drive_oauth_client",))
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "test_drive_oauth_client",
+        {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        },
+    )
+    manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).save_credentials(
+        provider.credential_service,
+        {
+            "token": "stored-token",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["has_client_config"] is True
+    assert status_response.json()["client_config_redirect_uri_supported"] is True
+    assert status_response.json()["connected"] is False
+
+
+def test_status_rejects_token_from_previous_oauth_client(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(client_config_services=("test_drive_oauth_client",))
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "test_drive_oauth_client",
+        {
+            "client_id": "new-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        },
+    )
+    manager.for_worker(_worker_key_for_matrix_user("@alice:example.org")).save_credentials(
+        provider.credential_service,
+        {
+            "token": "stored-token",
+            "client_id": "old-client-id",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            status_response = client.get(f"/api/oauth/{provider.id}/status?agent_name=general")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["has_client_config"] is True
+    assert status_response.json()["connected"] is False
+
+
+def test_status_reports_shared_oauth_client_config_service(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider(shared_client_config_services=("shared_oauth_client",))
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "shared_oauth_client",
+        {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            status_response = client.get(f"/api/oauth/{provider.id}/status")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["has_client_config"] is True
+    assert status_response.json()["client_config_service"] == "shared_oauth_client"
+    assert status_response.json()["client_config_redirect_uri_supported"] is False
+
+
+def test_status_reports_active_shared_oauth_client_config_service(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = _fake_provider(
+        client_config_services=("test_drive_oauth_client",),
+        shared_client_config_services=("shared_oauth_client",),
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "shared_oauth_client",
+        {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "_source": "ui",
+        },
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            status_response = client.get(f"/api/oauth/{provider.id}/status")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["has_client_config"] is True
+    assert status_response.json()["client_config_service"] == "shared_oauth_client"
+    assert status_response.json()["client_config_redirect_uri_supported"] is False
 
 
 def test_google_status_reports_connected_with_service_account(tmp_path: Path) -> None:
@@ -2141,10 +2651,56 @@ def test_oauth_credentials_usable_accepts_access_token_without_expiry(tmp_path: 
         runtime_paths,
         {
             "token": "stored-token",
+            "client_id": "client-id",
             "scopes": list(provider.scopes),
             "_source": "oauth",
             "_oauth_provider": provider.id,
         },
+    )
+
+
+def test_oauth_credentials_usable_rejects_missing_client_id(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = _fake_provider()
+
+    assert (
+        oauth_service.oauth_credentials_usable(
+            provider,
+            runtime_paths,
+            {
+                "token": "stored-token",
+                "scopes": list(provider.scopes),
+                "_source": "oauth",
+                "_oauth_provider": provider.id,
+            },
+        )
+        is False
+    )
+
+
+def test_oauth_credentials_usable_rejects_mismatched_client_id(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "new-client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = _fake_provider()
+
+    assert (
+        oauth_service.oauth_credentials_usable(
+            provider,
+            runtime_paths,
+            {
+                "token": "stored-token",
+                "client_id": "old-client-id",
+                "scopes": list(provider.scopes),
+                "_source": "oauth",
+                "_oauth_provider": provider.id,
+            },
+        )
+        is False
     )
 
 
@@ -2161,6 +2717,7 @@ def test_oauth_credentials_usable_accepts_expired_access_token_with_refresh(tmp_
         {
             "token": "expired-access-token",
             "refresh_token": "stored-refresh-token",
+            "client_id": "client-id",
             "expires_at": 1.0,
             "scopes": list(provider.scopes),
             "_source": "oauth",

@@ -1909,8 +1909,7 @@ def test_reload_plugins_invalidates_cached_oauth_providers(tmp_path: Path) -> No
         "        token_url='https://auth.example.test/token',\n"
         "        scopes=('plugin.read',),\n"
         "        credential_service='plugin_oauth_reload',\n"
-        "        client_id_env='PLUGIN_CLIENT_ID',\n"
-        "        client_secret_env='PLUGIN_CLIENT_SECRET',\n"
+        "        client_config_services=('plugin_oauth_reload_oauth_client',),\n"
         "    )]\n",
         encoding="utf-8",
     )

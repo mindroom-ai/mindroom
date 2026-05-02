@@ -26,6 +26,8 @@ export interface Integration {
   dashboard_configuration_supported?: boolean;
   execution_scope_supported?: boolean;
   oauth_client_configured?: boolean;
+  oauth_client_config_service?: string;
+  oauth_client_redirect_uri_supported?: boolean;
   oauth_service_account_configured?: boolean;
   status_error?: string;
   config_service?: string;

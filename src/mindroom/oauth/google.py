@@ -99,26 +99,6 @@ def _google_token_parser(
     return OAuthTokenResult(token_data=token_data, claims=claims, claims_verified=True)
 
 
-def _google_provider_env_names(provider_id: str, legacy_google: bool = True) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    prefix = provider_id.upper()
-    client_id_env = (
-        f"{prefix}_CLIENT_ID",
-        f"MINDROOM_OAUTH_{prefix}_CLIENT_ID",
-        *(("GOOGLE_CLIENT_ID",) if legacy_google else ()),
-    )
-    client_secret_env = (
-        f"{prefix}_CLIENT_SECRET",
-        f"MINDROOM_OAUTH_{prefix}_CLIENT_SECRET",
-        *(("GOOGLE_CLIENT_SECRET",) if legacy_google else ()),
-    )
-    return client_id_env, client_secret_env
-
-
-def _google_redirect_env_names(provider_id: str) -> tuple[str, ...]:
-    prefix = provider_id.upper()
-    return (f"{prefix}_REDIRECT_URI", f"MINDROOM_OAUTH_{prefix}_REDIRECT_URI")
-
-
 def _google_domain_env_names(provider_id: str, suffix: str) -> tuple[str, ...]:
     prefix = provider_id.upper()
     return (f"{prefix}_{suffix}", f"MINDROOM_OAUTH_{prefix}_{suffix}")

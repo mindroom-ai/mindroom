@@ -40,8 +40,6 @@ if kubectl cluster-info > /dev/null 2>&1; then
         --from-literal=stripe-secret-key="$STRIPE_SECRET_KEY" \
         --from-literal=stripe-webhook-secret="$STRIPE_WEBHOOK_SECRET" \
         --from-literal=provisioner-api-key="$PROVISIONER_API_KEY" \
-        --from-literal=google-client-id="$GOOGLE_CLIENT_ID" \
-        --from-literal=google-client-secret="$GOOGLE_CLIENT_SECRET" \
         --namespace=mindroom-staging
 
 fi
@@ -65,8 +63,6 @@ STRIPE_PUBLISHABLE_KEY=$STRIPE_PUBLISHABLE_KEY
 STRIPE_SECRET_KEY=$STRIPE_SECRET_KEY
 STRIPE_WEBHOOK_SECRET=$STRIPE_WEBHOOK_SECRET
 PROVISIONER_API_KEY=$PROVISIONER_API_KEY
-GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID
-GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET
 EOF
 
 # Update saas-platform .env if it exists

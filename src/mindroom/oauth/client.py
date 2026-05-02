@@ -17,6 +17,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider
 from mindroom.oauth.service import (
     oauth_connect_url,
     oauth_credentials_have_required_scopes,
+    oauth_credentials_match_client_id,
     oauth_credentials_satisfy_identity_policy,
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps
@@ -203,6 +204,9 @@ class ScopedOAuthClientMixin:
         client_config = self._oauth_provider.client_config(self._runtime_paths)
         if client_config is None:
             msg = f"{self._oauth_provider.display_name} OAuth client config is missing."
+            raise RuntimeError(msg)
+        if not oauth_credentials_match_client_id(client_config, token_data):
+            msg = f"{self._oauth_provider.display_name} OAuth token was issued for a different client ID."
             raise RuntimeError(msg)
         scopes = token_data.get("scopes")
         if not isinstance(scopes, list):

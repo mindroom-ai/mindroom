@@ -27,10 +27,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
       - HOME=/app
       - MEM0_DIR=/app/mindroom_data/memory/mem0  # Used by mem0
-      - GOOGLE_DRIVE_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/oauth/google_drive/callback
-      - GOOGLE_CALENDAR_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/oauth/google_calendar/callback
-      - GOOGLE_SHEETS_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/oauth/google_sheets/callback
-      - GOOGLE_GMAIL_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/oauth/google_gmail/callback
+      - MINDROOM_PUBLIC_URL=https://${INSTANCE_DOMAIN}
       - MINDROOM_PORT=${MINDROOM_PORT:-8765}
       - MINDROOM_API_KEY=${MINDROOM_API_KEY:-}
     networks:

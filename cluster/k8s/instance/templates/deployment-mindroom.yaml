@@ -94,6 +94,8 @@ spec:
           value: "{{ .Values.storagePath }}/config/config.yaml"
         - name: MINDROOM_CONFIG_TEMPLATE
           value: "/app/config.yaml"
+        - name: MINDROOM_PUBLIC_URL
+          value: "https://{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: LOG_LEVEL
           value: "INFO"
         - name: MINDROOM_WORKER_BACKEND

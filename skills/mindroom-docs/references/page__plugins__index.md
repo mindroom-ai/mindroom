@@ -184,9 +184,9 @@ def register_oauth_providers(settings, runtime_paths):
             scopes=("files.read",),
             credential_service="acme_drive_oauth",
             tool_config_service="acme_drive",
-            client_id_env=settings.get("client_id_env", "ACME_DRIVE_CLIENT_ID"),
-            client_secret_env=settings.get("client_secret_env", "ACME_DRIVE_CLIENT_SECRET"),
-            redirect_uri_env=settings.get("redirect_uri_env", "ACME_DRIVE_REDIRECT_URI"),
+            client_config_services=(
+                settings.get("client_config_service", "acme_drive_oauth_client"),
+            ),
             allowed_email_domains=tuple(settings.get("allowed_email_domains", [])),
             allowed_hosted_domains=tuple(settings.get("allowed_hosted_domains", [])),
         ),

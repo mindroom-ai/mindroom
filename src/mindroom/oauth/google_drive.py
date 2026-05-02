@@ -5,8 +5,6 @@ from __future__ import annotations
 from mindroom.oauth.google import (
     GOOGLE_IDENTITY_SCOPES,
     _google_domain_env_names,
-    _google_provider_env_names,
-    _google_redirect_env_names,
     _google_token_parser,
 )
 from mindroom.oauth.providers import OAuthProvider
@@ -19,7 +17,6 @@ GOOGLE_DRIVE_OAUTH_SCOPES = (
 
 def google_drive_oauth_provider() -> OAuthProvider:
     """Return the built-in Google Drive provider definition."""
-    client_id_env, client_secret_env = _google_provider_env_names("google_drive")
     return OAuthProvider(
         id="google_drive",
         display_name="Google Drive",
@@ -28,9 +25,8 @@ def google_drive_oauth_provider() -> OAuthProvider:
         scopes=GOOGLE_DRIVE_OAUTH_SCOPES,
         credential_service="google_drive_oauth",
         tool_config_service="google_drive",
-        client_id_env=client_id_env,
-        client_secret_env=client_secret_env,
-        redirect_uri_env=_google_redirect_env_names("google_drive"),
+        client_config_services=("google_drive_oauth_client",),
+        shared_client_config_services=("google_oauth_client",),
         allowed_email_domains_env=_google_domain_env_names("google_drive", "ALLOWED_EMAIL_DOMAINS"),
         allowed_hosted_domains_env=_google_domain_env_names("google_drive", "ALLOWED_HOSTED_DOMAINS"),
         extra_auth_params={

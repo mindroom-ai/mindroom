@@ -121,6 +121,8 @@ def _provider_registry(providers: Iterable[OAuthProvider]) -> dict[str, OAuthPro
         provider_services = [
             ("credential_service", provider.credential_service),
             ("tool_config_service", provider.tool_config_service),
+            *[("client_config_service", service) for service in provider.client_config_services],
+            *[("shared_client_config_service", service) for service in provider.shared_client_config_services],
         ]
         for role, service_name in provider_services:
             if service_name is None:
@@ -130,6 +132,8 @@ def _provider_registry(providers: Iterable[OAuthProvider]) -> dict[str, OAuthPro
                 service_owners[service_name] = (provider.id, role)
                 continue
             owner_provider_id, owner_role = owner
+            if owner_role == "shared_client_config_service" and role == "shared_client_config_service":
+                continue
             duplicate_services.append(
                 f"{service_name} ({owner_provider_id}.{owner_role}, {provider.id}.{role})",
             )
@@ -155,8 +159,13 @@ def _reject_tool_service_collisions(providers: Iterable[OAuthProvider]) -> None:
     tool_auth_providers = _registered_tool_service_auth_providers()
     collisions: list[str] = []
     for provider in providers:
-        if provider.credential_service in tool_auth_providers:
-            collisions.append(f"{provider.credential_service} ({provider.id}.credential_service, tool service)")
+        provider_services = [
+            ("credential_service", provider.credential_service),
+            *[("client_config_service", service) for service in provider.all_client_config_services],
+        ]
+        for role, service_name in provider_services:
+            if service_name in tool_auth_providers:
+                collisions.append(f"{service_name} ({provider.id}.{role}, tool service)")
         if provider.tool_config_service is None:
             continue
         if provider.tool_config_service not in tool_auth_providers:
