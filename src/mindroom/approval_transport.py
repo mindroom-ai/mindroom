@@ -12,6 +12,7 @@ import nio
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import normalize_nio_event_for_cache
+from mindroom.matrix.client_delivery import can_send_to_encrypted_room
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
@@ -164,6 +165,8 @@ class ApprovalMatrixTransport:
             return None
         if not self._bot_has_approval_room(bot, room_id):
             raise ToolApprovalTransportError(DEFAULT_ROUTER_MANAGED_ROOM_REASON)
+        if not can_send_to_encrypted_room(bot.client, room_id, operation="send_approval_event"):
+            return None
         send_content = dict(content)
         if thread_id is not None:
             send_content["m.relates_to"] = await self._approval_thread_relation(
@@ -260,6 +263,8 @@ class ApprovalMatrixTransport:
         bot = self.transport_bot(room_id)
         if bot is None or bot.client is None:
             return False
+        if not can_send_to_encrypted_room(bot.client, room_id, operation="edit_approval_event"):
+            return False
 
         thread_id = new_content.get("thread_id")
         if thread_id is not None and not isinstance(thread_id, str):
@@ -350,6 +355,8 @@ class ApprovalMatrixTransport:
                 room_id=room_id,
                 approval_event_id=approval_event_id,
             )
+            return False
+        if not can_send_to_encrypted_room(bot.client, room_id, operation="send_approval_notice"):
             return False
 
         content = build_message_content(

@@ -94,13 +94,22 @@ def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
     return sanitize_failure_text(_compact_preview_text(value), max_length=max_length)
 
 
+def _contains_sanitizer_truncation(value: object) -> bool:
+    if isinstance(value, dict):
+        return "__truncated__" in value or any(_contains_sanitizer_truncation(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_sanitizer_truncation(item) for item in value)
+    return isinstance(value, str) and value.endswith("... [truncated]")
+
+
 def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     sanitized = sanitize_failure_value(arguments)
+    sanitizer_truncated = _contains_sanitizer_truncation(sanitized)
     if not isinstance(sanitized, dict):
         wrapped = {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
         return wrapped, True
     if _json_preview_length(sanitized) <= _MAX_ARGUMENTS_PREVIEW_CHARS:
-        return sanitized, False
+        return sanitized, sanitizer_truncated
 
     per_value_budget = max(24, _MAX_ARGUMENTS_PREVIEW_CHARS // max(len(sanitized), 1))
     preview = {
@@ -250,6 +259,13 @@ class _PostCancelCleanupTask:
     send_task: asyncio.Future[SentApprovalEvent | None]
 
 
+@dataclass(slots=True, eq=False)
+class _ActiveApprovalSend:
+    done_future: Future[None]
+    owner_loop: asyncio.AbstractEventLoop
+    send_task: asyncio.Future[SentApprovalEvent | None]
+
+
 class ApprovalManager:
     """Coordinate live approval waiters against Matrix approval cards.
 
@@ -278,9 +294,11 @@ class ApprovalManager:
         self._resolving_card_event_ids: set[str] = set()
         self._resolved_card_event_ids: set[str] = set()
         self._cancelled_card_event_ids: set[str] = set()
+        self._active_approval_sends: set[_ActiveApprovalSend] = set()
         self._post_cancel_cleanup_tasks: set[_PostCancelCleanupTask] = set()
+        self._shutdown_reason: str | None = None
 
-    async def request_approval(  # noqa: PLR0911
+    async def request_approval(  # noqa: C901, PLR0911
         self,
         *,
         tool_name: str,
@@ -299,6 +317,9 @@ class ApprovalManager:
             return self._new_decision(status="denied", reason=_DEFAULT_MISSING_REQUESTER_REASON, resolved_by=None)
         if self._send_event is None:
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
+        shutdown_reason = self._current_shutdown_reason()
+        if shutdown_reason is not None:
+            return self._new_decision(status="expired", reason=shutdown_reason, resolved_by=None)
 
         approval_id = uuid4().hex
         requested_at = _utcnow()
@@ -337,6 +358,9 @@ class ApprovalManager:
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
 
         if waiter is None:
+            shutdown_reason = self._current_shutdown_reason()
+            if shutdown_reason is not None:
+                return self._new_decision(status="expired", reason=shutdown_reason, resolved_by=None)
             return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
 
         try:
@@ -510,6 +534,10 @@ class ApprovalManager:
         if transport_sender is not None:
             self._transport_sender = transport_sender
 
+    def _current_shutdown_reason(self) -> str | None:
+        with self._live_lock:
+            return self._shutdown_reason
+
     async def _send_and_bind_waiter(
         self,
         *,
@@ -523,39 +551,55 @@ class ApprovalManager:
             return None
 
         send_task = asyncio.ensure_future(self._send_event(room_id, thread_id, content))
-        try:
-            sent_event = await asyncio.shield(send_task)
-        except asyncio.CancelledError:
-            owner_loop = asyncio.get_running_loop()
-            cleanup_future = asyncio.run_coroutine_threadsafe(
-                self._cleanup_cancelled_send_when_event_arrives(
-                    send_task=send_task,
-                    room_id=room_id,
-                    content=content,
-                    requested_at=requested_at,
-                    approval_id=approval_id,
-                ),
-                owner_loop,
-            )
-            cleanup_task = _PostCancelCleanupTask(
-                cleanup_future=cleanup_future,
-                owner_loop=owner_loop,
-                send_task=send_task,
-            )
-            with self._live_lock:
-                self._post_cancel_cleanup_tasks.add(cleanup_task)
-            cleanup_future.add_done_callback(lambda _future: self._discard_post_cancel_cleanup_task(cleanup_task))
-            raise
-
-        if sent_event is None:
-            return None
-        return self._bind_live_waiter(
-            room_id=room_id,
-            content=content,
-            requested_at=requested_at,
-            approval_id=approval_id,
-            sent_event=sent_event,
+        active_send = _ActiveApprovalSend(
+            done_future=Future(),
+            owner_loop=asyncio.get_running_loop(),
+            send_task=send_task,
         )
+        with self._live_lock:
+            self._active_approval_sends.add(active_send)
+        try:
+            try:
+                sent_event = await asyncio.shield(send_task)
+            except asyncio.CancelledError:
+                cleanup_future = asyncio.run_coroutine_threadsafe(
+                    self._cleanup_cancelled_send_when_event_arrives(
+                        send_task=send_task,
+                        room_id=room_id,
+                        content=content,
+                        requested_at=requested_at,
+                        approval_id=approval_id,
+                    ),
+                    active_send.owner_loop,
+                )
+                cleanup_task = _PostCancelCleanupTask(
+                    cleanup_future=cleanup_future,
+                    owner_loop=active_send.owner_loop,
+                    send_task=send_task,
+                )
+                with self._live_lock:
+                    self._post_cancel_cleanup_tasks.add(cleanup_task)
+                cleanup_future.add_done_callback(lambda _future: self._discard_post_cancel_cleanup_task(cleanup_task))
+                raise
+
+            if sent_event is None:
+                return None
+            waiter = self._bind_live_waiter(
+                room_id=room_id,
+                content=content,
+                requested_at=requested_at,
+                approval_id=approval_id,
+                sent_event=sent_event,
+            )
+            shutdown_reason = self._current_shutdown_reason()
+            if shutdown_reason is not None:
+                await self._settle_bound_waiter_as_expired(waiter, reason=shutdown_reason)
+            return waiter
+        finally:
+            with self._live_lock:
+                self._active_approval_sends.discard(active_send)
+            with suppress(InvalidStateError):
+                active_send.done_future.set_result(None)
 
     async def _cleanup_cancelled_send_when_event_arrives(
         self,
@@ -616,16 +660,30 @@ class ApprovalManager:
         return waiter
 
     async def _settle_bound_waiter_as_cancelled(self, waiter: _LiveApprovalWaiter) -> None:
-        decision = self._new_decision(status="expired", reason=_DEFAULT_CANCELLED_REASON, resolved_by=None)
-        with self._live_lock:
-            self._cancelled_card_event_ids.add(waiter.card_event_id)
+        await self._settle_bound_waiter_as_expired(
+            waiter,
+            reason=_DEFAULT_CANCELLED_REASON,
+            mark_cancelled=True,
+        )
+
+    async def _settle_bound_waiter_as_expired(
+        self,
+        waiter: _LiveApprovalWaiter,
+        *,
+        reason: str,
+        mark_cancelled: bool = False,
+    ) -> None:
+        decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
+        if mark_cancelled:
+            with self._live_lock:
+                self._cancelled_card_event_ids.add(waiter.card_event_id)
         claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
         if claimed_waiter is None:
             with suppress(Exception):
                 await self._wait_for_competing_terminal_decision(waiter)
             if waiter.future.done():
                 completed = waiter.future.result()
-                if completed.status == "expired" and completed.reason == _DEFAULT_CANCELLED_REASON:
+                if completed.status == "expired" and completed.reason == reason:
                     return
             pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
             await self._emit_resolution(
@@ -636,7 +694,8 @@ class ApprovalManager:
             )
             with self._live_lock:
                 self._resolved_card_event_ids.add(waiter.card_event_id)
-                self._cancelled_card_event_ids.discard(waiter.card_event_id)
+                if mark_cancelled:
+                    self._cancelled_card_event_ids.discard(waiter.card_event_id)
             return
         claim_released = False
         try:
@@ -644,7 +703,8 @@ class ApprovalManager:
             with self._live_lock:
                 self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
                 self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
-                self._cancelled_card_event_ids.discard(claimed_waiter.card_event_id)
+                if mark_cancelled:
+                    self._cancelled_card_event_ids.discard(claimed_waiter.card_event_id)
             claim_released = True
         finally:
             if not claim_released:
@@ -891,6 +951,7 @@ class ApprovalManager:
 
     async def _shutdown(self, *, reason: str) -> None:
         with self._live_lock:
+            self._shutdown_reason = reason
             waiters = list(self._pending_by_card_event.values())
         for waiter in waiters:
             decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
@@ -910,7 +971,39 @@ class ApprovalManager:
                 if not claim_released:
                     with self._live_lock:
                         self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
+        await self._drain_active_approval_sends()
         await self._drain_post_cancel_cleanup_tasks()
+
+    async def _drain_active_approval_sends(self) -> None:
+        while True:
+            with self._live_lock:
+                active_sends = tuple(self._active_approval_sends)
+            if not active_sends:
+                return
+
+            wrapped_by_done = {asyncio.wrap_future(active.done_future): active for active in active_sends}
+            done, pending = await asyncio.wait(
+                wrapped_by_done,
+                timeout=_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            for done_future in done:
+                with suppress(asyncio.CancelledError, Exception):
+                    done_future.result()
+
+            if pending:
+                pending_sends = [wrapped_by_done[wrapped_future] for wrapped_future in pending]
+                for active_send in pending_sends:
+                    active_send.done_future.cancel()
+                    if not active_send.send_task.done() and not active_send.owner_loop.is_closed():
+                        active_send.owner_loop.call_soon_threadsafe(active_send.send_task.cancel)
+                with self._live_lock:
+                    for active_send in pending_sends:
+                        self._active_approval_sends.discard(active_send)
+                logger.warning(
+                    "Timed out waiting for active approval sends during shutdown",
+                    active_approval_sends=len(pending_sends),
+                )
+                return
 
     async def _drain_post_cancel_cleanup_tasks(self) -> None:
         while True:
@@ -958,8 +1051,9 @@ class ApprovalManager:
     def _has_live_work(self) -> bool:
         with self._live_lock:
             has_waiters = bool(self._pending_by_card_event or self._resolving_card_event_ids)
+            has_active_sends = bool(self._active_approval_sends)
             has_cleanup_tasks = bool(self._post_cancel_cleanup_tasks)
-        return has_waiters or has_cleanup_tasks
+        return has_waiters or has_active_sends or has_cleanup_tasks
 
     def _live_waiter_for_card(self, card_event_id: str) -> _LiveApprovalWaiter | None:
         with self._live_lock:
@@ -1024,6 +1118,11 @@ class ApprovalManager:
     def knows_in_memory_approval_card(self, card_event_id: str) -> bool:
         """Return whether this process has seen one approval card id."""
         return self._known_in_memory_approval_card(card_event_id)
+
+    def has_active_in_memory_approval_card(self, card_event_id: str) -> bool:
+        """Return whether an approval card can still consume in-process actions."""
+        with self._live_lock:
+            return card_event_id in self._pending_by_card_event or card_event_id in self._resolving_card_event_ids
 
     async def _wait_for_competing_terminal_decision(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
         if waiter.future.done():

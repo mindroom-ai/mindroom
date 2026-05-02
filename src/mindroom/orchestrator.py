@@ -1347,7 +1347,6 @@ class MultiAgentOrchestrator:
             clear_worker_validation_snapshot_cache()
         changed_runtime_mcp_servers = await self._sync_mcp_manager(new_config)
         await self._sync_event_cache_service(new_config)
-        self._configure_approval_store_transport()
         logger.info(
             "updating_config_authorization",
             authorized_user_ids=new_config.authorization.global_users,

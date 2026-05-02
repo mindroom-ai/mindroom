@@ -180,6 +180,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.cache",
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.message_builder",
     "mindroom.sync_bridge_state",
     "mindroom.tool_approval",
@@ -1279,6 +1280,7 @@ depends_on = [
 path = "mindroom.matrix.client_delivery"
 depends_on = []
 visibility = [
+    "mindroom.approval_transport",
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.matrix_conversation_operations",
@@ -2269,6 +2271,7 @@ expose = [
     "DeliveredMatrixEvent",
     "build_edit_event_content",
     "build_threaded_edit_content",
+    "can_send_to_encrypted_room",
     "cached_room",
     "cached_rooms",
     "edit_message_result",

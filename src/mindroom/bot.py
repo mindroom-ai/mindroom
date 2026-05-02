@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -12,6 +11,11 @@ from uuid import uuid4
 import nio
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
+from mindroom.approval_inbound import (
+    handle_tool_approval_action,
+    maybe_handle_tool_approval_reply,
+    parse_approval_response_event,
+)
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.dispatch_source import is_automation_source_kind
@@ -31,7 +35,7 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
-from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
+from mindroom.matrix.event_info import origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
 from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
@@ -49,13 +53,11 @@ from mindroom.matrix.sync_certification import (
 )
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
-from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
-from mindroom.tool_approval import MatrixApprovalAction, handle_matrix_approval_action, is_process_approval_card
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -121,14 +123,6 @@ __all__ = ["AgentBot"]
 # Constants
 _SYNC_TIMEOUT_MS = 30000
 _STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
-
-
-@dataclass(frozen=True, slots=True)
-class _ApprovalResponsePayload:
-    card_event_id: str | None
-    approval_id: str | None
-    status: Literal["approved", "denied"] | None
-    reason: str | None
 
 
 def _create_task_wrapper(
@@ -1370,7 +1364,14 @@ class AgentBot:
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Delegate one inbound text event to the turn engine."""
         self._log_matrix_event_callback_started(room, event, callback_name="message")
-        if await self._maybe_handle_tool_approval_reply(room, event):
+        if await maybe_handle_tool_approval_reply(
+            room=room,
+            event=event,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            orchestrator=self.orchestrator,
+            logger=self.logger,
+        ):
             return
         await self._turn_controller.handle_text_event(room, event)
 
@@ -1387,72 +1388,33 @@ class AgentBot:
         """Handle custom Matrix events that are not part of nio's typed event set."""
         if event.type != "io.mindroom.tool_approval_response":
             return
-        payload = self._approval_response_payload(event)
+        payload = parse_approval_response_event(event)
         if payload.status is None or (payload.card_event_id is None and payload.approval_id is None):
             return
-        await self._handle_tool_approval_action(
+        await handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            orchestrator=self.orchestrator,
+            logger=self.logger,
             approval_event_id=payload.card_event_id,
             approval_id=payload.approval_id,
             status=payload.status,
             reason=payload.reason,
         )
 
-    @staticmethod
-    def _approval_response_payload(event: nio.UnknownEvent) -> _ApprovalResponsePayload:
-        """Parse one custom approval response event into the manager command shape."""
-        content = event.source.get("content", {})
-        if not isinstance(content, dict):
-            return _ApprovalResponsePayload(card_event_id=None, approval_id=None, status=None, reason=None)
-
-        card_event_id = EventInfo.from_event(event.source).reply_to_event_id
-        raw_approval_id = content.get("approval_id")
-        approval_id = raw_approval_id if isinstance(raw_approval_id, str) and raw_approval_id else None
-
-        raw_status = content.get("status")
-        status: Literal["approved", "denied"] | None = None
-        if raw_status in {"approved", "denied"}:
-            status = raw_status
-
-        raw_reason = content.get("reason")
-        if not isinstance(raw_reason, str) or not raw_reason.strip():
-            raw_reason = content.get("denial_reason")
-        reason = raw_reason.strip() if isinstance(raw_reason, str) and raw_reason.strip() else None
-        return _ApprovalResponsePayload(
-            card_event_id=card_event_id,
-            approval_id=approval_id,
-            status=status,
-            reason=reason,
-        )
-
-    async def _maybe_handle_tool_approval_reply(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
-    ) -> bool:
-        """Consume reply-to-approval messages as denial actions."""
-        reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
-        if reply_to_event_id is None:
-            return False
-        if not is_process_approval_card(reply_to_event_id):
-            return False
-
-        return await self._handle_tool_approval_action(
-            room=room,
-            sender_id=event.sender,
-            approval_event_id=reply_to_event_id,
-            status="denied",
-            reason=strip_matrix_rich_reply_fallback(event.body),
-        )
-
     async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle one reaction inside the per-turn thread-history cache scope."""
         assert self.client is not None
 
-        if event.key == "✅" and await self._handle_tool_approval_action(
+        if event.key == "✅" and await handle_tool_approval_action(
             room=room,
             sender_id=event.sender,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            orchestrator=self.orchestrator,
+            logger=self.logger,
             approval_event_id=event.reacts_to,
             status="approved",
             reason=None,
@@ -1520,58 +1482,6 @@ class AgentBot:
             event=event,
             correlation_id=event.event_id,
         )
-
-    def _sender_can_resolve_tool_approval(self, room: nio.MatrixRoom, sender_id: str) -> bool:
-        """Return whether the sender is currently allowed to act on a tool approval."""
-        if not is_authorized_sender(
-            sender_id,
-            self.config,
-            room.room_id,
-            self.runtime_paths,
-            room_alias=room.canonical_alias,
-        ):
-            self.logger.debug("ignoring_tool_approval_action_from_unauthorized_sender", user_id=sender_id)
-            return False
-
-        return True
-
-    async def _handle_tool_approval_action(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        sender_id: str,
-        approval_event_id: str | None,
-        status: Literal["approved", "denied"],
-        reason: str | None,
-        approval_id: str | None = None,
-    ) -> bool:
-        """Resolve one approval action only when the sender still has access."""
-        if approval_event_id is None and approval_id is None:
-            return False
-        sender_can_resolve = self._sender_can_resolve_tool_approval(room, sender_id)
-        if not sender_can_resolve:
-            return False
-        result = await handle_matrix_approval_action(
-            MatrixApprovalAction(
-                room_id=room.room_id,
-                sender_id=sender_id,
-                card_event_id=approval_event_id,
-                approval_id=approval_id,
-                status=status,
-                reason=reason,
-            ),
-        )
-        notice_event_id = approval_event_id or result.card_event_id
-        if notice_event_id is not None and result.error_reason is not None:
-            orchestrator = self.orchestrator
-            if orchestrator is not None:
-                await orchestrator.send_approval_notice(
-                    room_id=room.room_id,
-                    approval_event_id=notice_event_id,
-                    thread_id=result.thread_id,
-                    reason=result.error_reason,
-                )
-        return result.consumed
 
     async def _on_media_message(
         self,

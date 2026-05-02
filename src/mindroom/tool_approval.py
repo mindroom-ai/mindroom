@@ -50,6 +50,7 @@ __all__ = [
     "expire_orphaned_approval_cards_on_startup",
     "handle_matrix_approval_action",
     "initialize_approval_runtime",
+    "is_process_active_approval_card",
     "is_process_approval_card",
     "request_tool_approval_for_call",
     "resolve_tool_approval_approver",
@@ -276,6 +277,12 @@ def is_process_approval_card(card_event_id: str) -> bool:
     return manager is not None and manager.knows_in_memory_approval_card(card_event_id)
 
 
+def is_process_active_approval_card(card_event_id: str) -> bool:
+    """Return whether one approval card still has an active in-process waiter."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and manager.has_active_in_memory_approval_card(card_event_id)
+
+
 async def handle_matrix_approval_action(action: MatrixApprovalAction) -> ApprovalActionResult:
     """Resolve one Matrix approval action against live in-process approval state."""
     manager = approval_manager.get_approval_store()
@@ -283,13 +290,15 @@ async def handle_matrix_approval_action(action: MatrixApprovalAction) -> Approva
         return ApprovalActionResult(consumed=False, resolved=False)
     sanitized_reason = action.reason.strip() if isinstance(action.reason, str) and action.reason.strip() else None
     if action.card_event_id is not None:
-        return await manager.handle_card_response(
+        card_result = await manager.handle_card_response(
             room_id=action.room_id,
             sender_id=action.sender_id,
             card_event_id=action.card_event_id,
             status=action.status,
             reason=sanitized_reason,
         )
+        if card_result.consumed or action.approval_id is None:
+            return card_result
     if action.approval_id is None:
         return ApprovalActionResult(consumed=False, resolved=False)
     return await manager.handle_live_approval_id_response(

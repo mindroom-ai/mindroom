@@ -143,6 +143,11 @@ def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operat
     return False
 
 
+def can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool:
+    """Return whether one outbound Matrix operation can safely proceed."""
+    return _can_send_to_encrypted_room(client, room_id, operation=operation)
+
+
 async def send_message_result(
     client: nio.AsyncClient,
     room_id: str,

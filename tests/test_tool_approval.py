@@ -12,17 +12,20 @@ import nio
 import pytest
 from pydantic import ValidationError
 
+from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     ApprovalManager,
     PendingApproval,
     SentApprovalEvent,
+    _build_event_arguments_preview,
     get_approval_store,
     initialize_approval_store,
 )
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.logging_config import get_logger
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.tool_approval import (
     MatrixApprovalAction,
@@ -100,8 +103,7 @@ def reset_approval_store() -> Generator[None, None, None]:
     asyncio.run(shutdown_approval_store())
 
 
-def _config(tmp_path: Path, *, requester_id: str = "@user:localhost") -> Config:
-    del requester_id
+def _config(tmp_path: Path) -> Config:
     return bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
@@ -647,9 +649,10 @@ async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
-    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender, editor=editor)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
     task = asyncio.create_task(
         store.request_approval(
             tool_name="write_file",
@@ -662,16 +665,25 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
         ),
     )
     pending = await _wait_for_pending(store, sender)
-    room = MagicMock(room_id="!room:localhost")
-    bot = MagicMock()
-    bot._sender_can_resolve_tool_approval.return_value = True
-    bot.orchestrator = MagicMock()
-    bot.orchestrator.send_approval_notice = AsyncMock(return_value=True)
+    room = MagicMock(room_id="!room:localhost", canonical_alias=None)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            authorization=AuthorizationConfig(global_users=["@user:localhost"]),
+        ),
+        runtime_paths,
+    )
+    orchestrator = MagicMock()
+    orchestrator.send_approval_notice = AsyncMock(return_value=True)
 
-    handled = await AgentBot._handle_tool_approval_action(
-        bot,
+    handled = await handle_tool_approval_action(
         room=room,
         sender_id="@user:localhost",
+        config=config,
+        runtime_paths=runtime_paths,
+        orchestrator=orchestrator,
+        logger=get_logger(__name__),
         approval_event_id=pending.card_event_id,
         status="approved",
         reason=None,
@@ -681,9 +693,8 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
     assert handled is True
     assert decision.status == "denied"
     assert editor.await_args.args[2]["status"] == "denied"
-    notice = bot.orchestrator.send_approval_notice
-    notice.assert_awaited_once()
-    assert notice.await_args.kwargs == {
+    orchestrator.send_approval_notice.assert_awaited_once()
+    assert orchestrator.send_approval_notice.await_args.kwargs == {
         "room_id": "!room:localhost",
         "approval_event_id": pending.card_event_id,
         "thread_id": "$thread",
@@ -955,7 +966,7 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
     orchestrator._approval_transport.cache_approval_event_now = AsyncMock(side_effect=cache_after_send)
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
-    client.rooms = {"!room:localhost": object()}
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
     bot = MagicMock(agent_name="router", running=True, client=client)
     orchestrator.agent_bots = {"router": bot}
@@ -1013,7 +1024,7 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
 
     router_client = MagicMock()
     router_client.user_id = "@mindroom_router:localhost"
-    router_client.rooms = {"!room:localhost": object()}
+    router_client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     router_client.room_send = AsyncMock(side_effect=room_send)
     router_bot = MagicMock(agent_name="router", running=True, client=router_client)
     router_bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$router-latest")
@@ -1054,6 +1065,90 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     assert sent_contents[1]["m.new_content"]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
     assert code_bot.latest_thread_event_id_if_needed.await_count == 2
     router_bot.latest_thread_event_id_if_needed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_refuses_encrypted_room_without_e2ee(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+    monkeypatch.setattr("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False)
+
+    room = nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost", encrypted=True)
+    router_client = MagicMock()
+    router_client.user_id = "@mindroom_router:localhost"
+    router_client.rooms = {"!room:localhost": room}
+    router_client.room_send = AsyncMock()
+    router_bot = MagicMock(agent_name="router", running=True, client=router_client)
+    orchestrator.agent_bots = {"router": router_bot}
+
+    sent = await orchestrator._approval_transport.send_approval_event_now(
+        "!room:localhost",
+        None,
+        {
+            "approval_id": "approval-1",
+            "tool_name": "read_file",
+            "arguments": {"path": "notes.txt"},
+            "status": "pending",
+        },
+    )
+    edited = await orchestrator._approval_transport.edit_approval_event_now(
+        "!room:localhost",
+        "$approval",
+        {
+            "approval_id": "approval-1",
+            "tool_name": "read_file",
+            "arguments": {"path": "notes.txt"},
+            "status": "expired",
+        },
+    )
+
+    assert sent is None
+    assert edited is False
+    router_client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_expires_approval_send_that_finishes_after_shutdown_starts(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    async def sender(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> SentApprovalEvent:
+        send_started.set()
+        await release_send.wait()
+        return SentApprovalEvent("$approval")
+
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    await asyncio.wait_for(send_started.wait(), timeout=1)
+
+    shutdown_task = asyncio.create_task(shutdown_approval_store())
+    await asyncio.sleep(0)
+    assert shutdown_task.done() is False
+
+    release_send.set()
+    await asyncio.wait_for(shutdown_task, timeout=1)
+    decision = await asyncio.wait_for(task, timeout=1)
+
+    assert decision.status == "expired"
+    assert decision.reason == "MindRoom shut down before approval completed."
+    assert editor.await_args.args[2]["status"] == "expired"
+    assert editor.await_args.args[2]["resolution_reason"] == "MindRoom shut down before approval completed."
+    assert get_approval_store() is None
 
 
 @pytest.mark.asyncio
@@ -1799,6 +1894,39 @@ def test_pending_approval_from_card_event_requires_approver_user_id() -> None:
 
     with pytest.raises(ValueError, match="missing required approval fields"):
         PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+
+def test_approval_arguments_preview_marks_sanitizer_truncation() -> None:
+    arguments = {f"k{index}": index for index in range(30)}
+    preview, truncated = _build_event_arguments_preview(arguments)
+
+    assert preview["__truncated__"] == "5 more items"
+    assert truncated is True
+
+    card = ApprovalManager._pending_event_content(
+        approval_id="approval-1",
+        tool_name="read_file",
+        arguments=preview,
+        arguments_truncated=truncated,
+        agent_name="code",
+        room_id="!room:localhost",
+        thread_id=None,
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        requested_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        status="pending",
+    )
+
+    assert card["arguments_truncated"] is True
+
+
+def test_approval_arguments_preview_marks_nested_sanitizer_truncation() -> None:
+    arguments = {"items": list(range(30))}
+    preview, truncated = _build_event_arguments_preview(arguments)
+
+    assert preview["items"][-1] == "... [truncated]"
+    assert truncated is True
 
 
 @pytest.mark.asyncio
