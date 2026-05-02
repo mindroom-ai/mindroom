@@ -7,9 +7,9 @@ import json
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Future, InvalidStateError
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
@@ -659,19 +659,12 @@ class ApprovalManager:
                 if mark_cancelled:
                     self._cancelled_card_event_ids.discard(waiter.card_event_id)
             return
-        claim_released = False
-        try:
+        with self._claimed_resolution(claimed_waiter.card_event_id):
             await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
             with self._live_lock:
-                self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
                 self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
                 if mark_cancelled:
                     self._cancelled_card_event_ids.discard(claimed_waiter.card_event_id)
-            claim_released = True
-        finally:
-            if not claim_released:
-                with self._live_lock:
-                    self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
 
     async def _await_waiter(
         self,
@@ -693,18 +686,11 @@ class ApprovalManager:
         claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
         if claimed_waiter is None:
             return await self._wait_for_competing_terminal_decision(waiter)
-        claim_released = False
-        try:
+        with self._claimed_resolution(claimed_waiter.card_event_id):
             await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
             with self._live_lock:
-                self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
                 self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
-            claim_released = True
             return decision
-        finally:
-            if not claim_released:
-                with self._live_lock:
-                    self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
 
     async def _resolve_live_response(
         self,
@@ -722,8 +708,7 @@ class ApprovalManager:
                 thread_id=pending.thread_id,
                 card_event_id=pending.card_event_id,
             )
-        claim_released = False
-        try:
+        with self._claimed_resolution(pending.card_event_id):
             await self._yield_to_queued_cancellation()
             cancelled = self._cancelled_card_event_ids_contains(pending.card_event_id)
             if cancelled:
@@ -739,10 +724,8 @@ class ApprovalManager:
             decision = self._new_decision(status=resolved_status, reason=resolved_reason, resolved_by=resolved_by)
             delivered = await self._settle_waiter_with_terminal_edit(waiter, decision)
             with self._live_lock:
-                self._resolving_card_event_ids.discard(pending.card_event_id)
                 self._resolved_card_event_ids.add(pending.card_event_id)
                 self._cancelled_card_event_ids.discard(pending.card_event_id)
-            claim_released = True
             return ApprovalActionResult(
                 consumed=True,
                 resolved=delivered,
@@ -750,10 +733,6 @@ class ApprovalManager:
                 thread_id=pending.thread_id,
                 card_event_id=pending.card_event_id,
             )
-        finally:
-            if not claim_released:
-                with self._live_lock:
-                    self._resolving_card_event_ids.discard(pending.card_event_id)
 
     @staticmethod
     async def _yield_to_queued_cancellation() -> None:
@@ -777,8 +756,7 @@ class ApprovalManager:
                 thread_id=pending.thread_id,
                 card_event_id=pending.card_event_id,
             )
-        claim_released = False
-        try:
+        with self._claimed_resolution(pending.card_event_id):
             delivered = await self._emit_resolution(
                 pending,
                 status="expired",
@@ -786,20 +764,14 @@ class ApprovalManager:
                 resolved_by=resolved_by,
             )
             with self._live_lock:
-                self._resolving_card_event_ids.discard(pending.card_event_id)
                 if delivered:
                     self._resolved_card_event_ids.add(pending.card_event_id)
-            claim_released = True
             return ApprovalActionResult(
                 consumed=True,
                 resolved=delivered,
                 thread_id=pending.thread_id,
                 card_event_id=pending.card_event_id,
             )
-        finally:
-            if not claim_released:
-                with self._live_lock:
-                    self._resolving_card_event_ids.discard(pending.card_event_id)
 
     async def _settle_waiter_with_terminal_edit(
         self,
@@ -921,17 +893,10 @@ class ApprovalManager:
                 with suppress(Exception):
                     await self._wait_for_competing_terminal_decision(waiter)
                 continue
-            claim_released = False
-            try:
+            with self._claimed_resolution(claimed_waiter.card_event_id):
                 await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
                 with self._live_lock:
-                    self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
                     self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
-                claim_released = True
-            finally:
-                if not claim_released:
-                    with self._live_lock:
-                        self._resolving_card_event_ids.discard(claimed_waiter.card_event_id)
         await self._drain_active_approval_sends()
         await self._drain_post_cancel_cleanup_tasks()
 
@@ -1083,6 +1048,14 @@ class ApprovalManager:
     def _cancelled_card_event_ids_contains(self, card_event_id: str) -> bool:
         with self._live_lock:
             return card_event_id in self._cancelled_card_event_ids
+
+    @contextmanager
+    def _claimed_resolution(self, card_event_id: str) -> Iterator[None]:
+        try:
+            yield
+        finally:
+            with self._live_lock:
+                self._resolving_card_event_ids.discard(card_event_id)
 
     def knows_in_memory_approval_card(self, card_event_id: str) -> bool:
         """Return whether this process has seen one approval card id."""
