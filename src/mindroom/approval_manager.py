@@ -272,6 +272,7 @@ class ApprovalManager:
         thread_id: str | None = None,
     ) -> ApprovalDecision:
         """Send one Matrix approval card and wait for the Matrix-backed resolution."""
+        # Keep the send/bind/wait flow linear so cancellation cleanup remains visible.
         if room_id is None:
             return self._new_decision(status="denied", reason=_DEFAULT_MISSING_CONTEXT_REASON, resolved_by=None)
         if approver_user_id is None:
@@ -415,7 +416,7 @@ class ApprovalManager:
                 reason=reason,
             )
 
-        consumed = self._known_in_memory_approval_card(card_event_id)
+        consumed = self.knows_in_memory_approval_card(card_event_id)
         return ApprovalActionResult(consumed=consumed, resolved=False, card_event_id=card_event_id)
 
     async def handle_live_approval_id_response(
@@ -1006,9 +1007,6 @@ class ApprovalManager:
 
     def has_live_work(self) -> bool:
         """Return whether live approvals or cancelled-send cleanup are still active."""
-        return self._has_live_work()
-
-    def _has_live_work(self) -> bool:
         with self._live_lock:
             has_waiters = bool(self._pending_by_card_event or self._resolving_card_event_ids)
             has_active_sends = bool(self._active_approval_sends)
@@ -1086,7 +1084,8 @@ class ApprovalManager:
         with self._live_lock:
             return card_event_id in self._cancelled_card_event_ids
 
-    def _known_in_memory_approval_card(self, card_event_id: str) -> bool:
+    def knows_in_memory_approval_card(self, card_event_id: str) -> bool:
+        """Return whether this process has seen one approval card id."""
         with self._live_lock:
             return (
                 card_event_id in self._pending_by_card_event
@@ -1094,10 +1093,6 @@ class ApprovalManager:
                 or card_event_id in self._resolved_card_event_ids
                 or card_event_id in self._cancelled_card_event_ids
             )
-
-    def knows_in_memory_approval_card(self, card_event_id: str) -> bool:
-        """Return whether this process has seen one approval card id."""
-        return self._known_in_memory_approval_card(card_event_id)
 
     def has_active_in_memory_approval_card(self, card_event_id: str) -> bool:
         """Return whether an approval card can still consume in-process actions."""

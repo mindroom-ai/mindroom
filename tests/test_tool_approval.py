@@ -217,40 +217,24 @@ def _approval_edit(
 
 async def _wait_for_pending(
     store: ApprovalManager,
-    sender: AsyncMock,
     *,
     room_id: str = "!room:localhost",
+    approval_id: str | None = None,
+    sender: AsyncMock | None = None,
+    call_index: int | None = None,
 ) -> PendingApproval:
     async with asyncio.timeout(5):
         while True:
-            if sender.await_args is not None:
-                approval_id = sender.await_args.args[2]["approval_id"]
-                if store._live_card_event_id_for_approval(approval_id) is not None:
-                    return await _wait_for_pending_by_id(store, room_id, approval_id)
-            await asyncio.sleep(0)
-
-
-async def _wait_for_pending_by_id(store: ApprovalManager, room_id: str, approval_id: str) -> PendingApproval:
-    async with asyncio.timeout(5):
-        while True:
-            pending = await store.get_pending_approval(room_id, approval_id)
-            if pending is not None:
-                return pending
-            await asyncio.sleep(0)
-
-
-async def _wait_for_pending_by_sender_call(
-    store: ApprovalManager,
-    sender: AsyncMock,
-    call_index: int,
-    *,
-    room_id: str = "!room:localhost",
-) -> PendingApproval:
-    async with asyncio.timeout(5):
-        while True:
-            if len(sender.await_args_list) > call_index:
-                approval_id = sender.await_args_list[call_index].args[2]["approval_id"]
-                return await _wait_for_pending_by_id(store, room_id, approval_id)
+            resolved_approval_id = approval_id
+            if resolved_approval_id is None and sender is not None:
+                if call_index is None and sender.await_args is not None:
+                    resolved_approval_id = sender.await_args.args[2]["approval_id"]
+                elif call_index is not None and len(sender.await_args_list) > call_index:
+                    resolved_approval_id = sender.await_args_list[call_index].args[2]["approval_id"]
+            if resolved_approval_id is not None:
+                pending = await store.get_pending_approval(room_id, resolved_approval_id)
+                if pending is not None:
+                    return pending
             await asyncio.sleep(0)
 
 
@@ -278,7 +262,7 @@ async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) 
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
 
     assert sender.await_args.args[2]["approver_user_id"] == "@user:localhost"
     result = await store.handle_card_response(
@@ -320,7 +304,7 @@ async def test_live_card_response_ignores_cached_terminal_edit_from_different_se
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
     fake_edit = _approval_edit(
         _approval_card(
             event_id=pending.card_event_id,
@@ -371,7 +355,7 @@ async def test_handle_card_response_wrong_clicker_noops(tmp_path: Path) -> None:
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
 
     result = await store.handle_card_response(
         room_id="!room:localhost",
@@ -474,7 +458,7 @@ async def test_public_tool_approval_facade_falls_back_to_live_id_after_terminal_
             timeout_seconds=30,
         ),
     )
-    first_pending = await _wait_for_pending(store, sender)
+    first_pending = await _wait_for_pending(store, sender=sender)
     first_result = await store.handle_card_response(
         room_id="!room:localhost",
         sender_id="@user:localhost",
@@ -496,7 +480,7 @@ async def test_public_tool_approval_facade_falls_back_to_live_id_after_terminal_
             timeout_seconds=30,
         ),
     )
-    second_pending = await _wait_for_pending(store, sender)
+    second_pending = await _wait_for_pending(store, sender=sender)
 
     action_result = await handle_matrix_approval_action(
         MatrixApprovalAction(
@@ -541,7 +525,7 @@ async def test_public_tool_approval_facade_uses_approval_id_over_active_unrelate
             timeout_seconds=30,
         ),
     )
-    first_pending = await _wait_for_pending_by_sender_call(store, sender, 0)
+    first_pending = await _wait_for_pending(store, sender=sender, call_index=0)
     second_task = asyncio.create_task(
         store.request_approval(
             tool_name="read_file",
@@ -552,7 +536,7 @@ async def test_public_tool_approval_facade_uses_approval_id_over_active_unrelate
             timeout_seconds=30,
         ),
     )
-    second_pending = await _wait_for_pending_by_sender_call(store, sender, 1)
+    second_pending = await _wait_for_pending(store, sender=sender, call_index=1)
 
     try:
         action_result = await handle_matrix_approval_action(
@@ -644,7 +628,7 @@ async def test_handle_card_response_rejects_live_card_from_wrong_room(tmp_path: 
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender, room_id="!room-a:localhost")
+    pending = await _wait_for_pending(store, sender=sender, room_id="!room-a:localhost")
 
     result = await store.handle_card_response(
         room_id="!room-b:localhost",
@@ -689,7 +673,7 @@ async def test_handle_live_approval_id_response_resolves_same_room_waiter(tmp_pa
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender, room_id="!room-a:localhost")
+    pending = await _wait_for_pending(store, sender=sender, room_id="!room-a:localhost")
 
     result = await store.handle_live_approval_id_response(
         room_id="!room-a:localhost",
@@ -725,7 +709,7 @@ async def test_handle_live_approval_id_response_rejects_waiter_from_wrong_room(t
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender, room_id="!room-a:localhost")
+    pending = await _wait_for_pending(store, sender=sender, room_id="!room-a:localhost")
 
     result = await store.handle_live_approval_id_response(
         room_id="!room-b:localhost",
@@ -796,7 +780,7 @@ async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) 
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
 
     await store.resolve_approval(
         card_event_id=pending.card_event_id,
@@ -828,7 +812,7 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
     room = MagicMock(room_id="!room:localhost", canonical_alias=None)
     config = bind_runtime_paths(
         Config(
@@ -882,7 +866,7 @@ async def test_request_approval_cleans_up_on_cancellation_after_send(tmp_path: P
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1153,7 +1137,7 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
     )
     await asyncio.wait_for(cache_started.wait(), timeout=1)
     approval_id = client.room_send.await_args.kwargs["content"]["approval_id"]
-    assert await _wait_for_pending_by_id(store, "!room:localhost", approval_id) is not None
+    assert await _wait_for_pending(store, room_id="!room:localhost", approval_id=approval_id) is not None
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1421,7 +1405,7 @@ async def test_request_approval_cancel_during_click_resolution_leaves_expired_te
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
     click_task = asyncio.create_task(
         store.handle_card_response(
             room_id="!room:localhost",
@@ -1468,7 +1452,7 @@ async def test_request_approval_cancel_during_click_resolution_emits_expired_not
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
     click_task = asyncio.create_task(
         store.handle_card_response(
             room_id="!room:localhost",
@@ -1524,7 +1508,7 @@ async def test_duplicate_live_response_from_approver_is_consumed_while_resolutio
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
     first = asyncio.create_task(
         store.handle_card_response(
             room_id="!room:localhost",
@@ -1878,7 +1862,7 @@ async def test_failed_terminal_edit_keeps_card_terminal_in_process(tmp_path: Pat
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender_mock)
+    pending = await _wait_for_pending(store, sender=sender_mock)
 
     first_result = await store.handle_card_response(
         room_id="!room:localhost",
@@ -1918,7 +1902,7 @@ async def test_wrong_clicker_response_is_not_consumed_and_leaves_card_pending(tm
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
 
     result = await store.handle_card_response(
         room_id="!room:localhost",
@@ -2203,7 +2187,7 @@ async def test_initialize_approval_store_rejects_storage_root_change_with_pendin
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_pending(store, sender)
+    pending = await _wait_for_pending(store, sender=sender)
 
     with pytest.raises(RuntimeError, match="Cannot reinitialize approval store"):
         initialize_approval_store(second_runtime_paths)

@@ -608,39 +608,32 @@ async def _execute_bridge(
     except BaseException as exc:
         error = exc
         duration_ms = (time.perf_counter() - started_at) * 1000
-        try:
-            failure_record = record_tool_failure(
-                tool_name=tool_name,
-                arguments=args,
-                error=error,
-                duration_ms=duration_ms,
-                agent_name=resolved_context.agent_name or None,
-                room_id=resolved_context.room_id,
-                thread_id=resolved_context.thread_id,
-                requester_id=resolved_context.requester_id,
-                session_id=resolved_context.session_id,
-                correlation_id=resolved_context.correlation_id,
-                execution_identity=(
-                    effective_dispatch_context.execution_identity if effective_dispatch_context is not None else None
-                ),
-                runtime_paths=resolved_context.runtime_paths,
-            )
-            logger.warning(
-                "Tool call failed",
-                tool_name=tool_name,
-                agent_name=resolved_context.agent_name or None,
-                error_type=failure_record.error_type,
-                error_message=failure_record.error_message,
-                duration_ms=failure_record.duration_ms,
-                correlation_id=resolved_context.correlation_id,
-                channel=resolved_context.channel,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to record tool failure",
-                tool_name=tool_name,
-                correlation_id=resolved_context.correlation_id,
-            )
+        failure_record = record_tool_failure(
+            tool_name=tool_name,
+            arguments=args,
+            error=error,
+            duration_ms=duration_ms,
+            agent_name=resolved_context.agent_name or None,
+            room_id=resolved_context.room_id,
+            thread_id=resolved_context.thread_id,
+            requester_id=resolved_context.requester_id,
+            session_id=resolved_context.session_id,
+            correlation_id=resolved_context.correlation_id,
+            execution_identity=(
+                effective_dispatch_context.execution_identity if effective_dispatch_context is not None else None
+            ),
+            runtime_paths=resolved_context.runtime_paths,
+        )
+        logger.warning(
+            "Tool call failed",
+            tool_name=tool_name,
+            agent_name=resolved_context.agent_name or None,
+            error_type=failure_record.error_type,
+            error_message=failure_record.error_message,
+            duration_ms=failure_record.duration_ms,
+            correlation_id=resolved_context.correlation_id,
+            channel=resolved_context.channel,
+        )
         if has_after_hooks:
             await _emit_after_call(
                 hook_registry=hook_registry,

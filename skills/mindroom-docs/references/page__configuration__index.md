@@ -39,7 +39,7 @@ On startup, MindRoom attempts to mark recent unresolved approval cards sent by t
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 
-```
+```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7

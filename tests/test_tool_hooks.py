@@ -153,6 +153,37 @@ def _plugin(
     )
 
 
+def _initialize_router_approval_store(
+    runtime_paths: RuntimePaths,
+    *,
+    room_send: AsyncMock | None = None,
+    editor: AsyncMock | None = None,
+) -> tuple[MagicMock, AsyncMock]:
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.room_send = room_send or AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
+    )
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    bot = MagicMock()
+    bot.agent_name = "router"
+    bot.running = True
+    bot.client = client
+    bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
+    orchestrator.agent_bots = {"router": bot}
+
+    approval_editor = editor or AsyncMock()
+    initialize_approval_store(
+        runtime_paths,
+        sender=orchestrator._approval_transport.send_approval_event,
+        editor=approval_editor,
+    )
+    return client, approval_editor
+
+
 def _before_context(
     tmp_path: Path,
     *,
@@ -1297,8 +1328,6 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         ),
         runtime_paths,
     )
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator._capture_runtime_loop()
 
     async def mock_room_send(room_id: str, message_type: str, content: dict[str, object]) -> nio.RoomSendResponse:
         current_loop = asyncio.get_running_loop()
@@ -1310,21 +1339,7 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         assert content["status"] == "pending"
         return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 
-    client = MagicMock()
-    client.user_id = "@mindroom_router:localhost"
-    client.room_send = AsyncMock(side_effect=mock_room_send)
-    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
-    bot = MagicMock()
-    bot.agent_name = "router"
-    bot.running = True
-    bot.client = client
-    bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
-    orchestrator.agent_bots = {"router": bot}
-    initialize_approval_store(
-        runtime_paths,
-        sender=orchestrator._approval_transport.send_approval_event,
-        editor=AsyncMock(),
-    )
+    client, _ = _initialize_router_approval_store(runtime_paths, room_send=AsyncMock(side_effect=mock_room_send))
 
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),
@@ -1381,26 +1396,7 @@ async def test_sync_execute_async_tool_entrypoint_still_runs_approval_gate(tmp_p
         ),
         runtime_paths,
     )
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator._capture_runtime_loop()
-
-    client = MagicMock()
-    client.user_id = "@mindroom_router:localhost"
-    client.room_send = AsyncMock(
-        return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
-    )
-    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
-    bot = MagicMock()
-    bot.agent_name = "router"
-    bot.running = True
-    bot.client = client
-    bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
-    orchestrator.agent_bots = {"router": bot}
-    initialize_approval_store(
-        runtime_paths,
-        sender=orchestrator._approval_transport.send_approval_event,
-        editor=AsyncMock(),
-    )
+    client, _ = _initialize_router_approval_store(runtime_paths)
 
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),
@@ -1462,23 +1458,8 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
         ),
         runtime_paths,
     )
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator._capture_runtime_loop()
-
-    client = MagicMock()
-    client.user_id = "@mindroom_router:localhost"
-    client.room_send = AsyncMock(
-        return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
-    )
-    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
-    bot = MagicMock()
-    bot.agent_name = "router"
-    bot.running = True
-    bot.client = client
-    bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
-    orchestrator.agent_bots = {"router": bot}
     editor = AsyncMock()
-    initialize_approval_store(runtime_paths, sender=orchestrator._approval_transport.send_approval_event, editor=editor)
+    client, _ = _initialize_router_approval_store(runtime_paths, editor=editor)
 
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),
@@ -1555,23 +1536,8 @@ async def test_sync_tool_approval_aexecute_resumes_on_runtime_loop(tmp_path: Pat
         ),
         runtime_paths,
     )
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator._capture_runtime_loop()
-
-    client = MagicMock()
-    client.user_id = "@mindroom_router:localhost"
-    client.room_send = AsyncMock(
-        return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
-    )
-    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
-    bot = MagicMock()
-    bot.agent_name = "router"
-    bot.running = True
-    bot.client = client
-    bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
-    orchestrator.agent_bots = {"router": bot}
     editor = AsyncMock(return_value=True)
-    initialize_approval_store(runtime_paths, sender=orchestrator._approval_transport.send_approval_event, editor=editor)
+    client, _ = _initialize_router_approval_store(runtime_paths, editor=editor)
 
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),
@@ -1666,26 +1632,7 @@ async def test_sync_tool_approval_execute_on_runtime_loop_fails_fast(tmp_path: P
         ),
         runtime_paths,
     )
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator._capture_runtime_loop()
-
-    client = MagicMock()
-    client.user_id = "@mindroom_router:localhost"
-    client.room_send = AsyncMock(
-        return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
-    )
-    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
-    bot = MagicMock()
-    bot.agent_name = "router"
-    bot.running = True
-    bot.client = client
-    bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
-    orchestrator.agent_bots = {"router": bot}
-    initialize_approval_store(
-        runtime_paths,
-        sender=orchestrator._approval_transport.send_approval_event,
-        editor=AsyncMock(),
-    )
+    client, _ = _initialize_router_approval_store(runtime_paths)
 
     bridge = build_tool_hook_bridge(
         HookRegistry.empty(),

@@ -3645,8 +3645,7 @@ class TestAgentBot:
         tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=bot.matrix_id)
         event = MagicMock()
         event.event_id = "$event"
         dispatch = PreparedDispatch(
@@ -4267,8 +4266,7 @@ class TestAgentBot:
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot._turn_controller.handle_text_event = AsyncMock()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.matrix_id)
         initialize_approval_store(runtime_paths)
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$ordinary-thread-reply"
