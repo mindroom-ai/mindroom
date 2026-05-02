@@ -224,7 +224,7 @@ class _StreamingAttemptState:
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     latest_model_id: str | None = None
     latest_model_provider: str | None = None
-    latest_request_context_input_tokens: int | None = None
+    latest_request_input_tokens: int | None = None
     latest_request_cache_read_tokens: int | None = None
     latest_request_cache_write_tokens: int | None = None
     cancelled_run_event: RunCancelledEvent | None = None
@@ -437,6 +437,7 @@ def _build_context_payload(
     if cache_write_tokens is not None and cache_write_tokens > 0:
         payload["cache_write_input_tokens"] = cache_write_tokens
     if cache_read_tokens is not None or cache_write_tokens is not None:
+        # Cache writes were not read from cache, so they remain in the non-cache-read bucket.
         uncached_input_tokens = context_input_tokens - (cache_read_tokens or 0)
         if uncached_input_tokens >= 0:
             payload["uncached_input_tokens"] = uncached_input_tokens
@@ -501,6 +502,7 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     room_id: str | None = None,
     metrics: Metrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
+    context_raw_input_tokens: int | None = None,
     context_input_tokens: int | None = None,
     context_cache_read_tokens: int | None = None,
     context_cache_write_tokens: int | None = None,
@@ -522,21 +524,38 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
     if not isinstance(usage_input_tokens, int):
         usage_input_tokens = None
+    explicit_context_scope = any(
+        value is not None
+        for value in (
+            context_raw_input_tokens,
+            context_input_tokens,
+            context_cache_read_tokens,
+            context_cache_write_tokens,
+        )
+    )
     resolved_context_input_tokens = context_input_tokens
     if resolved_context_input_tokens is None:
         resolved_context_input_tokens = _context_input_tokens_from_counts(
-            input_tokens=usage_input_tokens,
-            cache_read_tokens=_int_usage_value(usage_payload, "cache_read_tokens"),
-            cache_write_tokens=_int_usage_value(usage_payload, "cache_write_tokens"),
+            input_tokens=context_raw_input_tokens if explicit_context_scope else usage_input_tokens,
+            cache_read_tokens=(
+                context_cache_read_tokens
+                if explicit_context_scope
+                else _int_usage_value(usage_payload, "cache_read_tokens")
+            ),
+            cache_write_tokens=(
+                context_cache_write_tokens
+                if explicit_context_scope
+                else _int_usage_value(usage_payload, "cache_write_tokens")
+            ),
             provider=provider,
             configured_provider=model_config.provider if model_config is not None else None,
             model_id=model_id,
         )
     resolved_context_cache_read_tokens = context_cache_read_tokens
-    if resolved_context_cache_read_tokens is None:
+    if resolved_context_cache_read_tokens is None and not explicit_context_scope:
         resolved_context_cache_read_tokens = _int_usage_value(usage_payload, "cache_read_tokens")
     resolved_context_cache_write_tokens = context_cache_write_tokens
-    if resolved_context_cache_write_tokens is None:
+    if resolved_context_cache_write_tokens is None and not explicit_context_scope:
         resolved_context_cache_write_tokens = _int_usage_value(usage_payload, "cache_write_tokens")
 
     payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
@@ -711,6 +730,7 @@ def _track_model_request_metrics(
         state.latest_model_provider = event.model_provider
     request_input_tokens = event.input_tokens if isinstance(event.input_tokens, int) else None
     if request_input_tokens is not None:
+        state.latest_request_input_tokens = request_input_tokens
         state.request_metric_totals["input_tokens"] += request_input_tokens
     if isinstance(event.output_tokens, int):
         state.request_metric_totals["output_tokens"] += event.output_tokens
@@ -727,14 +747,6 @@ def _track_model_request_metrics(
     )
     state.latest_request_cache_write_tokens = (
         event.cache_write_tokens if isinstance(event.cache_write_tokens, int) else None
-    )
-    state.latest_request_context_input_tokens = _context_input_tokens_from_counts(
-        input_tokens=request_input_tokens,
-        cache_read_tokens=state.latest_request_cache_read_tokens,
-        cache_write_tokens=state.latest_request_cache_write_tokens,
-        provider=event.model_provider,
-        configured_provider=None,
-        model_id=event.model,
     )
     if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
         state.first_token_latency = float(event.time_to_first_token)
@@ -1722,7 +1734,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 model_provider=state.latest_model_provider,
                                 room_id=room_id,
                                 metrics=fallback_metrics,
-                                context_input_tokens=state.latest_request_context_input_tokens,
+                                context_raw_input_tokens=state.latest_request_input_tokens,
                                 context_cache_read_tokens=state.latest_request_cache_read_tokens,
                                 context_cache_write_tokens=state.latest_request_cache_write_tokens,
                                 tool_count=state.observed_tool_calls,
@@ -1768,7 +1780,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         room_id=room_id,
                         metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
                         metrics_fallback=fallback_metrics,
-                        context_input_tokens=state.latest_request_context_input_tokens,
+                        context_raw_input_tokens=state.latest_request_input_tokens,
                         context_cache_read_tokens=state.latest_request_cache_read_tokens,
                         context_cache_write_tokens=state.latest_request_cache_write_tokens,
                         tool_count=(

@@ -6088,6 +6088,66 @@ class TestUserIdPassthrough:
         assert payload["context"]["window_tokens"] == 1000
 
     @pytest.mark.asyncio
+    async def test_stream_agent_response_does_not_backfill_latest_context_cache_from_usage(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Missing latest-request cache counters should stay unknown, not use cumulative totals."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="step one")
+            yield ModelRequestCompletedEvent(
+                model="test-model",
+                model_provider="openai",
+                input_tokens=700,
+                output_tokens=50,
+                total_tokens=750,
+                cache_read_tokens=512,
+            )
+            yield RunContentEvent(content="step two")
+            yield ModelRequestCompletedEvent(
+                model="test-model",
+                model_provider="openai",
+                input_tokens=120,
+                output_tokens=20,
+                total_tokens=140,
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        config = Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
+        )
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            run_metadata: dict[str, object] = {}
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=config,
+                run_metadata_collector=run_metadata,
+            ):
+                pass
+
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["usage"]["cache_read_tokens"] == 512
+        assert payload["context"]["input_tokens"] == 120
+        assert "cache_read_input_tokens" not in payload["context"]
+        assert "cache_write_input_tokens" not in payload["context"]
+        assert "uncached_input_tokens" not in payload["context"]
+        assert payload["context"]["window_tokens"] == 1000
+
+    @pytest.mark.asyncio
     async def test_stream_agent_response_context_counts_latest_anthropic_cache_tokens(self, tmp_path: Path) -> None:
         """Streaming context metadata should include cache tokens for the latest Claude request."""
         mock_agent = MagicMock()
@@ -6148,4 +6208,63 @@ class TestUserIdPassthrough:
         assert payload["context"]["cache_write_input_tokens"] == 10
         assert payload["context"]["uncached_input_tokens"] == 130
         assert "cached_input_tokens" not in payload["context"]
+        assert payload["context"]["window_tokens"] == 200_000
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_context_counts_vertex_claude_cache_tokens(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming context should use configured provider when event provider is ambiguous."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "Claude"
+        mock_agent.model.id = "claude-sonnet-4-6"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="step one")
+            yield ModelRequestCompletedEvent(
+                model="claude-sonnet-4-6",
+                model_provider="google",
+                input_tokens=120,
+                output_tokens=20,
+                total_tokens=140,
+                cache_read_tokens=9000,
+                cache_write_tokens=10,
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        config = Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={
+                "default": ModelConfig(
+                    provider="vertexai_claude",
+                    id="claude-sonnet-4-6",
+                    context_window=200_000,
+                ),
+            },
+        )
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            run_metadata: dict[str, object] = {}
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=config,
+                run_metadata_collector=run_metadata,
+            ):
+                pass
+
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["model"]["provider"] == "google"
+        assert payload["context"]["input_tokens"] == 9130
+        assert payload["context"]["cache_read_input_tokens"] == 9000
+        assert payload["context"]["cache_write_input_tokens"] == 10
+        assert payload["context"]["uncached_input_tokens"] == 130
         assert payload["context"]["window_tokens"] == 200_000
