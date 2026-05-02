@@ -130,6 +130,134 @@ describe("EnhancedConfigDialog", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("requires a dependent secret only when the tracked field changes", async () => {
+    const onClose = vi.fn();
+    const onSuccess = vi.fn();
+
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        credentials: {
+          client_id: "old-client-id",
+        },
+      }),
+    });
+
+    render(
+      <EnhancedConfigDialog
+        open={true}
+        onClose={onClose}
+        service="google_drive_oauth_client"
+        displayName="Google Drive OAuth Client"
+        description="OAuth client config"
+        configFields={[
+          {
+            name: "client_id",
+            label: "Client ID",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "client_secret",
+            label: "Client Secret",
+            type: "password",
+            required: false,
+            requiredWhenFieldChanges: "client_id",
+          },
+        ]}
+        onSuccess={onSuccess}
+        isEditing={true}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/credentials/google_drive_oauth_client",
+      );
+    });
+
+    fireEvent.change(document.getElementById("client_id") as HTMLInputElement, {
+      target: { value: "new-client-id" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Update Configuration" }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Validation Error",
+          variant: "destructive",
+        }),
+      );
+    });
+    expect(
+      screen.getByText("Client Secret is required when Client ID changes"),
+    ).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("shows backend save error detail", async () => {
+    const onClose = vi.fn();
+    const onSuccess = vi.fn();
+
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ credentials: { api_key: "old-key" } }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({
+          detail: "client_secret is required when client_id changes.",
+        }),
+      });
+
+    render(
+      <EnhancedConfigDialog
+        open={true}
+        onClose={onClose}
+        service="google_drive_oauth_client"
+        displayName="Google Drive OAuth Client"
+        description="OAuth client config"
+        configFields={[
+          {
+            name: "api_key",
+            label: "API Key",
+            type: "password",
+            required: true,
+          },
+        ]}
+        onSuccess={onSuccess}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/credentials/google_drive_oauth_client",
+      );
+    });
+
+    fireEvent.change(document.getElementById("api_key") as HTMLInputElement, {
+      target: { value: "new-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Configuration" }));
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Configuration Failed",
+          description: "client_secret is required when client_id changes.",
+          variant: "destructive",
+        }),
+      );
+    });
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("omits cleared optional number fields when saving", async () => {
     const onClose = vi.fn();
     const onSuccess = vi.fn();

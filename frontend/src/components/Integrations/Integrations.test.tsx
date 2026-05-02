@@ -535,6 +535,15 @@ describe("Integrations", () => {
       expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
         /"required":false/,
       );
+      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
+        /"requiredWhenFieldChanges":"client_id"/,
+      );
+      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
+        /Required when changing Client ID/,
+      );
+      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
+        /The saved secret is kept for edits that do not change the Client ID/,
+      );
     });
   });
 

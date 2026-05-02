@@ -55,7 +55,8 @@ Store these fields on the client config service:
 Only provider-specific client config services use stored `redirect_uri`.
 The shared `google_oauth_client` service ignores `redirect_uri` and derives each provider's callback URI.
 Dashboard credential responses redact `client_secret`.
-Saving redacted client config preserves existing `client_id` and `client_secret` values when either field is omitted or blank.
+Saving redacted client config may omit or blank `client_secret` only when `client_id` is unchanged.
+Changing `client_id` requires submitting the matching new `client_secret`.
 First-time client config saves require `client_id` and `client_secret`.
 Client config services are not worker-grantable and are never mirrored into worker containers.
 Client config services cannot be copied into ordinary credential services.

@@ -38,7 +38,9 @@ Every client config service name must end with `_oauth_client` so credential pla
 Shared client config services do not supply redirect URIs because each provider must use its own callback route.
 Client config services are local-only deployment configuration and cannot be mirrored into worker containers.
 Generic credential responses redact `client_secret` for client config services.
-Generic credential saves preserve existing `client_id` and `client_secret` values when a client config edit omits or blanks either field, but first-time saves require both fields to be non-empty.
+Generic credential saves preserve the existing `client_secret` only when the saved `client_id` is unchanged.
+Changing `client_id` requires submitting the matching new `client_secret`.
+First-time client config saves require both fields to be non-empty.
 Client config services cannot be copied through the generic copy route.
 Generic credentials endpoints do not return OAuth token fields and reject direct writes to OAuth token services.
 

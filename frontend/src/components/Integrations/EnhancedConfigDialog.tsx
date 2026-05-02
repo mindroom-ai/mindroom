@@ -37,6 +37,7 @@ interface ConfigField {
   default?: any;
   placeholder?: string;
   description?: string;
+  requiredWhenFieldChanges?: string | null;
   validation?: {
     min?: number;
     max?: number;
@@ -81,6 +82,9 @@ export function EnhancedConfigDialog({
   const [configValues, setConfigValues] = useState<Record<string, ConfigValue>>(
     {},
   );
+  const [existingConfigValues, setExistingConfigValues] = useState<
+    Record<string, ConfigValue>
+  >({});
   const [loading, setLoading] = useState(false);
   const [loadingExisting, setLoadingExisting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -171,6 +175,7 @@ export function EnhancedConfigDialog({
               }
             });
             setConfigValues(defaults);
+            setExistingConfigValues(defaults);
             setLoadingExisting(false);
             return;
           }
@@ -197,6 +202,7 @@ export function EnhancedConfigDialog({
         }
       });
       setConfigValues(defaults);
+      setExistingConfigValues({});
       setLoadingExisting(false);
     };
 
@@ -214,6 +220,32 @@ export function EnhancedConfigDialog({
 
     if (field.required && (value === undefined || value === "")) {
       return `${field.label} is required`;
+    }
+
+    if (
+      field.requiredWhenFieldChanges &&
+      (value === undefined || value === "")
+    ) {
+      const trackedField = filteredFields.find(
+        (candidate) => candidate.name === field.requiredWhenFieldChanges,
+      );
+      const trackedFieldName = field.requiredWhenFieldChanges;
+      const currentTrackedValue = configValues[trackedFieldName];
+      const existingTrackedValue = existingConfigValues[trackedFieldName];
+      const currentNormalized =
+        typeof currentTrackedValue === "string"
+          ? currentTrackedValue.trim()
+          : currentTrackedValue;
+      const existingNormalized =
+        typeof existingTrackedValue === "string"
+          ? existingTrackedValue.trim()
+          : existingTrackedValue;
+      if (
+        existingNormalized !== undefined &&
+        currentNormalized !== existingNormalized
+      ) {
+        return `${field.label} is required when ${trackedField?.label ?? trackedFieldName} changes`;
+      }
     }
 
     if (value !== undefined && value !== "" && field.type === "number") {
@@ -241,10 +273,19 @@ export function EnhancedConfigDialog({
   const handleFieldChange = (field: ConfigField, value: ConfigValue) => {
     setConfigValues({ ...configValues, [field.name]: value });
 
-    // Clear error when user starts typing or toggling
-    if (fieldErrors[field.name]) {
+    // Clear errors for the edited field and fields whose validation depends on it.
+    const dependentFieldNames = filteredFields
+      .filter((candidate) => candidate.requiredWhenFieldChanges === field.name)
+      .map((candidate) => candidate.name);
+    if (
+      fieldErrors[field.name] ||
+      dependentFieldNames.some((name) => fieldErrors[name])
+    ) {
       const newErrors = { ...fieldErrors };
       delete newErrors[field.name];
+      dependentFieldNames.forEach((name) => {
+        delete newErrors[name];
+      });
       setFieldErrors(newErrors);
     }
   };
@@ -265,6 +306,18 @@ export function EnhancedConfigDialog({
       }
     });
     return normalized;
+  };
+
+  const saveErrorMessage = async (response: Response): Promise<string> => {
+    try {
+      const data = await response.json();
+      if (typeof data.detail === "string" && data.detail) {
+        return data.detail;
+      }
+    } catch {
+      // Fall back to the generic message when the response has no JSON detail.
+    }
+    return "Failed to save configuration";
   };
 
   const handleSave = async () => {
@@ -306,7 +359,7 @@ export function EnhancedConfigDialog({
       );
 
       if (!response.ok) {
-        throw new Error(`Failed to save configuration`);
+        throw new Error(await saveErrorMessage(response));
       }
 
       toast({

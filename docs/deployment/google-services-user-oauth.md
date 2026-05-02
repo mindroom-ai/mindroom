@@ -53,7 +53,9 @@ Provider-specific client config wins over the shared `google_oauth_client` servi
 The shared `google_oauth_client` service supplies only the shared client ID and secret.
 MindRoom derives each provider's redirect URI from `MINDROOM_PUBLIC_URL` or the local default origin.
 MindRoom stores OAuth app client config separately from user OAuth tokens and never mirrors it into worker containers.
-First-time dashboard client setup requires `client_id` and `client_secret`; later edits may leave either field blank to keep the stored value.
+First-time dashboard client setup requires `client_id` and `client_secret`.
+Later edits may leave `client_secret` blank only when `client_id` is unchanged.
+Changing `client_id` requires submitting the matching new `client_secret`.
 
 When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
 Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents.

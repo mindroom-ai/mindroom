@@ -414,11 +414,16 @@ export function Integrations() {
         label: "Client Secret",
         type: "password",
         required: integration.oauth_client_configured !== true,
+        requiredWhenFieldChanges:
+          integration.oauth_client_configured === true ? "client_id" : null,
         placeholder:
           integration.oauth_client_configured === true
-            ? "Leave blank to keep the saved secret"
+            ? "Required when changing Client ID"
             : "OAuth app client secret",
-        description: "OAuth app client secret",
+        description:
+          integration.oauth_client_configured === true
+            ? "The saved secret is kept for edits that do not change the Client ID."
+            : "OAuth app client secret",
       },
     ];
     if (integration.oauth_client_redirect_uri_supported === true) {
