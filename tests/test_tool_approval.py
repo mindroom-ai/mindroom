@@ -431,6 +431,73 @@ async def test_public_tool_approval_facade_resolves_live_matrix_action(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_public_tool_approval_facade_falls_back_to_live_id_after_terminal_card_match(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(
+        side_effect=[
+            SentApprovalEvent("$first-approval"),
+            SentApprovalEvent("$second-approval"),
+        ],
+    )
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+
+    first_task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "first.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    first_pending = await _wait_for_pending(store, sender)
+    first_result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id=first_pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    first_decision = await first_task
+    assert first_result.resolved is True
+    assert first_decision.status == "approved"
+
+    second_task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "second.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    second_pending = await _wait_for_pending(store, sender)
+
+    action_result = await handle_matrix_approval_action(
+        MatrixApprovalAction(
+            room_id="!room:localhost",
+            sender_id="@user:localhost",
+            card_event_id=first_pending.card_event_id,
+            approval_id=second_pending.approval_id,
+            status="denied",
+            reason="Wrong current tool.",
+        ),
+    )
+    second_decision = await asyncio.wait_for(second_task, timeout=1)
+
+    assert action_result.consumed is True
+    assert action_result.resolved is True
+    assert action_result.card_event_id == second_pending.card_event_id
+    assert second_decision.status == "denied"
+    assert second_decision.reason == "Wrong current tool."
+
+
+@pytest.mark.asyncio
 async def test_public_tool_approval_facade_missing_runtime_decision_uses_datetime(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -1927,6 +1994,14 @@ def test_approval_arguments_preview_marks_nested_sanitizer_truncation() -> None:
 
     assert preview["items"][-1] == "... [truncated]"
     assert truncated is True
+
+
+def test_approval_arguments_preview_does_not_mark_literal_truncation_marker() -> None:
+    arguments = {"note": "literal marker ... [truncated]"}
+    preview, truncated = _build_event_arguments_preview(arguments)
+
+    assert preview == arguments
+    assert truncated is False
 
 
 @pytest.mark.asyncio

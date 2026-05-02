@@ -52,6 +52,7 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
+_SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: ApprovalManager | None = None
 logger = get_logger(__name__)
 
@@ -94,17 +95,36 @@ def _truncate_event_argument_value(value: object, *, max_length: int) -> object:
     return sanitize_failure_text(_compact_preview_text(value), max_length=max_length)
 
 
-def _contains_sanitizer_truncation(value: object) -> bool:
-    if isinstance(value, dict):
-        return "__truncated__" in value or any(_contains_sanitizer_truncation(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_contains_sanitizer_truncation(item) for item in value)
-    return isinstance(value, str) and value.endswith("... [truncated]")
+def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
+    if isinstance(sanitized, dict):
+        if not isinstance(original, dict):
+            return "__truncated__" in sanitized or any(
+                _contains_sanitizer_truncation(None, item) for item in sanitized.values()
+            )
+        has_added_truncation_key = "__truncated__" in sanitized and "__truncated__" not in original
+        if len(sanitized) < len(original) or has_added_truncation_key:
+            return True
+        original_by_text_key = {str(key): item for key, item in original.items()}
+        return any(
+            _contains_sanitizer_truncation(original_by_text_key.get(str(key)), item)
+            for key, item in sanitized.items()
+            if key != "__truncated__"
+        )
+    if isinstance(sanitized, list):
+        original_items = list(original) if isinstance(original, list | tuple | set | frozenset) else []
+        has_added_truncation_marker = sanitized != original_items and sanitized[-1:] == [_SANITIZER_TRUNCATION_MARKER]
+        if len(original_items) > len(sanitized) or has_added_truncation_marker:
+            return True
+        return any(
+            _contains_sanitizer_truncation(original_item, sanitized_item)
+            for original_item, sanitized_item in zip(original_items, sanitized, strict=False)
+        )
+    return isinstance(sanitized, str) and sanitized.endswith(_SANITIZER_TRUNCATION_MARKER) and sanitized != original
 
 
 def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     sanitized = sanitize_failure_value(arguments)
-    sanitizer_truncated = _contains_sanitizer_truncation(sanitized)
+    sanitizer_truncated = _contains_sanitizer_truncation(arguments, sanitized)
     if not isinstance(sanitized, dict):
         wrapped = {"value": _truncate_event_argument_value(sanitized, max_length=_MAX_ARGUMENTS_PREVIEW_CHARS // 2)}
         return wrapped, True
