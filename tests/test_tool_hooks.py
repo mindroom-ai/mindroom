@@ -1315,7 +1315,7 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
     client.room_send = AsyncMock(side_effect=mock_room_send)
-    client.rooms = {"!room:localhost": object()}
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     bot = MagicMock()
     bot.agent_name = "router"
     bot.running = True
@@ -1390,7 +1390,7 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
     )
-    client.rooms = {"!room:localhost": object()}
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     bot = MagicMock()
     bot.agent_name = "router"
     bot.running = True
@@ -1483,7 +1483,7 @@ async def test_sync_tool_approval_aexecute_resumes_on_runtime_loop(tmp_path: Pat
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
     )
-    client.rooms = {"!room:localhost": object()}
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     bot = MagicMock()
     bot.agent_name = "router"
     bot.running = True
@@ -1594,7 +1594,7 @@ async def test_sync_tool_approval_execute_on_runtime_loop_fails_fast(tmp_path: P
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
     )
-    client.rooms = {"!room:localhost": object()}
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     bot = MagicMock()
     bot.agent_name = "router"
     bot.running = True
