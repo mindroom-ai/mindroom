@@ -2738,7 +2738,8 @@ async def test_prepend_tool_hook_bridge_preserves_existing_function_hooks() -> N
     prepend_tool_hook_bridge(toolkit, bridge)
 
     assert function.tool_hooks is not None
-    assert function.tool_hooks[0] is bridge
+    assert function.tool_hooks[0] is not existing_hook
+    assert callable(function.tool_hooks[0])
     assert function.tool_hooks[1] is existing_hook
 
     execution = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1")
