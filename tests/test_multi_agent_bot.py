@@ -3950,8 +3950,8 @@ class TestAgentBot:
         try:
             event = SimpleNamespace(
                 type="io.mindroom.tool_approval_response",
-                sender="@user:localhost",
                 source={
+                    "sender": "@user:localhost",
                     "content": {
                         "approval_id": pending.approval_id,
                         "status": "denied",
@@ -3988,8 +3988,8 @@ class TestAgentBot:
         try:
             event = SimpleNamespace(
                 type="io.mindroom.tool_approval_response",
-                sender="@user:localhost",
                 source={
+                    "sender": "@user:localhost",
                     "content": {
                         "approval_id": pending.approval_id,
                         "status": "denied",
@@ -4026,10 +4026,14 @@ class TestAgentBot:
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
-        event = SimpleNamespace(
-            type="io.mindroom.tool_approval_response",
-            sender="@user:localhost",
-            source={"content": {"approval_id": "approval-1", "status": "approved"}},
+        event = nio.UnknownEvent.from_dict(
+            {
+                "type": "io.mindroom.tool_approval_response",
+                "sender": "@user:localhost",
+                "event_id": "$response",
+                "origin_server_ts": 1,
+                "content": {"approval_id": "approval-1", "status": "approved"},
+            },
         )
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
@@ -4071,8 +4075,10 @@ class TestAgentBot:
         try:
             event = SimpleNamespace(
                 type="io.mindroom.tool_approval_response",
-                sender="@user:localhost",
-                source={"content": {"approval_id": pending.approval_id, "status": "approved"}},
+                source={
+                    "sender": "@user:localhost",
+                    "content": {"approval_id": pending.approval_id, "status": "approved"},
+                },
             )
             await bot._on_unknown_event(room, event)
             decision = await task

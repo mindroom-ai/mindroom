@@ -1361,6 +1361,88 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_sync_execute_async_tool_entrypoint_still_runs_approval_gate(tmp_path: Path) -> None:
+    """FunctionCall.execute() must not bypass approval hooks for async tool entrypoints."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "timeout_days": 0.000001,
+                "rules": [{"match": "echo", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
+    )
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    bot = MagicMock()
+    bot.agent_name = "router"
+    bot.running = True
+    bot.client = client
+    bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
+    orchestrator.agent_bots = {"router": bot}
+    initialize_approval_store(
+        runtime_paths,
+        sender=orchestrator._approval_transport.send_approval_event,
+        editor=AsyncMock(),
+    )
+
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    executed: list[str] = []
+
+    class DemoToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo", tools=[self.echo])
+
+        async def echo(self, text: str) -> str:
+            executed.append(text)
+            return text.upper()
+
+    toolkit = DemoToolkit()
+    function = _first_function(toolkit)
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    with patch("agno.tools.function.log_warning") as mock_log_warning:
+        result = await asyncio.to_thread(
+            lambda: FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute(),
+        )
+
+    assert result.status == "success"
+    assert result.result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: echo\n"
+        "Reason: Tool approval request timed out.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    assert executed == []
+    client.room_send.assert_awaited_once()
+    mock_log_warning.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: Path) -> None:
     """Approval-gated sync tools should resume after approval resolves on another loop."""
     runtime_paths = test_runtime_paths(tmp_path)

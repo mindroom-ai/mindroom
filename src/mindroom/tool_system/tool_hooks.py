@@ -749,10 +749,7 @@ def prepend_tool_hook_bridge(
 
 def _prepend_function_tool_hook(function: Function, bridge: Callable[..., Any]) -> None:
     sync_bridge = _SYNC_BRIDGES.get(bridge)
-    is_async_entrypoint = inspect.iscoroutinefunction(function.entrypoint) or inspect.isasyncgenfunction(
-        function.entrypoint,
-    )
-    bridge_hooks = [bridge] if is_async_entrypoint or sync_bridge is None else [sync_bridge]
+    bridge_hooks = [sync_bridge if sync_bridge is not None else bridge]
 
     existing_hooks = [hook for hook in list(function.tool_hooks or []) if hook not in bridge_hooks]
     function.tool_hooks = [*bridge_hooks, *existing_hooks]

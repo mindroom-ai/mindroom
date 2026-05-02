@@ -1388,12 +1388,16 @@ class AgentBot:
         """Handle custom Matrix events that are not part of nio's typed event set."""
         if event.type != "io.mindroom.tool_approval_response":
             return
+        raw_sender_id = event.source.get("sender")
+        if not isinstance(raw_sender_id, str) or not raw_sender_id:
+            self.logger.debug("ignoring_tool_approval_response_without_sender")
+            return
         payload = parse_approval_response_event(event)
         if payload.status is None or (payload.card_event_id is None and payload.approval_id is None):
             return
         await handle_tool_approval_action(
             room=room,
-            sender_id=event.sender,
+            sender_id=raw_sender_id,
             config=self.config,
             runtime_paths=self.runtime_paths,
             orchestrator=self.orchestrator,
