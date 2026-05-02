@@ -14,10 +14,13 @@ from pydantic import ValidationError
 
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
+    _MAX_REMEMBERED_TERMINAL_CARD_IDS,
+    ApprovalDecision,
     ApprovalManager,
     PendingApproval,
     SentApprovalEvent,
     _build_event_arguments_preview,
+    _LiveApprovalWaiter,
     get_approval_store,
     initialize_approval_store,
 )
@@ -155,6 +158,7 @@ def _approval_card(
     event_id: str = "$approval",
     room_id: str = "!room:localhost",
     sender: str = "@mindroom_router:localhost",
+    requester: str = "@requester:localhost",
     approver: str = "@user:localhost",
     status: str = "pending",
     origin_server_ts: int | None = None,
@@ -169,7 +173,7 @@ def _approval_card(
         "approval_id": approval_id,
         "arguments": {"path": "notes.txt"},
         "status": status,
-        "requester_id": approver,
+        "requester_id": requester,
         "approver_user_id": approver,
         "agent_name": "code",
         "thread_id": "$thread",
@@ -1163,6 +1167,60 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
 
 
 @pytest.mark.asyncio
+async def test_approval_transport_returns_event_after_successful_send_without_sender_user_id(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+
+    client = MagicMock()
+    client.user_id = None
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
+    bot = MagicMock(agent_name="router", running=True, client=client)
+    orchestrator.agent_bots = {"router": bot}
+    orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
+
+    sent = await orchestrator._approval_transport.send_approval_event_now(
+        "!room:localhost",
+        None,
+        {
+            "approval_id": "approval-1",
+            "tool_name": "read_file",
+            "arguments": {"path": "notes.txt"},
+            "status": "pending",
+        },
+    )
+
+    assert sent == SentApprovalEvent(event_id="$approval")
+
+
+@pytest.mark.asyncio
+async def test_approval_notice_replies_to_room_mode_card(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator._capture_runtime_loop()
+
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$notice", room_id="!room:localhost"))
+    bot = MagicMock(agent_name="router", running=True, client=client)
+    orchestrator.agent_bots = {"router": bot}
+
+    sent = await orchestrator._approval_transport.send_notice(
+        room_id="!room:localhost",
+        approval_event_id="$approval",
+        thread_id=None,
+        reason="Cannot approve: the displayed arguments are truncated.",
+    )
+
+    assert sent is True
+    assert client.room_send.await_args.kwargs["content"]["m.relates_to"] == {
+        "m.in_reply_to": {"event_id": "$approval"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
@@ -2055,6 +2113,15 @@ def test_pending_approval_from_card_event_requires_approver_user_id() -> None:
         PendingApproval.from_card_event(card, room_id="!room:localhost")
 
 
+def test_pending_approval_preserves_distinct_requester_and_approver() -> None:
+    card = _approval_card(requester="@requester:localhost", approver="@approver:localhost")
+
+    pending = PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+    assert pending.requester_id == "@requester:localhost"
+    assert pending.approver_user_id == "@approver:localhost"
+
+
 def test_approval_arguments_preview_marks_sanitizer_truncation() -> None:
     arguments = {f"k{index}": index for index in range(30)}
     preview, truncated = _build_event_arguments_preview(arguments)
@@ -2068,7 +2135,6 @@ def test_approval_arguments_preview_marks_sanitizer_truncation() -> None:
         arguments=preview,
         arguments_truncated=truncated,
         agent_name="code",
-        room_id="!room:localhost",
         thread_id=None,
         requester_id="@user:localhost",
         approver_user_id="@user:localhost",
@@ -2132,12 +2198,70 @@ async def test_initialize_approval_store_rejects_storage_root_change_with_pendin
 
 def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
-    config = _config(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
+            bot_accounts=["@bridge_bot:localhost"],
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+        ),
+        runtime_paths,
+    )
     internal_user_id = config.get_mindroom_user_id(runtime_paths)
+    agent_user_id = f"@mindroom_code:{config.get_domain(runtime_paths)}"
 
     assert resolve_tool_approval_approver(config, runtime_paths, None) is None
-    assert resolve_tool_approval_approver(config, runtime_paths, "@agent:localhost") == "@agent:localhost"
+    assert resolve_tool_approval_approver(config, runtime_paths, agent_user_id) is None
     assert resolve_tool_approval_approver(config, runtime_paths, internal_user_id) is None
+    assert resolve_tool_approval_approver(config, runtime_paths, "@bridge_bot:localhost") is None
+    assert resolve_tool_approval_approver(config, runtime_paths, "@user:localhost") == "@user:localhost"
+
+
+def test_terminal_approval_card_ids_are_bounded(tmp_path: Path) -> None:
+    store = ApprovalManager(test_runtime_paths(tmp_path))
+
+    for index in range(_MAX_REMEMBERED_TERMINAL_CARD_IDS + 1):
+        store._remember_resolved_card_event_id(f"$approval-{index}")
+
+    assert store.knows_in_memory_approval_card("$approval-0") is False
+    assert store.knows_in_memory_approval_card("$approval-1") is True
+    assert store.knows_in_memory_approval_card(f"$approval-{_MAX_REMEMBERED_TERMINAL_CARD_IDS}") is True
+
+
+def test_terminal_approval_card_ids_drop_discarded_entries(tmp_path: Path) -> None:
+    store = ApprovalManager(test_runtime_paths(tmp_path))
+
+    for index in range(_MAX_REMEMBERED_TERMINAL_CARD_IDS + 1):
+        card_event_id = f"$approval-{index}"
+        store._remember_cancelled_card_event_id(card_event_id)
+        store._forget_cancelled_card_event_id(card_event_id)
+
+    assert len(store._cancelled_card_event_ids) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_fast_path_moves_card_to_resolved_memory(tmp_path: Path) -> None:
+    store = ApprovalManager(test_runtime_paths(tmp_path), editor=AsyncMock())
+    waiter = _LiveApprovalWaiter(
+        approval_id="approval-1",
+        card_event_id="$approval",
+        room_id="!room:localhost",
+        card_event=_approval_card(),
+        future=asyncio.get_running_loop().create_future(),
+    )
+    waiter.future.set_result(
+        ApprovalDecision(
+            status="expired",
+            reason="Tool approval request was cancelled.",
+            resolved_by=None,
+            resolved_at=datetime.now(UTC),
+        ),
+    )
+    store._remember_cancelled_card_event_id(waiter.card_event_id)
+
+    await store._settle_bound_waiter_as_cancelled(waiter)
+
+    assert store._cancelled_card_event_ids_contains("$approval") is False
+    assert store.knows_in_memory_approval_card("$approval") is True
 
 
 @pytest.mark.asyncio

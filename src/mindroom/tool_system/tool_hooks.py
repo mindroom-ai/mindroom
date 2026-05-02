@@ -64,7 +64,9 @@ _DECLINED_RESULT_TEMPLATE = (
 _APPROVAL_POLICY_FAILURE_REASON = "Tool approval policy failed."
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
 ToolHookResult = Any
-# Agno upgrade landmine — see ARCH-000.md for context.
+# Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
+# deferred sync-bridge results. Keep these wrappers covered by tests when bumping Agno
+# in uv.lock, and drop them once upstream supports this as public API.
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN = FunctionCall._build_nested_execution_chain
 _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False

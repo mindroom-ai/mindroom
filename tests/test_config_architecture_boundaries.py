@@ -92,6 +92,8 @@ def test_tool_approval_config_uses_pydantic_validation_only() -> None:
                 )
             if isinstance(node, ast.Name) and node.id in forbidden_names:
                 found.append(f"{source_path}:{node.lineno}: {node.id}")
+            if isinstance(node, ast.Attribute) and node.attr in forbidden_names:
+                found.append(f"{source_path}:{node.lineno}: {node.attr}")
 
     assert found == []
 

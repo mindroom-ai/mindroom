@@ -188,7 +188,6 @@ class ApprovalMatrixTransport:
                     thread_id=thread_id,
                     agent_name=bot.agent_name,
                 )
-                return None
             self.track_cache_write(bot, room_id, str(response.event_id))
             return SentApprovalEvent(event_id=str(response.event_id))
         logger.warning(
@@ -362,7 +361,7 @@ class ApprovalMatrixTransport:
         content = build_message_content(
             reason,
             thread_event_id=thread_id,
-            reply_to_event_id=approval_event_id if isinstance(thread_id, str) and thread_id else None,
+            reply_to_event_id=approval_event_id,
             extra_content={"msgtype": "m.notice"},
         )
         response = await bot.client.room_send(

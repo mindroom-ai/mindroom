@@ -6,17 +6,22 @@ import asyncio
 import json
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
+from mindroom.approval_events import (
+    PendingApproval,
+    PendingApprovalStatus,
+    is_original_approval_card,
+    terminal_edit_matches_card_sender,
+)
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.tool_system.tool_failures import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
@@ -26,7 +31,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache.event_cache import ConversationEventCache
 
 ApprovalStatus = Literal["approved", "denied", "expired"]
-PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 ResolutionStatus = Literal["approved", "denied"]
 MatrixEventSender = Callable[[str, str | None, dict[str, Any]], Awaitable["SentApprovalEvent | None"]]
 MatrixEventEditor = Callable[[str, str, dict[str, Any]], Awaitable[bool]]
@@ -52,6 +56,7 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
+_MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: ApprovalManager | None = None
 logger = get_logger(__name__)
@@ -63,6 +68,28 @@ class ToolApprovalTransportError(RuntimeError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class _BoundedCardEventIds:
+    def __init__(self, max_size: int) -> None:
+        self._max_size = max_size
+        self._ids: OrderedDict[str, None] = OrderedDict()
+
+    def add(self, card_event_id: str) -> None:
+        if card_event_id in self._ids:
+            return
+        self._ids[card_event_id] = None
+        while len(self._ids) > self._max_size:
+            self._ids.popitem(last=False)
+
+    def discard(self, card_event_id: str) -> None:
+        self._ids.pop(card_event_id, None)
+
+    def __contains__(self, card_event_id: object) -> bool:
+        return card_event_id in self._ids
+
+    def __len__(self) -> int:
+        return len(self._ids)
 
 
 def _utcnow() -> datetime:
@@ -177,92 +204,6 @@ class ApprovalActionResult:
     card_event_id: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class PendingApproval:
-    """Typed projection of one Matrix `io.mindroom.tool_approval` card."""
-
-    approval_id: str
-    card_event_id: str
-    room_id: str
-    card_sender_id: str
-    requester_id: str
-    approver_user_id: str
-    tool_name: str
-    arguments_preview: dict[str, Any]
-    arguments_preview_truncated: bool
-    timeout_seconds: int
-    created_at_ms: int
-    thread_id: str | None = None
-    agent_name: str | None = None
-    requested_at: str | None = None
-    expires_at: str | None = None
-
-    @classmethod
-    def from_card_event(cls, event: dict[str, Any], *, room_id: str) -> PendingApproval:
-        """Parse one Matrix approval card event into a typed read-only view."""
-        if event.get("type") != "io.mindroom.tool_approval":
-            msg = "Approval card event has the wrong event type."
-            raise ValueError(msg)
-        content = event.get("content")
-        if not isinstance(content, dict):
-            msg = "Approval card event is missing content."
-            raise TypeError(msg)
-        if _is_replace_content(content):
-            msg = "Approval card event is a replacement edit, not an original card."
-            raise ValueError(msg)
-
-        event_id = _required_str(event, "event_id")
-        sender = _required_str(event, "sender")
-        approval_id = _content_str(content, "approval_id") or _content_str(content, "tool_call_id")
-        tool_name = _content_str(content, "tool_name")
-        approver_user_id = _content_str(content, "approver_user_id")
-        if approval_id is None or tool_name is None or approver_user_id is None:
-            msg = "Approval card event is missing required approval fields."
-            raise ValueError(msg)
-
-        arguments = content.get("arguments")
-        if not isinstance(arguments, dict):
-            arguments = {"value": arguments}
-
-        requested_at = _content_str(content, "requested_at")
-        expires_at = _content_str(content, "expires_at")
-        created_at_ms = _created_at_ms(event, requested_at)
-        timeout_seconds = _timeout_seconds(requested_at, expires_at)
-        requester_id = _content_str(content, "requester_id") or ""
-        thread_id = _content_str(content, "thread_id")
-        agent_name = _content_str(content, "agent_name")
-
-        return cls(
-            approval_id=approval_id,
-            card_event_id=event_id,
-            room_id=room_id,
-            card_sender_id=sender,
-            requester_id=requester_id,
-            approver_user_id=approver_user_id,
-            tool_name=tool_name,
-            arguments_preview=cast("dict[str, Any]", arguments),
-            arguments_preview_truncated=bool(content.get("arguments_truncated")),
-            timeout_seconds=timeout_seconds,
-            created_at_ms=created_at_ms,
-            thread_id=thread_id,
-            agent_name=agent_name,
-            requested_at=requested_at,
-            expires_at=expires_at,
-        )
-
-    def latest_status(self, latest_edit: dict[str, Any] | None) -> PendingApprovalStatus:
-        """Return the visible approval status after applying the latest cached edit."""
-        if latest_edit is None:
-            return "pending"
-        content = latest_edit.get("content")
-        if not isinstance(content, dict):
-            return "pending"
-        status = visible_content_from_content(cast("dict[str, object]", content)).get("status")
-        if status in {"pending", "approved", "denied", "expired"}:
-            return cast("PendingApprovalStatus", status)
-        return "pending"
-
-
 @dataclass(slots=True)
 class _LiveApprovalWaiter:
     approval_id: str
@@ -309,11 +250,11 @@ class ApprovalManager:
         self._event_cache = event_cache
         self._approval_room_ids = approval_room_ids
         self._transport_sender = transport_sender
-        self._live_lock = threading.Lock()
+        self._live_lock = threading.RLock()
         self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
         self._resolving_card_event_ids: set[str] = set()
-        self._resolved_card_event_ids: set[str] = set()
-        self._cancelled_card_event_ids: set[str] = set()
+        self._resolved_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
+        self._cancelled_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
         self._active_approval_sends: set[_ActiveApprovalSend] = set()
         self._post_cancel_cleanup_tasks: set[_PostCancelCleanupTask] = set()
         self._shutdown_reason: str | None = None
@@ -351,7 +292,6 @@ class ApprovalManager:
             arguments=event_arguments,
             arguments_truncated=arguments_truncated,
             agent_name=agent_name,
-            room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
             approver_user_id=approver_user_id,
@@ -664,7 +604,6 @@ class ApprovalManager:
     ) -> _LiveApprovalWaiter:
         card_event = self._card_event_from_content(
             event_id=sent_event.event_id,
-            room_id=room_id,
             content=content,
             requested_at=requested_at,
         )
@@ -695,8 +634,7 @@ class ApprovalManager:
     ) -> None:
         decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
         if mark_cancelled:
-            with self._live_lock:
-                self._cancelled_card_event_ids.add(waiter.card_event_id)
+            self._remember_cancelled_card_event_id(waiter.card_event_id)
         claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
         if claimed_waiter is None:
             with suppress(Exception):
@@ -704,6 +642,9 @@ class ApprovalManager:
             if waiter.future.done():
                 completed = waiter.future.result()
                 if completed.status == "expired" and completed.reason == reason:
+                    self._remember_resolved_card_event_id(waiter.card_event_id)
+                    if mark_cancelled:
+                        self._forget_cancelled_card_event_id(waiter.card_event_id)
                     return
             pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
             await self._emit_resolution(
@@ -783,13 +724,13 @@ class ApprovalManager:
         claim_released = False
         try:
             await self._yield_to_queued_cancellation()
-            with self._live_lock:
-                cancelled = pending.card_event_id in self._cancelled_card_event_ids
+            cancelled = self._cancelled_card_event_ids_contains(pending.card_event_id)
             if cancelled:
                 resolved_status: ApprovalStatus = "expired"
                 resolved_reason = _DEFAULT_CANCELLED_REASON
+                resolution_was_truncated = False
             else:
-                resolved_status, resolved_reason = self._normalized_resolution_request(
+                resolved_status, resolved_reason, resolution_was_truncated = self._normalized_resolution_request(
                     pending,
                     status=status,
                     reason=reason,
@@ -804,9 +745,7 @@ class ApprovalManager:
             return ApprovalActionResult(
                 consumed=True,
                 resolved=delivered,
-                error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON
-                if resolved_reason == _DEFAULT_TRUNCATED_APPROVAL_REASON
-                else None,
+                error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON if resolution_was_truncated else None,
                 thread_id=pending.thread_id,
                 card_event_id=pending.card_event_id,
             )
@@ -948,7 +887,7 @@ class ApprovalManager:
             card_event_id=pending.card_event_id,
             sender=pending.card_sender_id,
         )
-        if _terminal_edit_matches_card_sender(latest_edit, pending.card_sender_id):
+        if terminal_edit_matches_card_sender(latest_edit, pending.card_sender_id):
             return latest_edit
         return None
 
@@ -967,9 +906,10 @@ class ApprovalManager:
             since_ts_ms=since_ts_ms,
             limit=limit,
         )
-        return [event for event in events if _is_original_approval_card(event)]
+        return [event for event in events if is_original_approval_card(event)]
 
-    async def _shutdown(self, *, reason: str) -> None:
+    async def shutdown(self, *, reason: str) -> None:
+        """Expire pending approvals and drain approval cleanup tasks."""
         with self._live_lock:
             self._shutdown_reason = reason
             waiters = list(self._pending_by_card_event.values())
@@ -1126,6 +1066,26 @@ class ApprovalManager:
         except InvalidStateError:
             return
 
+    def _remember_resolved_card_event_id(self, card_event_id: str) -> None:
+        with self._live_lock:
+            self._resolved_card_event_ids.add(card_event_id)
+
+    def _remember_cancelled_card_event_id(self, card_event_id: str) -> None:
+        with self._live_lock:
+            self._cancelled_card_event_ids.add(card_event_id)
+
+    def _forget_cancelled_card_event_id(self, card_event_id: str) -> None:
+        with self._live_lock:
+            self._cancelled_card_event_ids.discard(card_event_id)
+
+    def _resolved_card_event_ids_contains(self, card_event_id: str) -> bool:
+        with self._live_lock:
+            return card_event_id in self._resolved_card_event_ids
+
+    def _cancelled_card_event_ids_contains(self, card_event_id: str) -> bool:
+        with self._live_lock:
+            return card_event_id in self._cancelled_card_event_ids
+
     def _known_in_memory_approval_card(self, card_event_id: str) -> bool:
         with self._live_lock:
             return (
@@ -1163,11 +1123,9 @@ class ApprovalManager:
         self,
         *,
         event_id: str,
-        room_id: str,
         content: dict[str, Any],
         requested_at: datetime,
     ) -> dict[str, Any]:
-        del room_id
         sender = self._transport_sender_id() or content.get("approver_user_id")
         return {
             "event_id": event_id,
@@ -1185,7 +1143,6 @@ class ApprovalManager:
         arguments: dict[str, Any],
         arguments_truncated: bool,
         agent_name: str | None,
-        room_id: str,
         thread_id: str | None,
         requester_id: str | None,
         approver_user_id: str,
@@ -1193,7 +1150,6 @@ class ApprovalManager:
         expires_at: datetime,
         status: PendingApprovalStatus,
     ) -> dict[str, Any]:
-        del room_id
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
             "body": ApprovalManager._event_body(tool_name, status),
@@ -1271,10 +1227,10 @@ class ApprovalManager:
         *,
         status: ResolutionStatus,
         reason: str | None,
-    ) -> tuple[ApprovalStatus, str | None]:
+    ) -> tuple[ApprovalStatus, str | None, bool]:
         if status == "approved" and pending.arguments_preview_truncated:
-            return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON
-        return status, reason
+            return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True
+        return status, reason, False
 
     @staticmethod
     def _new_decision(
@@ -1289,52 +1245,6 @@ class ApprovalManager:
             resolved_by=resolved_by,
             resolved_at=_utcnow(),
         )
-
-
-def _required_str(event: dict[str, Any], key: str) -> str:
-    value = event.get(key)
-    if isinstance(value, str) and value:
-        return value
-    msg = f"Approval card event is missing {key}."
-    raise ValueError(msg)
-
-
-def _content_str(content: dict[str, Any], key: str) -> str | None:
-    value = content.get(key)
-    return value if isinstance(value, str) and value else None
-
-
-def _created_at_ms(event: dict[str, Any], requested_at: str | None) -> int:
-    parsed = _parse_datetime(requested_at)
-    if parsed is not None:
-        return int(parsed.timestamp() * 1000)
-    timestamp = event.get("origin_server_ts")
-    return timestamp if isinstance(timestamp, int) and not isinstance(timestamp, bool) else 0
-
-
-def _timeout_seconds(requested_at: str | None, expires_at: str | None) -> int:
-    requested = _parse_datetime(requested_at)
-    expires = _parse_datetime(expires_at)
-    if requested is None or expires is None:
-        return 0
-    return max(0, int((expires - requested).total_seconds()))
-
-
-def _is_replace_content(content: dict[str, Any]) -> bool:
-    return EventInfo.from_event({"content": content}).is_edit
-
-
-def _is_original_approval_card(event: dict[str, Any]) -> bool:
-    if event.get("type") != "io.mindroom.tool_approval":
-        return False
-    content = event.get("content")
-    return isinstance(content, dict) and not _is_replace_content(content)
-
-
-def _terminal_edit_matches_card_sender(edit: dict[str, Any] | None, card_sender_id: str) -> bool:
-    if edit is None:
-        return True
-    return edit.get("sender") == card_sender_id
 
 
 def _lookback_cutoff_ms(lookback_hours: int) -> int:
@@ -1389,5 +1299,5 @@ async def shutdown_approval_manager(reason: str = DEFAULT_SHUTDOWN_REASON) -> No
 
     manager = _MANAGER
     if manager is not None:
-        await manager._shutdown(reason=reason)
+        await manager.shutdown(reason=reason)
         _MANAGER = None

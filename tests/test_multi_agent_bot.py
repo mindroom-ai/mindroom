@@ -517,7 +517,14 @@ async def _start_live_approval(
             timeout_seconds=30,
         ),
     )
-    pending = await _wait_for_live_pending(store, sender)
+    try:
+        pending = await _wait_for_live_pending(store, sender)
+    except Exception:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        await shutdown_approval_store()
+        raise
     return store, pending, task, approval_editor
 
 

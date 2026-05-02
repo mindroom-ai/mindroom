@@ -166,13 +166,20 @@ depends_on = ["mindroom.config.agent"]
 [[modules]]
 path = "mindroom.approval_manager"
 depends_on = [
+    "mindroom.approval_events",
     "mindroom.constants",
     "mindroom.logging_config",
-    "mindroom.matrix.event_info",
-    "mindroom.matrix.visible_body",
     "mindroom.tool_system.tool_failures",
 ]
 visibility = ["mindroom.tool_approval"]
+
+[[modules]]
+path = "mindroom.approval_events"
+depends_on = [
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.visible_body",
+]
+visibility = ["mindroom.approval_manager"]
 
 [[modules]]
 path = "mindroom.approval_transport"
@@ -188,6 +195,16 @@ depends_on = [
 visibility = ["mindroom.orchestrator"]
 
 [[modules]]
+path = "mindroom.approval_inbound"
+depends_on = [
+    "mindroom.authorization",
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.visible_body",
+    "mindroom.tool_approval",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.tool_approval"
 depends_on = [
     "mindroom.approval_manager",
@@ -197,6 +214,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.agents",
+    "mindroom.approval_inbound",
     "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.orchestrator",
@@ -1357,7 +1375,8 @@ depends_on = [
     "mindroom.matrix.identity",
 ]
 visibility = [
-    "mindroom.approval_manager",
+    "mindroom.approval_inbound",
+    "mindroom.approval_events",
     "mindroom.bot",
     "mindroom.matrix.cache.postgres_agent_message_snapshot",
     "mindroom.matrix.cache.sqlite_agent_message_snapshot",
@@ -1455,6 +1474,7 @@ depends_on = [
 path = "mindroom.bot"
 depends_on = [
     "mindroom.agents",
+    "mindroom.approval_inbound",
     "mindroom.bot_runtime_view",
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.config_confirmation",
@@ -2708,6 +2728,7 @@ expose = [
     "expire_orphaned_approval_cards_on_startup",
     "handle_matrix_approval_action",
     "initialize_approval_runtime",
+    "is_process_active_approval_card",
     "is_process_approval_card",
     "request_tool_approval_for_call",
     "resolve_tool_approval_approver",
