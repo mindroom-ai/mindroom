@@ -1,5 +1,6 @@
 """Tests for syncing shared provider/bootstrap credentials from runtime env."""
 
+import json
 import os
 from pathlib import Path
 
@@ -30,6 +31,20 @@ def _runtime_paths(
         config_path=config_path,
         storage_path=storage_root,
         process_env=process_env,
+    )
+
+
+def _credential_seed_json(service: str = "google_oauth_client") -> str:
+    return json.dumps(
+        [
+            {
+                "service": service,
+                "credentials": {
+                    "client_id": {"env": "OAUTH_CLIENT_ID"},
+                    "client_secret": {"env": "OAUTH_CLIENT_SECRET"},
+                },
+            },
+        ],
     )
 
 
@@ -101,6 +116,204 @@ class TestCredentialsSync:
         """Legacy Google OAuth client env vars should not seed stored client config."""
         monkeypatch.setenv("GOOGLE_CLIENT_ID", "client-id")
         monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "client-secret")
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("google_oauth_client") is None
+
+    def test_sync_declared_credential_seed_from_env(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit credential seeds should populate named services from env values."""
+        monkeypatch.setenv("OAUTH_CLIENT_ID", "client-id")
+        monkeypatch.setenv("OAUTH_CLIENT_SECRET", "client-secret")
+        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_JSON", _credential_seed_json())
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("google_oauth_client") == {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "env",
+        }
+
+    def test_sync_declared_credential_seed_from_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Credential seed specs can live in a config-relative JSON file."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        credentials_dir = tmp_path / "credentials"
+        credentials_dir.mkdir()
+        seed_file = config_dir / "credential-seeds.json"
+        seed_file.write_text(_credential_seed_json(service="example_oauth_client"), encoding="utf-8")
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        (config_dir / ".env").write_text(
+            f"MINDROOM_CREDENTIAL_SEEDS_FILE=credential-seeds.json\n{SHARED_CREDENTIALS_PATH_ENV}={credentials_dir}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OAUTH_CLIENT_ID", "client-id")
+        monkeypatch.setenv("OAUTH_CLIENT_SECRET", "client-secret")
+
+        sync_env_to_credentials(
+            runtime_paths=constants_mod.resolve_runtime_paths(
+                config_path=config_path,
+                storage_path=tmp_path,
+                process_env=dict(os.environ),
+            ),
+        )
+
+        cm = CredentialsManager(base_path=credentials_dir)
+        assert cm.load_credentials("example_oauth_client") == {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "env",
+        }
+
+    def test_sync_declared_credential_seed_reads_file_backed_values(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Seed field env refs should honor the existing NAME_FILE secret convention."""
+        secret_file = temp_credentials_dir.parent / "oauth-client-secret"
+        secret_file.write_text("client-secret\n", encoding="utf-8")
+        monkeypatch.setenv("OAUTH_CLIENT_ID", "client-id")
+        monkeypatch.setenv("OAUTH_CLIENT_SECRET_FILE", str(secret_file))
+        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_JSON", _credential_seed_json())
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("google_oauth_client") == {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "env",
+        }
+
+    def test_sync_declared_credential_seed_reads_literal_and_file_values(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Seed field declarations should support literal values and direct file refs."""
+        secret_file = temp_credentials_dir.parent / "oauth-client-secret"
+        secret_file.write_text("client-secret\n", encoding="utf-8")
+        monkeypatch.setenv(
+            "MINDROOM_CREDENTIAL_SEEDS_JSON",
+            json.dumps(
+                {
+                    "service": "google_oauth_client",
+                    "credentials": {
+                        "client_id": {"value": "client-id"},
+                        "client_secret": {"file": str(secret_file)},
+                    },
+                },
+            ),
+        )
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("google_oauth_client") == {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "env",
+        }
+
+    def test_sync_declared_credential_seed_updates_env_sourced_credentials(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Declared seeds may update credentials they previously seeded from env."""
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        cm.save_credentials(
+            "google_oauth_client",
+            {"client_id": "old-client-id", "client_secret": "old-secret", "_source": "env"},
+        )
+        monkeypatch.setenv("OAUTH_CLIENT_ID", "new-client-id")
+        monkeypatch.setenv("OAUTH_CLIENT_SECRET", "new-secret")
+        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_JSON", _credential_seed_json())
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        assert cm.load_credentials("google_oauth_client") == {
+            "client_id": "new-client-id",
+            "client_secret": "new-secret",
+            "_source": "env",
+        }
+
+    def test_sync_declared_credential_seed_does_not_overwrite_ui_credentials(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Declared seeds must not overwrite dashboard-managed credentials."""
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        cm.save_credentials(
+            "google_oauth_client",
+            {"client_id": "ui-client-id", "client_secret": "ui-secret", "_source": "ui"},
+        )
+        monkeypatch.setenv("OAUTH_CLIENT_ID", "env-client-id")
+        monkeypatch.setenv("OAUTH_CLIENT_SECRET", "env-secret")
+        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_JSON", _credential_seed_json())
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        assert cm.load_credentials("google_oauth_client") == {
+            "client_id": "ui-client-id",
+            "client_secret": "ui-secret",
+            "_source": "ui",
+        }
+
+    def test_sync_declared_credential_seed_skips_missing_values(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Declared seeds should not create partial credentials when a value is missing."""
+        monkeypatch.setenv("OAUTH_CLIENT_ID", "client-id")
+        monkeypatch.delenv("OAUTH_CLIENT_SECRET", raising=False)
+        monkeypatch.delenv("OAUTH_CLIENT_SECRET_FILE", raising=False)
+        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_JSON", _credential_seed_json())
 
         sync_env_to_credentials(
             runtime_paths=_runtime_paths(

@@ -61,6 +61,23 @@ First-time client config saves require `client_id` and `client_secret`.
 Client config services are not worker-grantable and are never mirrored into worker containers.
 Client config services cannot be copied into ordinary credential services.
 
+For non-interactive deployments, you can seed the shared client config service at startup with `MINDROOM_CREDENTIAL_SEEDS_FILE`:
+
+```json
+[
+  {
+    "service": "google_oauth_client",
+    "credentials": {
+      "client_id": {"env": "GOOGLE_CLIENT_ID"},
+      "client_secret": {"env": "GOOGLE_CLIENT_SECRET"}
+    }
+  }
+]
+```
+
+The referenced env vars may also use the `*_FILE` convention, such as `GOOGLE_CLIENT_SECRET_FILE`.
+MindRoom updates env-sourced seeded credentials on restart, but it does not overwrite dashboard-managed client config.
+
 ## Environment Variables
 
 Optional account restrictions are service-specific:
