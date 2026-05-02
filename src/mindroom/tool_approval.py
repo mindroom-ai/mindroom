@@ -289,29 +289,23 @@ async def handle_matrix_approval_action(action: MatrixApprovalAction) -> Approva
     if manager is None:
         return ApprovalActionResult(consumed=False, resolved=False)
     sanitized_reason = action.reason.strip() if isinstance(action.reason, str) and action.reason.strip() else None
-    card_result: ApprovalActionResult | None = None
-    if action.card_event_id is not None:
-        card_result = await manager.handle_card_response(
+    if action.approval_id is not None:
+        return await manager.handle_live_approval_id_response(
             room_id=action.room_id,
             sender_id=action.sender_id,
-            card_event_id=action.card_event_id,
+            approval_id=action.approval_id,
             status=action.status,
             reason=sanitized_reason,
         )
-        if card_result.resolved or action.approval_id is None:
-            return card_result
-    if action.approval_id is None:
+    if action.card_event_id is None:
         return ApprovalActionResult(consumed=False, resolved=False)
-    approval_id_result = await manager.handle_live_approval_id_response(
+    return await manager.handle_card_response(
         room_id=action.room_id,
         sender_id=action.sender_id,
-        approval_id=action.approval_id,
+        card_event_id=action.card_event_id,
         status=action.status,
         reason=sanitized_reason,
     )
-    if approval_id_result.consumed or card_result is None:
-        return approval_id_result
-    return card_result
 
 
 def initialize_approval_runtime(

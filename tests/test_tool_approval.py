@@ -234,6 +234,21 @@ async def _wait_for_pending_by_id(store: ApprovalManager, room_id: str, approval
             await asyncio.sleep(0)
 
 
+async def _wait_for_pending_by_sender_call(
+    store: ApprovalManager,
+    sender: AsyncMock,
+    call_index: int,
+    *,
+    room_id: str = "!room:localhost",
+) -> PendingApproval:
+    async with asyncio.timeout(5):
+        while True:
+            if len(sender.await_args_list) > call_index:
+                approval_id = sender.await_args_list[call_index].args[2]["approval_id"]
+                return await _wait_for_pending_by_id(store, room_id, approval_id)
+            await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_request_approval_approves_and_edits_matrix_event(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
@@ -495,6 +510,83 @@ async def test_public_tool_approval_facade_falls_back_to_live_id_after_terminal_
     assert action_result.card_event_id == second_pending.card_event_id
     assert second_decision.status == "denied"
     assert second_decision.reason == "Wrong current tool."
+
+
+@pytest.mark.asyncio
+async def test_public_tool_approval_facade_uses_approval_id_over_active_unrelated_card(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(
+        side_effect=[
+            SentApprovalEvent("$first-approval"),
+            SentApprovalEvent("$second-approval"),
+        ],
+    )
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+
+    first_task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "first.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    first_pending = await _wait_for_pending_by_sender_call(store, sender, 0)
+    second_task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "second.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    second_pending = await _wait_for_pending_by_sender_call(store, sender, 1)
+
+    try:
+        action_result = await handle_matrix_approval_action(
+            MatrixApprovalAction(
+                room_id="!room:localhost",
+                sender_id="@user:localhost",
+                card_event_id=first_pending.card_event_id,
+                approval_id=second_pending.approval_id,
+                status="denied",
+                reason="Wrong current tool.",
+            ),
+        )
+        assert action_result.card_event_id == second_pending.card_event_id
+        second_decision = await asyncio.wait_for(second_task, timeout=1)
+
+        assert action_result.consumed is True
+        assert action_result.resolved is True
+        assert second_decision.status == "denied"
+        assert second_decision.reason == "Wrong current tool."
+        assert not first_task.done()
+    finally:
+        if not first_task.done():
+            await store.resolve_approval(
+                card_event_id=first_pending.card_event_id,
+                room_id=first_pending.room_id,
+                status="denied",
+                reason="cleanup",
+                resolved_by="@user:localhost",
+            )
+            await asyncio.wait_for(first_task, timeout=1)
+        if not second_task.done():
+            await store.resolve_approval(
+                card_event_id=second_pending.card_event_id,
+                room_id=second_pending.room_id,
+                status="denied",
+                reason="cleanup",
+                resolved_by="@user:localhost",
+            )
+            await asyncio.wait_for(second_task, timeout=1)
 
 
 @pytest.mark.asyncio
