@@ -343,5 +343,7 @@ async def shutdown_approval_runtime(reason: str = DEFAULT_SHUTDOWN_REASON) -> No
 
 async def shutdown_approval_store(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
     """Expire pending approvals, drop the manager, and clear script state."""
-    await approval_manager.shutdown_approval_manager(reason=reason)
-    _clear_script_cache()
+    try:
+        await approval_manager.shutdown_approval_manager(reason=reason)
+    finally:
+        _clear_script_cache()

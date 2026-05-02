@@ -415,6 +415,12 @@ class TestResolvedMessageExtraction:
 
         assert strip_matrix_rich_reply_fallback(body) == "No, too risky."
 
+    def test_strip_matrix_rich_reply_fallback_allows_empty_reply_body(self) -> None:
+        """Quote-only rich replies should not preserve the Matrix fallback."""
+        body = "> <@alice:localhost> Approval required\n> quoted details\n\n"
+
+        assert strip_matrix_rich_reply_fallback(body) == ""
+
     def test_strip_matrix_rich_reply_fallback_leaves_plain_quotes_alone(self) -> None:
         """Quoted text without the Matrix blank separator is normal message content."""
         body = "> keep this quoted line\nNo Matrix rich-reply separator"

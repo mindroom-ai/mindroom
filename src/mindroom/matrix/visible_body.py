@@ -35,8 +35,7 @@ def strip_matrix_rich_reply_fallback(body: str) -> str:
         quoted_line_count += 1
     if quoted_line_count == 0 or quoted_line_count >= len(lines) or lines[quoted_line_count] != "":
         return body
-    reply_body = "\n".join(lines[quoted_line_count + 1 :])
-    return reply_body or body
+    return "\n".join(lines[quoted_line_count + 1 :])
 
 
 def visible_content_from_content(content: Mapping[str, object]) -> dict[str, object]:

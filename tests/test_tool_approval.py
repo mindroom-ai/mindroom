@@ -12,6 +12,7 @@ import nio
 import pytest
 from pydantic import ValidationError
 
+import mindroom.tool_approval as approval_module
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     _MAX_REMEMBERED_TERMINAL_CARD_IDS,
@@ -1366,6 +1367,29 @@ async def test_shutdown_expires_approval_send_that_finishes_after_shutdown_start
     assert editor.await_args.args[2]["status"] == "expired"
     assert editor.await_args.args[2]["resolution_reason"] == "MindRoom shut down before approval completed."
     assert get_approval_store() is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_approval_store_clears_script_cache_when_manager_shutdown_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approval_module._SCRIPT_CACHE[("approval.py", 1)] = MagicMock()
+    original_shutdown = approval_module.approval_manager.shutdown_approval_manager
+
+    async def fail_shutdown(*, reason: str) -> None:
+        del reason
+        message = "shutdown failed"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(approval_module.approval_manager, "shutdown_approval_manager", fail_shutdown)
+
+    try:
+        with pytest.raises(RuntimeError, match="shutdown failed"):
+            await shutdown_approval_store()
+    finally:
+        monkeypatch.setattr(approval_module.approval_manager, "shutdown_approval_manager", original_shutdown)
+
+    assert approval_module._SCRIPT_CACHE == {}
 
 
 @pytest.mark.asyncio
