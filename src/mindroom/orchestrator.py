@@ -1649,6 +1649,7 @@ class MultiAgentOrchestrator:
         self.running = False
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
+        await shutdown_approval_runtime()
         await self._cancel_config_reload_task()
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()
@@ -1659,8 +1660,6 @@ class MultiAgentOrchestrator:
         # Cancel sync tasks first so shutdown does not race with active sync loops.
         for entity_name in list(self._sync_tasks.keys()):
             await cancel_sync_task(entity_name, self._sync_tasks)
-
-        await shutdown_approval_runtime()
 
         for bot in self.agent_bots.values():
             bot.running = False
