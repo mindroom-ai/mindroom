@@ -5285,6 +5285,61 @@ class TestUserIdPassthrough:
         assert "utilization_pct" not in payload["context"]
         assert payload["tools"]["count"] == 0
 
+    @pytest.mark.asyncio
+    async def test_ai_response_context_counts_anthropic_cache_tokens(self, tmp_path: Path) -> None:
+        """Claude-family cache tokens should count toward context occupancy."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "Claude"
+        mock_agent.model.id = "claude-sonnet-4-6"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = []
+        mock_run_output.run_id = "run-1"
+        mock_run_output.session_id = "session1"
+        mock_run_output.status = RunStatus.completed
+        mock_run_output.model = "claude-sonnet-4-6"
+        mock_run_output.model_provider = "Anthropic"
+        mock_run_output.metrics = Metrics(
+            input_tokens=3000,
+            output_tokens=120,
+            total_tokens=3120,
+            cache_read_tokens=20_000,
+            cache_write_tokens=500,
+        )
+        mock_agent.arun = AsyncMock(return_value=mock_run_output)
+
+        config = Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6", context_window=200_000)},
+        )
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            run_metadata: dict[str, object] = {}
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=config,
+                run_metadata_collector=run_metadata,
+            )
+
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["usage"]["input_tokens"] == 3000
+        assert payload["usage"]["cache_read_tokens"] == 20_000
+        assert payload["usage"]["cache_write_tokens"] == 500
+        assert payload["context"]["input_tokens"] == 23_500
+        assert payload["context"]["cache_read_input_tokens"] == 20_000
+        assert payload["context"]["cache_write_input_tokens"] == 500
+        assert payload["context"]["uncached_input_tokens"] == 3500
+        assert "cached_input_tokens" not in payload["context"]
+        assert payload["context"]["window_tokens"] == 200_000
+
     def test_build_matrix_run_metadata_merges_coalesced_source_event_ids(self) -> None:
         """Run metadata should mark every source event in a coalesced batch as seen."""
         metadata = build_matrix_run_metadata(
@@ -6027,4 +6082,70 @@ class TestUserIdPassthrough:
         assert payload["usage"]["cache_read_tokens"] == 576
         assert payload["usage"]["reasoning_tokens"] == 48
         assert payload["context"]["input_tokens"] == 120
+        assert payload["context"]["cache_read_input_tokens"] == 64
+        assert payload["context"]["uncached_input_tokens"] == 56
+        assert "cached_input_tokens" not in payload["context"]
         assert payload["context"]["window_tokens"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_context_counts_latest_anthropic_cache_tokens(self, tmp_path: Path) -> None:
+        """Streaming context metadata should include cache tokens for the latest Claude request."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "Claude"
+        mock_agent.model.id = "claude-sonnet-4-6"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="step one")
+            yield ModelRequestCompletedEvent(
+                model="claude-sonnet-4-6",
+                model_provider="Anthropic",
+                input_tokens=3000,
+                output_tokens=50,
+                total_tokens=3050,
+                cache_read_tokens=20_000,
+                cache_write_tokens=500,
+            )
+            yield RunContentEvent(content="step two")
+            yield ModelRequestCompletedEvent(
+                model="claude-sonnet-4-6",
+                model_provider="Anthropic",
+                input_tokens=120,
+                output_tokens=20,
+                total_tokens=140,
+                cache_read_tokens=9000,
+                cache_write_tokens=10,
+            )
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+        config = Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6", context_window=200_000)},
+        )
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+            run_metadata: dict[str, object] = {}
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=config,
+                run_metadata_collector=run_metadata,
+            ):
+                pass
+
+        payload = run_metadata["io.mindroom.ai_run"]
+        assert payload["usage"]["input_tokens"] == 3120
+        assert payload["usage"]["cache_read_tokens"] == 29_000
+        assert payload["usage"]["cache_write_tokens"] == 510
+        assert payload["context"]["input_tokens"] == 9130
+        assert payload["context"]["cache_read_input_tokens"] == 9000
+        assert payload["context"]["cache_write_input_tokens"] == 10
+        assert payload["context"]["uncached_input_tokens"] == 130
+        assert "cached_input_tokens" not in payload["context"]
+        assert payload["context"]["window_tokens"] == 200_000

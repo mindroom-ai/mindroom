@@ -224,7 +224,9 @@ class _StreamingAttemptState:
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     latest_model_id: str | None = None
     latest_model_provider: str | None = None
-    latest_request_input_tokens: int | None = None
+    latest_request_context_input_tokens: int | None = None
+    latest_request_cache_read_tokens: int | None = None
+    latest_request_cache_write_tokens: int | None = None
     cancelled_run_event: RunCancelledEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
     canonical_final_body_candidate: str | None = None
@@ -417,6 +419,8 @@ def _build_model_request_metrics_fallback(
 def _build_context_payload(
     *,
     context_input_tokens: int | None,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
     model_config: ModelConfig | None,
 ) -> dict[str, Any] | None:
     if context_input_tokens is None or model_config is None or model_config.context_window is None:
@@ -424,10 +428,64 @@ def _build_context_payload(
     context_window = model_config.context_window
     if context_window <= 0:
         return None
-    return {
+    payload = {
         "input_tokens": context_input_tokens,
         "window_tokens": context_window,
     }
+    if cache_read_tokens is not None and cache_read_tokens > 0:
+        payload["cache_read_input_tokens"] = cache_read_tokens
+    if cache_write_tokens is not None and cache_write_tokens > 0:
+        payload["cache_write_input_tokens"] = cache_write_tokens
+    if cache_read_tokens is not None or cache_write_tokens is not None:
+        uncached_input_tokens = context_input_tokens - (cache_read_tokens or 0)
+        if uncached_input_tokens >= 0:
+            payload["uncached_input_tokens"] = uncached_input_tokens
+    return payload
+
+
+def _provider_reports_cache_tokens_outside_input(
+    *,
+    provider: str | None,
+    configured_provider: str | None,
+    model_id: str | None,
+) -> bool:
+    """Return whether cache tokens must be added to input tokens for context occupancy."""
+    provider_key = (provider or configured_provider or "").lower()
+    configured_provider_key = (configured_provider or "").lower()
+    model_key = (model_id or "").lower()
+    if "anthropic" in provider_key or "bedrock" in provider_key:
+        return True
+    if configured_provider_key == "vertexai_claude":
+        return True
+    return "vertex" in provider_key and "claude" in model_key
+
+
+def _context_input_tokens_from_counts(
+    *,
+    input_tokens: int | None,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
+    provider: str | None,
+    configured_provider: str | None,
+    model_id: str | None,
+) -> int | None:
+    """Return full request-context tokens from provider usage counters."""
+    if input_tokens is None:
+        return None
+    if not _provider_reports_cache_tokens_outside_input(
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id=model_id,
+    ):
+        return input_tokens
+    return input_tokens + (cache_read_tokens or 0) + (cache_write_tokens or 0)
+
+
+def _int_usage_value(usage_payload: dict[str, Any] | None, key: str) -> int | None:
+    if usage_payload is None:
+        return None
+    value = usage_payload.get(key)
+    return value if isinstance(value, int) else None
 
 
 def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
@@ -444,6 +502,8 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     metrics: Metrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
     context_input_tokens: int | None = None,
+    context_cache_read_tokens: int | None = None,
+    context_cache_write_tokens: int | None = None,
     tool_count: int | None = None,
 ) -> dict[str, Any] | None:
     model_name, model_config = _get_model_config(
@@ -462,6 +522,22 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
     if not isinstance(usage_input_tokens, int):
         usage_input_tokens = None
+    resolved_context_input_tokens = context_input_tokens
+    if resolved_context_input_tokens is None:
+        resolved_context_input_tokens = _context_input_tokens_from_counts(
+            input_tokens=usage_input_tokens,
+            cache_read_tokens=_int_usage_value(usage_payload, "cache_read_tokens"),
+            cache_write_tokens=_int_usage_value(usage_payload, "cache_write_tokens"),
+            provider=provider,
+            configured_provider=model_config.provider if model_config is not None else None,
+            model_id=model_id,
+        )
+    resolved_context_cache_read_tokens = context_cache_read_tokens
+    if resolved_context_cache_read_tokens is None:
+        resolved_context_cache_read_tokens = _int_usage_value(usage_payload, "cache_read_tokens")
+    resolved_context_cache_write_tokens = context_cache_write_tokens
+    if resolved_context_cache_write_tokens is None:
+        resolved_context_cache_write_tokens = _int_usage_value(usage_payload, "cache_write_tokens")
 
     payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
     if run_id is not None:
@@ -484,7 +560,9 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
     if usage_payload:
         payload["usage"] = usage_payload
     context_payload = _build_context_payload(
-        context_input_tokens=context_input_tokens if context_input_tokens is not None else usage_input_tokens,
+        context_input_tokens=resolved_context_input_tokens,
+        cache_read_tokens=resolved_context_cache_read_tokens,
+        cache_write_tokens=resolved_context_cache_write_tokens,
         model_config=model_config,
     )
     if context_payload:
@@ -631,9 +709,9 @@ def _track_model_request_metrics(
         state.latest_model_id = event.model
     if event.model_provider:
         state.latest_model_provider = event.model_provider
-    if isinstance(event.input_tokens, int):
-        state.latest_request_input_tokens = event.input_tokens
-        state.request_metric_totals["input_tokens"] += event.input_tokens
+    request_input_tokens = event.input_tokens if isinstance(event.input_tokens, int) else None
+    if request_input_tokens is not None:
+        state.request_metric_totals["input_tokens"] += request_input_tokens
     if isinstance(event.output_tokens, int):
         state.request_metric_totals["output_tokens"] += event.output_tokens
     if isinstance(event.total_tokens, int):
@@ -644,6 +722,20 @@ def _track_model_request_metrics(
         state.request_metric_totals["cache_read_tokens"] += event.cache_read_tokens
     if isinstance(event.cache_write_tokens, int):
         state.request_metric_totals["cache_write_tokens"] += event.cache_write_tokens
+    state.latest_request_cache_read_tokens = (
+        event.cache_read_tokens if isinstance(event.cache_read_tokens, int) else None
+    )
+    state.latest_request_cache_write_tokens = (
+        event.cache_write_tokens if isinstance(event.cache_write_tokens, int) else None
+    )
+    state.latest_request_context_input_tokens = _context_input_tokens_from_counts(
+        input_tokens=request_input_tokens,
+        cache_read_tokens=state.latest_request_cache_read_tokens,
+        cache_write_tokens=state.latest_request_cache_write_tokens,
+        provider=event.model_provider,
+        configured_provider=None,
+        model_id=event.model,
+    )
     if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
         state.first_token_latency = float(event.time_to_first_token)
 
@@ -1630,7 +1722,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 model_provider=state.latest_model_provider,
                                 room_id=room_id,
                                 metrics=fallback_metrics,
-                                context_input_tokens=state.latest_request_input_tokens,
+                                context_input_tokens=state.latest_request_context_input_tokens,
+                                context_cache_read_tokens=state.latest_request_cache_read_tokens,
+                                context_cache_write_tokens=state.latest_request_cache_write_tokens,
                                 tool_count=state.observed_tool_calls,
                             )
                             if cancelled_metadata:
@@ -1674,7 +1768,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         room_id=room_id,
                         metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
                         metrics_fallback=fallback_metrics,
-                        context_input_tokens=state.latest_request_input_tokens,
+                        context_input_tokens=state.latest_request_context_input_tokens,
+                        context_cache_read_tokens=state.latest_request_cache_read_tokens,
+                        context_cache_write_tokens=state.latest_request_cache_write_tokens,
                         tool_count=(
                             len(state.completed_run_event.tools)
                             if state.completed_run_event is not None and state.completed_run_event.tools is not None
