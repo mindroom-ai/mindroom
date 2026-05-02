@@ -62,6 +62,7 @@ class ToolExecutionIdentity:
     session_id: str | None
     tenant_id: str | None = None
     account_id: str | None = None
+    transport_agent_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +184,7 @@ def build_tool_execution_identity(
     *,
     channel: _ExecutionChannel,
     agent_name: str,
+    transport_agent_name: str | None = None,
     runtime_paths: RuntimePaths,
     requester_id: str | None,
     room_id: str | None,
@@ -194,6 +196,7 @@ def build_tool_execution_identity(
     return ToolExecutionIdentity(
         channel=channel,
         agent_name=agent_name,
+        transport_agent_name=transport_agent_name or agent_name,
         requester_id=requester_id,
         room_id=room_id,
         thread_id=thread_id,

@@ -29,6 +29,14 @@ from agno.run.team import TeamRunOutput
 
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom import interactive
+from mindroom.approval_inbound import handle_tool_approval_action
+from mindroom.approval_manager import (
+    ApprovalManager,
+    PendingApproval,
+    SentApprovalEvent,
+    get_approval_store,
+    initialize_approval_store,
+)
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, TeamBot
@@ -76,6 +84,7 @@ from mindroom.hooks import (
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
 from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
+from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.utils import MultiKnowledgeVectorDb
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -112,6 +121,7 @@ from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, shutdown_approval_store
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
@@ -403,6 +413,172 @@ def _mock_managed_bot(config: Config) -> MagicMock:
     bot.event_cache_write_coordinator = None
     bot._set_presence_with_model_info = AsyncMock()
     return bot
+
+
+def _approval_reload_config(tmp_path: Path, *, include_code: bool) -> Config:
+    """Return one minimal config for approval reload tests."""
+    agents: dict[str, dict[str, object]] = {
+        "general": {
+            "display_name": "GeneralAgent",
+            "role": "General assistant",
+            "model": "default",
+            "rooms": ["lobby"],
+        },
+    }
+    if include_code:
+        agents["code"] = {
+            "display_name": "CodeAgent",
+            "role": "Writes code",
+            "model": "default",
+            "rooms": ["lobby"],
+        }
+    return _runtime_bound_config(
+        Config(
+            agents=agents,
+            models={"default": {"provider": "test", "id": "test-model"}},
+        ),
+        tmp_path,
+    )
+
+
+def _code_only_config(tmp_path: Path, *, rooms: list[str]) -> Config:
+    """Return one minimal config with only the code agent."""
+    return _runtime_bound_config(
+        Config(
+            agents={
+                "code": {
+                    "display_name": "CodeAgent",
+                    "role": "Writes code",
+                    "model": "default",
+                    "rooms": rooms,
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        ),
+        tmp_path,
+    )
+
+
+def _mock_approval_reload_bot(
+    config: Config,
+    *,
+    agent_name: str,
+    user_id: str,
+    room_send: AsyncMock,
+) -> MagicMock:
+    """Return one managed-bot double with a live Matrix client for approval reload tests."""
+    bot = _mock_managed_bot(config)
+    bot.agent_name = agent_name
+    bot.running = True
+    bot.client = make_matrix_client_mock(user_id=user_id)
+    bot.client.room_send = room_send
+    bot.client.rooms["!room:localhost"].add_member(user_id, agent_name.capitalize(), None)
+    latest_thread_event_id = "$latest-thread-event" if agent_name == "code" else None
+    bot.latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
+    bot.cleanup = AsyncMock()
+    return bot
+
+
+async def _wait_for_live_pending(
+    store: ApprovalManager,
+    sender: AsyncMock,
+    *,
+    room_id: str = "!test:localhost",
+) -> PendingApproval:
+    async with asyncio.timeout(5):
+        while True:
+            if sender.await_args is not None:
+                approval_id = sender.await_args.args[2]["approval_id"]
+                card_event_id = store._live_card_event_id_for_approval(approval_id)
+                if card_event_id is not None:
+                    pending = await store.get_pending_approval(room_id, approval_id)
+                    if pending is not None:
+                        return pending
+            await asyncio.sleep(0)
+
+
+async def _wait_for_pending_approval_id(store: ApprovalManager, approval_ids: list[str]) -> str:
+    async with asyncio.timeout(1):
+        while True:
+            if approval_ids and await store.get_pending_approval("!room:localhost", approval_ids[0]) is not None:
+                return approval_ids[0]
+            await asyncio.sleep(0)
+
+
+async def _start_live_approval(
+    runtime_paths: RuntimePaths,
+    *,
+    approver_user_id: str = "@user:localhost",
+    editor: AsyncMock | None = None,
+    arguments: dict[str, Any] | None = None,
+) -> tuple[ApprovalManager, PendingApproval, asyncio.Task[Any], AsyncMock]:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    approval_editor = editor or AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=approval_editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments=arguments or {"path": "notes.txt"},
+            room_id="!test:localhost",
+            requester_id="@user:localhost",
+            approver_user_id=approver_user_id,
+            timeout_seconds=30,
+        ),
+    )
+    try:
+        pending = await _wait_for_live_pending(store, sender)
+    except Exception:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        await shutdown_approval_store()
+        raise
+    return store, pending, task, approval_editor
+
+
+def _approval_removal_plan(new_config: Config) -> ConfigUpdatePlan:
+    """Return one config-update plan that removes the code bot without restarting others."""
+    return ConfigUpdatePlan(
+        new_config=new_config,
+        changed_mcp_servers=set(),
+        all_new_entities=set(),
+        entities_to_restart=set(),
+        new_entities=set(),
+        removed_entities={"code"},
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+
+def _cleanup_recorder(event_order: list[str]) -> Callable[[], Awaitable[None]]:
+    """Return one async cleanup side effect that records teardown ordering."""
+
+    async def _cleanup() -> None:
+        event_order.append("cleanup")
+
+    return _cleanup
+
+
+def _mock_shared_knowledge_manager(
+    *,
+    base_id: str,
+    storage_root: Path,
+    knowledge_path: Path,
+    knowledge: object,
+) -> KnowledgeManager:
+    manager = MagicMock(spec=KnowledgeManager)
+    manager.base_id = base_id
+    manager.storage_path = storage_root
+    manager.knowledge_path = knowledge_path
+    manager._cached_persisted_indexing_state = SimpleNamespace(
+        status="complete",
+        availability=KnowledgeAvailability.READY.value,
+    )
+    manager.matches.return_value = True
+    manager.get_knowledge.return_value = knowledge
+    return manager
 
 
 def _hook_plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
@@ -1088,8 +1264,8 @@ class TestAgentBot:
         assert mock_login.called
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         assert (
-            mock_client.add_event_callback.call_count == 12
-        )  # invite, message, redaction, reaction, audio, image/file/video callbacks
+            mock_client.add_event_callback.call_count == 13
+        )  # invite, message, redaction, reaction, audio, image/file/video, unknown-event callbacks
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -3469,8 +3645,7 @@ class TestAgentBot:
         tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=bot.matrix_id)
         event = MagicMock()
         event.event_id = "$event"
         dispatch = PreparedDispatch(
@@ -3765,6 +3940,509 @@ class TestAgentBot:
             await bot._on_reaction(room, event)
 
         assert seen == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_approval_response_with_approval_id_and_denial_reason_resolves_live_waiter(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Cinny custom approval responses should resolve by approval_id alone."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        _store, pending, task, editor = await _start_live_approval(runtime_paths)
+
+        try:
+            event = SimpleNamespace(
+                type="io.mindroom.tool_approval_response",
+                source={
+                    "sender": "@user:localhost",
+                    "content": {
+                        "approval_id": pending.approval_id,
+                        "status": "denied",
+                        "denial_reason": "Not this time.",
+                    },
+                },
+            )
+            await bot._on_unknown_event(room, event)
+            decision = await task
+
+            assert decision.status == "denied"
+            assert decision.reason == "Not this time."
+            assert editor.await_args.args[1] == "$approval"
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_approval_response_with_approval_id_and_non_card_reply_resolves_live_waiter(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Custom approval responses should fall back to approval_id when reply metadata is not the card."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        _store, pending, task, editor = await _start_live_approval(runtime_paths)
+
+        try:
+            event = SimpleNamespace(
+                type="io.mindroom.tool_approval_response",
+                source={
+                    "sender": "@user:localhost",
+                    "content": {
+                        "approval_id": pending.approval_id,
+                        "status": "denied",
+                        "denial_reason": "Wrong arguments.",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$thread",
+                            "m.in_reply_to": {"event_id": "$latest-thread-event"},
+                        },
+                    },
+                },
+            )
+            await bot._on_unknown_event(room, event)
+            decision = await task
+
+            assert decision.status == "denied"
+            assert decision.reason == "Wrong arguments."
+            assert editor.await_args.args[1] == "$approval"
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_approval_response_with_approval_id_uses_live_id_entrypoint(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Approval-id-only custom events should use the live-id manager API."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        event = nio.UnknownEvent.from_dict(
+            {
+                "type": "io.mindroom.tool_approval_response",
+                "sender": "@user:localhost",
+                "event_id": "$response",
+                "origin_server_ts": 1,
+                "content": {"approval_id": "approval-1", "status": "approved"},
+            },
+        )
+        with patch(
+            "mindroom.approval_inbound.handle_matrix_approval_action",
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True, card_event_id="$approval")),
+        ) as handle_matrix_approval_action:
+            await bot._on_unknown_event(room, event)
+
+        handle_matrix_approval_action.assert_awaited_once_with(
+            MatrixApprovalAction(
+                room_id="!test:localhost",
+                sender_id="@user:localhost",
+                card_event_id=None,
+                approval_id="approval-1",
+                status="approved",
+                reason=None,
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_truncated_approval_id_response_sends_notice_with_card_event_id(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Approval-id-only responses should still send truncated-argument denial notices."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        orchestrator = MagicMock()
+        orchestrator.send_approval_notice = AsyncMock(return_value=True)
+        bot.orchestrator = orchestrator
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        _store, pending, task, editor = await _start_live_approval(
+            runtime_paths,
+            arguments={"content": "x" * 10_000},
+        )
+
+        try:
+            event = SimpleNamespace(
+                type="io.mindroom.tool_approval_response",
+                source={
+                    "sender": "@user:localhost",
+                    "content": {"approval_id": pending.approval_id, "status": "approved"},
+                },
+            )
+            await bot._on_unknown_event(room, event)
+            decision = await task
+
+            assert decision.status == "denied"
+            assert "displayed arguments are truncated" in (decision.reason or "")
+            replacement = editor.await_args.args[2]
+            assert replacement["status"] == "denied"
+            assert "displayed arguments are truncated" in replacement["resolution_reason"]
+            orchestrator.send_approval_notice.assert_awaited_once_with(
+                room_id="!test:localhost",
+                approval_event_id=pending.card_event_id,
+                thread_id=pending.thread_id,
+                reason=replacement["resolution_reason"],
+            )
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_non_router_bot_truncated_approval_race_sends_notice_via_orchestrator(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A non-router bot that wins the approval callback race should still trigger notice delivery."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        agent_bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        agent_bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
+        router_bot = MagicMock()
+        router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        orchestrator = MagicMock()
+        orchestrator.send_approval_notice = AsyncMock(return_value=True)
+        agent_bot.orchestrator = orchestrator
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        _store, pending, task, editor = await _start_live_approval(
+            runtime_paths,
+            arguments={"content": "x" * 10_000},
+        )
+
+        try:
+            handled = await handle_tool_approval_action(
+                room=room,
+                sender_id="@user:localhost",
+                config=agent_bot.config,
+                runtime_paths=agent_bot.runtime_paths,
+                orchestrator=agent_bot.orchestrator,
+                logger=agent_bot.logger,
+                approval_event_id=pending.card_event_id,
+                status="approved",
+                reason=None,
+            )
+            decision = await task
+
+            assert handled is True
+            assert decision.status == "denied"
+            replacement = editor.await_args.args[2]
+            assert "displayed arguments are truncated" in replacement["resolution_reason"]
+            orchestrator.send_approval_notice.assert_awaited_once_with(
+                room_id="!test:localhost",
+                approval_event_id=pending.card_event_id,
+                thread_id=pending.thread_id,
+                reason=replacement["resolution_reason"],
+            )
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_reply_text_from_non_approver_falls_through_to_normal_handler(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Non-approver approval replies should fall through to normal text handling."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot._turn_controller.handle_text_event = AsyncMock()
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        store, pending, task, editor = await _start_live_approval(
+            runtime_paths,
+            approver_user_id="@approver:localhost",
+        )
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$reply"
+        event.sender = "@other:localhost"
+        event.body = "I should not resolve this."
+        event.server_timestamp = 1234
+        event.source = {
+            "event_id": "$reply",
+            "sender": "@other:localhost",
+            "origin_server_ts": 1234,
+            "content": {
+                "m.relates_to": {"m.in_reply_to": {"event_id": pending.card_event_id}},
+            },
+        }
+
+        try:
+            await bot._on_message(room, event)
+
+            bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+            editor.assert_not_awaited()
+            assert task.done() is False
+
+            await store.handle_card_response(
+                room_id="!test:localhost",
+                sender_id="@approver:localhost",
+                card_event_id=pending.card_event_id,
+                status="approved",
+                reason=None,
+            )
+            decision = await task
+            assert decision.status == "approved"
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_plain_rich_reply_does_not_probe_approval_cache(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Ordinary rich replies should not touch approval cache lookup."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot._turn_controller.handle_text_event = AsyncMock()
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        event_cache = MagicMock()
+        event_cache.get_event = AsyncMock(side_effect=RuntimeError("cache should not run"))
+        store = initialize_approval_store(
+            runtime_paths,
+            event_cache=event_cache,
+        )
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$ordinary-rich-reply"
+        event.sender = "@user:localhost"
+        event.body = "!help"
+        event.server_timestamp = 1234
+        event.source = {
+            "event_id": "$ordinary-rich-reply",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234,
+            "content": {
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$ordinary-message"}},
+            },
+        }
+
+        try:
+            await bot._on_message(room, event)
+
+            bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+            event_cache.get_event.assert_not_awaited()
+            assert store is get_approval_store()
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_plain_thread_reply_with_approval_store_does_not_require_room_alias(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Ordinary replies should not run approval authorization before matching an in-memory card."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot._turn_controller.handle_text_event = AsyncMock()
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.matrix_id)
+        initialize_approval_store(runtime_paths)
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$ordinary-thread-reply"
+        event.sender = "@user:localhost"
+        event.body = "ordinary reply"
+        event.server_timestamp = 1234
+        event.source = {
+            "event_id": "$ordinary-thread-reply",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234,
+            "content": {
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$ordinary-message"}},
+            },
+        }
+
+        try:
+            await bot._on_message(room, event)
+
+            bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_live_approval_reply_is_consumed_without_falling_through(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Duplicate approver replies should be consumed while the first resolution is in flight."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot._turn_controller.handle_text_event = AsyncMock()
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        edit_started = asyncio.Event()
+        release_edit = asyncio.Event()
+
+        async def slow_editor(_room_id: str, _event_id: str, _content: dict[str, Any]) -> bool:
+            edit_started.set()
+            await release_edit.wait()
+            return True
+
+        store, pending, task, editor = await _start_live_approval(
+            runtime_paths,
+            editor=AsyncMock(side_effect=slow_editor),
+        )
+        first_resolution = asyncio.create_task(
+            store.handle_card_response(
+                room_id="!test:localhost",
+                sender_id="@user:localhost",
+                card_event_id=pending.card_event_id,
+                status="approved",
+                reason=None,
+            ),
+        )
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$duplicate-approval-reply"
+        event.sender = "@user:localhost"
+        event.body = "No, deny it."
+        event.server_timestamp = 1234
+        event.source = {
+            "event_id": "$duplicate-approval-reply",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234,
+            "content": {
+                "m.relates_to": {"m.in_reply_to": {"event_id": pending.card_event_id}},
+            },
+        }
+
+        try:
+            await asyncio.wait_for(edit_started.wait(), timeout=1)
+            await bot._on_message(room, event)
+
+            bot._turn_controller.handle_text_event.assert_not_awaited()
+            release_edit.set()
+            first_result = await first_resolution
+            decision = await task
+
+            assert first_result.resolved is True
+            assert decision.status == "approved"
+            assert editor.await_count == 1
+        finally:
+            release_edit.set()
+            if not first_resolution.done():
+                first_resolution.cancel()
+                with suppress(asyncio.CancelledError):
+                    await first_resolution
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_reply_to_resolved_approval_card_falls_through_to_normal_text(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Follow-up text on a terminal approval card should remain a normal message."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot._turn_controller.handle_text_event = AsyncMock()
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        store, pending, task, _editor = await _start_live_approval(runtime_paths)
+
+        try:
+            result = await store.handle_card_response(
+                room_id="!test:localhost",
+                sender_id="@user:localhost",
+                card_event_id=pending.card_event_id,
+                status="approved",
+                reason=None,
+            )
+            decision = await task
+            assert result.resolved is True
+            assert decision.status == "approved"
+
+            event = MagicMock(spec=nio.RoomMessageText)
+            event.event_id = "$follow-up-reply"
+            event.sender = "@user:localhost"
+            event.body = "Why did this fail?"
+            event.server_timestamp = 1234
+            event.source = {
+                "event_id": "$follow-up-reply",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234,
+                "content": {
+                    "m.relates_to": {"m.in_reply_to": {"event_id": pending.card_event_id}},
+                },
+            }
+
+            await bot._on_message(room, event)
+
+            bot._turn_controller.handle_text_event.assert_awaited_once_with(room, event)
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_checkmark_reaction_reaches_approval_manager_with_card_id_and_sender(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Checkmark reactions should dispatch approval actions to the manager."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        event = MagicMock(spec=nio.ReactionEvent)
+        event.key = "✅"
+        event.reacts_to = "$approval"
+        event.sender = "@user:localhost"
+        event.event_id = "$reaction"
+        with patch(
+            "mindroom.approval_inbound.handle_matrix_approval_action",
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True)),
+        ) as handle_matrix_approval_action:
+            await bot._on_reaction(room, event)
+
+        handle_matrix_approval_action.assert_awaited_once_with(
+            MatrixApprovalAction(
+                room_id="!test:localhost",
+                sender_id="@user:localhost",
+                card_event_id="$approval",
+                approval_id=None,
+                status="approved",
+                reason=None,
+            ),
+        )
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_inherit_thread_for_promoted_plain_reply_target(
@@ -11290,7 +11968,10 @@ class TestMultiAgentOrchestrator:
                     process_env={},
                 ),
             )
-            await orchestrator.initialize()
+            try:
+                await orchestrator.initialize()
+            finally:
+                await orchestrator._close_runtime_support_services()
 
         mock_load_config.assert_called_once()
         assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
@@ -11525,6 +12206,97 @@ class TestMultiAgentOrchestrator:
             await _run_orchestrator_start_until_ready(orchestrator)
 
         sync_runtime_support_services.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_start_discards_tool_approval_cards_on_router_ready(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router readiness should trigger Matrix-backed startup discard after room setup."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.config.tool_approval.timeout_days = 7.0
+        orchestrator.config.tool_approval.rules = [SimpleNamespace(timeout_days=10.0)]
+
+        bot = MagicMock()
+        bot.agent_name = "router"
+        bot.running = False
+        bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+
+        async def _start_bot() -> bool:
+            bot.running = True
+            return True
+
+        bot.try_start = AsyncMock(side_effect=_start_bot)
+
+        async def _emit_bot_ready(_response: object) -> None:
+            await orchestrator.handle_bot_ready(bot)
+
+        bot._on_sync_response = AsyncMock(side_effect=_emit_bot_ready)
+        bot.stop = AsyncMock()
+        orchestrator.agent_bots = {"router": bot}
+
+        call_order: list[str] = []
+
+        async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
+            call_order.append("wait_for_homeserver")
+
+        async def _setup_rooms(_: list[Any]) -> None:
+            call_order.append("setup_rooms")
+
+        async def _sync_runtime_support_services(*_: object, **__: object) -> None:
+            call_order.append("support_services")
+
+        async def _discard_pending_on_startup(*, lookback_hours: int) -> int:
+            assert lookback_hours == 240
+            call_order.append("startup_discard")
+            return 2
+
+        async def _sync_forever_with_restart(started_bot: object) -> None:
+            await cast("Any", started_bot)._on_sync_response(MagicMock(spec=nio.SyncResponse))
+
+        with (
+            patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
+            patch(
+                "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+                new=AsyncMock(side_effect=_discard_pending_on_startup),
+            ) as expire_orphaned_approval_cards_on_startup,
+            patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch("mindroom.orchestrator.sync_forever_with_restart", side_effect=_sync_forever_with_restart),
+        ):
+            await _run_orchestrator_start_until_ready(orchestrator)
+
+        assert call_order == [
+            "wait_for_homeserver",
+            "setup_rooms",
+            "support_services",
+            "startup_discard",
+        ]
+        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with(lookback_hours=240)
+        bot.try_start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_bot_ready_skips_startup_discard_for_non_router_bots(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Only the router owns startup approval cleanup."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+
+        bot = MagicMock()
+        bot.agent_name = "code"
+        bot.running = True
+        bot.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
+
+        with patch(
+            "mindroom.approval_transport.expire_orphaned_approval_cards_on_startup",
+            new=AsyncMock(),
+        ) as expire_orphaned_approval_cards_on_startup:
+            await orchestrator.handle_bot_ready(bot)
+
+        expire_orphaned_approval_cards_on_startup.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_orchestrator_waits_for_homeserver_before_initialize(self, tmp_path: Path) -> None:
@@ -11791,6 +12563,99 @@ class TestMultiAgentOrchestrator:
         mock_schedule_retry.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_shutdown_expires_in_flight_approval_send_after_event_id_arrives(  # noqa: PLR0915
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shutdown should settle approval sends that receive a card id during shutdown."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+
+        send_started = asyncio.Event()
+        allow_send_to_finish = asyncio.Event()
+
+        async def _room_send(
+            room_id: str,
+            message_type: str,
+            content: dict[str, object],
+        ) -> nio.RoomSendResponse:
+            del content
+            assert room_id == "!room:localhost"
+            assert message_type == "io.mindroom.tool_approval"
+            send_started.set()
+            await allow_send_to_finish.wait()
+            return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
+
+        router_client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+        router_client.room_send = AsyncMock(side_effect=_room_send)
+        router_client.rooms["!room:localhost"].add_member(router_client.user_id, "Router", None)
+        router_bot = MagicMock()
+        router_bot.agent_name = "router"
+        router_bot.running = True
+        router_bot.client = router_client
+        router_bot.event_cache = make_event_cache_mock()
+        router_bot.stop = AsyncMock()
+
+        code_bot = MagicMock()
+        code_bot.agent_name = "code"
+        code_bot.running = True
+        code_bot.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
+        code_bot.stop = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
+
+        task: asyncio.Task[object] | None = None
+        try:
+            store = initialize_approval_store(
+                runtime_paths,
+                sender=orchestrator._approval_transport.send_approval_event,
+                editor=orchestrator._approval_transport.edit_approval_event,
+            )
+            task = asyncio.create_task(
+                store.request_approval(
+                    tool_name="run_shell_command",
+                    arguments={"command": "echo hi"},
+                    agent_name="code",
+                    room_id="!room:localhost",
+                    thread_id=None,
+                    requester_id="@user:localhost",
+                    approver_user_id="@user:localhost",
+                    timeout_seconds=60,
+                ),
+            )
+
+            await send_started.wait()
+            orchestrator._knowledge_refresh_scheduler = MagicMock()
+            orchestrator._knowledge_refresh_scheduler.shutdown = AsyncMock()
+
+            with (
+                patch.object(orchestrator, "_cancel_config_reload_task", new=AsyncMock()),
+                patch.object(orchestrator, "_stop_memory_auto_flush_worker", new=AsyncMock()),
+                patch.object(orchestrator._knowledge_source_watcher, "shutdown", new=AsyncMock()),
+                patch.object(orchestrator, "_cancel_bot_start_tasks", new=AsyncMock()),
+                patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock()),
+                patch.object(orchestrator, "_close_runtime_support_services", new=AsyncMock()),
+            ):
+                stop_task = asyncio.create_task(orchestrator.stop())
+                await asyncio.sleep(0)
+                assert stop_task.done() is False
+                allow_send_to_finish.set()
+                await stop_task
+
+            decision = await asyncio.wait_for(task, timeout=1)
+            assert decision.status == "expired"
+            assert decision.reason == "MindRoom shut down before approval completed."
+            assert router_bot.running is False
+            router_bot.stop.assert_awaited_once_with(reason="shutdown")
+        finally:
+            allow_send_to_finish.set()
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:
         """Auxiliary supervisors should restart tasks that crash."""
         started = asyncio.Event()
@@ -12014,6 +12879,295 @@ class TestMultiAgentOrchestrator:
         assert updated is False
         mock_sync_runtime.assert_awaited_once_with(config, start_watcher=True)
         assert not hasattr(orchestrator, "_schedule_knowledge_refresh")
+
+    @pytest.mark.asyncio
+    async def test_sync_runtime_support_services_rebinds_approval_store_cache(self, tmp_path: Path) -> None:
+        """Approval store transport should track replaced runtime cache objects."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        old_cache = MagicMock()
+        new_cache = MagicMock()
+        support = SimpleNamespace(
+            event_cache=new_cache,
+            event_cache_write_coordinator=MagicMock(),
+            startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
+        )
+        store = initialize_approval_store(runtime_paths, event_cache=old_cache)
+
+        try:
+            with (
+                patch("mindroom.orchestrator.sync_owned_runtime_support", new=AsyncMock(return_value=support)),
+                patch.object(orchestrator._knowledge_source_watcher, "sync", new=AsyncMock()),
+                patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            ):
+                await orchestrator._sync_runtime_support_services(config, start_watcher=False)
+
+            assert get_approval_store() is store
+            assert store._event_cache is new_cache
+        finally:
+            await shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_update_config_keeps_router_owned_approvals_pending_when_requesting_bot_is_removed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Hot reload should not expire a pending approval just because the requesting bot was removed."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+
+        old_config = _approval_reload_config(tmp_path, include_code=True)
+        new_config = _approval_reload_config(tmp_path, include_code=False)
+        orchestrator.config = old_config
+        orchestrator.running = True
+
+        event_order: list[str] = []
+        approval_ids: list[str] = []
+
+        async def _router_room_send(
+            *,
+            room_id: str,
+            message_type: str,
+            content: dict[str, object],
+        ) -> nio.RoomSendResponse:
+            assert room_id == "!room:localhost"
+            assert message_type == "io.mindroom.tool_approval"
+            if "m.new_content" in content:
+                event_order.append("edit")
+                return nio.RoomSendResponse(event_id="$approval-edit", room_id=room_id)
+            event_order.append("send")
+            approval_id = content.get("approval_id")
+            assert isinstance(approval_id, str)
+            approval_ids.append(approval_id)
+            return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
+
+        router_bot = _mock_approval_reload_bot(
+            old_config,
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            room_send=AsyncMock(side_effect=_router_room_send),
+        )
+        code_bot = _mock_approval_reload_bot(
+            old_config,
+            agent_name="code",
+            user_id="@mindroom_code:localhost",
+            room_send=AsyncMock(),
+        )
+        code_bot.cleanup = AsyncMock(side_effect=_cleanup_recorder(event_order))
+        orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
+
+        plan = _approval_removal_plan(new_config)
+        task: asyncio.Task[object] | None = None
+        try:
+            store = initialize_approval_store(
+                runtime_paths,
+                sender=orchestrator._approval_transport.send_approval_event,
+                editor=orchestrator._approval_transport.edit_approval_event,
+            )
+            task = asyncio.create_task(
+                store.request_approval(
+                    tool_name="run_shell_command",
+                    arguments={"command": "echo hi"},
+                    agent_name="code",
+                    room_id="!room:localhost",
+                    thread_id="$thread",
+                    requester_id="@user:localhost",
+                    approver_user_id="@user:localhost",
+                    timeout_seconds=60,
+                ),
+            )
+
+            approval_id = await _wait_for_pending_approval_id(store, approval_ids)
+
+            with (
+                patch("mindroom.orchestrator.load_config", return_value=new_config),
+                patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+                patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+                patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
+                patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+                patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+                patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            ):
+                updated = await orchestrator.update_config()
+
+            assert updated is True
+            assert task.done() is False
+            assert event_order == ["send", "cleanup"]
+            pending = await store.get_pending_approval("!room:localhost", approval_id)
+            assert pending is not None
+
+            await store.resolve_approval(
+                card_event_id=pending.card_event_id,
+                room_id=pending.room_id,
+                status="approved",
+                resolved_by="@user:localhost",
+            )
+            decision = await task
+
+            assert decision.status == "approved"
+            assert event_order == ["send", "cleanup", "edit"]
+            assert router_bot.client is not None
+            assert router_bot.client.room_send.await_count == 2
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
+            await orchestrator._close_runtime_support_services()
+
+    @pytest.mark.asyncio
+    async def test_requesting_bot_room_reconcile_keeps_router_owned_approval_pending(  # noqa: PLR0915
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Leaving the requesting bot's room should not force-expire a router-owned approval."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator._capture_runtime_loop()
+
+        old_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "code": {
+                        "display_name": "CodeAgent",
+                        "role": "Writes code",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
+                },
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
+        )
+        new_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "code": {
+                        "display_name": "CodeAgent",
+                        "role": "Writes code",
+                        "model": "default",
+                        "rooms": [],
+                    },
+                },
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
+        )
+
+        event_order: list[str] = []
+        approval_ids: list[str] = []
+
+        async def _router_room_send(
+            *,
+            room_id: str,
+            message_type: str,
+            content: dict[str, object],
+        ) -> nio.RoomSendResponse:
+            assert room_id == "!room:localhost"
+            assert message_type == "io.mindroom.tool_approval"
+            if "m.new_content" in content:
+                event_order.append("edit")
+                return nio.RoomSendResponse(event_id="$approval-edit", room_id=room_id)
+            event_order.append("send")
+            approval_id = content.get("approval_id")
+            assert isinstance(approval_id, str)
+            approval_ids.append(approval_id)
+            return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
+
+        router_bot = _mock_approval_reload_bot(
+            old_config,
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            room_send=AsyncMock(side_effect=_router_room_send),
+        )
+
+        code_user = AgentMatrixUser(
+            agent_name="code",
+            user_id="@mindroom_code:localhost",
+            display_name="CodeAgent",
+            password=TEST_PASSWORD,
+        )
+        code_bot = AgentBot(
+            code_user,
+            tmp_path,
+            config=old_config,
+            runtime_paths=runtime_paths_for(old_config),
+            rooms=["!room:localhost"],
+        )
+        code_bot.orchestrator = orchestrator
+        code_bot.client = make_matrix_client_mock(user_id=code_user.user_id)
+        code_bot.client.room_send = AsyncMock()
+        code_bot.client.rooms["!room:localhost"].add_member(code_user.user_id, code_user.display_name, None)
+        code_bot.latest_thread_event_id_if_needed = AsyncMock(
+            return_value="$latest-thread-event",
+        )
+        code_bot.running = True
+
+        orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
+
+        leave_non_dm_rooms = AsyncMock(side_effect=lambda *_args, **_kwargs: event_order.append("leave"))
+        task: asyncio.Task[object] | None = None
+        try:
+            store = initialize_approval_store(
+                runtime_paths,
+                sender=orchestrator._approval_transport.send_approval_event,
+                editor=orchestrator._approval_transport.edit_approval_event,
+            )
+            task = asyncio.create_task(
+                store.request_approval(
+                    tool_name="run_shell_command",
+                    arguments={"command": "echo hi"},
+                    agent_name="code",
+                    room_id="!room:localhost",
+                    thread_id="$thread",
+                    requester_id="@user:localhost",
+                    approver_user_id="@user:localhost",
+                    timeout_seconds=60,
+                ),
+            )
+
+            approval_id = await _wait_for_pending_approval_id(store, approval_ids)
+
+            code_bot.config = new_config
+            code_bot.rooms = []
+
+            with (
+                patch("mindroom.bot_room_lifecycle.get_joined_rooms", new=AsyncMock(return_value=["!room:localhost"])),
+                patch("mindroom.bot_room_lifecycle.leave_non_dm_rooms", new=leave_non_dm_rooms),
+            ):
+                await code_bot.leave_unconfigured_rooms()
+
+            assert task.done() is False
+            pending = await store.get_pending_approval("!room:localhost", approval_id)
+            assert pending is not None
+            assert event_order == ["send", "leave"]
+            leave_non_dm_rooms.assert_awaited_once()
+
+            await store.resolve_approval(
+                card_event_id=pending.card_event_id,
+                room_id=pending.room_id,
+                status="approved",
+                resolved_by="@user:localhost",
+            )
+            decision = await task
+
+            assert decision.status == "approved"
+            assert event_order == ["send", "leave", "edit"]
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            await shutdown_approval_store()
 
     @pytest.mark.asyncio
     async def test_update_config_uses_custom_config_path(self, tmp_path: Path) -> None:
@@ -12566,7 +13720,10 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
-            updated = await orchestrator.update_config()
+            try:
+                updated = await orchestrator.update_config()
+            finally:
+                await orchestrator._close_runtime_support_services()
 
         assert updated is True
         assert orchestrator.agent_bots["coach"] is new_bot
@@ -12646,7 +13803,10 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
-            updated = await orchestrator.update_config()
+            try:
+                updated = await orchestrator.update_config()
+            finally:
+                await orchestrator._close_runtime_support_services()
 
         assert updated is True
         assert orchestrator.agent_bots["coach"] is new_bot

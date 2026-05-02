@@ -2,7 +2,37 @@
 
 from __future__ import annotations
 
-from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.matrix.message_builder import build_matrix_edit_content, build_thread_relation, markdown_to_html
+
+
+def test_build_thread_relation_returns_fallback_reply_relation() -> None:
+    """Thread relation construction should be available without fake message content."""
+    assert build_thread_relation("$thread", latest_thread_event_id="$latest") == {
+        "rel_type": "m.thread",
+        "event_id": "$thread",
+        "is_falling_back": True,
+        "m.in_reply_to": {"event_id": "$latest"},
+    }
+
+
+def test_build_matrix_edit_content_wraps_replacement_content() -> None:
+    """Matrix edit wrapping should be shared instead of hand-built at call sites."""
+    replacement = {
+        "msgtype": "io.mindroom.tool_approval",
+        "body": "Expired: shell.run",
+        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+    }
+
+    assert build_matrix_edit_content(event_id="$approval", new_content=replacement) == {
+        "msgtype": "io.mindroom.tool_approval",
+        "body": "Expired: shell.run",
+        "m.new_content": {
+            "msgtype": "io.mindroom.tool_approval",
+            "body": "Expired: shell.run",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+    }
 
 
 def test_same_line_div_followed_by_markdown_still_renders_markdown() -> None:

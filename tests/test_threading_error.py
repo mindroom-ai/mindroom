@@ -12,6 +12,7 @@ import asyncio
 import json
 import tempfile
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -1709,6 +1710,8 @@ class TestThreadingBehavior:
         # Mock the orchestrator
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config
+        mock_orchestrator.handle_bot_ready = AsyncMock()
+        mock_orchestrator.send_approval_notice = AsyncMock()
         bot.orchestrator = mock_orchestrator
 
         # Create a mock client
@@ -1751,10 +1754,15 @@ class TestThreadingBehavior:
     ) -> None:
         if bot.client is not None and not isinstance(sync_response.next_batch, str):
             sync_response.next_batch = bot.client.next_batch
+        orchestrator = bot.orchestrator
+        bot_ready_context = (
+            patch.object(orchestrator, "handle_bot_ready", AsyncMock()) if orchestrator is not None else nullcontext()
+        )
         with (
             patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
             patch.object(bot, "_maybe_start_startup_thread_prewarm"),
             patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+            bot_ready_context,
         ):
             await bot._on_sync_response(sync_response)
 

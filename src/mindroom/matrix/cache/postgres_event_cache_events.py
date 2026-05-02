@@ -12,6 +12,9 @@ if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
 
+_EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
+
+
 @dataclass(frozen=True, slots=True)
 class SerializedCachedEvent:
     """One normalized cached event plus its serialized storage row."""
@@ -121,14 +124,63 @@ async def load_event(
     return None if row is None else json.loads(row[0])
 
 
+async def load_recent_room_events(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    event_type: str,
+    since_ts_ms: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Return recent cached room events of one type, newest first."""
+    if limit <= 0:
+        return []
+    rows = await _fetchall(
+        db,
+        """
+        SELECT event_json
+        FROM mindroom_event_cache_events
+        WHERE namespace = %s
+            AND room_id = %s
+            AND origin_server_ts >= %s
+            AND event_json::jsonb ->> 'type' = %s
+        ORDER BY origin_server_ts DESC, write_seq DESC
+        LIMIT %s
+        """,
+        (namespace, room_id, since_ts_ms, event_type, limit),
+    )
+    return [json.loads(row[0]) for row in rows]
+
+
 async def load_latest_edit(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     original_event_id: str,
+    sender: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
+    if sender is None:
+        row = await _fetchone(
+            db,
+            """
+            SELECT mindroom_event_cache_events.event_json
+            FROM mindroom_event_cache_event_edits
+            JOIN mindroom_event_cache_events
+                ON mindroom_event_cache_events.namespace = mindroom_event_cache_event_edits.namespace
+                AND mindroom_event_cache_events.event_id = mindroom_event_cache_event_edits.edit_event_id
+            WHERE mindroom_event_cache_event_edits.namespace = %s
+                AND mindroom_event_cache_event_edits.room_id = %s
+                AND mindroom_event_cache_event_edits.original_event_id = %s
+            ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
+            LIMIT 1
+            """,
+            (namespace, room_id, original_event_id),
+        )
+        return None if row is None else json.loads(row[0])
+
     row = await _fetchone(
         db,
         """
@@ -140,10 +192,11 @@ async def load_latest_edit(
         WHERE mindroom_event_cache_event_edits.namespace = %s
             AND mindroom_event_cache_event_edits.room_id = %s
             AND mindroom_event_cache_event_edits.original_event_id = %s
+            AND mindroom_event_cache_events.event_json::jsonb ->> 'sender' = %s
         ORDER BY mindroom_event_cache_event_edits.origin_server_ts DESC, mindroom_event_cache_events.write_seq DESC
         LIMIT 1
         """,
-        (namespace, room_id, original_event_id),
+        (namespace, room_id, original_event_id, sender),
     )
     return None if row is None else json.loads(row[0])
 
@@ -565,7 +618,7 @@ def _with_thread_root_self_rows(
 
 def _edit_cache_row(namespace: str, room_id: str, event: dict[str, Any]) -> tuple[str, str, str, str, int] | None:
     """Return one edit-index row for a cached event when it is an edit."""
-    if event.get("type") != "m.room.message":
+    if event.get("type") not in _EDITABLE_EVENT_TYPES:
         return None
 
     event_info = EventInfo.from_event(event)

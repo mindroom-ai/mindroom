@@ -11,6 +11,11 @@ from uuid import uuid4
 import nio
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
+from mindroom.approval_inbound import (
+    handle_tool_approval_action,
+    maybe_handle_tool_approval_reply,
+    parse_approval_response_event,
+)
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.dispatch_source import is_automation_source_kind
@@ -30,6 +35,7 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
+from mindroom.matrix.event_info import origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
 from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
@@ -582,6 +588,10 @@ class AgentBot:
         """Return when this bot runtime started."""
         return self._runtime_view.runtime_started_at
 
+    async def latest_thread_event_id_if_needed(self, room_id: str, thread_id: str) -> str | None:
+        """Return the latest event id for one Matrix thread when the cache knows it."""
+        return await self._conversation_cache.get_latest_thread_event_id_if_needed(room_id, thread_id)
+
     @property
     def hook_registry(self) -> HookRegistry:
         """Return the currently active hook registry."""
@@ -845,7 +855,10 @@ class AgentBot:
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
-        await self._room_lifecycle.leave_unconfigured_rooms()
+        rooms_to_leave = await self._room_lifecycle.rooms_to_actually_leave()
+        if not rooms_to_leave:
+            return
+        await self._room_lifecycle.leave_unconfigured_rooms(room_ids=rooms_to_leave)
 
     async def ensure_user_account(self) -> None:
         """Ensure this agent has a Matrix user account.
@@ -1031,6 +1044,9 @@ class AgentBot:
 
         if first_sync_response:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
+            orchestrator = self.orchestrator
+            if orchestrator is not None:
+                await orchestrator.handle_bot_ready(self)
             self._maybe_start_startup_thread_prewarm()
 
         if first_sync_response or has_deferred_overdue_tasks():
@@ -1128,6 +1144,10 @@ class AgentBot:
                 nio.RoomEncryptedAudio,
             ):
                 client.add_event_callback(media_callback, event_type)
+            client.add_event_callback(
+                _create_task_wrapper(self._on_unknown_event, owner=self._runtime_view),
+                nio.UnknownEvent,
+            )
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
@@ -1319,17 +1339,6 @@ class AgentBot:
         """Delegate one flushed coalesced batch to the turn engine."""
         await self._turn_controller.handle_coalesced_batch(batch)
 
-    @staticmethod
-    def _origin_server_ts_from_source(source: object) -> int | float | None:
-        """Return a Matrix origin timestamp from a raw event source if present."""
-        if not isinstance(source, dict):
-            return None
-        source_dict = cast("dict[str, object]", source)
-        raw_timestamp = source_dict.get("origin_server_ts")
-        if isinstance(raw_timestamp, int | float) and not isinstance(raw_timestamp, bool):
-            return raw_timestamp
-        return None
-
     def _log_matrix_event_callback_started(
         self,
         room: nio.MatrixRoom,
@@ -1339,7 +1348,7 @@ class AgentBot:
     ) -> None:
         """Log Matrix ingress timing without message content."""
         receive_timestamp_ms = int(time.time() * 1000)
-        origin_server_ts = self._origin_server_ts_from_source(event.source)
+        origin_server_ts = origin_server_ts_from_event_source(event.source)
         log_context: dict[str, object] = {
             "callback": callback_name,
             "event_id": event.event_id,
@@ -1355,6 +1364,15 @@ class AgentBot:
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Delegate one inbound text event to the turn engine."""
         self._log_matrix_event_callback_started(room, event, callback_name="message")
+        if await maybe_handle_tool_approval_reply(
+            room=room,
+            event=event,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            orchestrator=self.orchestrator,
+            logger=self.logger,
+        ):
+            return
         await self._turn_controller.handle_text_event(room, event)
 
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
@@ -1366,9 +1384,46 @@ class AgentBot:
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._handle_reaction_inner(room, event)
 
+    async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Handle custom Matrix events that are not part of nio's typed event set."""
+        if event.type != "io.mindroom.tool_approval_response":
+            return
+        raw_sender_id = event.source.get("sender")
+        if not isinstance(raw_sender_id, str) or not raw_sender_id:
+            self.logger.debug("ignoring_tool_approval_response_without_sender")
+            return
+        payload = parse_approval_response_event(event)
+        if payload.status is None or (payload.card_event_id is None and payload.approval_id is None):
+            return
+        await handle_tool_approval_action(
+            room=room,
+            sender_id=raw_sender_id,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            orchestrator=self.orchestrator,
+            logger=self.logger,
+            approval_event_id=payload.card_event_id,
+            approval_id=payload.approval_id,
+            status=payload.status,
+            reason=payload.reason,
+        )
+
     async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle one reaction inside the per-turn thread-history cache scope."""
         assert self.client is not None
+
+        if event.key == "✅" and await handle_tool_approval_action(
+            room=room,
+            sender_id=event.sender,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            orchestrator=self.orchestrator,
+            logger=self.logger,
+            approval_event_id=event.reacts_to,
+            status="approved",
+            reason=None,
+        ):
+            return
 
         if not is_authorized_sender(
             event.sender,

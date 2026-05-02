@@ -72,6 +72,7 @@ depends_on = [
     "mindroom.tool_system.skills",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tool_approval",
     "mindroom.tools",
     "mindroom.workspaces",
 ]
@@ -161,6 +162,64 @@ visibility = [
 [[modules]]
 path = "mindroom.agent_policy"
 depends_on = ["mindroom.config.agent"]
+
+[[modules]]
+path = "mindroom.approval_manager"
+depends_on = [
+    "mindroom.approval_events",
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.tool_system.tool_failures",
+]
+visibility = ["mindroom.tool_approval"]
+
+[[modules]]
+path = "mindroom.approval_events"
+depends_on = [
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.visible_body",
+]
+visibility = ["mindroom.approval_manager"]
+
+[[modules]]
+path = "mindroom.approval_transport"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.cache",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.message_builder",
+    "mindroom.sync_bridge_state",
+    "mindroom.tool_approval",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.approval_inbound"
+depends_on = [
+    "mindroom.authorization",
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.visible_body",
+    "mindroom.tool_approval",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.tool_approval"
+depends_on = [
+    "mindroom.approval_manager",
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.identity",
+]
+visibility = [
+    "mindroom.agents",
+    "mindroom.approval_inbound",
+    "mindroom.approval_transport",
+    "mindroom.bot",
+    "mindroom.orchestrator",
+    "mindroom.tool_system.tool_hooks",
+]
 
 [[modules]]
 path = "mindroom.credential_policy"
@@ -729,6 +788,7 @@ path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.agents",
     "mindroom.api.main",
+    "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.config.main",
     "mindroom.constants",
@@ -748,7 +808,10 @@ depends_on = [
     "mindroom.mcp.toolkit",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_support",
-    "mindroom.scheduling", "mindroom.tool_system.plugins", "mindroom.tool_system.skills",
+    "mindroom.scheduling",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.skills",
+    "mindroom.tool_approval",
 ]
 
 [[modules]]
@@ -1024,6 +1087,8 @@ depends_on = [
     "mindroom.matrix.cache.sqlite_event_cache_events",
     "mindroom.matrix.cache.sqlite_event_cache_threads",
     "mindroom.matrix.cache.thread_cache_helpers",
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.visible_body",
 ]
 visibility = ["mindroom.matrix.cache.sqlite_event_cache"]
 
@@ -1034,6 +1099,8 @@ depends_on = [
     "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.postgres_event_cache_threads",
     "mindroom.matrix.cache.thread_cache_helpers",
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.visible_body",
 ]
 visibility = ["mindroom.matrix.cache.postgres_event_cache"]
 
@@ -1209,6 +1276,15 @@ path = "mindroom.cancellation"
 depends_on = []
 
 [[modules]]
+path = "mindroom.sync_bridge_state"
+depends_on = []
+visibility = [
+    "mindroom.approval_transport",
+    "mindroom.orchestrator",
+    "mindroom.tool_system.tool_hooks",
+]
+
+[[modules]]
 path = "mindroom.matrix.client"
 depends_on = [
     "mindroom.matrix.client_delivery",
@@ -1222,6 +1298,7 @@ depends_on = [
 path = "mindroom.matrix.client_delivery"
 depends_on = []
 visibility = [
+    "mindroom.approval_transport",
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.matrix_conversation_operations",
@@ -1298,6 +1375,11 @@ depends_on = [
     "mindroom.matrix.identity",
 ]
 visibility = [
+    "mindroom.approval_inbound",
+    "mindroom.approval_events",
+    "mindroom.bot",
+    "mindroom.matrix.cache.postgres_agent_message_snapshot",
+    "mindroom.matrix.cache.sqlite_agent_message_snapshot",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.conversation_cache",
@@ -1392,6 +1474,7 @@ depends_on = [
 path = "mindroom.bot"
 depends_on = [
     "mindroom.agents",
+    "mindroom.approval_inbound",
     "mindroom.bot_runtime_view",
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.config_confirmation",
@@ -1407,15 +1490,18 @@ depends_on = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.event_info",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.users",
+    "mindroom.matrix.visible_body",
     "mindroom.post_response_effects",
     "mindroom.response_runner",
     "mindroom.scheduling",
     "mindroom.teams",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tool_approval",
     "mindroom.turn_controller",
     "mindroom.turn_policy",
     "mindroom.turn_store",
@@ -1629,6 +1715,8 @@ depends_on = ["mindroom.constants"]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
     "mindroom.hooks",
+    "mindroom.sync_bridge_state",
+    "mindroom.tool_approval",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_failures",
     "mindroom.tool_system.worker_routing",
@@ -2134,7 +2222,7 @@ expose = [
 from = ["mindroom.matrix.conversation_cache"]
 
 [[interfaces]]
-expose = ["EventInfo"]
+expose = ["EventInfo", "origin_server_ts_from_event_source"]
 from = ["mindroom.matrix.event_info"]
 
 [[interfaces]]
@@ -2203,6 +2291,7 @@ expose = [
     "DeliveredMatrixEvent",
     "build_edit_event_content",
     "build_threaded_edit_content",
+    "can_send_to_encrypted_room",
     "cached_room",
     "cached_rooms",
     "edit_message_result",
@@ -2620,6 +2709,40 @@ from = ["mindroom.tool_system.events"]
 [[interfaces]]
 expose = ["build_tool_hook_bridge", "prepend_tool_hook_bridge"]
 from = ["mindroom.tool_system.tool_hooks"]
+
+[[interfaces]]
+expose = ["ApprovalMatrixTransport"]
+from = ["mindroom.approval_transport"]
+
+[[interfaces]]
+expose = [
+    "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
+    "ApprovalActionResult",
+    "ApprovalDecision",
+    "MatrixApprovalAction",
+    "SentApprovalEvent",
+    "ToolApprovalCall",
+    "ToolApprovalScriptError",
+    "ToolApprovalTransportError",
+    "evaluate_tool_approval",
+    "expire_orphaned_approval_cards_on_startup",
+    "handle_matrix_approval_action",
+    "initialize_approval_runtime",
+    "is_process_active_approval_card",
+    "is_process_approval_card",
+    "request_tool_approval_for_call",
+    "resolve_tool_approval_approver",
+    "shutdown_approval_runtime",
+    "tool_requires_approval_for_openai_compat",
+]
+from = ["mindroom.tool_approval"]
+
+[[interfaces]]
+expose = [
+    "is_loop_blocked_by_sync_tool_bridge",
+    "sync_tool_bridge_blocked_loop",
+]
+from = ["mindroom.sync_bridge_state"]
 
 [[interfaces]]
 expose = [

@@ -77,6 +77,7 @@ class ToolRuntimeContext:
     runtime_paths: RuntimePaths
     event_cache: ConversationEventCache
     conversation_cache: ConversationCacheProtocol
+    transport_agent_name: str | None = None
     active_model_name: str | None = None
     session_id: str | None = None
     room: nio.MatrixRoom | None = None
@@ -220,6 +221,7 @@ class ToolRuntimeSupport:
             runtime_paths=self.runtime_paths,
             conversation_cache=self.resolver.deps.conversation_cache,
             event_cache=event_cache,
+            transport_agent_name=self.agent_name,
             active_model_name=active_model_name,
             session_id=session_id or target.session_id,
             room=self.resolver.cached_room(target_room_id),
@@ -333,6 +335,7 @@ class ToolRuntimeSupport:
         return build_tool_execution_identity(
             channel="matrix",
             agent_name=agent_name or self.agent_name,
+            transport_agent_name=self.agent_name,
             runtime_paths=self.runtime_paths,
             requester_id=user_id or self.matrix_id.full_id,
             room_id=target.room_id,
@@ -432,6 +435,7 @@ def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -
     return build_tool_execution_identity(
         channel="matrix",
         agent_name=context.agent_name,
+        transport_agent_name=context.transport_agent_name or context.agent_name,
         runtime_paths=context.runtime_paths,
         requester_id=context.requester_id,
         room_id=target.room_id,
@@ -458,6 +462,8 @@ def execution_identity_matches_tool_runtime_context(
         and execution_identity.session_id == target.session_id
         and execution_identity.tenant_id == context.runtime_paths.env_value("CUSTOMER_ID")
         and execution_identity.account_id == context.runtime_paths.env_value("ACCOUNT_ID")
+        and (execution_identity.transport_agent_name or execution_identity.agent_name)
+        == (context.transport_agent_name or context.agent_name)
     )
 
 

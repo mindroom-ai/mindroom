@@ -11,6 +11,8 @@ from mindroom.matrix.event_info import EventInfo
 if TYPE_CHECKING:
     import aiosqlite
 
+_EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
+
 
 @dataclass(frozen=True, slots=True)
 class SerializedCachedEvent:
@@ -84,23 +86,70 @@ async def load_event(
     return None if row is None else json.loads(row[0])
 
 
+async def load_recent_room_events(
+    db: aiosqlite.Connection,
+    *,
+    room_id: str,
+    event_type: str,
+    since_ts_ms: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Return recent cached room events of one type, newest first."""
+    if limit <= 0:
+        return []
+    cursor = await db.execute(
+        """
+        SELECT event_json
+        FROM events
+        WHERE room_id = ?
+            AND origin_server_ts >= ?
+            AND json_extract(event_json, '$.type') = ?
+        ORDER BY origin_server_ts DESC, rowid DESC
+        LIMIT ?
+        """,
+        (room_id, since_ts_ms, event_type, limit),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [json.loads(row[0]) for row in rows]
+
+
 async def load_latest_edit(
     db: aiosqlite.Connection,
     *,
     room_id: str,
     original_event_id: str,
+    sender: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
+    if sender is None:
+        cursor = await db.execute(
+            """
+            SELECT events.event_json
+            FROM event_edits
+            JOIN events ON events.event_id = event_edits.edit_event_id
+            WHERE event_edits.room_id = ? AND event_edits.original_event_id = ?
+            ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
+            LIMIT 1
+            """,
+            (room_id, original_event_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return None if row is None else json.loads(row[0])
+
     cursor = await db.execute(
         """
         SELECT events.event_json
         FROM event_edits
         JOIN events ON events.event_id = event_edits.edit_event_id
-        WHERE event_edits.room_id = ? AND event_edits.original_event_id = ?
+        WHERE event_edits.room_id = ?
+            AND event_edits.original_event_id = ?
+            AND json_extract(events.event_json, '$.sender') = ?
         ORDER BY event_edits.origin_server_ts DESC, events.rowid DESC
         LIMIT 1
         """,
-        (room_id, original_event_id),
+        (room_id, original_event_id, sender),
     )
     row = await cursor.fetchone()
     await cursor.close()
@@ -475,7 +524,7 @@ def _with_thread_root_self_rows(
 
 def _edit_cache_row(room_id: str, event: dict[str, Any]) -> tuple[str, str, str, int] | None:
     """Return one edit-index row for a cached event when it is an edit."""
-    if event.get("type") != "m.room.message":
+    if event.get("type") not in _EDITABLE_EVENT_TYPES:
         return None
 
     event_info = EventInfo.from_event(event)

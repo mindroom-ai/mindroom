@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
@@ -55,6 +56,21 @@ class OrchestratorRuntime(Protocol):
     def hook_matrix_admin(self) -> HookMatrixAdmin | None: ...  # noqa: D102
 
     def reload_plugins_now(self, *, source: str) -> Awaitable[PluginReloadResult]: ...  # noqa: D102
+
+    def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:
+        """Handle a managed bot completing its first sync."""
+        ...
+
+    def send_approval_notice(
+        self,
+        *,
+        room_id: str,
+        approval_event_id: str,
+        thread_id: str | None,
+        reason: str,
+    ) -> Awaitable[bool]:
+        """Send an approval-related notice through the runtime transport."""
+        ...
 
 
 class SupportsConfig(Protocol):

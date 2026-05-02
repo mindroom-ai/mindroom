@@ -27,7 +27,11 @@ from mindroom.matrix.message_content import (
     resolve_event_source_content,
 )
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.visible_body import visible_body_from_event_source
+from mindroom.matrix.visible_body import (
+    strip_matrix_rich_reply_fallback,
+    visible_body_from_event_source,
+    visible_content_from_content,
+)
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 
 
@@ -404,6 +408,33 @@ class TestResolvedMessageExtraction:
             "Diagnosis follows",
             trusted_sender_ids={"@mindroom_general:localhost"},
         ) == ("Diagnosis follows\n\n⚠️ Worker startup failed for shell.run: intentional example.")
+
+    def test_strip_matrix_rich_reply_fallback_removes_quoted_prefix(self) -> None:
+        """Rich-reply denial reasons should keep only the user-authored reply body."""
+        body = "> <@alice:localhost> Approval required\n> quoted details\n\nNo, too risky."
+
+        assert strip_matrix_rich_reply_fallback(body) == "No, too risky."
+
+    def test_strip_matrix_rich_reply_fallback_allows_empty_reply_body(self) -> None:
+        """Quote-only rich replies should not preserve the Matrix fallback."""
+        body = "> <@alice:localhost> Approval required\n> quoted details\n\n"
+
+        assert strip_matrix_rich_reply_fallback(body) == ""
+
+    def test_strip_matrix_rich_reply_fallback_leaves_plain_quotes_alone(self) -> None:
+        """Quoted text without the Matrix blank separator is normal message content."""
+        body = "> keep this quoted line\nNo Matrix rich-reply separator"
+
+        assert strip_matrix_rich_reply_fallback(body) == body
+
+    def test_visible_content_from_content_prefers_replacement_content(self) -> None:
+        """Matrix edit content unwrapping should be shared across consumers."""
+        content = {
+            "body": "* old",
+            "m.new_content": {"body": "new", "status": "expired"},
+        }
+
+        assert visible_content_from_content(content) == {"body": "new", "status": "expired"}
 
     def test_visible_body_from_event_source_ignores_removed_agent_sender_ids(self, tmp_path: Path) -> None:
         """Removed managed senders must not keep overriding canonical-body metadata."""

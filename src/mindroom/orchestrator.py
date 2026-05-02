@@ -15,6 +15,7 @@ import uvicorn
 
 from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
+from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import configured_bot_usernames_for_room
@@ -54,6 +55,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
+from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
     apply_prepared_plugin_reload,
@@ -260,6 +262,7 @@ class MultiAgentOrchestrator:
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty, init=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
+    _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
@@ -272,6 +275,12 @@ class MultiAgentOrchestrator:
         )
         self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
+        self._approval_transport = ApprovalMatrixTransport(
+            runtime_paths=self.runtime_paths,
+            bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
+            config_provider=lambda: self.config,
+            event_cache_provider=lambda: self._runtime_support.event_cache,
+        )
 
     @property
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
@@ -319,6 +328,26 @@ class MultiAgentOrchestrator:
         self._runtime_shutdown_event = shutdown_event
         return shutdown_event
 
+    def _capture_runtime_loop(self) -> None:
+        """Remember the runtime loop that owns Matrix client I/O."""
+        self._approval_transport.capture_runtime_loop()
+
+    async def send_approval_notice(
+        self,
+        *,
+        room_id: str,
+        approval_event_id: str,
+        thread_id: str | None,
+        reason: str,
+    ) -> bool:
+        """Send one approval notice through the public runtime protocol."""
+        return await self._approval_transport.send_notice(
+            room_id=room_id,
+            approval_event_id=approval_event_id,
+            thread_id=thread_id,
+            reason=reason,
+        )
+
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
         bot.event_cache = self._runtime_support.event_cache
@@ -342,6 +371,10 @@ class MultiAgentOrchestrator:
             log_db_path_change=True,
         )
         self._rebind_runtime_support_services()
+
+    def _configure_approval_store_transport(self) -> None:
+        """Bind approval transport hooks to the current shared runtime services."""
+        self._approval_transport.bind_approval_runtime()
 
     async def _close_runtime_support_services(self) -> None:
         """Close the shared runtime-owned cache services."""
@@ -642,6 +675,7 @@ class MultiAgentOrchestrator:
         )
         ensure_default_agent_workspaces(config, self.storage_path)
         await self._sync_event_cache_service(config)
+        self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
 
     async def _stop_mcp_manager(self) -> None:
@@ -890,6 +924,7 @@ class MultiAgentOrchestrator:
 
     async def initialize(self) -> None:
         """Initialize all managed bots from configuration."""
+        self._capture_runtime_loop()
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
@@ -900,6 +935,7 @@ class MultiAgentOrchestrator:
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
         await self._sync_event_cache_service(config)
+        self._configure_approval_store_transport()
         for entity_name in self._configured_entity_names(config):
             self._create_managed_bot(entity_name, config)
 
@@ -1043,6 +1079,10 @@ class MultiAgentOrchestrator:
                 logger.info("Queued auto-resume messages after restart", count=resumed_count)
         except Exception as exc:
             logger.warning("Could not auto-resume interrupted threads (non-critical)", error=str(exc))
+
+    async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
+        """Handle bot-ready notifications through the public runtime protocol."""
+        await self._approval_transport.handle_bot_ready(bot)
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
@@ -1619,6 +1659,8 @@ class MultiAgentOrchestrator:
         # Cancel sync tasks first so shutdown does not race with active sync loops.
         for entity_name in list(self._sync_tasks.keys()):
             await cancel_sync_task(entity_name, self._sync_tasks)
+
+        await shutdown_approval_runtime()
 
         for bot in self.agent_bots.values():
             bot.running = False

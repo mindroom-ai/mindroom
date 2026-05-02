@@ -6,7 +6,19 @@ including threads (MSC3440), edits, replies, reactions, and more.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
+
+
+def origin_server_ts_from_event_source(event_source: object) -> int | float | None:
+    """Return a Matrix origin timestamp from one raw event source if present."""
+    if not isinstance(event_source, Mapping):
+        return None
+    raw_timestamp = cast("Mapping[str, object]", event_source).get("origin_server_ts")
+    if isinstance(raw_timestamp, int | float) and not isinstance(raw_timestamp, bool):
+        return raw_timestamp
+    return None
 
 
 @dataclass
@@ -121,7 +133,11 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
         )
 
     content = event_source.get("content", {})
+    if not isinstance(content, dict):
+        content = {}
     relates_to = content.get("m.relates_to", {})
+    if not isinstance(relates_to, dict):
+        relates_to = {}
 
     # Extract basic relation information
     relation_type = relates_to.get("rel_type")
@@ -146,8 +162,11 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     # Replies can exist within threads or as standalone
     # They have m.in_reply_to field
     in_reply_to = relates_to.get("m.in_reply_to", {})
-    is_reply = bool(in_reply_to and in_reply_to.get("event_id"))
-    reply_to_event_id = in_reply_to.get("event_id") if is_reply else None
+    if not isinstance(in_reply_to, dict):
+        in_reply_to = {}
+    raw_reply_to_event_id = in_reply_to.get("event_id")
+    reply_to_event_id = raw_reply_to_event_id if isinstance(raw_reply_to_event_id, str) else None
+    is_reply = reply_to_event_id is not None
 
     # Determine if this event can be a thread root (per MSC3440)
     # An event can only be a thread root if it has NO relations

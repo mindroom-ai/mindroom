@@ -53,7 +53,23 @@ class ConversationEventCache(Protocol):
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
         """Return one cached event payload by event ID."""
 
-    async def get_latest_edit(self, room_id: str, original_event_id: str) -> dict[str, Any] | None:
+    async def get_recent_room_events(
+        self,
+        room_id: str,
+        *,
+        event_type: str,
+        since_ts_ms: int,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return recent cached room events of one type, newest first."""
+
+    async def get_latest_edit(
+        self,
+        room_id: str,
+        original_event_id: str,
+        *,
+        sender: str | None = None,
+    ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
 
     async def get_latest_agent_message_snapshot(

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
+from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent, RunOutput
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
@@ -31,6 +32,7 @@ from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
 
 from mindroom import constants
+from mindroom.agents import create_agent
 from mindroom.ai_runtime import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
@@ -56,6 +58,7 @@ from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
+from mindroom.tool_approval import shutdown_approval_store
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -158,6 +161,14 @@ def _prepared_team_execution_context(
         compaction_outcomes=[],
         post_response_compaction_checks=post_response_compaction_checks or [],
     )
+
+
+@pytest.fixture(autouse=True)
+def reset_approval_store() -> Iterator[None]:
+    """Keep the module-level approval store isolated per test."""
+    asyncio.run(shutdown_approval_store())
+    yield
+    asyncio.run(shutdown_approval_store())
 
 
 @pytest.fixture
@@ -355,6 +366,92 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
 
     assert response.status_code == 200
     assert captured_runtime_paths == [runtime_a]
+
+
+def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config, tmp_path: Path) -> None:
+    """OpenAI-compatible agent construction should hide tools that require approval."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    config = Config.validate_with_runtime(
+        {
+            **test_config.authored_model_dump(),
+            "tool_approval": {
+                "rules": [{"match": "run_shell_command", "action": "require_approval"}],
+            },
+        },
+        runtime_paths,
+    )
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name="code",
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="openai-session",
+    )
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        agent = create_agent(
+            "code",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            include_openai_compat_guidance=True,
+        )
+
+    exposed_tool_names = {
+        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+    }
+    assert "run_shell_command" not in exposed_tool_names
+    assert "check_shell_command" in exposed_tool_names
+    assert "kill_shell_command" in exposed_tool_names
+
+
+def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, tmp_path: Path) -> None:
+    """Script-based approval rules should also hide matching /v1 tools."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    approval_script = tmp_path / "approval_scripts" / "shell_review.py"
+    approval_script.parent.mkdir(parents=True)
+    approval_script.write_text(
+        "def check(tool_name, arguments, agent_name):\n    return tool_name == 'run_shell_command'\n",
+        encoding="utf-8",
+    )
+    config = Config.validate_with_runtime(
+        {
+            **test_config.authored_model_dump(),
+            "tool_approval": {
+                "rules": [{"match": "run_shell_command", "script": "approval_scripts/shell_review.py"}],
+            },
+        },
+        runtime_paths,
+    )
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name="code",
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="openai-session",
+    )
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        agent = create_agent(
+            "code",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            include_openai_compat_guidance=True,
+        )
+
+    exposed_tool_names = {
+        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+    }
+    assert "run_shell_command" not in exposed_tool_names
 
 
 def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path: Path) -> None:

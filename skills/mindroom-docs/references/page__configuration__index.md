@@ -22,6 +22,35 @@ mindroom config validate --path /path/to/config.yaml
 
 MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block. See [MCP](https://docs.mindroom.chat/mcp/index.md) for transport-specific config, tool naming, examples, and agent setup.
 
+## Tool Approval
+
+Use the top-level `tool_approval` block to gate tool calls behind human approval in Matrix conversations.
+Rules are evaluated in order and the first matching rule wins.
+Each rule must set exactly one of `action` or `script`.
+Use `action: require_approval` to always pause the tool call and send a Matrix approval card.
+Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, agent_name) -> bool` and require approval only when it returns `True`.
+`timeout_days` sets the default approval expiry window and can be overridden per rule.
+React to the approval card with `✅` to approve the tool call.
+Reply to the approval card with a message to deny the tool call and record that text as the denial reason.
+Only the original human requester can approve or deny their pending tool call.
+Approval responses only resolve the live Matrix approval card in the same room; approval IDs are used only as a live client hint.
+If MindRoom restarts before a tool call is approved, the live tool call is cancelled.
+On startup, MindRoom attempts to mark recent unresolved approval cards sent by the current router as expired.
+Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
+OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
+
+```yaml
+tool_approval:
+  default: auto_approve
+  timeout_days: 7
+  rules:
+    - match: slack_*
+      action: require_approval
+    - match: run_shell_command
+      script: ./approval_scripts/shell_review.py
+      timeout_days: 3
+```
+
 ## Environment Variables
 
 ### Core
@@ -458,6 +487,8 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - `agents.<name>.accept_invites` defaults to `true`; when enabled, authorized ad-hoc room invites are accepted and persisted across restarts without adding those rooms to the static `rooms` list
+- Approval-gated tools require the router to be joined to the Matrix room.
+- In ad-hoc invited rooms accepted through `accept_invites`, approval only works if the router is already joined to that room.
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
 - `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent

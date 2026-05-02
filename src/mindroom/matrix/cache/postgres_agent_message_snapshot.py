@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.visible_body import visible_content_from_content
+
 from . import postgres_event_cache_events, postgres_event_cache_threads
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
 from .thread_cache_helpers import thread_cache_rejection_reason
@@ -27,25 +30,11 @@ class _SnapshotLookupResult:
 _THREAD_CACHE_REJECTION_NONE_REASONS = frozenset({"no_cache_state", "cache_never_validated"})
 
 
-def _content_dict(content: object) -> dict[str, Any]:
+def _visible_content(event: dict[str, Any]) -> dict[str, Any]:
+    content = event.get("content")
     if not isinstance(content, dict):
         return {}
-    return {key: value for key, value in content.items() if isinstance(key, str)}
-
-
-def _relation_type(event: dict[str, Any]) -> str | None:
-    content = _content_dict(event.get("content"))
-    relates_to = content.get("m.relates_to")
-    if not isinstance(relates_to, dict):
-        return None
-    relation_type = relates_to.get("rel_type")
-    return relation_type if isinstance(relation_type, str) else None
-
-
-def _visible_content(event: dict[str, Any]) -> dict[str, Any]:
-    content = _content_dict(event.get("content"))
-    new_content = _content_dict(content.get("m.new_content"))
-    return new_content or content
+    return visible_content_from_content(content)
 
 
 def _event_matches_scope(
@@ -56,7 +45,7 @@ def _event_matches_scope(
 ) -> bool:
     if event.get("type") != "m.room.message" or event.get("sender") != sender:
         return False
-    relation_type = _relation_type(event)
+    relation_type = EventInfo.from_event(event).relation_type
     if relation_type == "m.replace":
         return False
     return not (thread_id is None and relation_type == "m.thread")

@@ -122,6 +122,7 @@ Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom i
 Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`.
 Only shared agents that are either unscoped or explicitly configured with `worker_scope=shared` appear in `/v1/models`.
 Agents that use `agents.<name>.private` are not listed there, because `private.per` creates requester-private instances and therefore an isolating execution scope.
+An OpenAI-compatible run can expose fewer tool functions than the same agent in Matrix when `tool_approval` hides approval-gated functions from `/v1`.
 
 ### Auto-routing
 
@@ -205,4 +206,5 @@ The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate
 - **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
 - **No requester-private instances** — `/v1` currently supports only shared agents that are unscoped or configured with `worker_scope=shared`, so `agents.<name>.private` and other isolating execution scopes are not available there
+- **Tool approval is Matrix-only** — `/v1` hides tool functions matched by required-approval rules, including script-based rules, because approval cards need a live Matrix room, thread, and runtime process
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available

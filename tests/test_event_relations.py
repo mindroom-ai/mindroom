@@ -1,6 +1,6 @@
 """Tests for comprehensive event relation analysis."""
 
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 
 
 class TestEventRelations:
@@ -172,6 +172,27 @@ class TestEventRelations:
         assert info.is_reaction is False
         assert info.is_reply is False
         assert info.relation_type is None
+
+    def test_malformed_relation_content_is_ignored(self) -> None:
+        """Malformed raw Matrix content should not crash relation analysis."""
+        for event_source in (
+            {"content": "not-a-dict"},
+            {"content": {"m.relates_to": "not-a-dict"}},
+            {"content": {"m.relates_to": {"m.in_reply_to": "not-a-dict"}}},
+            {"content": {"m.relates_to": {"m.in_reply_to": {"event_id": 123}}}},
+        ):
+            info = EventInfo.from_event(event_source)
+
+            assert info.is_reply is False
+            assert info.reply_to_event_id is None
+
+    def test_origin_server_ts_from_event_source_returns_numeric_timestamp(self) -> None:
+        """Raw Matrix timestamp extraction should have one shared non-throwing helper."""
+        assert origin_server_ts_from_event_source({"origin_server_ts": 1234}) == 1234
+        assert origin_server_ts_from_event_source({"origin_server_ts": 12.5}) == 12.5
+        assert origin_server_ts_from_event_source({"origin_server_ts": True}) is None
+        assert origin_server_ts_from_event_source({"origin_server_ts": "1234"}) is None
+        assert origin_server_ts_from_event_source(None) is None
 
     def test_edit_relates_to_original_event(self) -> None:
         """Edit relation metadata should point at the original event only."""

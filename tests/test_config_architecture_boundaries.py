@@ -13,6 +13,8 @@ CONCRETE_ORCHESTRATOR_IMPORT_ALLOWLIST = {
     Path("src/mindroom/orchestrator.py"),
 }
 RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
+CONFIG_MAIN_MODULE = Path("src/mindroom/config/main.py")
+APPROVAL_CONFIG_MODULE = Path("src/mindroom/config/approval.py")
 MATRIX_MESSAGE_TOOL_MODULE = Path("src/mindroom/custom_tools/matrix_message.py")
 RESPONSE_RUNNER_MODULE = Path("src/mindroom/response_runner.py")
 RESPONSE_LIFECYCLE_MODULE = Path("src/mindroom/response_lifecycle.py")
@@ -64,6 +66,36 @@ def test_config_modules_do_not_import_matrix_runtime_modules() -> None:
                 )
 
     assert forbidden == []
+
+
+def test_tool_approval_config_uses_pydantic_validation_only() -> None:
+    """Tool approval config should not duplicate Pydantic with raw pre-validation."""
+    forbidden_names = {
+        "validate_raw_tool_approval_config",
+        "_validate_tool_approval_default",
+        "_validate_tool_approval_rule",
+        "_validate_positive_timeout_days",
+        "_coerce_positive_float",
+    }
+    found: list[str] = []
+
+    for source_path in (APPROVAL_CONFIG_MODULE, CONFIG_MAIN_MODULE):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in forbidden_names:
+                found.append(f"{source_path}:{node.lineno}: def {node.name}")
+            if isinstance(node, ast.ImportFrom):
+                found.extend(
+                    f"{source_path}:{node.lineno}: import {alias.name}"
+                    for alias in node.names
+                    if alias.name in forbidden_names
+                )
+            if isinstance(node, ast.Name) and node.id in forbidden_names:
+                found.append(f"{source_path}:{node.lineno}: {node.id}")
+            if isinstance(node, ast.Attribute) and node.attr in forbidden_names:
+                found.append(f"{source_path}:{node.lineno}: {node.attr}")
+
+    assert found == []
 
 
 def test_matrix_identity_does_not_reexport_identifier_helpers() -> None:
