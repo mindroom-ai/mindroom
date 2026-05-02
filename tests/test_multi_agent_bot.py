@@ -497,6 +497,14 @@ async def _wait_for_live_pending(
             await asyncio.sleep(0)
 
 
+async def _wait_for_pending_approval_id(store: ApprovalManager, approval_ids: list[str]) -> str:
+    async with asyncio.timeout(1):
+        while True:
+            if approval_ids and await store.get_pending_approval("!room:localhost", approval_ids[0]) is not None:
+                return approval_ids[0]
+            await asyncio.sleep(0)
+
+
 async def _start_live_approval(
     runtime_paths: RuntimePaths,
     *,
@@ -12598,29 +12606,30 @@ class TestMultiAgentOrchestrator:
         code_bot.stop = AsyncMock()
         orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
 
-        store = initialize_approval_store(
-            runtime_paths,
-            sender=orchestrator._approval_transport.send_approval_event,
-            editor=orchestrator._approval_transport.edit_approval_event,
-        )
-        task = asyncio.create_task(
-            store.request_approval(
-                tool_name="run_shell_command",
-                arguments={"command": "echo hi"},
-                agent_name="code",
-                room_id="!room:localhost",
-                thread_id=None,
-                requester_id="@user:localhost",
-                approver_user_id="@user:localhost",
-                timeout_seconds=60,
-            ),
-        )
-
-        await send_started.wait()
-        orchestrator._knowledge_refresh_scheduler = MagicMock()
-        orchestrator._knowledge_refresh_scheduler.shutdown = AsyncMock()
-
+        task: asyncio.Task[object] | None = None
         try:
+            store = initialize_approval_store(
+                runtime_paths,
+                sender=orchestrator._approval_transport.send_approval_event,
+                editor=orchestrator._approval_transport.edit_approval_event,
+            )
+            task = asyncio.create_task(
+                store.request_approval(
+                    tool_name="run_shell_command",
+                    arguments={"command": "echo hi"},
+                    agent_name="code",
+                    room_id="!room:localhost",
+                    thread_id=None,
+                    requester_id="@user:localhost",
+                    approver_user_id="@user:localhost",
+                    timeout_seconds=60,
+                ),
+            )
+
+            await send_started.wait()
+            orchestrator._knowledge_refresh_scheduler = MagicMock()
+            orchestrator._knowledge_refresh_scheduler.shutdown = AsyncMock()
+
             with (
                 patch.object(orchestrator, "_cancel_config_reload_task", new=AsyncMock()),
                 patch.object(orchestrator, "_stop_memory_auto_flush_worker", new=AsyncMock()),
@@ -12642,7 +12651,7 @@ class TestMultiAgentOrchestrator:
             router_bot.stop.assert_awaited_once_with(reason="shutdown")
         finally:
             allow_send_to_finish.set()
-            if not task.done():
+            if task is not None and not task.done():
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
@@ -12957,33 +12966,29 @@ class TestMultiAgentOrchestrator:
         code_bot.cleanup = AsyncMock(side_effect=_cleanup_recorder(event_order))
         orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
 
-        store = initialize_approval_store(
-            runtime_paths,
-            sender=orchestrator._approval_transport.send_approval_event,
-            editor=orchestrator._approval_transport.edit_approval_event,
-        )
-        task = asyncio.create_task(
-            store.request_approval(
-                tool_name="run_shell_command",
-                arguments={"command": "echo hi"},
-                agent_name="code",
-                room_id="!room:localhost",
-                thread_id="$thread",
-                requester_id="@user:localhost",
-                approver_user_id="@user:localhost",
-                timeout_seconds=60,
-            ),
-        )
-
-        async with asyncio.timeout(1):
-            while True:
-                if approval_ids and await store.get_pending_approval("!room:localhost", approval_ids[0]) is not None:
-                    break
-                await asyncio.sleep(0)
-
         plan = _approval_removal_plan(new_config)
-
+        task: asyncio.Task[object] | None = None
         try:
+            store = initialize_approval_store(
+                runtime_paths,
+                sender=orchestrator._approval_transport.send_approval_event,
+                editor=orchestrator._approval_transport.edit_approval_event,
+            )
+            task = asyncio.create_task(
+                store.request_approval(
+                    tool_name="run_shell_command",
+                    arguments={"command": "echo hi"},
+                    agent_name="code",
+                    room_id="!room:localhost",
+                    thread_id="$thread",
+                    requester_id="@user:localhost",
+                    approver_user_id="@user:localhost",
+                    timeout_seconds=60,
+                ),
+            )
+
+            approval_id = await _wait_for_pending_approval_id(store, approval_ids)
+
             with (
                 patch("mindroom.orchestrator.load_config", return_value=new_config),
                 patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
@@ -12998,7 +13003,7 @@ class TestMultiAgentOrchestrator:
             assert updated is True
             assert task.done() is False
             assert event_order == ["send", "cleanup"]
-            pending = await store.get_pending_approval("!room:localhost", approval_ids[0])
+            pending = await store.get_pending_approval("!room:localhost", approval_id)
             assert pending is not None
 
             await store.resolve_approval(
@@ -13014,6 +13019,10 @@ class TestMultiAgentOrchestrator:
             assert router_bot.client is not None
             assert router_bot.client.room_send.await_count == 2
         finally:
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
             await shutdown_approval_store()
             await orchestrator._close_runtime_support_services()
 
@@ -13107,35 +13116,32 @@ class TestMultiAgentOrchestrator:
 
         orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
 
-        store = initialize_approval_store(
-            runtime_paths,
-            sender=orchestrator._approval_transport.send_approval_event,
-            editor=orchestrator._approval_transport.edit_approval_event,
-        )
-        task = asyncio.create_task(
-            store.request_approval(
-                tool_name="run_shell_command",
-                arguments={"command": "echo hi"},
-                agent_name="code",
-                room_id="!room:localhost",
-                thread_id="$thread",
-                requester_id="@user:localhost",
-                approver_user_id="@user:localhost",
-                timeout_seconds=60,
-            ),
-        )
-
-        async with asyncio.timeout(1):
-            while True:
-                if approval_ids and await store.get_pending_approval("!room:localhost", approval_ids[0]) is not None:
-                    break
-                await asyncio.sleep(0)
-
-        code_bot.config = new_config
-        code_bot.rooms = []
-
         leave_non_dm_rooms = AsyncMock(side_effect=lambda *_args, **_kwargs: event_order.append("leave"))
+        task: asyncio.Task[object] | None = None
         try:
+            store = initialize_approval_store(
+                runtime_paths,
+                sender=orchestrator._approval_transport.send_approval_event,
+                editor=orchestrator._approval_transport.edit_approval_event,
+            )
+            task = asyncio.create_task(
+                store.request_approval(
+                    tool_name="run_shell_command",
+                    arguments={"command": "echo hi"},
+                    agent_name="code",
+                    room_id="!room:localhost",
+                    thread_id="$thread",
+                    requester_id="@user:localhost",
+                    approver_user_id="@user:localhost",
+                    timeout_seconds=60,
+                ),
+            )
+
+            approval_id = await _wait_for_pending_approval_id(store, approval_ids)
+
+            code_bot.config = new_config
+            code_bot.rooms = []
+
             with (
                 patch("mindroom.bot_room_lifecycle.get_joined_rooms", new=AsyncMock(return_value=["!room:localhost"])),
                 patch("mindroom.bot_room_lifecycle.leave_non_dm_rooms", new=leave_non_dm_rooms),
@@ -13143,7 +13149,7 @@ class TestMultiAgentOrchestrator:
                 await code_bot.leave_unconfigured_rooms()
 
             assert task.done() is False
-            pending = await store.get_pending_approval("!room:localhost", approval_ids[0])
+            pending = await store.get_pending_approval("!room:localhost", approval_id)
             assert pending is not None
             assert event_order == ["send", "leave"]
             leave_non_dm_rooms.assert_awaited_once()
@@ -13159,6 +13165,10 @@ class TestMultiAgentOrchestrator:
             assert decision.status == "approved"
             assert event_order == ["send", "leave", "edit"]
         finally:
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
