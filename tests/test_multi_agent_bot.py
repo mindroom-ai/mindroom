@@ -12656,6 +12656,43 @@ class TestMultiAgentOrchestrator:
             await shutdown_approval_store()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_stop_shuts_down_approvals_before_mcp_manager(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Pending approvals should expire even if MCP shutdown fails."""
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        calls: list[str] = []
+
+        async def _shutdown_approvals() -> None:
+            calls.append("approvals")
+
+        async def _stop_mcp_manager() -> None:
+            calls.append("mcp")
+            msg = "mcp shutdown failed"
+            raise RuntimeError(msg)
+
+        orchestrator._knowledge_refresh_scheduler = MagicMock()
+        orchestrator._knowledge_refresh_scheduler.shutdown = AsyncMock()
+
+        with (
+            patch(
+                "mindroom.orchestrator.shutdown_approval_runtime",
+                new=AsyncMock(side_effect=_shutdown_approvals),
+            ) as mock_shutdown_approvals,
+            patch.object(orchestrator, "_cancel_config_reload_task", new=AsyncMock()),
+            patch.object(orchestrator, "_stop_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator._knowledge_source_watcher, "shutdown", new=AsyncMock()),
+            patch.object(orchestrator, "_cancel_bot_start_tasks", new=AsyncMock()),
+            patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock(side_effect=_stop_mcp_manager)),
+            pytest.raises(RuntimeError, match="mcp shutdown failed"),
+        ):
+            await orchestrator.stop()
+
+        assert calls == ["approvals", "mcp"]
+        mock_shutdown_approvals.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:
         """Auxiliary supervisors should restart tasks that crash."""
         started = asyncio.Event()
