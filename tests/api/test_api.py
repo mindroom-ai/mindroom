@@ -1718,6 +1718,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
         {
             "token": "drive-token",
             "refresh_token": "drive-refresh-token",
+            "client_id": "client-id",
             "scopes": [
                 "openid",
                 "https://www.googleapis.com/auth/userinfo.email",

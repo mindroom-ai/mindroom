@@ -785,6 +785,27 @@ def _require_or_preserve_oauth_client_config_field(
     raise HTTPException(status_code=400, detail=f"{field_name} is required for OAuth client config.")
 
 
+def _require_or_preserve_oauth_client_config_secret(
+    credentials: dict[str, Any],
+    existing_credentials: dict[str, Any],
+) -> None:
+    submitted_secret = credentials.get("client_secret")
+    if isinstance(submitted_secret, str) and submitted_secret.strip():
+        return
+    submitted_client_id = credentials.get("client_id")
+    existing_client_id = existing_credentials.get("client_id")
+    client_id_changed = (
+        isinstance(submitted_client_id, str)
+        and isinstance(existing_client_id, str)
+        and submitted_client_id.strip()
+        and existing_client_id.strip()
+        and submitted_client_id.strip() != existing_client_id.strip()
+    )
+    if client_id_changed:
+        raise HTTPException(status_code=400, detail="client_secret is required when client_id changes.")
+    _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_secret")
+
+
 @dataclass(frozen=True)
 class DashboardCredentialAccess:
     """Credential storage access for one dashboard request target."""
@@ -864,7 +885,7 @@ class DashboardCredentialAccess:
             _reject_invalid_client_config_field_values(credentials)
             existing_credentials = load_credentials_for_target(service, self.target) or {}
             _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_id")
-            _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_secret")
+            _require_or_preserve_oauth_client_config_secret(credentials, existing_credentials)
             return credentials
         return credentials
 

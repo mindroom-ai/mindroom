@@ -185,6 +185,7 @@ def test_google_drive_credentials_restore_stored_expiry(tmp_path: Path) -> None:
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
+            "client_id": "client-id",
             "expires_at": expires_at,
         },
     )

@@ -487,6 +487,36 @@ class TestCredentialsAPI:
             "_source": "ui",
         }
 
+    def test_oauth_client_config_save_rejects_blank_secret_when_client_id_changes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Changing OAuth client IDs should require the matching new client secret."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        existing_credentials = {
+            "client_id": "stored-client-id",
+            "client_secret": "stored-client-secret",
+            "redirect_uri": "https://old.example.test/callback",
+            "_source": "ui",
+        }
+        manager.save_credentials("google_drive_oauth_client", existing_credentials)
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client",
+            json={
+                "credentials": {
+                    "client_id": "new-client-id",
+                    "client_secret": "",
+                    "redirect_uri": "https://new.example.test/callback",
+                },
+            },
+        )
+
+        assert response.status_code == 400
+        assert "client_secret is required when client_id changes" in response.json()["detail"]
+        assert manager.load_credentials("google_drive_oauth_client") == existing_credentials
+
     def test_oauth_client_config_save_rejects_missing_first_time_secret(
         self,
         client: TestClient,
