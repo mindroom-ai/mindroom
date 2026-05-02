@@ -48,9 +48,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
-from mindroom.tool_approval import (
-    shutdown_approval_store,
-)
+from mindroom.tool_approval import shutdown_approval_store
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (

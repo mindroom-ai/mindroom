@@ -121,11 +121,7 @@ from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
-from mindroom.tool_approval import (
-    ApprovalActionResult,
-    MatrixApprovalAction,
-    shutdown_approval_store,
-)
+from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, shutdown_approval_store
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots

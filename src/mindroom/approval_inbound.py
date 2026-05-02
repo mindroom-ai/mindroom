@@ -8,11 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.authorization import is_authorized_sender
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
-from mindroom.tool_approval import (
-    MatrixApprovalAction,
-    handle_matrix_approval_action,
-    is_process_active_approval_card,
-)
+from mindroom.tool_approval import MatrixApprovalAction, handle_matrix_approval_action, is_process_active_approval_card
 
 if TYPE_CHECKING:
     import nio

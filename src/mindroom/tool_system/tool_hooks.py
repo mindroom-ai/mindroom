@@ -28,11 +28,7 @@ from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.sync_bridge_state import sync_tool_bridge_blocked_loop
 from mindroom.timing import emit_timing_event
-from mindroom.tool_approval import (
-    ToolApprovalCall,
-    ToolApprovalScriptError,
-    request_tool_approval_for_call,
-)
+from mindroom.tool_approval import ToolApprovalCall, ToolApprovalScriptError, request_tool_approval_for_call
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
