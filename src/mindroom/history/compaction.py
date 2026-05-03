@@ -483,7 +483,11 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
                 )
                 compactable_runs = [run for run in compactable_runs if _has_stable_run_id(run)]
             selected_run_ids = {run.run_id for run in compactable_runs if isinstance(run.run_id, str) and run.run_id}
-            if compactable_runs:
+            if (
+                selection_state.force_compact_before_next_run
+                and compactable_runs
+                and len(selected_run_ids) == len(compactable_runs)
+            ):
                 pending_selected_run_ids = selected_run_ids
         if not compactable_runs:
             break
@@ -603,6 +607,18 @@ async def _emit_lifecycle_progress_after_persist(
     remaining_runs = runs_for_scope(completed_top_level_runs(working_session), scope)
     if progress_callback is None or not remaining_runs:
         return
+    after_tokens = estimate_prompt_visible_history_tokens(
+        session=working_session,
+        scope=scope,
+        history_settings=history_settings,
+    )
+    runs_remaining = len(remaining_runs)
+    if (
+        not state.force_compact_before_next_run
+        and available_history_budget is not None
+        and after_tokens <= available_history_budget
+    ):
+        runs_remaining = 0
     await progress_callback(
         CompactionLifecycleProgress(
             notice_event_id=lifecycle_notice_event_id,
@@ -611,15 +627,11 @@ async def _emit_lifecycle_progress_after_persist(
             scope=scope.key,
             summary_model=summary_model_name,
             before_tokens=before_tokens,
-            after_tokens=estimate_prompt_visible_history_tokens(
-                session=working_session,
-                scope=scope,
-                history_settings=history_settings,
-            ),
+            after_tokens=after_tokens,
             history_budget_tokens=available_history_budget,
             runs_before=runs_before,
             compacted_run_count=total_compacted_run_count,
-            runs_remaining=len(remaining_runs),
+            runs_remaining=runs_remaining,
         ),
     )
 
