@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 class ResponseOutcome:
     """Terminal response facts needed for post-delivery side effects."""
 
-    strip_transient_enrichment_after_run: bool = False
     response_run_id: str | None = None
     session_id: str | None = None
     session_type: SessionType | None = None
@@ -44,7 +43,6 @@ class ResponseOutcome:
     thread_summary_message_count_hint: int | None = None
     memory_prompt: str | None = None
     memory_thread_history: Sequence[ResolvedVisibleMessage] | None = None
-    transient_system_context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,7 +59,6 @@ class PostResponseEffectsDeps:
     ) = None
     queue_memory_persistence: Callable[[], None] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
-    strip_transient_enrichment: Callable[[ResponseOutcome], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
 
@@ -163,7 +160,6 @@ class PostResponseEffectsSupport:
         interactive_agent_name: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
-        strip_transient_enrichment: Callable[[ResponseOutcome], None] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
 
@@ -185,7 +181,6 @@ class PostResponseEffectsSupport:
             register_interactive=register_interactive,
             queue_memory_persistence=queue_memory_persistence,
             persist_response_event_id=persist_response_event_id,
-            strip_transient_enrichment=strip_transient_enrichment,
             should_queue_thread_summary=self.should_queue_thread_summary,
             queue_thread_summary=self.queue_thread_summary,
         )
@@ -244,17 +239,6 @@ async def apply_post_response_effects(
                 session_id=outcome.session_id,
                 run_id=outcome.response_run_id,
                 response_event_id=response_event_id,
-            )
-
-    if outcome.strip_transient_enrichment_after_run and deps.strip_transient_enrichment is not None:
-        try:
-            deps.strip_transient_enrichment(outcome)
-        except Exception:
-            deps.logger.exception(
-                "Failed to strip transient enrichment from session history",
-                session_id=outcome.session_id,
-                session_type=outcome.session_type.value if outcome.session_type is not None else None,
-                run_id=outcome.response_run_id,
             )
 
     if deps.queue_memory_persistence is not None:

@@ -66,7 +66,7 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history import PreparedHistoryState, strip_transient_enrichment_from_session
+from mindroom.history import PreparedHistoryState
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -2373,44 +2373,10 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
 
 
 @pytest.mark.asyncio
-async def test_generate_response_marks_transient_model_prompt_for_cleanup(
+async def test_generate_response_preserves_model_prompt_in_persisted_session(
     tmp_path: Path,
 ) -> None:
-    """Agent responses should scrub transient per-turn model tails after the run."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        )
-
-        await coordinator.generate_response(
-            replace(
-                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
-                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
-            ),
-        )
-
-    outcome = mock_post.await_args.args[1]
-    assert outcome.strip_transient_enrichment_after_run is True
-
-
-@pytest.mark.asyncio
-async def test_generate_response_strips_transient_model_prompt_from_persisted_session(
-    tmp_path: Path,
-) -> None:
-    """Post-response cleanup should restore persisted user text to the raw turn."""
+    """Persisted model prompts should stay intact so later turns can reuse provider cache prefixes."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -2470,12 +2436,14 @@ async def test_generate_response_strips_transient_model_prompt_from_persisted_se
     persisted_run = cast("RunOutput", persisted_session.runs[0])
     assert persisted_run.messages is not None
     assert persisted_run.messages[0].content == "Earlier context"
-    assert persisted_run.messages[2].content == "Describe this image"
+    assert persisted_run.messages[2].content == (
+        "Describe this image\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them."
+    )
 
 
 @pytest.mark.asyncio
-async def test_generate_response_marks_matrix_tool_prompt_context_for_cleanup(tmp_path: Path) -> None:
-    """Matrix tool metadata appended during runtime preparation should be scrubbed after the run."""
+async def test_generate_response_appends_matrix_tool_prompt_context(tmp_path: Path) -> None:
+    """Matrix tool metadata appended during runtime preparation should reach the model."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_matrix_message(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -2488,7 +2456,7 @@ async def test_generate_response_marks_matrix_tool_prompt_context_for_cleanup(tm
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -2505,9 +2473,6 @@ async def test_generate_response_marks_matrix_tool_prompt_context_for_cleanup(tm
 
     assert model_prompts
     assert "[Matrix metadata for tool calls]" in model_prompts[0]
-    outcome = mock_post.await_args.args[1]
-    assert outcome.strip_transient_enrichment_after_run is True
-    assert outcome.memory_prompt == "Hello"
 
 
 @pytest.mark.asyncio
@@ -2551,8 +2516,8 @@ async def test_generate_response_passes_resolved_correlation_id_to_ai_response(t
 
 
 @pytest.mark.asyncio
-async def test_generate_response_cleanup_targets_retry_run_id(tmp_path: Path) -> None:
-    """Cleanup should target the persisted retry run instead of the abandoned first run id."""
+async def test_generate_response_preserves_retry_model_prompt(tmp_path: Path) -> None:
+    """Retry runs should keep the model-facing prompt that Agno persisted."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -2616,50 +2581,14 @@ async def test_generate_response_cleanup_targets_retry_run_id(tmp_path: Path) ->
     persisted_run = cast("RunOutput", persisted_session.runs[0])
     assert persisted_run.run_id == "retry-run"
     assert persisted_run.messages is not None
-    assert persisted_run.messages[0].content == "Describe this image"
+    assert persisted_run.messages[0].content == (
+        "Describe this image\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them."
+    )
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_marks_transient_model_prompt_for_cleanup(
-    tmp_path: Path,
-) -> None:
-    """Team responses should scrub transient per-turn model tails after the run."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config_with_team(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
-        )
-
-        await coordinator.generate_team_response_helper(
-            replace(
-                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
-                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
-            ),
-            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
-            team_mode="coordinate",
-        )
-
-    outcome = mock_post.await_args.args[1]
-    assert outcome.strip_transient_enrichment_after_run is True
-    assert outcome.memory_prompt == "Describe this image"
-
-
-@pytest.mark.asyncio
-async def test_generate_team_response_marks_matrix_tool_prompt_context_for_cleanup(tmp_path: Path) -> None:
-    """Team Matrix tool metadata appended during runtime preparation should be scrubbed after the run."""
+async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_path: Path) -> None:
+    """Team Matrix tool metadata appended during runtime preparation should reach the model."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
@@ -2672,7 +2601,7 @@ async def test_generate_team_response_marks_matrix_tool_prompt_context_for_clean
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -2692,9 +2621,6 @@ async def test_generate_team_response_marks_matrix_tool_prompt_context_for_clean
 
     assert model_messages
     assert "[Matrix metadata for tool calls]" in model_messages[0]
-    outcome = mock_post.await_args.args[1]
-    assert outcome.strip_transient_enrichment_after_run is True
-    assert outcome.memory_prompt == "Hello"
 
 
 @pytest.mark.asyncio
@@ -2741,10 +2667,10 @@ async def test_generate_team_response_passes_resolved_correlation_id_to_team_res
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_strips_transient_model_prompt_from_persisted_session(
+async def test_generate_team_response_preserves_model_prompt_in_persisted_session(
     tmp_path: Path,
 ) -> None:
-    """Team cleanup should restore the current user turn, not earlier context."""
+    """Team persisted model prompts should stay intact for later provider cache reuse."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
@@ -2805,12 +2731,14 @@ async def test_generate_team_response_strips_transient_model_prompt_from_persist
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
     assert persisted_run.messages is not None
     assert persisted_run.messages[0].content == "Earlier context"
-    assert persisted_run.messages[2].content == "Describe this image"
+    assert persisted_run.messages[2].content == (
+        "Describe this image\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them."
+    )
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_cleanup_targets_retry_run_id(tmp_path: Path) -> None:
-    """Team cleanup should target the persisted retry run instead of the abandoned first run id."""
+async def test_generate_team_response_preserves_retry_model_prompt(tmp_path: Path) -> None:
+    """Team retry runs should keep the model-facing prompt that Agno persisted."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
@@ -2881,208 +2809,9 @@ async def test_generate_team_response_cleanup_targets_retry_run_id(tmp_path: Pat
     persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
     assert persisted_run.run_id == "team-retry-run"
     assert persisted_run.messages is not None
-    assert persisted_run.messages[0].content == "Describe this image"
-
-
-def test_strip_transient_enrichment_targets_response_run_id() -> None:
-    """Cleanup should not rewrite a newer or older run when the finished run id is known."""
-    transient_system_context = render_system_enrichment_block(
-        (EnrichmentItem(key="weather", text="72F and sunny", cache_policy="volatile"),),
+    assert persisted_run.messages[0].content == (
+        "Describe this image\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them."
     )
-    storage = _SessionStorage(
-        AgentSession(
-            session_id="session-1",
-            agent_id="general",
-            runs=[
-                RunOutput(
-                    run_id="older-run",
-                    messages=[Message(role="user", content="older enriched prompt")],
-                ),
-                RunOutput(
-                    run_id="target-run",
-                    messages=[
-                        Message(role="system", content=f"durable system context\n\n{transient_system_context}"),
-                        Message(role="user", content="current enriched prompt"),
-                    ],
-                ),
-                RunOutput(
-                    run_id="newer-run",
-                    messages=[Message(role="user", content="newer enriched prompt")],
-                ),
-            ],
-        ),
-    )
-    storage_view = storage.open()
-
-    changed = strip_transient_enrichment_from_session(
-        storage_view,
-        session_id="session-1",
-        session_type=SessionType.AGENT,
-        response_run_id="target-run",
-        memory_prompt="current raw prompt",
-        transient_system_context=transient_system_context,
-    )
-
-    persisted_session = cast("AgentSession", storage.session)
-    assert changed is True
-    assert persisted_session.runs is not None
-    assert cast("RunOutput", persisted_session.runs[0]).messages[0].content == "older enriched prompt"
-    target_messages = cast("RunOutput", persisted_session.runs[1]).messages
-    assert target_messages is not None
-    assert target_messages[0].content == "durable system context"
-    assert target_messages[1].content == "current raw prompt"
-    assert cast("RunOutput", persisted_session.runs[2]).messages[0].content == "newer enriched prompt"
-
-
-def test_strip_transient_enrichment_strips_nested_team_member_system_context() -> None:
-    """Team cleanup should recurse into persisted member responses."""
-    transient_system_context = render_system_enrichment_block(
-        (EnrichmentItem(key="weather", text="72F and sunny", cache_policy="volatile"),),
-    )
-    storage = _SessionStorage(
-        TeamSession(
-            session_id="session-1",
-            team_id="ultimate",
-            runs=[
-                TeamRunOutput(
-                    run_id="target-run",
-                    messages=[
-                        Message(role="system", content=f"durable team context\n\n{transient_system_context}"),
-                        Message(role="user", content="current enriched prompt"),
-                    ],
-                    member_responses=[
-                        RunOutput(
-                            run_id="member-run",
-                            messages=[
-                                Message(
-                                    role="system",
-                                    content=f"durable member context\n\n{transient_system_context}",
-                                ),
-                                Message(role="assistant", content="member answer"),
-                            ],
-                        ),
-                    ],
-                ),
-            ],
-        ),
-    )
-    storage_view = storage.open()
-
-    changed = strip_transient_enrichment_from_session(
-        storage_view,
-        session_id="session-1",
-        session_type=SessionType.TEAM,
-        response_run_id="target-run",
-        memory_prompt="current raw prompt",
-        transient_system_context=transient_system_context,
-    )
-
-    persisted_session = cast("TeamSession", storage.session)
-    assert changed is True
-    assert persisted_session.runs is not None
-    target_run = cast("TeamRunOutput", persisted_session.runs[0])
-    assert target_run.messages is not None
-    assert target_run.messages[0].content == "durable team context"
-    assert target_run.messages[1].content == "current raw prompt"
-    assert target_run.member_responses is not None
-    member_run = cast("RunOutput", target_run.member_responses[0])
-    assert member_run.messages is not None
-    assert member_run.messages[0].content == "durable member context"
-
-
-@pytest.mark.asyncio
-async def test_generate_response_cleanup_uses_model_time_knowledge_notice(tmp_path: Path) -> None:
-    """Cleanup should use the exact knowledge notice appended before the model run."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    knowledge_access_support = _knowledge_access_support()
-    knowledge_access_support.resolve_for_agent.side_effect = [
-        _KnowledgeResolution(
-            knowledge=None,
-            unavailable={
-                "docs": KnowledgeAvailabilityDetail(
-                    availability=KnowledgeAvailability.INITIALIZING,
-                    search_available=False,
-                ),
-            },
-        ),
-        _KnowledgeResolution(knowledge=None, unavailable={}),
-    ]
-
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-            knowledge_access_support=knowledge_access_support,
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        )
-
-        await coordinator.generate_response(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-        )
-
-    outcome = mock_post.await_args.args[1]
-    assert outcome.strip_transient_enrichment_after_run is True
-    assert "knowledge_availability" in outcome.transient_system_context
-    assert "Knowledge base `docs` is initializing" in outcome.transient_system_context
-    assert knowledge_access_support.resolve_for_agent.call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_generate_response_streaming_cleanup_uses_model_time_knowledge_notice(tmp_path: Path) -> None:
-    """Streaming cleanup should use the exact knowledge notice appended before the model run."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    knowledge_access_support = _knowledge_access_support()
-    knowledge_access_support.resolve_for_agent.side_effect = [
-        _KnowledgeResolution(
-            knowledge=None,
-            unavailable={
-                "docs": KnowledgeAvailabilityDetail(
-                    availability=KnowledgeAvailability.INITIALIZING,
-                    search_available=False,
-                ),
-            },
-        ),
-        _KnowledgeResolution(knowledge=None, unavailable={}),
-    ]
-
-    async def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
-        yield "Hello"
-
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_runner.stream_agent_response", new=fake_stream_agent_response),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-            knowledge_access_support=knowledge_access_support,
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        )
-
-        await coordinator.generate_response(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-        )
-
-    outcome = mock_post.await_args.args[1]
-    assert outcome.strip_transient_enrichment_after_run is True
-    assert "knowledge_availability" in outcome.transient_system_context
-    assert "Knowledge base `docs` is initializing" in outcome.transient_system_context
-    assert knowledge_access_support.resolve_for_agent.call_count == 1
 
 
 def test_append_knowledge_availability_notice_rendering() -> None:
@@ -3122,77 +2851,6 @@ async def test_stream_with_request_log_context_closes_wrapped_stream_on_early_cl
     await stream.aclose()
 
     assert closed is True
-
-
-@pytest.mark.asyncio
-async def test_generate_response_marks_system_enrichment_for_cleanup(
-    tmp_path: Path,
-) -> None:
-    """Agent responses should scrub transient system enrichment after the run."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        )
-
-        await coordinator.generate_response(
-            replace(
-                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-                system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),),
-            ),
-        )
-
-    outcome = mock_post.await_args.args[1]
-    assert outcome.strip_transient_enrichment_after_run is True
-
-
-@pytest.mark.asyncio
-async def test_generate_team_response_marks_system_enrichment_for_cleanup(
-    tmp_path: Path,
-) -> None:
-    """Team responses should scrub transient system enrichment after the run."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config_with_team(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            requester_id="@alice:localhost",
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
-        )
-
-        await coordinator.generate_team_response_helper(
-            replace(
-                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-                system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),),
-            ),
-            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
-            team_mode="coordinate",
-        )
-
-    outcome = mock_post.await_args.args[1]
-    assert outcome.strip_transient_enrichment_after_run is True
 
 
 def test_compose_current_turn_prompt_uses_normalized_tail_comparison() -> None:
