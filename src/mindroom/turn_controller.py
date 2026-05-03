@@ -451,6 +451,11 @@ class TurnController:
             return False
         return self.deps.response_runner.has_active_response_for_target(target)
 
+    @staticmethod
+    def _same_response_lifecycle_target(left: MessageTarget, right: MessageTarget) -> bool:
+        """Return whether two targets share the same response lifecycle lock."""
+        return left.room_id == right.room_id and left.resolved_thread_id == right.resolved_thread_id
+
     async def _enqueue_active_thread_follow_up(
         self,
         *,
@@ -462,6 +467,7 @@ class TurnController:
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
         trust_internal_payload_metadata: bool | None = None,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> None:
         """Queue an active-thread follow-up while preserving its mid-turn notice."""
         if dispatch_timing is not None:
@@ -469,10 +475,11 @@ class TurnController:
                 coalescing_bypassed=True,
                 coalescing_bypass_reason="active_thread_follow_up",
             )
-        queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
-            target=target,
-            response_envelope=envelope,
-        )
+        if queued_notice_reservation is None:
+            queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
+                target=target,
+                response_envelope=envelope,
+            )
         try:
             await self._enqueue_for_dispatch(
                 event,
@@ -506,6 +513,7 @@ class TurnController:
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
         trust_internal_payload_metadata: bool | None = None,
+        queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> None:
         """Queue one normalized text event with shared active-follow-up handling."""
         target = self.deps.resolver.build_message_target(
@@ -528,19 +536,30 @@ class TurnController:
                 requester_user_id=requester_user_id,
                 dispatch_timing=dispatch_timing,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
+                queued_notice_reservation=queued_notice_reservation,
             )
             return
-        await self._enqueue_for_dispatch(
-            dispatch_event,
-            room,
-            source_kind=envelope.source_kind,
-            dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
-            hook_source=envelope.hook_source,
-            message_received_depth=envelope.message_received_depth,
-            requester_user_id=requester_user_id,
-            coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
-            trust_internal_payload_metadata=trust_internal_payload_metadata,
-        )
+        try:
+            await self._enqueue_for_dispatch(
+                dispatch_event,
+                room,
+                source_kind=envelope.source_kind,
+                dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
+                hook_source=envelope.hook_source,
+                message_received_depth=envelope.message_received_depth,
+                requester_user_id=requester_user_id,
+                coalescing_key=(room.room_id, coalescing_thread_id, requester_user_id),
+                queued_notice_reservation=queued_notice_reservation,
+                trust_internal_payload_metadata=trust_internal_payload_metadata,
+            )
+        except asyncio.CancelledError:
+            if queued_notice_reservation is not None:
+                queued_notice_reservation.cancel()
+            raise
+        except Exception:
+            if queued_notice_reservation is not None:
+                queued_notice_reservation.cancel()
+            raise
 
     async def _enqueue_media_for_dispatch(
         self,
@@ -1982,7 +2001,11 @@ class TurnController:
             dispatch_timing=dispatch_timing,
         )
 
-        if await self._dispatch_special_media_as_text(room, prechecked_event):
+        if await self._dispatch_special_media_as_text(
+            room,
+            prechecked_event,
+            coalescing_thread_id=coalescing_thread_id,
+        ):
             return
         if not is_matrix_media_dispatch_event(prechecked_event.event):
             return
@@ -1998,6 +2021,8 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedInboundMediaEvent,
+        *,
+        coalescing_thread_id: str | None,
     ) -> bool:
         """Handle media events that normalize into the text dispatch pipeline."""
         event = prechecked_event.event
@@ -2008,6 +2033,8 @@ class TurnController:
                     event=event,
                     requester_user_id=prechecked_event.requester_user_id,
                 ),
+                coalescing_thread_id=coalescing_thread_id,
+                has_coalescing_thread_context=True,
             )
             return True
         if is_file_message_event(event):
@@ -2024,8 +2051,17 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
+        *,
+        coalescing_thread_id: str | None = None,
+        has_coalescing_thread_context: bool = False,
     ) -> None:
-        """Normalize audio into a synthetic text event and reuse text dispatch."""
+        """Normalize audio into a synthetic text event and reuse text dispatch.
+
+        ``coalescing_thread_id`` is a pre-STT target computed by media ingress.
+        Direct helper calls lack that ingress context unless explicitly marked;
+        in that case reservation waits for the normalized voice event's final
+        thread target.
+        """
         event = prechecked_event.event
 
         if is_agent_id(event.sender, self.deps.runtime.config, self.deps.runtime_paths):
@@ -2037,49 +2073,94 @@ class TurnController:
             self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
             return
 
-        dispatch_timing = get_dispatch_pipeline_timing(event.source)
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_start")
-        normalized_voice = await self.deps.normalizer.prepare_voice_event(
-            VoiceNormalizationRequest(
+        target = None
+        queued_notice_reservation = None
+        if has_coalescing_thread_context:
+            target = self.deps.resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id=coalescing_thread_id,
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
+            envelope = self.deps.resolver.build_ingress_envelope(
+                room_id=room.room_id,
+                event=cast("DispatchEvent", event),
+                requester_user_id=prechecked_event.requester_user_id,
+                thread_id=coalescing_thread_id,
+                source_kind="voice",
+            )
+            queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
+                target=target,
+                response_envelope=envelope,
+            )
+        reservation_released_or_handed_off = False
+        try:
+            dispatch_timing = get_dispatch_pipeline_timing(event.source)
+            if dispatch_timing is not None:
+                dispatch_timing.mark("ingress_normalize_start")
+            normalized_voice = await self.deps.normalizer.prepare_voice_event(
+                VoiceNormalizationRequest(
+                    room=room,
+                    event=event,
+                ),
+            )
+            if dispatch_timing is not None:
+                dispatch_timing.mark("ingress_normalize_ready")
+            if normalized_voice is None:
+                self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
+                return
+            attach_dispatch_pipeline_timing(
+                normalized_voice.event.source,
+                dispatch_timing,
+            )
+
+            await self._maybe_send_visible_voice_echo(
+                room,
+                event,
+                text=normalized_voice.event.body,
+                thread_id=normalized_voice.effective_thread_id,
+            )
+
+            envelope = self.deps.resolver.build_ingress_envelope(
+                room_id=room.room_id,
+                event=normalized_voice.event,
+                requester_user_id=prechecked_event.requester_user_id,
+                thread_id=normalized_voice.effective_thread_id,
+                source_kind="voice",
+            )
+            normalized_target = self.deps.resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id=normalized_voice.effective_thread_id,
+                reply_to_event_id=normalized_voice.event.event_id,
+                event_source=normalized_voice.event.source,
+            )
+            if queued_notice_reservation is None:
+                queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
+                    target=normalized_target,
+                    response_envelope=envelope,
+                )
+            elif target is not None and not self._same_response_lifecycle_target(target, normalized_target):
+                if queued_notice_reservation is not None:
+                    queued_notice_reservation.cancel()
+                queued_notice_reservation = self.deps.response_runner.reserve_waiting_human_message(
+                    target=normalized_target,
+                    response_envelope=envelope,
+                )
+            await self._enqueue_prepared_text_for_dispatch(
                 room=room,
-                event=event,
-            ),
-        )
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_ready")
-        if normalized_voice is None:
-            self._mark_source_events_responded(HandledTurnState.from_source_event_id(event.event_id))
-            return
-        attach_dispatch_pipeline_timing(
-            normalized_voice.event.source,
-            dispatch_timing,
-        )
-
-        await self._maybe_send_visible_voice_echo(
-            room,
-            event,
-            text=normalized_voice.event.body,
-            thread_id=normalized_voice.effective_thread_id,
-        )
-
-        envelope = self.deps.resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=normalized_voice.event,
-            requester_user_id=prechecked_event.requester_user_id,
-            thread_id=normalized_voice.effective_thread_id,
-            source_kind="voice",
-        )
-        await self._enqueue_prepared_text_for_dispatch(
-            room=room,
-            prepared_event=normalized_voice.event,
-            dispatch_event=normalized_voice.event,
-            envelope=envelope,
-            coalescing_thread_id=normalized_voice.effective_thread_id,
-            requester_user_id=prechecked_event.requester_user_id,
-            dispatch_timing=dispatch_timing,
-            trust_internal_payload_metadata=True,
-        )
+                prepared_event=normalized_voice.event,
+                dispatch_event=normalized_voice.event,
+                envelope=envelope,
+                coalescing_thread_id=normalized_voice.effective_thread_id,
+                requester_user_id=prechecked_event.requester_user_id,
+                dispatch_timing=dispatch_timing,
+                trust_internal_payload_metadata=True,
+                queued_notice_reservation=queued_notice_reservation,
+            )
+            reservation_released_or_handed_off = True
+        finally:
+            if not reservation_released_or_handed_off and queued_notice_reservation is not None:
+                queued_notice_reservation.cancel()
 
     async def _dispatch_file_sidecar_text_preview(
         self,

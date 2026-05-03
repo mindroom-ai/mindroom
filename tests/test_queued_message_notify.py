@@ -51,6 +51,7 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
@@ -311,6 +312,28 @@ class _StaticQueuedState:
 
     def has_pending_human_messages(self) -> bool:
         return self.pending
+
+
+def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
+    """Queued-message state should track distinct source events, not anonymous increments."""
+    state = _QueuedMessageState()
+
+    assert state.add_waiting_human_message("$event")
+    assert not state.add_waiting_human_message("$event")
+
+    assert state.has_pending_human_messages()
+    assert state.pending_human_messages == 1
+    assert state.is_set()
+
+    state.consume_waiting_human_message("$unknown")
+    assert state.pending_human_messages == 1
+
+    state.consume_waiting_human_message("$event")
+    state.consume_waiting_human_message("$event")
+
+    assert not state.has_pending_human_messages()
+    assert state.pending_human_messages == 0
+    assert not state.is_set()
 
 
 @contextmanager
@@ -1241,8 +1264,9 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
 async def test_generate_response_preserves_later_queued_human_message(tmp_path: Path) -> None:
     """The next active turn must still see any later human messages that were already queued."""
     bot = _bot(tmp_path)
-    response_envelope = _envelope()
-    response_target = response_envelope.target
+    response_envelope_b = _envelope(source_event_id="$event-b")
+    response_envelope_c = _envelope(source_event_id="$event-c")
+    response_target = response_envelope_b.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator._lifecycle_coordinator
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
@@ -1269,7 +1293,7 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
                     thread_id=None,
                     thread_history=[],
                     user_id="@user:localhost",
-                    response_envelope=response_envelope,
+                    response_envelope=response_envelope_b,
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
@@ -1281,7 +1305,7 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
                     thread_id=None,
                     thread_history=[],
                     user_id="@user:localhost",
-                    response_envelope=response_envelope,
+                    response_envelope=response_envelope_c,
                 ),
             )
             for _ in range(20):
@@ -1309,8 +1333,9 @@ async def test_generate_response_preserves_later_queued_human_message(tmp_path: 
 async def test_generate_team_response_preserves_later_queued_human_message(tmp_path: Path) -> None:
     """Team queue notices must also survive when more than one human turn is waiting."""
     bot = _bot(tmp_path)
-    response_envelope = _envelope()
-    response_target = response_envelope.target
+    response_envelope_b = _envelope(source_event_id="$team-event-b")
+    response_envelope_c = _envelope(source_event_id="$team-event-c")
+    response_target = response_envelope_b.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator._lifecycle_coordinator
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
@@ -1339,7 +1364,7 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
                     thread_history=[],
                     requester_user_id="@user:localhost",
                     payload=DispatchPayload(prompt="hello"),
-                    response_envelope=response_envelope,
+                    response_envelope=response_envelope_b,
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
@@ -1353,7 +1378,7 @@ async def test_generate_team_response_preserves_later_queued_human_message(tmp_p
                     thread_history=[],
                     requester_user_id="@user:localhost",
                     payload=DispatchPayload(prompt="hello again"),
-                    response_envelope=response_envelope,
+                    response_envelope=response_envelope_c,
                 ),
             )
             for _ in range(20):

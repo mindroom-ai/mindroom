@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,10 +11,12 @@ import nio
 import pytest
 from agno.media import Audio
 
+from mindroom import inbound_turn_normalizer
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from tests.conftest import (
@@ -251,3 +254,332 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
     attachment = load_attachment(bot.storage_path, _attachment_id_for_event("$voice789"))
     assert attachment is not None
     assert attachment.thread_id == "$thread_root"
+
+
+@pytest.mark.asyncio
+async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: AgentBot) -> None:
+    """Audio follow-ups should notify an active response before transcription finishes."""
+    bot = mock_home_bot
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+    room.users = {
+        "@mindroom_home:localhost": MagicMock(),
+        "@user:example.com": MagicMock(),
+    }
+    room.members_synced = True
+
+    voice_event = _make_voice_event(
+        event_id="$voice-blocked",
+        source={
+            "content": {
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        },
+    )
+    target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id="$thread_root",
+        reply_to_event_id=voice_event.event_id,
+        event_source=voice_event.source,
+    )
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    prepare_started = asyncio.Event()
+    allow_prepare = asyncio.Event()
+
+    async def prepare_voice_event(*_args: object, **_kwargs: object) -> None:
+        prepare_started.set()
+        await allow_prepare.wait()
+
+    queued_signal.begin_response_turn()
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$thread_root"),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(side_effect=prepare_voice_event),
+            ),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            task = asyncio.create_task(bot._on_media_message(room, voice_event))
+            await asyncio.wait_for(prepare_started.wait(), timeout=0.2)
+            assert queued_signal.pending_human_messages == 1
+            allow_prepare.set()
+            await task
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert queued_signal.pending_human_messages == 0
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.parametrize(
+    "echo_error",
+    [
+        RuntimeError("echo failed"),
+        asyncio.CancelledError(),
+    ],
+)
+@pytest.mark.asyncio
+async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
+    mock_home_bot: AgentBot,
+    echo_error: BaseException,
+) -> None:
+    """Post-STT failures before dispatch handoff should release the pre-STT reservation."""
+    bot = mock_home_bot
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+    room.users = {
+        "@mindroom_home:localhost": MagicMock(),
+        "@user:example.com": MagicMock(),
+    }
+    room.members_synced = True
+
+    voice_event = _make_voice_event(
+        event_id="$voice-echo-fails",
+        source={
+            "content": {
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        },
+    )
+    target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id="$thread_root",
+        reply_to_event_id=voice_event.event_id,
+        event_source=voice_event.source,
+    )
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
+        event=PreparedTextEvent(
+            sender=voice_event.sender,
+            event_id=voice_event.event_id,
+            body="🎤 continue",
+            source={"content": {"body": "🎤 continue", "com.mindroom.source_kind": "voice"}},
+            server_timestamp=voice_event.server_timestamp,
+            source_kind_override="voice",
+        ),
+        effective_thread_id="$thread_root",
+    )
+
+    async def fail_visible_echo(*_args: object, **_kwargs: object) -> None:
+        assert queued_signal.pending_human_messages == 1
+        raise echo_error
+
+    queued_signal.begin_response_turn()
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$thread_root"),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(return_value=normalized_voice),
+            ),
+            patch.object(
+                bot._turn_controller,
+                "_maybe_send_visible_voice_echo",
+                new=AsyncMock(side_effect=fail_visible_echo),
+            ),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            pytest.raises(type(echo_error)),
+        ):
+            await bot._on_media_message(room, voice_event)
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert queued_signal.pending_human_messages == 0
+    assert not queued_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_voice_message_retargets_queued_notice_when_stt_thread_changes(
+    mock_home_bot: AgentBot,
+) -> None:
+    """A post-STT target change should cancel the pre-STT notice and reserve the final target."""
+    bot = mock_home_bot
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+    room.users = {
+        "@mindroom_home:localhost": MagicMock(),
+        "@user:example.com": MagicMock(),
+    }
+    room.members_synced = True
+
+    voice_event = _make_voice_event(
+        event_id="$voice-retargeted",
+        source={
+            "content": {
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$pre_stt_thread"},
+            },
+        },
+    )
+    normalized_event = PreparedTextEvent(
+        sender=voice_event.sender,
+        event_id=voice_event.event_id,
+        body="🎤 continue somewhere else",
+        source={"content": {"body": "🎤 continue somewhere else", "com.mindroom.source_kind": "voice"}},
+        server_timestamp=voice_event.server_timestamp,
+        source_kind_override="voice",
+    )
+    normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
+        event=normalized_event,
+        effective_thread_id="$post_stt_thread",
+    )
+    pre_stt_target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id="$pre_stt_thread",
+        reply_to_event_id=voice_event.event_id,
+        event_source=voice_event.source,
+    )
+    post_stt_target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id="$post_stt_thread",
+        reply_to_event_id=normalized_event.event_id,
+        event_source=normalized_event.source,
+    )
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    pre_stt_signal = lifecycle._get_or_create_queued_signal(pre_stt_target)
+    post_stt_signal = lifecycle._get_or_create_queued_signal(post_stt_target)
+    captured_reservations: list[object] = []
+
+    async def capture_enqueue(*_args: object, **kwargs: object) -> None:
+        assert pre_stt_signal.pending_human_messages == 0
+        assert post_stt_signal.pending_human_messages == 1
+        reservation = kwargs["queued_notice_reservation"]
+        assert reservation is not None
+        captured_reservations.append(reservation)
+        reservation.cancel()
+
+    pre_stt_signal.begin_response_turn()
+    post_stt_signal.begin_response_turn()
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value="$pre_stt_thread"),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(return_value=normalized_voice),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch.object(bot._turn_controller, "_enqueue_for_dispatch", new=AsyncMock(side_effect=capture_enqueue)),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            await bot._on_media_message(room, voice_event)
+    finally:
+        pre_stt_signal.finish_response_turn()
+        post_stt_signal.finish_response_turn()
+
+    assert len(captured_reservations) == 1
+    assert pre_stt_signal.pending_human_messages == 0
+    assert post_stt_signal.pending_human_messages == 0
+    assert not pre_stt_signal.is_set()
+    assert not post_stt_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
+    mock_home_bot: AgentBot,
+) -> None:
+    """Room-mode voice should signal the room-level active turn before STT finishes."""
+    bot = mock_home_bot
+    bot.config.agents["home"].thread_mode = "room"
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+    room.users = {
+        "@mindroom_home:localhost": MagicMock(),
+        "@user:example.com": MagicMock(),
+    }
+    room.members_synced = True
+
+    voice_event = _make_voice_event(
+        event_id="$voice-room-mode",
+        source={
+            "content": {
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        },
+    )
+    normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
+        event=PreparedTextEvent(
+            sender=voice_event.sender,
+            event_id=voice_event.event_id,
+            body="🎤 room mode follow-up",
+            source={"content": {"body": "🎤 room mode follow-up", "com.mindroom.source_kind": "voice"}},
+            server_timestamp=voice_event.server_timestamp,
+            source_kind_override="voice",
+        ),
+        effective_thread_id=None,
+    )
+    target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id=voice_event.event_id,
+        event_source=voice_event.source,
+    )
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    captured_reservations: list[object] = []
+    prepare_started = asyncio.Event()
+    allow_prepare = asyncio.Event()
+
+    async def prepare_voice_event(
+        *_args: object,
+        **_kwargs: object,
+    ) -> inbound_turn_normalizer._VoiceNormalizationResult:
+        prepare_started.set()
+        await allow_prepare.wait()
+        return normalized_voice
+
+    async def capture_enqueue(*_args: object, **kwargs: object) -> None:
+        assert queued_signal.pending_human_messages == 1
+        reservation = kwargs["queued_notice_reservation"]
+        assert reservation is not None
+        captured_reservations.append(reservation)
+        reservation.cancel()
+
+    queued_signal.begin_response_turn()
+    try:
+        with (
+            patch.object(
+                bot._turn_controller.deps.resolver,
+                "coalescing_thread_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                bot._turn_controller.deps.normalizer,
+                "prepare_voice_event",
+                new=AsyncMock(side_effect=prepare_voice_event),
+            ),
+            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
+            patch.object(bot._turn_controller, "_enqueue_for_dispatch", new=AsyncMock(side_effect=capture_enqueue)),
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        ):
+            task = asyncio.create_task(bot._on_media_message(room, voice_event))
+            await asyncio.wait_for(prepare_started.wait(), timeout=0.2)
+            assert queued_signal.pending_human_messages == 1
+            allow_prepare.set()
+            await task
+    finally:
+        queued_signal.finish_response_turn()
+
+    assert len(captured_reservations) == 1
+    assert queued_signal.pending_human_messages == 0
+    assert not queued_signal.is_set()

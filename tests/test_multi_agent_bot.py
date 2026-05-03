@@ -10466,6 +10466,8 @@ class TestAgentBot:
 
         mock_echo.assert_awaited_once()
         mock_reserve_waiting_human_message.assert_called_once()
+        reserved_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
+        assert reserved_target.resolved_thread_id == "$thread_root"
         reserved_envelope = mock_reserve_waiting_human_message.call_args.kwargs["response_envelope"]
         assert reserved_envelope.source_kind == "voice"
         mock_start.assert_awaited_once()

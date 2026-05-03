@@ -35,6 +35,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
+    PendingDispatchMetadata,
     PreparedTextEvent,
     _build_batch_dispatch_event,
     build_dispatch_handoff,
@@ -1581,6 +1582,54 @@ async def test_bypass_preserves_fifo_order_behind_existing_normal_work() -> None
 
     await _wait_for(lambda: calls == [["$m1"], ["$hook"], ["$m2"]])
 
+    assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+async def test_room_mode_voice_queued_notice_is_solo_barrier_before_nearby_normal_message() -> None:
+    """Room-scoped voice notices should dispatch solo instead of joining normal debounce batches."""
+    room = _make_room()
+    voice = _text_event(event_id="$voice-room", body="voice transcript", server_timestamp=1000, source_kind="voice")
+    normal = _text_event(event_id="$normal", body="nearby text", server_timestamp=1001)
+    reservation = MagicMock()
+    metadata = (
+        PendingDispatchMetadata(
+            kind="queued_notice_reservation",
+            payload=reservation,
+            close=reservation.cancel,
+            requires_solo_batch=True,
+        ),
+    )
+    calls: list[list[str]] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        calls.append(list(batch.source_event_ids))
+        if batch.source_event_ids == ["$voice-room"]:
+            assert batch.dispatch_metadata == metadata
+            return
+        assert batch.dispatch_metadata == ()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 5.0,
+        upload_grace_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = ("!room:localhost", None, "@user:localhost")
+
+    await gate.enqueue(
+        key,
+        PendingEvent(event=voice, room=room, source_kind="voice", dispatch_metadata=metadata),
+    )
+    await gate.enqueue(key, PendingEvent(event=normal, room=room, source_kind="message"))
+
+    await _wait_for(lambda: calls == [["$voice-room"]], deadline_seconds=0.2)
+    reservation.cancel.assert_not_called()
+
+    await gate.drain_all()
+
+    assert calls == [["$voice-room"], ["$normal"]]
+    reservation.cancel.assert_not_called()
     assert _coalescing_gate_is_idle(gate)
 
 

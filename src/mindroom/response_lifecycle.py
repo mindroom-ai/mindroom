@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import enum
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -38,9 +37,14 @@ _LockedResponseResult = TypeVar("_LockedResponseResult")
 class _QueuedMessageState:
     """Track queued human ingress while one response lifecycle holds the lock."""
 
-    pending_human_messages: int = 0
+    pending_human_message_event_ids: set[str] = field(default_factory=set)
     _active_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @property
+    def pending_human_messages(self) -> int:
+        """Return the number of distinct queued human events."""
+        return len(self.pending_human_message_event_ids)
 
     def begin_response_turn(self) -> bool:
         existing_turn = self._active_response_turns > 0
@@ -52,14 +56,16 @@ class _QueuedMessageState:
             return
         self._active_response_turns -= 1
 
-    def add_waiting_human_message(self) -> None:
-        self.pending_human_messages += 1
+    def add_waiting_human_message(self, source_event_id: str) -> bool:
+        previous_count = self.pending_human_messages
+        self.pending_human_message_event_ids.add(source_event_id)
         self._event.set()
+        return self.pending_human_messages != previous_count
 
-    def consume_waiting_human_message(self) -> None:
-        if self.pending_human_messages == 0:
+    def consume_waiting_human_message(self, source_event_id: str) -> None:
+        if source_event_id not in self.pending_human_message_event_ids:
             return
-        self.pending_human_messages -= 1
+        self.pending_human_message_event_ids.remove(source_event_id)
         if self.pending_human_messages == 0:
             self._event.clear()
 
@@ -76,22 +82,18 @@ class _QueuedMessageState:
         return self._event.is_set()
 
 
-class _QueuedHumanNotice(enum.Enum):
-    NONE = "none"
-    WAITING = "waiting"
-
-
 @dataclass(slots=True)
 class QueuedHumanNoticeReservation:
     """Owned reservation for a queued-human notice created before dispatch starts."""
 
     _state: _QueuedMessageState
+    _source_event_id: str
     _active: bool = True
 
     def _release_waiting_human_message(self) -> None:
         if not self._active:
             return
-        self._state.consume_waiting_human_message()
+        self._state.consume_waiting_human_message(self._source_event_id)
         self._active = False
 
     def consume(self) -> None:
@@ -173,8 +175,9 @@ class ResponseLifecycleCoordinator:
         if not self._has_active_response_for_thread_key(thread_key):
             return None
         queued_signal = self._get_or_create_queued_signal(target)
-        queued_signal.add_waiting_human_message()
-        return QueuedHumanNoticeReservation(queued_signal)
+        if not queued_signal.add_waiting_human_message(response_envelope.source_event_id):
+            return None
+        return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)
 
     def _begin_response_turn_notice(
         self,
@@ -183,27 +186,28 @@ class ResponseLifecycleCoordinator:
         queued_signal: _QueuedMessageState,
         response_envelope: MessageEnvelope | None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None,
-    ) -> _QueuedHumanNotice:
+    ) -> str | None:
         existing_turn = queued_signal.begin_response_turn()
         if queued_notice_reservation is not None:
-            return _QueuedHumanNotice.NONE
+            return None
         if not (existing_turn or lifecycle_lock.locked()):
-            return _QueuedHumanNotice.NONE
+            return None
         if not self._should_signal_queued_message(response_envelope):
-            return _QueuedHumanNotice.NONE
-        queued_signal.add_waiting_human_message()
-        return _QueuedHumanNotice.WAITING
+            return None
+        assert response_envelope is not None
+        if not queued_signal.add_waiting_human_message(response_envelope.source_event_id):
+            return None
+        return response_envelope.source_event_id
 
     def _consume_queued_human_notice(
         self,
         *,
-        notice: _QueuedHumanNotice,
+        notice: str | None,
         queued_signal: _QueuedMessageState,
-    ) -> _QueuedHumanNotice:
-        if notice is _QueuedHumanNotice.NONE:
-            return notice
-        queued_signal.consume_waiting_human_message()
-        return _QueuedHumanNotice.NONE
+    ) -> None:
+        if notice is None:
+            return
+        queued_signal.consume_waiting_human_message(notice)
 
     async def run_locked_response(
         self,

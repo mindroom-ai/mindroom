@@ -295,6 +295,8 @@ class CoalescingGate:
     def _queue_kind(pending_event: PendingEvent) -> _QueueKind:
         if pending_event.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP:
             return _QueueKind.BYPASS
+        if any(item.requires_solo_batch for item in pending_event.dispatch_metadata):
+            return _QueueKind.BYPASS
         if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
             return _QueueKind.BYPASS
         if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
