@@ -214,22 +214,22 @@ def _validate_compaction_threshold_choice(
 
 
 class CompactionOverrideConfig(BaseModel):
-    """Optional per-agent overrides for automatic compaction."""
+    """Optional per-scope overrides for destructive compaction."""
 
     enabled: bool | None = Field(
         default=None,
-        description="Whether to run destructive auto-compaction for this history scope",
+        description="Whether to allow destructive compaction for this history scope",
     )
     threshold_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Absolute history trigger threshold in tokens",
+        description="Soft replay trigger budget in tokens",
     )
     threshold_percent: float | None = Field(
         default=None,
         gt=0,
         lt=1,
-        description="Context-window trigger threshold as a fraction",
+        description="Soft replay trigger budget as a fraction of the context window",
     )
     reserve_tokens: int | None = Field(
         default=None,
@@ -252,19 +252,19 @@ class CompactionOverrideConfig(BaseModel):
 
 
 class CompactionConfig(BaseModel):
-    """Concrete automatic compaction configuration."""
+    """Concrete destructive compaction configuration."""
 
-    enabled: bool = Field(default=True, description="Whether to run destructive auto-compaction for this history scope")
+    enabled: bool = Field(default=True, description="Whether to allow destructive compaction for this history scope")
     threshold_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Absolute history trigger threshold in tokens (defaults to 80% of context window when both thresholds are None)",
+        description="Soft replay trigger budget in tokens (defaults to 80% of context window when both thresholds are None)",
     )
     threshold_percent: float | None = Field(
         default=None,
         gt=0,
         lt=1,
-        description="Context-window trigger threshold as a fraction",
+        description="Soft replay trigger budget as a fraction of the context window",
     )
     reserve_tokens: int = Field(
         default=16384,

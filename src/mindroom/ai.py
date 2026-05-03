@@ -907,7 +907,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
         compaction_outcomes_collector: Optional list that receives completed
-            compaction outcomes from auto-compaction and manual `compact_context`
+            compaction outcomes from required compaction and manual `compact_context`
             tool calls during this run.
         compaction_lifecycle: Optional lifecycle sink for ordered foreground
             compaction notices.
@@ -1373,7 +1373,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
         compaction_outcomes_collector: Optional list that receives completed
-            compaction outcomes from auto-compaction and manual `compact_context`
+            compaction outcomes from required compaction and manual `compact_context`
             tool calls during this run.
         compaction_lifecycle: Optional lifecycle sink for ordered foreground
             compaction notices.

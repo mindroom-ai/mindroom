@@ -1038,17 +1038,17 @@ class Config(BaseModel):
         )
 
     def get_default_compaction_config(self) -> CompactionConfig:
-        """Return the effective automatic compaction config for defaults-only scope."""
+        """Return the effective destructive compaction config for defaults-only scope."""
         base = self.defaults.compaction
         merged = base.model_dump() if base is not None else {}
         return CompactionConfig.model_validate(merged)
 
     def has_authored_default_compaction_config(self) -> bool:
-        """Return whether defaults-only scope has authored auto-compaction config."""
+        """Return whether defaults-only scope has authored destructive compaction config."""
         return self.defaults.compaction is not None
 
     def get_entity_compaction_config(self, entity_name: str) -> CompactionConfig:
-        """Return the effective automatic compaction config for one configured agent or team."""
+        """Return the effective destructive compaction config for one configured agent or team."""
         base = self.defaults.compaction
         defaults_enabled = base.enabled if base is not None else False
         merged = base.model_dump() if base is not None else {}
@@ -1087,7 +1087,7 @@ class Config(BaseModel):
         return CompactionConfig.model_validate(merged)
 
     def has_authored_entity_compaction_config(self, entity_name: str) -> bool:
-        """Return whether auto-compaction was explicitly configured for one configured entity."""
+        """Return whether destructive compaction was explicitly configured for one configured entity."""
         if entity_name in self.agents:
             override = self.get_agent(entity_name).compaction
         elif entity_name in self.teams:

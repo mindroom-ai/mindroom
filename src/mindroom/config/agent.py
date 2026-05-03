@@ -202,7 +202,7 @@ class AgentConfig(BaseModel):
     )
     compaction: CompactionOverrideConfig | None = Field(
         default=None,
-        description="Per-agent auto-compaction overrides",
+        description="Per-agent required-compaction overrides",
     )
     private: AgentPrivateConfig | None = Field(
         default=None,
@@ -406,7 +406,7 @@ class TeamConfig(BaseModel):
     )
     compaction: CompactionOverrideConfig | None = Field(
         default=None,
-        description="Per-team auto-compaction overrides",
+        description="Per-team required-compaction overrides",
     )
     num_history_runs: int | None = Field(
         default=None,

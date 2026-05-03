@@ -938,7 +938,7 @@ def _prepare_agent_prompt_inputs_for_estimation(
 
 
 def resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
-    """Resolve the absolute token threshold that should trigger auto-compaction."""
+    """Resolve the soft replay trigger budget in tokens."""
     threshold_tokens = compaction_config.threshold_tokens
     if threshold_tokens is not None:
         return threshold_tokens
