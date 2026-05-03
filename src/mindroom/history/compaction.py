@@ -504,7 +504,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
         )
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
-        if total_compacted_run_count == 0 and before_persist_callback is not None:
+        if before_persist_callback is not None:
             await before_persist_callback(included_runs)
         final_summary_text = generated_summary.summary
         compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}

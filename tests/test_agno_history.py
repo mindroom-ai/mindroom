@@ -1463,6 +1463,118 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
 
 
 @pytest.mark.asyncio
+async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(tmp_path: Path) -> None:
+    """Every destructive compaction chunk should expose raw messages before persistence."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    first_run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="user", content="u" * 200),
+            Message(role="assistant", content="a" * 200),
+        ],
+    )
+    second_run = _completed_run(
+        "run-2",
+        messages=[
+            Message(role="user", content="v" * 200),
+            Message(role="assistant", content="b" * 200),
+        ],
+    )
+    session = _session("session-1", runs=[first_run, second_run])
+    storage.upsert_session(session)
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+    )
+    summary_input_budget = next(
+        budget
+        for budget in range(1, 5_000)
+        if len(
+            _build_summary_input(
+                previous_summary=None,
+                compacted_runs=[first_run, second_run],
+                max_input_tokens=budget,
+            )[1],
+        )
+        == 1
+        and len(
+            _build_summary_input(
+                previous_summary="merged summary",
+                compacted_runs=[second_run],
+                max_input_tokens=budget,
+            )[1],
+        )
+        == 1
+    )
+    observed: list[tuple[str, list[str], list[str]]] = []
+
+    @hook(EVENT_COMPACTION_BEFORE)
+    async def before(ctx: CompactionHookContext) -> None:
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        observed.append(
+            (
+                ctx.event_name,
+                [run.run_id for run in persisted.runs or []],
+                [str(message.content) for message in ctx.messages],
+            ),
+        )
+
+    @hook(EVENT_COMPACTION_AFTER)
+    async def after(ctx: CompactionHookContext) -> None:
+        persisted = get_agent_session(storage, "session-1")
+        assert persisted is not None
+        observed.append(
+            (
+                ctx.event_name,
+                [run.run_id for run in persisted.runs or []],
+                [str(message.content) for message in ctx.messages],
+            ),
+        )
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
+    runtime_context = _hook_runtime_context(
+        config=config,
+        runtime_paths=runtime_paths,
+        registry=registry,
+        session_id="session-1",
+    )
+
+    with (
+        tool_runtime_context(runtime_context),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        _state, outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=scope,
+            state=HistoryScopeState(),
+            history_settings=history_settings,
+            available_history_budget=1,
+            summary_input_budget=summary_input_budget,
+            compaction_context_window=16_000,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            active_context_window=16_000,
+            replay_window_tokens=16_000,
+            threshold_tokens=1,
+            reserve_tokens=0,
+        )
+
+    assert outcome is not None
+    assert observed == [
+        ("compaction:before", ["run-1", "run-2"], ["u" * 200, "a" * 200]),
+        ("compaction:before", ["run-2"], ["v" * 200, "b" * 200]),
+        ("compaction:after", [], ["u" * 200, "a" * 200, "v" * 200, "b" * 200]),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_branch(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
