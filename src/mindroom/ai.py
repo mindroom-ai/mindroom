@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from agno.db.base import SessionType
 from agno.models.message import Message
-from agno.models.metrics import Metrics
 from agno.run.agent import (
     ModelRequestCompletedEvent,
     RunCancelledEvent,
@@ -24,14 +23,17 @@ from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
+from mindroom.ai_run_metadata import (
+    build_ai_run_metadata_content,
+    build_model_request_metrics_fallback,
+    empty_request_metric_totals,
+)
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
-    AI_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
-    ROUTER_AGENT_NAME,
     RuntimePaths,
 )
 from mindroom.error_handling import get_user_friendly_error_message
@@ -74,7 +76,6 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
-    from mindroom.config.models import ModelConfig
     from mindroom.history import CompactionLifecycle, PostResponseCompactionCheck
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -91,7 +92,6 @@ __all__ = [
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
-_AI_RUN_METADATA_VERSION = 1
 
 
 def _append_additional_context(agent: Agent, context_chunk: str) -> None:
@@ -155,17 +155,6 @@ class _PreparedAgentRun:
         return ai_runtime.copy_run_input(self.messages)
 
 
-def _empty_request_metric_totals() -> dict[str, int]:
-    return {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "reasoning_tokens": 0,
-        "cache_read_tokens": 0,
-        "cache_write_tokens": 0,
-    }
-
-
 def _next_retry_run_id(run_id: str | None) -> str | None:
     """Return a fresh Agno run identifier for a retry attempt."""
     if run_id is None:
@@ -225,10 +214,12 @@ class _StreamingAttemptState:
     latest_model_id: str | None = None
     latest_model_provider: str | None = None
     latest_request_input_tokens: int | None = None
+    latest_request_cache_read_tokens: int | None = None
+    latest_request_cache_write_tokens: int | None = None
     cancelled_run_event: RunCancelledEvent | None = None
     completed_run_event: RunCompletedEvent | None = None
     canonical_final_body_candidate: str | None = None
-    request_metric_totals: dict[str, int] = field(default_factory=_empty_request_metric_totals)
+    request_metric_totals: dict[str, int] = field(default_factory=empty_request_metric_totals)
     first_token_latency: float | None = None
     first_token_logged: bool = False
     retry_requested: bool = False
@@ -357,144 +348,6 @@ def _extract_interrupted_partial_text(
 def _raise_agent_run_cancelled(reason: str | None) -> NoReturn:
     """Raise the canonical agent cancellation error."""
     raise build_cancelled_error(reason)
-
-
-def _get_model_config(
-    config: Config,
-    agent_name: str,
-    *,
-    runtime_paths: RuntimePaths,
-    room_id: str | None = None,
-) -> tuple[str | None, ModelConfig | None]:
-    """Return configured model name/config for an agent when available."""
-    if agent_name not in config.agents and agent_name not in config.teams and agent_name != ROUTER_AGENT_NAME:
-        return None, None
-    model_name = config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=room_id,
-        runtime_paths=runtime_paths,
-    ).model_name
-    return model_name, config.models.get(model_name)
-
-
-def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
-    def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
-        sanitized: dict[str, Any] = {}
-        for key, value in payload.items():
-            if isinstance(value, (str, int)) or value is None or isinstance(value, bool):
-                sanitized[key] = value
-            elif isinstance(value, float):
-                sanitized[key] = format(value, ".12g")
-        return sanitized or None
-
-    if metrics is None:
-        return None
-    if isinstance(metrics, Metrics):
-        metrics_dict = metrics.to_dict()
-        if not isinstance(metrics_dict, dict):
-            return None
-        return _sanitize_metrics_payload(metrics_dict)
-    if isinstance(metrics, dict):
-        return _sanitize_metrics_payload(metrics)
-    return None
-
-
-def _build_model_request_metrics_fallback(
-    totals: dict[str, int],
-    first_token_latency: float | None,
-) -> dict[str, Any] | None:
-    payload: dict[str, Any] = {key: value for key, value in totals.items() if value > 0}
-    if payload.get("total_tokens") is None:
-        input_tokens = payload.get("input_tokens")
-        output_tokens = payload.get("output_tokens")
-        if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-            payload["total_tokens"] = input_tokens + output_tokens
-    if first_token_latency is not None:
-        payload["time_to_first_token"] = format(first_token_latency, ".12g")
-    return payload or None
-
-
-def _build_context_payload(
-    *,
-    context_input_tokens: int | None,
-    model_config: ModelConfig | None,
-) -> dict[str, Any] | None:
-    if context_input_tokens is None or model_config is None or model_config.context_window is None:
-        return None
-    context_window = model_config.context_window
-    if context_window <= 0:
-        return None
-    return {
-        "input_tokens": context_input_tokens,
-        "window_tokens": context_window,
-    }
-
-
-def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
-    *,
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    run_id: str | None,
-    session_id: str | None,
-    status: RunStatus | str | None,
-    model: str | None,
-    model_provider: str | None,
-    room_id: str | None = None,
-    metrics: Metrics | dict[str, Any] | None = None,
-    metrics_fallback: dict[str, Any] | None = None,
-    context_input_tokens: int | None = None,
-    tool_count: int | None = None,
-) -> dict[str, Any] | None:
-    model_name, model_config = _get_model_config(
-        config,
-        agent_name,
-        runtime_paths=runtime_paths,
-        room_id=room_id,
-    )
-    model_id = model or (model_config.id if model_config is not None else None)
-    provider = model_provider or (model_config.provider if model_config is not None else None)
-
-    usage_payload = _serialize_metrics(metrics)
-    if usage_payload is None and metrics_fallback:
-        usage_payload = dict(metrics_fallback)
-
-    usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
-    if not isinstance(usage_input_tokens, int):
-        usage_input_tokens = None
-
-    payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
-    if run_id is not None:
-        payload["run_id"] = run_id
-    if session_id is not None:
-        payload["session_id"] = session_id
-    if status is not None:
-        raw_status = status.value if isinstance(status, RunStatus) else str(status)
-        payload["status"] = raw_status.lower()
-    if model_name is not None or model_id is not None or provider is not None:
-        model_payload: dict[str, Any] = {}
-        if model_name is not None:
-            model_payload["config"] = model_name
-        if model_id is not None:
-            model_payload["id"] = model_id
-        if provider is not None:
-            model_payload["provider"] = provider
-        if model_payload:
-            payload["model"] = model_payload
-    if usage_payload:
-        payload["usage"] = usage_payload
-    context_payload = _build_context_payload(
-        context_input_tokens=context_input_tokens if context_input_tokens is not None else usage_input_tokens,
-        model_config=model_config,
-    )
-    if context_payload:
-        payload["context"] = context_payload
-    if tool_count is not None:
-        payload["tools"] = {"count": tool_count}
-
-    if len(payload) == 1:
-        return None
-    return {AI_RUN_METADATA_KEY: payload}
 
 
 def _normalized_string_list(values: object) -> list[str]:
@@ -631,9 +484,10 @@ def _track_model_request_metrics(
         state.latest_model_id = event.model
     if event.model_provider:
         state.latest_model_provider = event.model_provider
-    if isinstance(event.input_tokens, int):
-        state.latest_request_input_tokens = event.input_tokens
-        state.request_metric_totals["input_tokens"] += event.input_tokens
+    request_input_tokens = event.input_tokens if isinstance(event.input_tokens, int) else None
+    if request_input_tokens is not None:
+        state.latest_request_input_tokens = request_input_tokens
+        state.request_metric_totals["input_tokens"] += request_input_tokens
     if isinstance(event.output_tokens, int):
         state.request_metric_totals["output_tokens"] += event.output_tokens
     if isinstance(event.total_tokens, int):
@@ -644,6 +498,12 @@ def _track_model_request_metrics(
         state.request_metric_totals["cache_read_tokens"] += event.cache_read_tokens
     if isinstance(event.cache_write_tokens, int):
         state.request_metric_totals["cache_write_tokens"] += event.cache_write_tokens
+    state.latest_request_cache_read_tokens = (
+        event.cache_read_tokens if isinstance(event.cache_read_tokens, int) else None
+    )
+    state.latest_request_cache_write_tokens = (
+        event.cache_write_tokens if isinstance(event.cache_write_tokens, int) else None
+    )
     if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
         state.first_token_latency = float(event.time_to_first_token)
 
@@ -1138,7 +998,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             if tool_trace_collector is not None:
                 tool_trace_collector.extend(_extract_tool_trace(response))
             if run_metadata_collector is not None:
-                run_metadata = _build_ai_run_metadata_content(
+                run_metadata = build_ai_run_metadata_content(
                     agent_name=agent_name,
                     config=config,
                     runtime_paths=runtime_paths,
@@ -1615,11 +1475,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
                             )
                         if run_metadata_collector is not None:
-                            fallback_metrics = _build_model_request_metrics_fallback(
+                            fallback_metrics = build_model_request_metrics_fallback(
                                 state.request_metric_totals,
                                 state.first_token_latency,
                             )
-                            cancelled_metadata = _build_ai_run_metadata_content(
+                            cancelled_metadata = build_ai_run_metadata_content(
                                 agent_name=agent_name,
                                 config=config,
                                 runtime_paths=runtime_paths,
@@ -1630,7 +1490,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 model_provider=state.latest_model_provider,
                                 room_id=room_id,
                                 metrics=fallback_metrics,
-                                context_input_tokens=state.latest_request_input_tokens,
+                                context_raw_input_tokens=state.latest_request_input_tokens,
+                                context_cache_read_tokens=state.latest_request_cache_read_tokens,
+                                context_cache_write_tokens=state.latest_request_cache_write_tokens,
                                 tool_count=state.observed_tool_calls,
                             )
                             if cancelled_metadata:
@@ -1653,11 +1515,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     break
 
                 if run_metadata_collector is not None:
-                    fallback_metrics = _build_model_request_metrics_fallback(
+                    fallback_metrics = build_model_request_metrics_fallback(
                         state.request_metric_totals,
                         state.first_token_latency,
                     )
-                    run_metadata = _build_ai_run_metadata_content(
+                    run_metadata = build_ai_run_metadata_content(
                         agent_name=agent_name,
                         config=config,
                         runtime_paths=runtime_paths,
@@ -1674,7 +1536,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         room_id=room_id,
                         metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
                         metrics_fallback=fallback_metrics,
-                        context_input_tokens=state.latest_request_input_tokens,
+                        context_raw_input_tokens=state.latest_request_input_tokens,
+                        context_cache_read_tokens=state.latest_request_cache_read_tokens,
+                        context_cache_write_tokens=state.latest_request_cache_write_tokens,
                         tool_count=(
                             len(state.completed_run_event.tools)
                             if state.completed_run_event is not None and state.completed_run_event.tools is not None

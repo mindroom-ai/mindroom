@@ -29,6 +29,7 @@ source_roots = ["src"]
 path = "mindroom.ai"
 depends_on = [
     "mindroom.agents",
+    "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.cancellation",
     "mindroom.constants",
@@ -46,6 +47,12 @@ depends_on = [
     "mindroom.memory",
     "mindroom.timing",
     "mindroom.tool_system.events",
+]
+
+[[modules]]
+path = "mindroom.ai_run_metadata"
+depends_on = [
+    "mindroom.constants",
 ]
 
 [[modules]]
