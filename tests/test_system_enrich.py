@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,6 +24,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -56,27 +56,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
-
-
-@dataclass
-class _FakePreparedExecution:
-    messages: tuple[Message, ...]
-    unseen_event_ids: list[str]
-    compaction_outcomes: list[object]
-    replay_plan: object | None = None
-    replays_persisted_history: bool = False
-    compaction_decision: object | None = None
-    compaction_reply_outcome: str = "none"
-    prepared_context_tokens: int | None = None
-    estimated_context_tokens: int | None = None
-
-    @property
-    def final_prompt(self) -> str:
-        return "\n\n".join(str(message.content) for message in self.messages if message.content)
-
-    @property
-    def context_messages(self) -> tuple[Message, ...]:
-        return self.messages[:-1]
 
 
 def _config(tmp_path: Path) -> Config:
@@ -338,13 +317,15 @@ async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_addit
     rendered = render_system_enrichment_block(system_items)
     prepared_agent = _agent("code", "CodeAgent")
 
-    async def fake_prepare_agent_execution_context(**kwargs: object) -> _FakePreparedExecution:
+    async def fake_prepare_agent_execution_context(**kwargs: object) -> PreparedExecutionContext:
         agent = kwargs["agent"]
         assert isinstance(agent, Agent)
         assert agent.additional_context == rendered
-        return _FakePreparedExecution(
+        return PreparedExecutionContext(
             messages=(Message(role="user", content="prepared prompt"),),
+            replay_plan=None,
             unseen_event_ids=[],
+            replays_persisted_history=False,
             compaction_outcomes=[],
         )
 
@@ -403,15 +384,17 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
     )
     rendered = render_system_enrichment_block(system_items)
 
-    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> _FakePreparedExecution:
+    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> PreparedExecutionContext:
         team = kwargs["team"]
         agents = kwargs["agents"]
         assert isinstance(team, Team)
         assert team.additional_context == rendered
         assert all(agent.additional_context == rendered for agent in agents)
-        return _FakePreparedExecution(
+        return PreparedExecutionContext(
             messages=(Message(role="user", content="prepared team prompt"),),
+            replay_plan=None,
             unseen_event_ids=[],
+            replays_persisted_history=False,
             compaction_outcomes=[],
         )
 
@@ -483,10 +466,12 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
         failed_agent_names=[],
     )
 
-    async def fake_prepare_bound_team_execution_context(**_kwargs: object) -> _FakePreparedExecution:
-        return _FakePreparedExecution(
+    async def fake_prepare_bound_team_execution_context(**_kwargs: object) -> PreparedExecutionContext:
+        return PreparedExecutionContext(
             messages=(Message(role="user", content="prepared team prompt"),),
+            replay_plan=None,
             unseen_event_ids=[],
+            replays_persisted_history=False,
             compaction_outcomes=[],
         )
 

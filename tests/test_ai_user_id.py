@@ -63,6 +63,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
+from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import PreparedHistoryState, strip_transient_enrichment_from_session
 from mindroom.history.runtime import ScopeSessionContext
@@ -4719,7 +4720,7 @@ class TestUserIdPassthrough:
         config = _config()
         mock_agent = MagicMock()
         mock_agent.additional_context = "existing context"
-        prepared_execution = SimpleNamespace(
+        prepared_execution = PreparedExecutionContext(
             messages=(Message(role="user", content="prepared prompt"),),
             replay_plan=None,
             unseen_event_ids=[],
