@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from contextlib import aclosing, contextmanager
+from collections.abc import AsyncGenerator as AsyncGeneratorABC
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from agno.models.message import Message
 from pydantic import BaseModel
@@ -26,6 +27,16 @@ if TYPE_CHECKING:
     from mindroom.config.models import DebugConfig
 
 _INSTALLED_ATTR = "_mindroom_llm_request_logging_installed"
+
+
+@runtime_checkable
+class _AsyncClosableIterator(Protocol):
+    """Minimal async-iterator surface that can be closed explicitly."""
+
+    async def aclose(self) -> None:
+        """Close the async iterator and release any underlying resources."""
+
+
 _SKIP_MODEL_PARAM_NAMES = {
     "id",
     "name",
@@ -248,9 +259,10 @@ async def stream_with_llm_request_log_context[StreamEventT](
     request_context: dict[str, object],
 ) -> AsyncIterator[StreamEventT]:
     """Advance one async stream with request-log context bound per item pull."""
-    async with aclosing(cast("Any", stream_generator)) as stream_iterator:
+    stream: AsyncIterator[StreamEventT] | None = None
+    try:
         with bind_llm_request_log_context(**request_context):
-            stream = stream_iterator.__aiter__()
+            stream = stream_generator.__aiter__()
         while True:
             try:
                 with bind_llm_request_log_context(**request_context):
@@ -258,6 +270,10 @@ async def stream_with_llm_request_log_context[StreamEventT](
             except StopAsyncIteration:
                 return
             yield event
+    finally:
+        if isinstance(stream, (AsyncGeneratorABC, _AsyncClosableIterator)):
+            with bind_llm_request_log_context(**request_context):
+                await stream.aclose()
 
 
 async def write_llm_request_log(

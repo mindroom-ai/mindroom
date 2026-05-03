@@ -11,7 +11,12 @@ from agno.models.message import Message, MessageMetrics
 
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
-from mindroom.llm_request_logging import bind_llm_request_log_context, install_llm_request_logging
+from mindroom.llm_request_logging import (
+    bind_llm_request_log_context,
+    current_llm_request_log_context,
+    install_llm_request_logging,
+    stream_with_llm_request_log_context,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -31,6 +36,23 @@ class _FakeModel:
 
     async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[dict[str, str]]:
         yield {"status": "ok"}
+
+
+class _PlainAsyncIterator:
+    """Async iterator without aclose(), valid under the AsyncIterator contract."""
+
+    def __init__(self, values: list[str]) -> None:
+        self._values = values
+        self.contexts: list[dict[str, object]] = []
+
+    def __aiter__(self) -> _PlainAsyncIterator:
+        return self
+
+    async def __anext__(self) -> str:
+        if not self._values:
+            raise StopAsyncIteration
+        self.contexts.append(current_llm_request_log_context())
+        return self._values.pop(0)
 
 
 def _read_log_entries(log_dir: Path) -> list[dict[str, Any]]:
@@ -157,6 +179,27 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:  # noqa
     assert entries[1]["correlation_id"] == "$reply:example.com"
     assert entries[1]["tools"] == []
     assert entries[1]["tool_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_with_llm_request_log_context_accepts_plain_async_iterator() -> None:
+    """Request-log stream binding should not require an aclose method."""
+    source = _PlainAsyncIterator(["one", "two"])
+
+    async def collect() -> list[str]:
+        return [
+            item
+            async for item in stream_with_llm_request_log_context(
+                source,
+                request_context={"correlation_id": "corr-1"},
+            )
+        ]
+
+    assert await collect() == ["one", "two"]
+    assert source.contexts == [
+        {"correlation_id": "corr-1"},
+        {"correlation_id": "corr-1"},
+    ]
 
 
 @pytest.mark.asyncio
