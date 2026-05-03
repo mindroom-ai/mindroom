@@ -31,8 +31,8 @@ _MAX_STRING_LENGTH = 2048
 _MAX_TRACEBACK_LENGTH = 4096
 _MAX_COLLECTION_ITEMS = 25
 _MAX_REDACTION_DEPTH = 6
-_FAILURE_LOG_MAX_BYTES = 10 * 1024 * 1024
-_FAILURE_LOG_BACKUPS = 5
+_TOOL_CALL_LOG_MAX_BYTES = 10 * 1024 * 1024
+_TOOL_CALL_LOG_BACKUPS = 5
 _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 _BEARER_TOKEN_PATTERN = re.compile(
     r"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token)?\s+)"
@@ -93,8 +93,8 @@ _SECRET_ASSIGNMENT_PATTERN = re.compile(
     rf"(?=(?:{_NEXT_ASSIGNMENT_PATTERN})|[\r\n,&)\]}}]|$)",
     re.IGNORECASE,
 )
-_FAILURE_LOGGERS: dict[Path, logging.Logger] = {}
-_FAILURE_LOGGER_LOCK = Lock()
+_TOOL_CALL_LOGGERS: dict[Path, logging.Logger] = {}
+_TOOL_CALL_LOGGER_LOCK = Lock()
 
 type JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
@@ -416,34 +416,34 @@ def build_tool_success_record(
     )
 
 
-def _failure_log_path(runtime_paths: RuntimePaths) -> Path:
+def _tool_call_log_path(runtime_paths: RuntimePaths) -> Path:
     return tracking_dir(runtime_paths) / "tool_calls.jsonl"
 
 
-def _failure_logger(path: Path) -> logging.Logger:
-    with _FAILURE_LOGGER_LOCK:
-        cached = _FAILURE_LOGGERS.get(path)
+def _tool_call_logger(path: Path) -> logging.Logger:
+    with _TOOL_CALL_LOGGER_LOCK:
+        cached = _TOOL_CALL_LOGGERS.get(path)
         if cached is not None:
             return cached
         path.parent.mkdir(parents=True, exist_ok=True)
-        failure_logger = logging.getLogger(f"mindroom.tool_failures.{path}")
-        failure_logger.handlers.clear()
-        failure_logger.setLevel(logging.INFO)
-        failure_logger.propagate = False
+        tool_call_logger = logging.getLogger(f"mindroom.tool_calls.{path}")
+        tool_call_logger.handlers.clear()
+        tool_call_logger.setLevel(logging.INFO)
+        tool_call_logger.propagate = False
         handler = RotatingFileHandler(
             path,
-            maxBytes=_FAILURE_LOG_MAX_BYTES,
-            backupCount=_FAILURE_LOG_BACKUPS,
+            maxBytes=_TOOL_CALL_LOG_MAX_BYTES,
+            backupCount=_TOOL_CALL_LOG_BACKUPS,
             encoding="utf-8",
         )
         handler.setFormatter(logging.Formatter("%(message)s"))
-        failure_logger.addHandler(handler)
-        _FAILURE_LOGGERS[path] = failure_logger
-        return failure_logger
+        tool_call_logger.addHandler(handler)
+        _TOOL_CALL_LOGGERS[path] = tool_call_logger
+        return tool_call_logger
 
 
-def _append_failure_record(record: ToolCallRecord, runtime_paths: RuntimePaths) -> None:
-    _failure_logger(_failure_log_path(runtime_paths)).info(
+def _append_tool_call_record(record: ToolCallRecord, runtime_paths: RuntimePaths) -> None:
+    _tool_call_logger(_tool_call_log_path(runtime_paths)).info(
         json.dumps(record.as_dict(), sort_keys=True, allow_nan=False),
     )
 
@@ -480,9 +480,14 @@ def record_tool_failure(
         correlation_id=correlation_id,
     )
     if runtime_paths is None:
+        logger.debug(
+            "Skipping tool failure persistence without runtime paths",
+            tool_name=tool_name,
+            correlation_id=correlation_id,
+        )
         return record
     try:
-        _append_failure_record(record, runtime_paths)
+        _append_tool_call_record(record, runtime_paths)
     except Exception:
         logger.exception(
             "Failed to persist tool failure record",
@@ -524,9 +529,14 @@ def record_tool_success(
         correlation_id=correlation_id,
     )
     if runtime_paths is None:
+        logger.debug(
+            "Skipping tool success persistence without runtime paths",
+            tool_name=tool_name,
+            correlation_id=correlation_id,
+        )
         return record
     try:
-        _append_failure_record(record, runtime_paths)
+        _append_tool_call_record(record, runtime_paths)
     except Exception:
         logger.exception(
             "Failed to persist tool success record",
@@ -536,9 +546,9 @@ def record_tool_success(
     return record
 
 
-def _reset_failure_loggers_for_tests() -> None:
-    for failure_logger in _FAILURE_LOGGERS.values():
-        for handler in list(failure_logger.handlers):
+def _reset_tool_call_loggers_for_tests() -> None:
+    for tool_call_logger in _TOOL_CALL_LOGGERS.values():
+        for handler in list(tool_call_logger.handlers):
             handler.close()
-            failure_logger.removeHandler(handler)
-    _FAILURE_LOGGERS.clear()
+            tool_call_logger.removeHandler(handler)
+    _TOOL_CALL_LOGGERS.clear()

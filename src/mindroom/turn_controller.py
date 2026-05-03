@@ -1117,16 +1117,9 @@ class TurnController:
             ),
         )
         tracked_handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
-        tracked_handled_turn = HandledTurnState.create(
-            tracked_handled_turn.source_event_ids,
-            response_event_id=tracked_handled_turn.response_event_id,
-            visible_echo_event_id=tracked_handled_turn.visible_echo_event_id,
-            source_event_prompts=tracked_handled_turn.source_event_prompts,
-            response_owner=tracked_handled_turn.response_owner,
+        tracked_handled_turn = tracked_handled_turn.with_request_context(
             requester_id=requester_user_id,
             correlation_id=event.event_id,
-            history_scope=tracked_handled_turn.history_scope,
-            conversation_target=tracked_handled_turn.conversation_target,
         )
         tracked_handled_turn = self.deps.turn_store.attach_response_context(
             tracked_handled_turn,
@@ -1670,16 +1663,9 @@ class TurnController:
                 dispatch_timing.mark("dispatch_prepare_ready")
             if dispatch is None:
                 return
-            handled_turn = HandledTurnState.create(
-                handled_turn.source_event_ids,
-                response_event_id=handled_turn.response_event_id,
-                visible_echo_event_id=handled_turn.visible_echo_event_id,
-                source_event_prompts=handled_turn.source_event_prompts,
-                response_owner=handled_turn.response_owner,
+            handled_turn = handled_turn.with_request_context(
                 requester_id=dispatch.requester_user_id,
                 correlation_id=dispatch.correlation_id,
-                history_scope=handled_turn.history_scope,
-                conversation_target=handled_turn.conversation_target,
             )
 
             command = None

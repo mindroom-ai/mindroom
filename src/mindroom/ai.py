@@ -380,15 +380,15 @@ def build_matrix_run_metadata(
 ) -> dict[str, Any] | None:
     """Build metadata dict for a run, tracking consumed Matrix event ids."""
     metadata = dict(extra_metadata or {})
-    if room_id is not None or extra_metadata is None:
+    if room_id is not None:
         metadata["room_id"] = room_id
-    if thread_id is not None or extra_metadata is None:
+    if thread_id is not None:
         metadata["thread_id"] = thread_id
-    if reply_to_event_id is not None or extra_metadata is None:
+    if reply_to_event_id is not None:
         metadata["reply_to_event_id"] = reply_to_event_id
-    if requester_id is not None or extra_metadata is None:
+    if requester_id is not None:
         metadata["requester_id"] = requester_id
-    if correlation_id is not None or extra_metadata is None:
+    if correlation_id is not None:
         metadata["correlation_id"] = correlation_id
     if tools_schema is not None:
         metadata["tools_schema"] = tools_schema

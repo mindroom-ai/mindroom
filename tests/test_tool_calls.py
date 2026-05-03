@@ -9,8 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.constants import tracking_dir
-from mindroom.tool_system import tool_failures
-from mindroom.tool_system.tool_failures import (
+from mindroom.tool_system import tool_calls
+from mindroom.tool_system.tool_calls import (
     build_tool_failure_record,
     build_tool_success_record,
     record_tool_failure,
@@ -21,9 +21,9 @@ from tests.conftest import test_runtime_paths
 
 
 @pytest.fixture(autouse=True)
-def reset_failure_loggers() -> None:
+def reset_tool_call_loggers() -> None:
     """Reset cached rotating loggers so tests do not leak global handler state."""
-    tool_failures._reset_failure_loggers_for_tests()
+    tool_calls._reset_tool_call_loggers_for_tests()
 
 
 def _execution_identity() -> ToolExecutionIdentity:
@@ -101,13 +101,13 @@ def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
 
 def test_sanitize_failure_text_redacts_url_credentials() -> None:
     """Credential-bearing HTTP(S) URLs should be masked in free-form error text."""
-    sanitized = tool_failures.sanitize_failure_text("clone failed for https://alice:secret@example.com/private.git")
+    sanitized = tool_calls.sanitize_failure_text("clone failed for https://alice:secret@example.com/private.git")
     assert sanitized == "clone failed for https://alice:***@example.com/private.git"
 
 
 def test_sanitize_failure_text_redacts_signed_url_query_credentials() -> None:
     """Signed query-string credentials should be redacted alongside basic-auth URL credentials."""
-    sanitized = tool_failures.sanitize_failure_text(
+    sanitized = tool_calls.sanitize_failure_text(
         "fetch failed for "
         "https://alice:secret@example.com/private?"
         "sig=azure-secret&X-Amz-Signature=s3-signature&X-Amz-Credential=s3-credential"
@@ -124,7 +124,7 @@ def test_sanitize_failure_text_redacts_signed_url_query_credentials() -> None:
 
 def test_sanitize_failure_text_redacts_gcs_signed_url_query_credentials() -> None:
     """Google Cloud Storage signed URL query credentials should be redacted."""
-    sanitized = tool_failures.sanitize_failure_text(
+    sanitized = tool_calls.sanitize_failure_text(
         "fetch failed for "
         "https://storage.googleapis.com/bucket/object?"
         "X-Goog-Credential=gcs-credential&X-Goog-Signature=gcs-signature"
@@ -156,7 +156,7 @@ def test_sanitize_failure_text_redacts_gcs_signed_url_query_credentials() -> Non
 )
 def test_sanitize_failure_text_redacts_v2_signed_url_query_credentials(url: str, expected_query: str) -> None:
     """Legacy GCS and S3 V2 signed URL query credentials should be redacted."""
-    sanitized = tool_failures.sanitize_failure_text(f"fetch failed for {url}")
+    sanitized = tool_calls.sanitize_failure_text(f"fetch failed for {url}")
 
     assert sanitized == f"fetch failed for {url.split('?', 1)[0]}?{expected_query}"
 
@@ -177,12 +177,12 @@ def test_sanitize_failure_text_redacts_v2_signed_url_query_credentials(url: str,
 )
 def test_sanitize_failure_text_redacts_common_sdk_secret_phrasings(raw: str, expected: str) -> None:
     """Common SDK authentication errors should not leak tokens into durable logs."""
-    assert tool_failures.sanitize_failure_text(raw) == expected
+    assert tool_calls.sanitize_failure_text(raw) == expected
 
 
 def test_sanitize_failure_text_redacts_additional_provider_secret_formats() -> None:
     """Provider-specific token formats should be recognized outside generic API-key phrasings."""
-    sanitized = tool_failures.sanitize_failure_text(
+    sanitized = tool_calls.sanitize_failure_text(
         "sk_live_secret rk_live_secret ghp_secret github_pat_secret AIzaSySecret",
     )
 
@@ -234,7 +234,7 @@ def test_build_tool_failure_record_redacts_camel_case_and_prefixed_secret_keys(
 
 def test_sanitize_failure_text_redacts_camel_case_secret_assignments() -> None:
     """CamelCase secret assignments should redact across quoted and unquoted forms."""
-    sanitized = tool_failures.sanitize_failure_text(
+    sanitized = tool_calls.sanitize_failure_text(
         "apiKey=secret clientSecret='top-secret' accessToken: token-value "
         'refreshToken="refresh-value" openaiApiKey=provider-secret',
     )
@@ -257,15 +257,15 @@ def test_sanitize_failure_text_redacts_camel_case_secret_assignments() -> None:
 )
 def test_sanitize_failure_redacts_secret_key_suffix_variants(secret_key: str) -> None:
     """Secret-bearing stems should redact even when the key has additional suffix components."""
-    assert tool_failures.sanitize_failure_value({secret_key: "topsecret"}) == {
+    assert tool_calls.sanitize_failure_value({secret_key: "topsecret"}) == {
         secret_key: "***redacted***",
     }
-    assert tool_failures.sanitize_failure_text(f"{secret_key}=topsecret") == f"{secret_key}=***redacted***"
+    assert tool_calls.sanitize_failure_text(f"{secret_key}=topsecret") == f"{secret_key}=***redacted***"
 
 
 def test_sanitize_failure_value_replaces_non_finite_floats() -> None:
     """NaN and infinity should be normalized before persistence to JSONL."""
-    assert tool_failures.sanitize_failure_value(
+    assert tool_calls.sanitize_failure_value(
         {
             "nan": float("nan"),
             "pos_inf": float("inf"),
@@ -303,7 +303,7 @@ def test_build_tool_failure_record_normalizes_non_finite_duration(duration_ms: f
 
 def test_sanitize_failure_value_handles_unrepresentable_keys_and_values() -> None:
     """Custom objects with broken __str__ or __repr__ should not abort sanitization."""
-    sanitized = tool_failures.sanitize_failure_value(
+    sanitized = tool_calls.sanitize_failure_value(
         {
             _BadStr(): "kept",
             "value": _BadRepr(),
@@ -320,7 +320,7 @@ def test_build_tool_failure_record_handles_unrepresentable_exception_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exceptions with broken __str__ should still produce a durable record."""
-    monkeypatch.setattr(tool_failures.traceback, "format_exception", lambda *_args: (_ for _ in ()).throw(RuntimeError))
+    monkeypatch.setattr(tool_calls.traceback, "format_exception", lambda *_args: (_ for _ in ()).throw(RuntimeError))
     error = _BrokenError()
     record = build_tool_failure_record(
         tool_name="explode",
@@ -344,7 +344,7 @@ def test_build_tool_failure_record_handles_unrepresentable_exception_text(
 
 def test_build_tool_failure_record_truncates_tracebacks(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tracebacks should be sanitized before length limits are applied."""
-    monkeypatch.setattr(tool_failures, "_MAX_TRACEBACK_LENGTH", 120)
+    monkeypatch.setattr(tool_calls, "_MAX_TRACEBACK_LENGTH", 120)
 
     def explode() -> None:
         msg = "token=secret-value " + ("x" * 200)
@@ -379,8 +379,8 @@ def test_record_tool_failure_writes_jsonl_and_rotates(tmp_path: Path, monkeypatc
     log_path = tracking_dir(runtime_paths) / "tool_calls.jsonl"
     backup_path = Path(f"{log_path}.1")
 
-    monkeypatch.setattr(tool_failures, "_FAILURE_LOG_MAX_BYTES", 300)
-    monkeypatch.setattr(tool_failures, "_FAILURE_LOG_BACKUPS", 1)
+    monkeypatch.setattr(tool_calls, "_TOOL_CALL_LOG_MAX_BYTES", 300)
+    monkeypatch.setattr(tool_calls, "_TOOL_CALL_LOG_BACKUPS", 1)
 
     for index in range(6):
         record_tool_failure(
@@ -471,8 +471,8 @@ def test_record_tool_failure_logs_secondary_write_errors(tmp_path: Path) -> None
     runtime_paths = test_runtime_paths(tmp_path)
 
     with (
-        patch("mindroom.tool_system.tool_failures._append_failure_record", side_effect=OSError("disk full")),
-        patch("mindroom.tool_system.tool_failures.logger.exception") as mock_logger_exception,
+        patch("mindroom.tool_system.tool_calls._append_tool_call_record", side_effect=OSError("disk full")),
+        patch("mindroom.tool_system.tool_calls.logger.exception") as mock_logger_exception,
     ):
         record = record_tool_failure(
             tool_name="explode",
@@ -501,7 +501,7 @@ def test_record_tool_failure_logs_secondary_write_errors(tmp_path: Path) -> None
 
 def test_record_tool_failure_skips_persistence_without_runtime_paths() -> None:
     """The durable record should still be built when runtime paths are unavailable."""
-    with patch("mindroom.tool_system.tool_failures._append_failure_record") as mock_append:
+    with patch("mindroom.tool_system.tool_calls._append_tool_call_record") as mock_append:
         record = record_tool_failure(
             tool_name="explode",
             arguments={"api_key": "secret"},
@@ -547,7 +547,7 @@ def test_build_tool_success_record_redacts_large_result_payloads() -> None:
     assert record.arguments == {"api_key": "***redacted***"}
     assert record.result == {
         "authorization": "***redacted***",
-        "payload": ("x" * (tool_failures._MAX_STRING_LENGTH - len("... [truncated]"))) + "... [truncated]",
+        "payload": ("x" * (tool_calls._MAX_STRING_LENGTH - len("... [truncated]"))) + "... [truncated]",
     }
 
 
@@ -574,14 +574,14 @@ def test_build_tool_failure_record_uses_redaction_markers_and_truncates_large_pa
 
     assert record.arguments["api_key"] == "***redacted***"
     assert record.arguments["payload"].endswith("... [truncated]")
-    assert len(record.arguments["payload"]) == tool_failures._MAX_STRING_LENGTH
+    assert len(record.arguments["payload"]) == tool_calls._MAX_STRING_LENGTH
     assert record.arguments["items"][-1] == "... [truncated]"
     assert record.error_message == "cookie=***redacted***"
 
 
 def test_sanitize_failure_value_truncates_at_max_redaction_depth() -> None:
     """Nested values beyond the configured redaction depth should be truncated."""
-    assert tool_failures.sanitize_failure_value(
+    assert tool_calls.sanitize_failure_value(
         {"a": {"b": {"c": {"d": {"e": {"f": {"g": "secret"}}}}}}},
     ) == {
         "a": {
@@ -589,7 +589,7 @@ def test_sanitize_failure_value_truncates_at_max_redaction_depth() -> None:
                 "c": {
                     "d": {
                         "e": {
-                            "f": tool_failures._TRUNCATED,
+                            "f": tool_calls._TRUNCATED,
                         },
                     },
                 },

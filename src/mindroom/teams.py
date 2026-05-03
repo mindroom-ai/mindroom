@@ -98,10 +98,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _team_tools_schema(team: Team) -> list[dict[str, object]]:
-    return team_tool_definition_payloads_for_logging(team)
-
-
 def _team_run_input_text(run_input: str | list[Message]) -> str:
     if isinstance(run_input, str):
         return run_input
@@ -1504,7 +1500,7 @@ async def _prepare_materialized_team_execution(
         thread_id=thread_id,
         requester_id=requester_id,
         correlation_id=correlation_id,
-        tools_schema=_team_tools_schema(team),
+        tools_schema=team_tool_definition_payloads_for_logging(team),
         model_params=model_params_payload(team.model) if team.model is not None else {},
         extra_metadata=matrix_run_metadata,
     )

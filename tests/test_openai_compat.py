@@ -62,7 +62,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
 from mindroom.tool_approval import shutdown_approval_store
-from mindroom.tool_system.tool_failures import record_tool_success
+from mindroom.tool_system.tool_calls import record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,

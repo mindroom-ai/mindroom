@@ -22,7 +22,7 @@ from mindroom.approval_events import (
     terminal_edit_matches_card_sender,
 )
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.tool_failures import sanitize_failure_text, sanitize_failure_value
+from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
     from pathlib import Path

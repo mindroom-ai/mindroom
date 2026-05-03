@@ -186,6 +186,25 @@ class HandledTurnState:
             conversation_target=self.conversation_target,
         )
 
+    def with_request_context(
+        self,
+        *,
+        requester_id: str | None,
+        correlation_id: str | None,
+    ) -> HandledTurnState:
+        """Return a copy with updated request trace context."""
+        return HandledTurnState.create(
+            self.source_event_ids,
+            response_event_id=self.response_event_id,
+            visible_echo_event_id=self.visible_echo_event_id,
+            source_event_prompts=self.source_event_prompts,
+            response_owner=self.response_owner,
+            requester_id=requester_id,
+            correlation_id=correlation_id,
+            history_scope=self.history_scope,
+            conversation_target=self.conversation_target,
+        )
+
     def with_response_context(
         self,
         *,

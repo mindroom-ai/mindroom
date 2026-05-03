@@ -278,7 +278,10 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
                 "mindroom.ai._prepare_agent_and_prompt",
                 new=AsyncMock(return_value=_prepared_prompt_result(agent)),
             ),
-            patch("mindroom.ai._agent_tools_schema", return_value=[{"name": "demo_tool", "description": "Echo"}]),
+            patch(
+                "mindroom.ai.agent_tool_definition_payloads_for_logging",
+                return_value=[{"name": "demo_tool", "description": "Echo"}],
+            ),
         ):
             response = await ai_response(
                 agent_name="general",
@@ -426,7 +429,10 @@ async def test_streaming_tool_call_shares_correlation_id_across_streaming_sinks(
             "mindroom.ai._prepare_agent_and_prompt",
             new=AsyncMock(return_value=_prepared_prompt_result(agent)),
         ),
-        patch("mindroom.ai._agent_tools_schema", return_value=[{"name": "demo_tool", "description": "Echo"}]),
+        patch(
+            "mindroom.ai.agent_tool_definition_payloads_for_logging",
+            return_value=[{"name": "demo_tool", "description": "Echo"}],
+        ),
     ):
         chunks = [
             chunk
@@ -499,7 +505,10 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(tmp_pat
             "mindroom.ai._prepare_agent_and_prompt",
             new=AsyncMock(return_value=_prepared_prompt_result(agent)),
         ),
-        patch("mindroom.ai._agent_tools_schema", return_value=[{"name": "demo_tool", "description": "Echo"}]),
+        patch(
+            "mindroom.ai.agent_tool_definition_payloads_for_logging",
+            return_value=[{"name": "demo_tool", "description": "Echo"}],
+        ),
     ):
         response = await ai_response(
             agent_name="general",
@@ -522,6 +531,6 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(tmp_pat
     assert re.fullmatch(r"[0-9a-f]{32}", correlation_id)
     assert tool_entry["correlation_id"] == correlation_id
     assert metadata["correlation_id"] == correlation_id
-    assert metadata["reply_to_event_id"] is None
-    assert metadata["room_id"] is None
-    assert metadata["thread_id"] is None
+    assert "reply_to_event_id" not in metadata
+    assert "room_id" not in metadata
+    assert "thread_id" not in metadata

@@ -5012,10 +5012,7 @@ class TestUserIdPassthrough:
         persisted_run = cast("RunOutput", persisted_session.runs[0])
         assert persisted_run.status is RunStatus.completed
         assert persisted_run.metadata == {
-            "room_id": None,
-            "thread_id": None,
             "reply_to_event_id": "e1",
-            "requester_id": None,
             "correlation_id": "e1",
             "tools_schema": [],
             "model_params": {},
@@ -5461,10 +5458,6 @@ class TestUserIdPassthrough:
         assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
         assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
         assert logged_contexts[0]["metadata"] == {
-            "room_id": None,
-            "thread_id": None,
-            "reply_to_event_id": None,
-            "requester_id": None,
             "correlation_id": logged_contexts[0]["correlation_id"],
             "tools_schema": [],
             "model_params": {},
@@ -5704,10 +5697,6 @@ class TestUserIdPassthrough:
         assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
         assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
         assert logged_contexts[0]["metadata"] == {
-            "room_id": None,
-            "thread_id": None,
-            "reply_to_event_id": None,
-            "requester_id": None,
             "correlation_id": logged_contexts[0]["correlation_id"],
             "tools_schema": [],
             "model_params": {},

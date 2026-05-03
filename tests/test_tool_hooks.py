@@ -946,7 +946,7 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
     with (
         tool_runtime_context(runtime_context),
         tool_execution_identity(_execution_identity()),
-        patch("mindroom.tool_system.tool_hooks.record_tool_success", side_effect=RuntimeError("disk full")),
+        patch("mindroom.tool_system.tool_calls._append_tool_call_record", side_effect=RuntimeError("disk full")),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 

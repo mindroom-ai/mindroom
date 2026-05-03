@@ -37,7 +37,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     resolve_tool_runtime_hook_bindings,
 )
-from mindroom.tool_system.tool_failures import record_tool_failure, record_tool_success
+from mindroom.tool_system.tool_calls import record_tool_failure, record_tool_success
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -242,7 +242,7 @@ def _should_record_successful_tool_call(resolved_context: _ResolvedToolContext) 
     return bool(resolved_context.config and resolved_context.config.debug.log_llm_requests)
 
 
-def _record_tool_success_if_debug_enabled(
+def _record_debug_tool_success(
     *,
     tool_name: str,
     arguments: dict[str, object],
@@ -253,28 +253,21 @@ def _record_tool_success_if_debug_enabled(
 ) -> None:
     if not _should_record_successful_tool_call(resolved_context):
         return
-    try:
-        record_tool_success(
-            tool_name=tool_name,
-            arguments=arguments,
-            result=result,
-            duration_ms=duration_ms,
-            agent_name=resolved_context.agent_name or None,
-            room_id=resolved_context.room_id,
-            thread_id=resolved_context.thread_id,
-            reply_to_event_id=resolved_context.reply_to_event_id,
-            requester_id=resolved_context.requester_id,
-            session_id=resolved_context.session_id,
-            correlation_id=resolved_context.correlation_id,
-            execution_identity=dispatch_context.execution_identity if dispatch_context is not None else None,
-            runtime_paths=resolved_context.runtime_paths,
-        )
-    except Exception:
-        logger.exception(
-            "Failed to record tool success",
-            tool_name=tool_name,
-            correlation_id=resolved_context.correlation_id,
-        )
+    record_tool_success(
+        tool_name=tool_name,
+        arguments=arguments,
+        result=result,
+        duration_ms=duration_ms,
+        agent_name=resolved_context.agent_name or None,
+        room_id=resolved_context.room_id,
+        thread_id=resolved_context.thread_id,
+        reply_to_event_id=resolved_context.reply_to_event_id,
+        requester_id=resolved_context.requester_id,
+        session_id=resolved_context.session_id,
+        correlation_id=resolved_context.correlation_id,
+        execution_identity=dispatch_context.execution_identity if dispatch_context is not None else None,
+        runtime_paths=resolved_context.runtime_paths,
+    )
 
 
 def _format_declined_result(tool_name: str, reason: str) -> str:
@@ -646,7 +639,7 @@ async def _execute_bridge(
             "connect_url": exc.connect_url,
         }
         duration_ms = (time.perf_counter() - started_at) * 1000
-        _record_tool_success_if_debug_enabled(
+        _record_debug_tool_success(
             tool_name=tool_name,
             arguments=args,
             result=result,
@@ -720,7 +713,7 @@ async def _execute_bridge(
         raise
 
     duration_ms = (time.perf_counter() - started_at) * 1000
-    _record_tool_success_if_debug_enabled(
+    _record_debug_tool_success(
         tool_name=tool_name,
         arguments=args,
         result=result,
