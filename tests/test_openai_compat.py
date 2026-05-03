@@ -1948,14 +1948,14 @@ class TestMessageConversion:
 
 @pytest.mark.asyncio
 async def test_openai_completion_lock_releases_after_response_background() -> None:
-    """Queued compaction must start only after the completion lock finalizer runs."""
+    """Response background work must start only after the completion lock finalizer runs."""
     events: list[str] = []
     completion_lock = asyncio.Lock()
     await completion_lock.acquire()
 
     async def existing_background() -> None:
         assert not completion_lock.locked()
-        events.append("compact")
+        events.append("background")
 
     response = openai_compat._OpenAIJSONResponse(
         content={"ok": True},
@@ -1976,7 +1976,7 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
         send,
     )
 
-    assert events == ["compact"]
+    assert events == ["background"]
     assert not completion_lock.locked()
 
 
@@ -1992,7 +1992,7 @@ async def test_openai_stream_response_runs_background_when_client_closes_after_d
         done_sent = True
 
     async def background() -> None:
-        events.append("compact")
+        events.append("background")
 
     response = openai_compat._OpenAIStreamingResponse(
         body(),
@@ -2016,12 +2016,12 @@ async def test_openai_stream_response_runs_background_when_client_closes_after_d
             send,
         )
 
-    assert events == ["compact"]
+    assert events == ["background"]
 
 
 @pytest.mark.asyncio
 async def test_openai_stream_response_skips_background_when_client_closes_before_done() -> None:
-    """Incomplete streams must release the lock without running destructive compaction."""
+    """Incomplete streams must release the lock without running response background work."""
     events: list[str] = []
     done_sent = False
     completion_lock = asyncio.Lock()
@@ -2034,7 +2034,7 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
         done_sent = True
 
     async def background() -> None:
-        events.append("compact")
+        events.append("background")
 
     streaming_response = openai_compat._OpenAIStreamingResponse(
         body(),
@@ -2065,7 +2065,7 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
 
 @pytest.mark.asyncio
 async def test_openai_stream_response_skips_background_on_asgi20_disconnect_before_done() -> None:
-    """ASGI 2.0 disconnect can return normally but still must not compact."""
+    """ASGI 2.0 disconnect can return normally but still must skip background work."""
     events: list[str] = []
     partial_sent = asyncio.Event()
     continue_stream = asyncio.Event()
@@ -2081,7 +2081,7 @@ async def test_openai_stream_response_skips_background_on_asgi20_disconnect_befo
         done_sent = True
 
     async def background() -> None:
-        events.append("compact")
+        events.append("background")
 
     streaming_response = openai_compat._OpenAIStreamingResponse(
         body(),
@@ -2112,13 +2112,13 @@ async def test_openai_stream_response_skips_background_on_asgi20_disconnect_befo
 
 @pytest.mark.asyncio
 async def test_openai_json_response_skips_background_when_send_fails() -> None:
-    """JSON send failures should release the lock without compacting an undelivered response."""
+    """JSON send failures should release the lock without finalizing an undelivered response."""
     events: list[str] = []
     completion_lock = asyncio.Lock()
     await completion_lock.acquire()
 
     async def background() -> None:
-        events.append("compact")
+        events.append("background")
 
     response = openai_compat._attach_openai_completion_lock_release(
         openai_compat._OpenAIJSONResponse(

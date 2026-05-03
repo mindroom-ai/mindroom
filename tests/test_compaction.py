@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
+from agno.db.base import SessionType
 from agno.models.message import Message
+from agno.session.team import TeamSession
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
@@ -26,9 +28,11 @@ from mindroom.history.compaction import (
 )
 from mindroom.history.policy import classify_compaction_decision
 from mindroom.history.runtime import create_scope_session_storage
+from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import (
     CompactionOutcome,
     HistoryScope,
+    HistoryScopeState,
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
@@ -408,8 +412,8 @@ def test_ai_run_metadata_fallback_usage_only_backfills_missing_fields(tmp_path: 
     assert usage["time_to_first_token"] == format(0.12, ".12g")
 
 
-def test_team_scope_storage_identity_includes_execution_identity(tmp_path: Path) -> None:
-    """Team history storage should not collapse distinct execution identities."""
+def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
+    """Team history storage is scoped to the shared conversation, not the sender."""
     config, runtime_paths = _make_prepare_config(tmp_path)
     scope = HistoryScope(kind="team", scope_id="super_team")
     first_identity = ToolExecutionIdentity(
@@ -450,7 +454,28 @@ def test_team_scope_storage_identity_includes_execution_identity(tmp_path: Path)
         execution_identity=second_identity,
     )
     try:
-        assert first_storage.db_file != second_storage.db_file
+        session = TeamSession(
+            session_id="session-1",
+            team_id="super_team",
+            metadata={"source": "alice"},
+            created_at=1,
+            updated_at=1,
+        )
+        write_scope_state(
+            session,
+            scope,
+            HistoryScopeState(force_compact_before_next_run=True, last_summary_model="summary-model"),
+        )
+        first_storage.upsert_session(session)
+
+        persisted = second_storage.get_session("session-1", SessionType.TEAM)
+
+        assert first_storage.db_file == second_storage.db_file
+        assert isinstance(persisted, TeamSession)
+        assert persisted.metadata["source"] == "alice"
+        state = read_scope_state(persisted, scope)
+        assert state.force_compact_before_next_run is True
+        assert state.last_summary_model == "summary-model"
     finally:
         first_storage.close()
         second_storage.close()

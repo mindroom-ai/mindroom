@@ -1233,11 +1233,7 @@ def create_scope_session_storage(
     storage_name = _scope_session_storage_name(scope)
     return create_state_storage(
         storage_name=storage_name,
-        state_root=_team_scope_state_root(
-            storage_name=storage_name,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        ),
+        state_root=_team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
         subdir="sessions",
         session_table=f"{storage_name}_sessions",
     )
@@ -1299,22 +1295,8 @@ def _team_scope_state_root(
     *,
     storage_name: str,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
 ) -> Path:
-    base_root = runtime_paths.storage_root / _TEAM_STATE_ROOT_DIRNAME
-    if execution_identity is None:
-        return base_root / storage_name
-    identity_payload = "|".join(
-        (
-            execution_identity.channel,
-            execution_identity.agent_name,
-            execution_identity.requester_id or "",
-            execution_identity.tenant_id or "",
-            execution_identity.account_id or "",
-        ),
-    )
-    identity_digest = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()[:16]
-    return base_root / f"identity_{identity_digest}" / storage_name
+    return runtime_paths.storage_root / _TEAM_STATE_ROOT_DIRNAME / storage_name
 
 
 def _scope_session_agent_id(scope: HistoryScope) -> str:
