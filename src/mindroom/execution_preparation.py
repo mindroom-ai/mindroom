@@ -467,14 +467,19 @@ def _build_thread_history_messages(
     )
 
 
-def _thread_history_without_current_event(
+def _thread_history_before_current_event(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     current_event_id: str | None,
 ) -> Sequence[ResolvedVisibleMessage] | None:
-    """Return thread history suitable for full-context fallback replay."""
+    """Return full-context fallback history up to, but not including, the current event."""
     if not thread_history or current_event_id is None:
         return thread_history
-    return tuple(msg for msg in thread_history if msg.event_id != current_event_id)
+    preceding_messages: list[ResolvedVisibleMessage] = []
+    for msg in thread_history:
+        if msg.event_id == current_event_id:
+            return tuple(preceding_messages)
+        preceding_messages.append(msg)
+    return tuple(preceding_messages)
 
 
 def _sanitize_thread_history_for_replay(
@@ -600,7 +605,7 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     del timing_scope
     seen_event_ids = _scope_seen_event_ids(scope_context)
-    fallback_thread_history = _thread_history_without_current_event(thread_history, reply_to_event_id)
+    fallback_thread_history = _thread_history_before_current_event(thread_history, reply_to_event_id)
     if fallback_thread_history is not None:
         fallback_thread_history = _sanitize_thread_history_for_replay(
             fallback_thread_history,
