@@ -589,6 +589,7 @@ def _response_request(
     prompt: str = "Hello",
     model_prompt: str | None = None,
     user_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
@@ -599,6 +600,7 @@ def _response_request(
         prompt=prompt,
         model_prompt=model_prompt,
         user_id=user_id,
+        correlation_id=correlation_id,
     )
 
 
@@ -2497,6 +2499,46 @@ async def test_generate_response_marks_matrix_tool_prompt_context_for_cleanup(tm
 
 
 @pytest.mark.asyncio
+async def test_generate_response_passes_resolved_correlation_id_to_ai_response(tmp_path: Path) -> None:
+    """Edit regeneration can correlate on a different event than the reply anchor."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    seen_kwargs: dict[str, object] = {}
+
+    async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+        seen_kwargs.update(kwargs)
+        return "Hello"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$original"),
+        )
+
+        await coordinator.generate_response(
+            _response_request(
+                prompt="Regenerate this edit",
+                user_id="@alice:localhost",
+                thread_id="$thread-root",
+                reply_to_event_id="$original",
+                correlation_id="$edit",
+            ),
+        )
+
+    assert seen_kwargs["reply_to_event_id"] == "$original"
+    assert seen_kwargs["correlation_id"] == "$edit"
+
+
+@pytest.mark.asyncio
 async def test_generate_response_cleanup_targets_retry_run_id(tmp_path: Path) -> None:
     """Cleanup should target the persisted retry run instead of the abandoned first run id."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -2641,6 +2683,49 @@ async def test_generate_team_response_marks_matrix_tool_prompt_context_for_clean
     outcome = mock_post.await_args.args[1]
     assert outcome.strip_transient_enrichment_after_run is True
     assert outcome.memory_prompt == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_passes_resolved_correlation_id_to_team_response(tmp_path: Path) -> None:
+    """Team execution should share the lifecycle/tool-runtime correlation id."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    seen_kwargs: dict[str, object] = {}
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        seen_kwargs.update(kwargs)
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$original"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            _response_request(
+                prompt="Regenerate team edit",
+                user_id="@alice:localhost",
+                thread_id="$thread-root",
+                reply_to_event_id="$original",
+                correlation_id="$edit",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert seen_kwargs["reply_to_event_id"] == "$original"
+    assert seen_kwargs["correlation_id"] == "$edit"
 
 
 @pytest.mark.asyncio

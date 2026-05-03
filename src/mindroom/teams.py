@@ -31,7 +31,7 @@ from mindroom import ai_runtime, model_loading
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent
-from mindroom.ai import build_matrix_run_metadata
+from mindroom.ai import build_matrix_run_metadata, resolve_run_correlation_id
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
@@ -1525,6 +1525,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
     reply_to_event_id: str | None = None,
+    correlation_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
@@ -1550,7 +1551,11 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         else None
     )
     requester_id = user_id or (execution_identity.requester_id if execution_identity is not None else None)
-    correlation_id = reply_to_event_id or uuid4().hex
+    correlation_id = resolve_run_correlation_id(
+        correlation_id,
+        reply_to_event_id=reply_to_event_id,
+        matrix_run_metadata=matrix_run_metadata,
+    )
     try:
         team_members = _materialize_team_members(
             agent_names,
@@ -1899,6 +1904,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     run_id_callback: Callable[[str], None] | None = None,
     user_id: str | None = None,
     reply_to_event_id: str | None = None,
+    correlation_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
@@ -1931,7 +1937,11 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         else None
     )
     requester_id = user_id or (execution_identity.requester_id if execution_identity is not None else None)
-    correlation_id = reply_to_event_id or uuid4().hex
+    correlation_id = resolve_run_correlation_id(
+        correlation_id,
+        reply_to_event_id=reply_to_event_id,
+        matrix_run_metadata=matrix_run_metadata,
+    )
     try:
         team_members = _materialize_team_members(
             requested_agent_names,

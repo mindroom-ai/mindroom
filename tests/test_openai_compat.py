@@ -1032,8 +1032,8 @@ class TestChatCompletions:
 
             assert mock_ai.call_args.kwargs["user_id"] == "user-123"
 
-    def test_request_body_user_is_used_for_openai_execution_identity(self, app_client: TestClient) -> None:
-        """The OpenAI user field should label non-Matrix tool-call traces."""
+    def test_request_body_user_is_not_used_for_openai_execution_identity(self, app_client: TestClient) -> None:
+        """The OpenAI user field should not become credential-routing identity."""
         seen_requester_ids: list[str | None] = []
 
         async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
@@ -1054,7 +1054,7 @@ class TestChatCompletions:
             )
 
         assert response.status_code == 200
-        assert seen_requester_ids == ["spoofed-user"]
+        assert seen_requester_ids == [None]
 
     def test_non_stream_completion_keeps_execution_identity_for_ai_response(self, app_client: TestClient) -> None:
         """Non-stream agent responses must keep execution identity active through ai_response."""

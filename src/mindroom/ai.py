@@ -95,6 +95,7 @@ __all__ = [
     "AIStreamChunk",
     "ai_response",
     "build_matrix_run_metadata",
+    "resolve_run_correlation_id",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
@@ -418,7 +419,18 @@ def build_matrix_run_metadata(
     return metadata or None
 
 
-def _resolved_correlation_id(reply_to_event_id: str | None) -> str:
+def resolve_run_correlation_id(
+    correlation_id: str | None,
+    *,
+    reply_to_event_id: str | None,
+    matrix_run_metadata: dict[str, Any] | None,
+) -> str:
+    """Return the authoritative correlation ID for one persisted model run."""
+    if correlation_id:
+        return correlation_id
+    metadata_correlation_id = matrix_run_metadata.get("correlation_id") if matrix_run_metadata is not None else None
+    if isinstance(metadata_correlation_id, str) and metadata_correlation_id:
+        return metadata_correlation_id
     if reply_to_event_id:
         return reply_to_event_id
     return uuid4().hex
@@ -785,6 +797,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
     reply_to_event_id: str | None = None,
+    correlation_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
@@ -825,6 +838,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         media: Optional multimodal inputs (audio/images/files/videos)
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
+        correlation_id: Stable cross-sink trace ID for this response lifecycle.
         active_event_ids: Live self-authored Matrix event IDs still tracked as
             actively streaming for this bot in the current room.
         show_tool_calls: Whether to include tool call details inline in the response text.
@@ -864,7 +878,11 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     )
     media_inputs = media or MediaInputs()
     resolved_requester_id = user_id
-    resolved_correlation_id = _resolved_correlation_id(reply_to_event_id)
+    resolved_correlation_id = resolve_run_correlation_id(
+        correlation_id,
+        reply_to_event_id=reply_to_event_id,
+        matrix_run_metadata=matrix_run_metadata,
+    )
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
@@ -1248,6 +1266,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     include_openai_compat_guidance: bool = False,
     media: MediaInputs | None = None,
     reply_to_event_id: str | None = None,
+    correlation_id: str | None = None,
     active_event_ids: Collection[str] = frozenset(),
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
@@ -1287,6 +1306,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         media: Optional multimodal inputs (audio/images/files/videos)
         reply_to_event_id: Matrix event ID of the triggering message, stored
             in run metadata for unseen message tracking and edit cleanup.
+        correlation_id: Stable cross-sink trace ID for this response lifecycle.
         active_event_ids: Live self-authored Matrix event IDs still tracked as
             actively streaming for this bot in the current room.
         show_tool_calls: Whether to include tool call details inline in the streamed response.
@@ -1324,7 +1344,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     )
     media_inputs = media or MediaInputs()
     resolved_requester_id = user_id
-    resolved_correlation_id = _resolved_correlation_id(reply_to_event_id)
+    resolved_correlation_id = resolve_run_correlation_id(
+        correlation_id,
+        reply_to_event_id=reply_to_event_id,
+        matrix_run_metadata=matrix_run_metadata,
+    )
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
