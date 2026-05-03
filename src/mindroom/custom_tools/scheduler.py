@@ -10,6 +10,14 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
 
+_TOOL_ERROR_PREFIX = "❌"
+_LIST_SCHEDULES_ERROR = "Unable to retrieve scheduled tasks."
+
+
+def _raise_for_scheduler_error(response_text: str) -> None:
+    if response_text.startswith(_TOOL_ERROR_PREFIX) or response_text == _LIST_SCHEDULES_ERROR:
+        raise RuntimeError(response_text)
+
 
 class SchedulerTools(Toolkit):
     """Tools for scheduling tasks in the current Matrix room/thread."""
@@ -42,7 +50,7 @@ class SchedulerTools(Toolkit):
             return "❌ Scheduler tool is unavailable in this context."
 
         runtime = build_scheduling_runtime_from_tool_runtime_context(context)
-        _, response_text = await schedule_task(
+        task_id, response_text = await schedule_task(
             runtime=runtime,
             room_id=context.room_id,
             thread_id=context.resolved_thread_id,
@@ -50,6 +58,8 @@ class SchedulerTools(Toolkit):
             full_text=request,
             new_thread=new_thread,
         )
+        if task_id is None:
+            raise RuntimeError(response_text)
         return response_text
 
     async def edit_schedule(self, task_id: str, request: str) -> str:
@@ -68,7 +78,7 @@ class SchedulerTools(Toolkit):
             return "❌ Scheduler tool is unavailable in this context."
 
         runtime = build_scheduling_runtime_from_tool_runtime_context(context)
-        return await edit_scheduled_task(
+        response_text = await edit_scheduled_task(
             runtime=runtime,
             room_id=context.room_id,
             task_id=task_id,
@@ -76,6 +86,8 @@ class SchedulerTools(Toolkit):
             scheduled_by=context.requester_id,
             thread_id=context.resolved_thread_id,
         )
+        _raise_for_scheduler_error(response_text)
+        return response_text
 
     async def list_schedules(self) -> str:
         """List all pending scheduled tasks in the current room/thread.
@@ -88,12 +100,14 @@ class SchedulerTools(Toolkit):
         if context is None:
             return "❌ Scheduler tool is unavailable in this context."
 
-        return await list_scheduled_tasks(
+        response_text = await list_scheduled_tasks(
             client=context.client,
             room_id=context.room_id,
             thread_id=context.resolved_thread_id,
             config=context.config,
         )
+        _raise_for_scheduler_error(response_text)
+        return response_text
 
     async def cancel_schedule(self, task_id: str) -> str:
         """Cancel a scheduled task.
@@ -109,8 +123,10 @@ class SchedulerTools(Toolkit):
         if context is None:
             return "❌ Scheduler tool is unavailable in this context."
 
-        return await cancel_scheduled_task(
+        response_text = await cancel_scheduled_task(
             client=context.client,
             room_id=context.room_id,
             task_id=task_id,
         )
+        _raise_for_scheduler_error(response_text)
+        return response_text

@@ -118,6 +118,24 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scheduler_tool_raises_when_backend_rejects_request() -> None:
+    """Invalid schedule requests should fail the tool call instead of returning error text."""
+    tools = SchedulerTools()
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    context = _make_context(config)
+
+    with (
+        patch(
+            "mindroom.custom_tools.scheduler.schedule_task",
+            new=AsyncMock(return_value=(None, "❌ Failed to schedule: schedule is not valid")),
+        ),
+        tool_runtime_context(context),
+        pytest.raises(RuntimeError, match="schedule is not valid"),
+    ):
+        await tools.schedule("next message")
+
+
+@pytest.mark.asyncio
 async def test_edit_schedule_tool_requires_context() -> None:
     """Edit tool should fail clearly when called outside Matrix response context."""
     tools = SchedulerTools()
