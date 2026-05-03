@@ -1025,7 +1025,9 @@ describe("AgentEditor", () => {
     render(<AgentEditor />);
 
     expect(
-      screen.getByRole("checkbox", { name: /enable auto-compaction/i }),
+      screen.getByRole("checkbox", {
+        name: /enable automatic required compaction/i,
+      }),
     ).toBeChecked();
   });
 
@@ -1089,7 +1091,7 @@ describe("AgentEditor", () => {
     });
   });
 
-  it("shows auto-compaction as disabled for a pure model clear when defaults are disabled", () => {
+  it("shows automatic required compaction as disabled for a pure model clear when defaults are disabled", () => {
     const compactionAgent: Agent = {
       ...mockAgent,
       compaction: { model: null },
@@ -1113,10 +1115,12 @@ describe("AgentEditor", () => {
 
     render(<AgentEditor />);
 
-    expect(screen.getByLabelText("Enable auto-compaction")).not.toBeChecked();
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).not.toBeChecked();
   });
 
-  it("shows auto-compaction as disabled for an empty authored override when defaults are disabled", () => {
+  it("shows automatic required compaction as disabled for an empty authored override when defaults are disabled", () => {
     const compactionAgent: Agent = {
       ...mockAgent,
       compaction: {},
@@ -1140,10 +1144,12 @@ describe("AgentEditor", () => {
 
     render(<AgentEditor />);
 
-    expect(screen.getByLabelText("Enable auto-compaction")).not.toBeChecked();
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).not.toBeChecked();
   });
 
-  it("shows auto-compaction as enabled when defaults.compaction is omitted", () => {
+  it("shows automatic required compaction as enabled when defaults.compaction is omitted", () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       agents: [mockAgent],
@@ -1156,10 +1162,12 @@ describe("AgentEditor", () => {
 
     render(<AgentEditor />);
 
-    expect(screen.getByLabelText("Enable auto-compaction")).toBeChecked();
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).toBeChecked();
   });
 
-  it("shows auto-compaction as disabled when defaults.compaction is null", () => {
+  it("shows automatic required compaction as disabled when defaults.compaction is null", () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       agents: [mockAgent],
@@ -1175,10 +1183,12 @@ describe("AgentEditor", () => {
 
     render(<AgentEditor />);
 
-    expect(screen.getByLabelText("Enable auto-compaction")).not.toBeChecked();
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).not.toBeChecked();
   });
 
-  it("shows auto-compaction as enabled when defaults.compaction is an authored empty object", () => {
+  it("shows automatic required compaction as enabled when defaults.compaction is an authored empty object", () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       agents: [mockAgent],
@@ -1194,7 +1204,9 @@ describe("AgentEditor", () => {
 
     render(<AgentEditor />);
 
-    expect(screen.getByLabelText("Enable auto-compaction")).toBeChecked();
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).toBeChecked();
   });
 
   it("shows field-level history and compaction validation errors", () => {

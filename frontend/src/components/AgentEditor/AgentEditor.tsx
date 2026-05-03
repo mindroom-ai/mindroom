@@ -1884,8 +1884,8 @@ export function AgentEditor() {
             ? ` (${config.defaults.max_tool_calls_from_history})`
             : " (no limit)"
         }.`}
-        autoCompactionHelperText="Automatically compact older session history before a run when the context budget gets tight."
-        thresholdTokensHelperText="Absolute token threshold that triggers compaction. Leave empty to use threshold percent or the runtime fallback."
+        autoCompactionHelperText="Automatically compact older session history before a run when raw replay exceeds the hard context budget."
+        thresholdTokensHelperText="Soft replay budget in tokens. Crossing it records planning metadata; destructive compaction waits for the hard budget."
         compactionModelPlaceholder={
           config?.defaults.compaction?.model ?? "Default: agent model"
         }

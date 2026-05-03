@@ -284,7 +284,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
         )}
 
         <FieldGroup
-          label="Auto-Compaction"
+          label="Required Compaction"
           helperText={autoCompactionHelperText}
           htmlFor="compaction_enabled"
           error={compactionError}
@@ -305,7 +305,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                 htmlFor="compaction_enabled"
                 className="text-sm font-medium cursor-pointer select-none"
               >
-                Enable auto-compaction
+                Enable automatic required compaction
               </label>
               {compactionConfig != null && (
                 <Button
@@ -351,7 +351,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
 
               <FieldGroup
                 label="Threshold Percent"
-                helperText="Fraction of the context window that triggers compaction, greater than 0 and less than 1."
+                helperText="Soft replay budget as a fraction of the context window. Crossing it records planning metadata; destructive compaction waits for the hard budget."
                 htmlFor="compaction_threshold_percent"
               >
                 <Input

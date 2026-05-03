@@ -302,8 +302,8 @@ export function TeamEditor() {
             ? ` (${config.defaults.max_tool_calls_from_history})`
             : " (no limit)"
         }.`}
-        autoCompactionHelperText="Automatically compact older team-scoped history before the next run when the context budget gets tight."
-        thresholdTokensHelperText="Absolute token threshold that triggers compaction."
+        autoCompactionHelperText="Automatically compact older team-scoped history before the next run when raw replay exceeds the hard context budget."
+        thresholdTokensHelperText="Soft replay budget in tokens. Crossing it records planning metadata; destructive compaction waits for the hard budget."
         compactionModelPlaceholder={
           config?.defaults.compaction?.model ?? "Default: team run model"
         }

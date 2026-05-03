@@ -277,7 +277,8 @@ mindroom_user:
 defaults:
   markdown: true
   compress_tool_results: false       # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
-  # Auto-compaction is disabled until you author a compaction block.
+  # Required compaction is enabled by default when the runtime model has context_window.
+  # Soft thresholds do not compact by themselves while history still fits.
   # compaction:
   #   enabled: true
   #   threshold_percent: 0.8
@@ -304,9 +305,11 @@ agents:
       - thread_summary
 ```
 
-Auto-compaction is destructive inside the active session.
+Required compaction is destructive inside the active session.
 It uses one Matrix lifecycle notice that is edited in place.
-It runs before a reply only when needed for that reply, and otherwise runs immediately after a successful reply when the updated session crosses the threshold.
+It runs before a reply when raw history exceeds the hard replay budget.
+It also runs before the next reply after a manual `compact_context` request.
+Otherwise MindRoom leaves the stored session unchanged and relies on replay fitting for that reply.
 It rewrites the stored session summary and removes the compacted raw runs from the live session so Agno replays only the merged summary plus the remaining recent runs.
 
 2. Configure your Matrix homeserver and API keys (optional, defaults shown):
@@ -341,7 +344,7 @@ agents:
     # num_history_runs: 10
     # compaction:
     #   enabled: true
-    #   threshold_tokens: 60000  # Requires context_window on the active model or compaction.model
+    #   threshold_tokens: 60000  # Soft replay budget; hard-budget compaction still requires context_window
 
 voice:
   enabled: true
