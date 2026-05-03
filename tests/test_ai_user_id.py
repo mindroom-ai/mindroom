@@ -199,6 +199,26 @@ def _config_with_team() -> Config:
     )
 
 
+def _config_with_team_matrix_message() -> Config:
+    return Config(
+        agents={
+            "general": AgentConfig(
+                display_name="General",
+                tools=["matrix_message"],
+            ),
+        },
+        teams={
+            "ultimate": TeamConfig(
+                display_name="Ultimate",
+                role="Coordinate the team",
+                agents=["general"],
+                mode="coordinate",
+            ),
+        },
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+
+
 def _prepared_prompt_result(
     agent: object,
     *,
@@ -2582,6 +2602,46 @@ async def test_generate_team_response_marks_transient_model_prompt_for_cleanup(
     outcome = mock_post.await_args.args[1]
     assert outcome.strip_transient_enrichment_after_run is True
     assert outcome.memory_prompt == "Describe this image"
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_marks_matrix_tool_prompt_context_for_cleanup(tmp_path: Path) -> None:
+    """Team Matrix tool metadata appended during runtime preparation should be scrubbed after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    model_messages: list[str] = []
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        model_messages.append(cast("str", kwargs["message"]))
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert model_messages
+    assert "[Matrix metadata for tool calls]" in model_messages[0]
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+    assert outcome.memory_prompt == "Hello"
 
 
 @pytest.mark.asyncio

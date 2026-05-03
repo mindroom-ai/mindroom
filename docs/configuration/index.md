@@ -315,15 +315,6 @@ Those tools keep using normal shared credentials even when `worker_grantable_cre
 `google_vertex_adc` is intentionally not supported here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; use that auth path only in the main runtime.
 Sandbox-proxied execution is stricter than direct local execution: ordinary runtime `.env` values and provider env do not carry over unless they are explicitly passed through.
 
-**Debug Logging**
-
-`debug.log_llm_requests` enables pre-provider request assembly logging for troubleshooting.
-When enabled, MindRoom writes JSONL request records under `debug.llm_request_log_dir` or `mindroom_data/logs/llm_requests` by default.
-Those records include prompts, messages, tool schemas, model parameters, correlation IDs, requester metadata, and source Matrix event metadata.
-The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs.
-Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
-These artifacts can contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
-
 # Auto-compaction is destructive inside the active session.
 # It uses one Matrix lifecycle notice that is edited in place.
 # It runs before a reply only when needed for that reply.
@@ -453,6 +444,15 @@ matrix_space:
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 ```
+
+## Debug Logging
+
+`debug.log_llm_requests` enables pre-provider request assembly logging for troubleshooting.
+When enabled, MindRoom writes JSONL request records under `debug.llm_request_log_dir` or `mindroom_data/logs/llm_requests` by default.
+Those records include prompts, messages, tool schemas, model parameters, correlation IDs, requester metadata, and source Matrix event metadata.
+The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs.
+Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
+These artifacts can contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
 
 ## Managed Avatars
 

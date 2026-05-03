@@ -1348,6 +1348,7 @@ class ResponseRunner:
             final_delivery_outcome,
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(
                 strip_transient_enrichment_after_run=_should_strip_transient_enrichment(request)
+                or _model_prompt_has_transient_tail(memory_prompt=_memory_prompt, model_prompt=model_message)
                 or bool(transient_system_context),
                 response_run_id=team_turn_recorder.run_id or response_run_id,
                 session_id=session_id,
