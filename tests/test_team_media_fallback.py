@@ -993,13 +993,11 @@ async def test_prepare_materialized_team_execution_carries_compaction_metadata_a
             pipeline_timing=timing,
         )
 
-    assert prepared.run_extra_content is not None
-    ai_metadata = prepared.run_extra_content[AI_RUN_METADATA_KEY]
+    assert prepared.run_metadata is not None
+    ai_metadata = prepared.run_metadata[AI_RUN_METADATA_KEY]
     assert ai_metadata["prepared_context"] == {"tokens": 12_345}
     assert ai_metadata["compaction"]["decision"] == "none"
     assert ai_metadata["compaction"]["outcome"] == "none"
-    assert prepared.run_metadata is not None
-    assert prepared.run_metadata[AI_RUN_METADATA_KEY] == ai_metadata
     assert timing.metadata["compaction_decision"] == "none"
     assert timing.metadata["prepared_context_tokens"] == 12_345
 
