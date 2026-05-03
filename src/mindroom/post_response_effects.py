@@ -322,6 +322,16 @@ async def apply_post_response_effects(  # noqa: C901
                 response_event_id=response_event_id,
             )
 
+    if outcome.strip_transient_enrichment_after_run and deps.strip_transient_enrichment is not None:
+        try:
+            deps.strip_transient_enrichment(outcome)
+        except Exception:
+            deps.logger.exception(
+                "Failed to strip transient enrichment from session history",
+                session_id=outcome.session_id,
+                session_type=outcome.session_type.value if outcome.session_type is not None else None,
+            )
+
     if (
         response_event_id is not None
         and final_delivery_outcome.terminal_status == "completed"
@@ -340,16 +350,6 @@ async def apply_post_response_effects(  # noqa: C901
                 thread_id=(
                     outcome.interactive_target.resolved_thread_id if outcome.interactive_target is not None else None
                 ),
-            )
-
-    if outcome.strip_transient_enrichment_after_run and deps.strip_transient_enrichment is not None:
-        try:
-            deps.strip_transient_enrichment(outcome)
-        except Exception:
-            deps.logger.exception(
-                "Failed to strip transient enrichment from session history",
-                session_id=outcome.session_id,
-                session_type=outcome.session_type.value if outcome.session_type is not None else None,
             )
 
     if (

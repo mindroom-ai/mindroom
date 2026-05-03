@@ -2381,6 +2381,8 @@ async def test_generate_response_strips_transient_model_prompt_from_persisted_se
                     RunOutput(
                         content="Hello",
                         messages=[
+                            Message(role="user", content="Earlier context"),
+                            Message(role="assistant", content="Earlier answer"),
                             Message(
                                 role="user",
                                 content=(
@@ -2408,7 +2410,8 @@ async def test_generate_response_strips_transient_model_prompt_from_persisted_se
     assert persisted_session.runs is not None
     persisted_run = cast("RunOutput", persisted_session.runs[0])
     assert persisted_run.messages is not None
-    assert persisted_run.messages[0].content == "Describe this image"
+    assert persisted_run.messages[0].content == "Earlier context"
+    assert persisted_run.messages[2].content == "Describe this image"
 
 
 @pytest.mark.asyncio
@@ -2446,6 +2449,75 @@ async def test_generate_team_response_marks_transient_model_prompt_for_cleanup(
 
     outcome = mock_post.await_args.args[1]
     assert outcome.strip_transient_enrichment_after_run is True
+    assert outcome.memory_prompt == "Describe this image"
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_strips_transient_model_prompt_from_persisted_session(
+    tmp_path: Path,
+) -> None:
+    """Team cleanup should restore the current user turn, not earlier context."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    async def fake_team_response(*_args: object, **_kwargs: object) -> str:
+        storage.session = TeamSession(
+            session_id="!test:localhost:$thread-root",
+            team_id="ultimate",
+            created_at=1,
+            updated_at=1,
+            runs=[
+                TeamRunOutput(
+                    content="Team answer",
+                    messages=[
+                        Message(role="user", content="Earlier context"),
+                        Message(role="assistant", content="Earlier answer"),
+                        Message(
+                            role="user",
+                            content=(
+                                "Describe this image\n\n"
+                                "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+                            ),
+                        ),
+                        Message(role="assistant", content="Team answer"),
+                    ],
+                ),
+            ],
+        )
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].content == "Earlier context"
+    assert persisted_run.messages[2].content == "Describe this image"
 
 
 @pytest.mark.asyncio

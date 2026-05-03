@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.types import HistoryScope, HistoryScopeState
 
 if TYPE_CHECKING:
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
+    from agno.db.base import BaseDb, SessionType
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
@@ -134,6 +135,32 @@ def consume_pending_force_compaction_scope(
 
     session.session_data = next_session_data or None
     return True
+
+
+def strip_transient_enrichment_from_session(
+    storage: BaseDb,
+    *,
+    session_id: str,
+    session_type: SessionType,
+    memory_prompt: str,
+) -> bool:
+    """Restore the persisted current user turn after transient model context was used."""
+    session = storage.get_session(session_id, session_type)
+    if not isinstance(session, AgentSession | TeamSession) or not session.runs:
+        return False
+
+    for run in reversed(session.runs):
+        if not isinstance(run, RunOutput | TeamRunOutput) or not run.messages:
+            continue
+        for message in reversed(run.messages):
+            if message.role != "user":
+                continue
+            if message.content == memory_prompt:
+                return False
+            message.content = memory_prompt
+            storage.upsert_session(session)
+            return True
+    return False
 
 
 def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:

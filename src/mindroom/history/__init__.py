@@ -29,6 +29,7 @@ from mindroom.history.storage import (
     add_pending_force_compaction_scope,
     read_scope_seen_event_ids,
     read_scope_state,
+    strip_transient_enrichment_from_session,
     update_scope_seen_event_ids,
     write_scope_state,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
     "run_post_response_compaction_check",
+    "strip_transient_enrichment_from_session",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
     "write_scope_state",

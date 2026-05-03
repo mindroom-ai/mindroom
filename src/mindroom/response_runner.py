@@ -11,10 +11,6 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
@@ -22,7 +18,7 @@ from mindroom.ai import ai_response, build_matrix_run_metadata, stream_agent_res
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history import HistoryScope, run_post_response_compaction_check
+from mindroom.history import HistoryScope, run_post_response_compaction_check, strip_transient_enrichment_from_session
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
@@ -491,25 +487,16 @@ class ResponseRunner:
         session_scope: HistoryScope,
         execution_identity: ToolExecutionIdentity | None,
     ) -> None:
-        """Restore the persisted current user turn after transient model context was used."""
         if outcome.session_id is None or outcome.session_type is None or outcome.memory_prompt is None:
             return
         storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
         try:
-            session = storage.get_session(outcome.session_id, outcome.session_type)
-            if not isinstance(session, AgentSession | TeamSession) or not session.runs:
-                return
-            for run in reversed(session.runs):
-                if not isinstance(run, RunOutput | TeamRunOutput) or not run.messages:
-                    continue
-                for message in run.messages:
-                    if message.role != "user":
-                        continue
-                    if message.content == outcome.memory_prompt:
-                        return
-                    message.content = outcome.memory_prompt
-                    storage.upsert_session(session)
-                    return
+            strip_transient_enrichment_from_session(
+                storage,
+                session_id=outcome.session_id,
+                session_type=outcome.session_type,
+                memory_prompt=outcome.memory_prompt,
+            )
         finally:
             storage.close()
 
@@ -1348,6 +1335,8 @@ class ResponseRunner:
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
                 thread_summary_thread_id=resolved_target.resolved_thread_id,
                 thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
+                memory_prompt=_memory_prompt,
+                memory_thread_history=_memory_thread_history,
             ),
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
