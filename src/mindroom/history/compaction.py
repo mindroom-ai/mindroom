@@ -468,8 +468,17 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
                 history_settings=history_settings,
                 available_history_budget=available_history_budget,
             )
+            unremovable_run_count = sum(1 for run in compactable_runs if not _has_stable_run_id(run))
+            if unremovable_run_count:
+                logger.warning(
+                    "Compaction skipped runs without stable run IDs",
+                    session_id=session_id,
+                    scope=scope.key,
+                    skipped_runs=unremovable_run_count,
+                )
+                compactable_runs = [run for run in compactable_runs if _has_stable_run_id(run)]
             selected_run_ids = {run.run_id for run in compactable_runs if isinstance(run.run_id, str) and run.run_id}
-            if compactable_runs and len(selected_run_ids) == len(compactable_runs):
+            if compactable_runs:
                 pending_selected_run_ids = selected_run_ids
         if not compactable_runs:
             break
@@ -1626,6 +1635,10 @@ def _current_summary_text(session: AgentSession | TeamSession) -> str | None:
     return session.summary.summary.strip() or None
 
 
+def _has_stable_run_id(run: RunOutput | TeamRunOutput) -> bool:
+    return isinstance(run.run_id, str) and bool(run.run_id)
+
+
 def _estimated_message_chars(message: Message) -> int:
     content_chars = len(_render_message_content(message))
     tool_call_chars = len(stable_serialize(message.tool_calls)) if message.tool_calls else 0
@@ -1652,7 +1665,14 @@ def _remove_runs_by_id(
                 remove_ids.add(run_id)
                 changed = True
 
-    return [run for run in runs if not isinstance(run.run_id, str) or run.run_id not in remove_ids]
+    return [
+        run
+        for run in runs
+        if not (
+            (isinstance(run.run_id, str) and run.run_id in remove_ids)
+            or (isinstance(run.parent_run_id, str) and run.parent_run_id in remove_ids)
+        )
+    ]
 
 
 def _estimate_message_media_chars(message: Message) -> int:

@@ -3339,6 +3339,57 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
 
 
 @pytest.mark.asyncio
+async def test_rewrite_working_session_for_compaction_ignores_runs_without_stable_ids(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    unremovable_run = RunOutput(
+        run_id=None,
+        agent_id="test_agent",
+        status=RunStatus.completed,
+        messages=[
+            Message(role="user", content="question"),
+            Message(role="assistant", content="answer"),
+        ],
+    )
+    working_session = _session("session-1", runs=[unremovable_run])
+
+    with patch(
+        "mindroom.history.compaction._generate_compaction_summary",
+        new=AsyncMock(return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC))),
+    ) as mock_generate:
+        rewrite_result = await _rewrite_working_session_for_compaction(
+            storage=storage,
+            persisted_session=working_session,
+            working_session=working_session,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            session_id="session-1",
+            scope=scope,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            available_history_budget=1,
+            summary_input_budget=16_000,
+            compaction_context_window=16_000,
+            before_tokens=0,
+            runs_before=1,
+            lifecycle_notice_event_id=None,
+            progress_callback=None,
+            collect_compaction_hook_messages=False,
+        )
+
+    assert rewrite_result is None
+    assert mock_generate.await_count == 0
+    assert working_session.summary is None
+    assert working_session.runs == [unremovable_run]
+
+
+@pytest.mark.asyncio
 async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path: Path) -> None:
     """Final compaction persist should copy sanitized remaining runs onto the latest session."""
     config, _runtime_paths = _make_config(tmp_path)
@@ -4634,6 +4685,52 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
         'Current message:\n<msg from="@alice:localhost"><![CDATA[What was that?]]></msg>'
     )
     assert "Later reaction" not in prepared_run.prompt_text
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_replay(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[],
+        summary=SessionSummary(summary="Compacted summary", updated_at=datetime.now(UTC)),
+    )
+    storage.upsert_session(session)
+    live_agent = _agent()
+    thread_history = [
+        make_visible_message(sender="@alice:localhost", body="Original context", event_id="$root"),
+        make_visible_message(sender="@bot:localhost", body="Prior answer", event_id="$agent-reply"),
+    ]
+
+    with (
+        open_scope_session_context(
+            agent=live_agent,
+            agent_name="test_agent",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+        ) as scope_context,
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+    ):
+        prepared_run = await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            session_id="session-1",
+            scope_context=scope_context,
+            thread_history=thread_history,
+        )
+
+    assert prepared_run.prepared_history.replays_persisted_history is True
+    assert prepared_run.prompt_text == "Current prompt"
+    assert "Original context" not in prepared_run.prompt_text
+    assert "Prior answer" not in prepared_run.prompt_text
 
 
 @pytest.mark.asyncio

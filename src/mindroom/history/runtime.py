@@ -1640,6 +1640,10 @@ def _has_effective_persisted_replay(
     scope: HistoryScope,
     replay_plan: ResolvedReplayPlan,
 ) -> bool:
-    return replay_plan.add_history_to_context and bool(
-        runs_for_scope(completed_top_level_runs(session), scope),
-    )
+    if not replay_plan.add_history_to_context:
+        return False
+    if runs_for_scope(completed_top_level_runs(session), scope):
+        return True
+    if session.summary is None:
+        return False
+    return bool(session.summary.summary.strip())
