@@ -167,6 +167,10 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.metadata_merge"
+depends_on = []
+
+[[modules]]
 path = "mindroom.agent_policy"
 depends_on = ["mindroom.config.agent"]
 
@@ -367,6 +371,7 @@ depends_on = [
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.metadata_merge",
     "mindroom.routing",
     "mindroom.teams",
     "mindroom.tool_system.events",
@@ -638,6 +643,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.logging_config",
+    "mindroom.metadata_merge",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
@@ -906,6 +912,7 @@ depends_on = [
     "mindroom.matrix.rooms",
     "mindroom.media_fallback",
     "mindroom.media_inputs",
+    "mindroom.metadata_merge",
     "mindroom.model_loading",
     "mindroom.team_exact_members",
     "mindroom.tool_system.events",

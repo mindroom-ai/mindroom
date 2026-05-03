@@ -1113,7 +1113,10 @@ class ResponseRunner:
                     response_envelope=resolved_response_envelope,
                     correlation_id=resolved_correlation_id,
                     tool_trace=None,
-                    extra_content=ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                    extra_content=_merge_response_extra_content(
+                        ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                        request.attachment_ids,
+                    ),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 )
@@ -1220,7 +1223,10 @@ class ResponseRunner:
                             response_envelope=resolved_response_envelope,
                             correlation_id=resolved_correlation_id,
                             tool_trace=None,
-                            extra_content=ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                            extra_content=_merge_response_extra_content(
+                                ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                                request.attachment_ids,
+                            ),
                         ),
                     )
                 except asyncio.CancelledError:
@@ -1307,7 +1313,10 @@ class ResponseRunner:
                     response_envelope=resolved_response_envelope,
                     correlation_id=resolved_correlation_id,
                     tool_trace=error.tool_trace if show_tool_calls else None,
-                    extra_content=ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                    extra_content=_merge_response_extra_content(
+                        ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                        request.attachment_ids,
+                    ),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
@@ -1338,7 +1347,10 @@ class ResponseRunner:
                     response_envelope=resolved_response_envelope,
                     correlation_id=resolved_correlation_id,
                     tool_trace=None,
-                    extra_content=ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                    extra_content=_merge_response_extra_content(
+                        ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                        request.attachment_ids,
+                    ),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),

@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from html import escape
-from typing import TYPE_CHECKING, Any, TypeGuard, cast
+from typing import TYPE_CHECKING, TypeGuard, cast
 from uuid import uuid4
 
 from agno.agent._tools import determine_tools_for_model
@@ -34,6 +34,7 @@ from mindroom.history.storage import read_scope_state, update_scope_seen_event_i
 from mindroom.history.types import CompactionLifecycleProgress, CompactionOutcome, HistoryScope, HistoryScopeState
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
+from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
@@ -212,30 +213,6 @@ def _persist_cleared_force_state_if_needed(
     return cleared_state
 
 
-def _deep_merge_metadata(
-    base: dict[str, Any] | None,
-    extra: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    if base is None:
-        return deepcopy(extra) if extra is not None else None
-    if extra is None:
-        return deepcopy(base)
-    merged = deepcopy(base)
-    for key, value in extra.items():
-        existing = merged.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            merged[key] = (
-                _deep_merge_metadata(
-                    cast("dict[str, Any]", existing),
-                    cast("dict[str, Any]", value),
-                )
-                or {}
-            )
-        else:
-            merged[key] = deepcopy(value)
-    return merged
-
-
 async def _emit_compaction_hook(
     *,
     event_name: str,
@@ -334,6 +311,18 @@ async def compact_scope_history(
     before_run_count = len(visible_runs)
     working_session = deepcopy(session)
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
+
+    async def emit_before_persist(included_runs: Sequence[RunOutput | TeamRunOutput]) -> None:
+        await _emit_compaction_hook(
+            event_name=EVENT_COMPACTION_BEFORE,
+            scope=scope,
+            messages=_messages_for_runs(included_runs) if collect_compaction_hook_messages else (),
+            session_id=session.session_id,
+            token_count_before=before_tokens,
+            token_count_after=None,
+            compaction_summary=None,
+        )
+
     rewrite_result = await _rewrite_working_session_for_compaction(
         storage=storage,
         persisted_session=session,
@@ -352,6 +341,7 @@ async def compact_scope_history(
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
         collect_compaction_hook_messages=collect_compaction_hook_messages,
+        before_persist_callback=emit_before_persist,
         timing_scope=timing_scope,
     )
     if rewrite_result is None:
@@ -362,16 +352,6 @@ async def compact_scope_history(
             state=state,
         )
         return cleared_state, None
-
-    await _emit_compaction_hook(
-        event_name=EVENT_COMPACTION_BEFORE,
-        scope=scope,
-        messages=rewrite_result.compacted_messages,
-        session_id=session.session_id,
-        token_count_before=before_tokens,
-        token_count_after=None,
-        compaction_summary=None,
-    )
 
     compacted_at = _iso_utc_now()
     new_state = HistoryScopeState(
@@ -387,6 +367,7 @@ async def compact_scope_history(
         persisted_session=session,
         working_session=working_session,
         compacted_run_ids=set(rewrite_result.compacted_run_ids),
+        sync_remaining_runs=True,
     )
     logger.info(
         "Compaction summary generated",
@@ -433,7 +414,7 @@ async def compact_scope_history(
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
-async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
+async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR0915
     *,
     storage: BaseDb,
     persisted_session: AgentSession | TeamSession,
@@ -452,6 +433,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
     lifecycle_notice_event_id: str | None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     collect_compaction_hook_messages: bool,
+    before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
     timing_scope: str | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
@@ -522,6 +504,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912
         )
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
+        if total_compacted_run_count == 0 and before_persist_callback is not None:
+            await before_persist_callback(included_runs)
         final_summary_text = generated_summary.summary
         compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}
         compacted_seen_event_ids = _seen_event_ids_for_runs(included_runs)
@@ -630,18 +614,39 @@ def _persist_compaction_progress(
     persisted_session: AgentSession | TeamSession,
     working_session: AgentSession | TeamSession,
     compacted_run_ids: set[str],
+    sync_remaining_runs: bool = False,
 ) -> None:
     """Save one successful compaction chunk before attempting the next chunk."""
     session_type = SessionType.TEAM if isinstance(persisted_session, TeamSession) else SessionType.AGENT
     latest_session = storage.get_session(session_id=persisted_session.session_id, session_type=session_type)
     target_session = latest_session if isinstance(latest_session, type(persisted_session)) else persisted_session
     target_session.summary = working_session.summary
-    target_session.metadata = _deep_merge_metadata(target_session.metadata, working_session.metadata)
+    target_session.metadata = deep_merge_metadata(target_session.metadata, working_session.metadata)
     target_session.runs = _remove_runs_by_id(target_session.runs or [], compacted_run_ids)
+    if sync_remaining_runs:
+        target_session.runs = _sync_remaining_runs_from_working(
+            target_session.runs or [],
+            working_session.runs or [],
+        )
     storage.upsert_session(target_session)
     persisted_session.summary = target_session.summary
     persisted_session.runs = target_session.runs
     persisted_session.metadata = target_session.metadata
+
+
+def _sync_remaining_runs_from_working(
+    target_runs: list[RunOutput | TeamRunOutput],
+    working_runs: list[RunOutput | TeamRunOutput],
+) -> list[RunOutput | TeamRunOutput]:
+    working_by_id = {run.run_id: run for run in working_runs if isinstance(run.run_id, str) and run.run_id}
+    synced_runs: list[RunOutput | TeamRunOutput] = []
+    for run in target_runs:
+        run_id = run.run_id
+        if isinstance(run_id, str) and run_id in working_by_id:
+            synced_runs.append(deepcopy(working_by_id[run_id]))
+        else:
+            synced_runs.append(run)
+    return synced_runs
 
 
 def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:

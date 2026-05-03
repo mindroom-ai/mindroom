@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import time
@@ -85,6 +86,13 @@ _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
 def _elapsed_ms(start: float) -> int:
     """Return elapsed monotonic milliseconds."""
     return int((time.monotonic() - start) * 1000)
+
+
+def _compaction_failure_status(error: BaseException) -> Literal["failed", "timeout"]:
+    failure_reason = str(error) or type(error).__name__
+    if isinstance(error, TimeoutError) or "timed out" in failure_reason.casefold():
+        return "timeout"
+    return "failed"
 
 
 @timed("system_prompt_assembly.history_prepare.compaction_model_init")
@@ -522,6 +530,23 @@ async def _run_scope_compaction_with_lifecycle(
             lifecycle_notice_event_id=notice_event_id,
             progress_callback=_compaction_progress_callback(visible_compaction_lifecycle, compaction_start),
         )
+    except asyncio.CancelledError as error:
+        duration_ms = _elapsed_ms(compaction_start)
+        await _complete_compaction_lifecycle_failure(
+            visible_compaction_lifecycle,
+            CompactionLifecycleFailure(
+                notice_event_id=notice_event_id,
+                mode=mode,
+                session_id=session.session_id,
+                scope=scope.key,
+                summary_model=execution_plan.compaction_model_name,
+                status="failed",
+                duration_ms=duration_ms,
+                failure_reason=str(error) or type(error).__name__,
+                history_budget_tokens=history_budget,
+            ),
+        )
+        raise
     except Exception as error:
         _clear_forced_compaction_after_failure(
             storage=storage,
@@ -531,7 +556,7 @@ async def _run_scope_compaction_with_lifecycle(
         )
         duration_ms = _elapsed_ms(compaction_start)
         failure_reason = str(error) or type(error).__name__
-        status = "timeout" if "timed out" in failure_reason else "failed"
+        status = _compaction_failure_status(error)
         await _complete_compaction_lifecycle_failure(
             visible_compaction_lifecycle,
             CompactionLifecycleFailure(

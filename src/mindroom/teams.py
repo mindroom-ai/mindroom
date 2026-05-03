@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -66,6 +65,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
+from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,
@@ -307,30 +307,6 @@ def _format_terminal_team_response(
 ) -> str:
     """Render the final user-visible text for one terminal team fallback output."""
     return _format_team_header(team_display_names) + _team_response_text(response)
-
-
-def _merge_metadata_content(
-    base: dict[str, Any] | None,
-    extra: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    if base is None:
-        return deepcopy(extra) if extra is not None else None
-    if extra is None:
-        return deepcopy(base)
-    merged = deepcopy(base)
-    for key, value in extra.items():
-        existing = merged.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            merged[key] = (
-                _merge_metadata_content(
-                    cast("dict[str, Any]", existing),
-                    cast("dict[str, Any]", value),
-                )
-                or {}
-            )
-        else:
-            merged[key] = deepcopy(value)
-    return merged
 
 
 def _cleanup_team_notice_state(
@@ -1537,7 +1513,7 @@ async def _prepare_materialized_team_execution(
         correlation_id=correlation_id,
         tools_schema=team_tool_definition_payloads_for_logging(team),
         model_params=model_params_payload(team.model) if team.model is not None else {},
-        extra_metadata=_merge_metadata_content(matrix_run_metadata, run_extra_content),
+        extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
     )
     return _PreparedMaterializedTeamExecution(
         messages=prepared_execution.messages,

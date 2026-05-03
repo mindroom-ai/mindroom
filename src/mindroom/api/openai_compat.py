@@ -12,7 +12,6 @@ import json
 import re
 import time
 from contextlib import ExitStack
-from copy import deepcopy
 from dataclasses import dataclass, field
 from html import escape
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
@@ -63,6 +62,7 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.routing import suggest_agent
 from mindroom.teams import (
     TeamMode,
@@ -1439,30 +1439,6 @@ def _format_team_output(response: TeamRunOutput | RunOutput) -> str:
     return "\n\n".join(parts) if parts else str(response.content or "")
 
 
-def _merge_openai_metadata_content(
-    base: dict[str, object] | None,
-    extra: dict[str, object] | None,
-) -> dict[str, object] | None:
-    if base is None:
-        return deepcopy(extra) if extra is not None else None
-    if extra is None:
-        return deepcopy(base)
-    merged = deepcopy(base)
-    for key, value in extra.items():
-        existing = merged.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            merged[key] = (
-                _merge_openai_metadata_content(
-                    cast("dict[str, object]", existing),
-                    cast("dict[str, object]", value),
-                )
-                or {}
-            )
-        else:
-            merged[key] = deepcopy(value)
-    return merged
-
-
 def _is_failed_team_output(response: TeamRunOutput | RunOutput) -> bool:
     """Return whether a fallback team output ended in a terminal non-success state."""
     return is_errored_run_output(response) or is_cancelled_run_output(response)
@@ -1557,8 +1533,11 @@ async def prepare_materialized_team_execution(
         tools_schema=team_tool_definition_payloads_for_logging(team),
         model_params=model_params_payload(team.model) if team.model is not None else {},
         extra_metadata=cast(
-            "dict[str, Any] | None",
-            _merge_openai_metadata_content(matrix_run_metadata, run_extra_content),
+            "dict[str, object] | None",
+            deep_merge_metadata(
+                cast("dict[str, Any] | None", matrix_run_metadata),
+                run_extra_content,
+            ),
         ),
     )
     return _PreparedOpenAIMaterializedTeamExecution(
