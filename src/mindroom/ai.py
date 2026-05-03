@@ -27,6 +27,7 @@ from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
+    build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
 from mindroom.cancellation import build_cancelled_error
@@ -67,6 +68,7 @@ from mindroom.logging_config import get_logger
 from mindroom.media_fallback import should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
+from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
@@ -943,8 +945,9 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
-    attempt_run_id = run_id
     metadata: dict[str, Any] | None = None
+    run_extra_content: dict[str, Any] | None = None
+    attempt_run_id = run_id
     try:
         try:
             _assert_agent_target(agent_name, config)
@@ -1006,6 +1009,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             if agent.model is not None:
                 ai_runtime.install_queued_message_notice_hook(agent.model)
 
+            run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
                 unseen_event_ids,
@@ -1015,7 +1019,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 correlation_id=resolved_correlation_id,
                 tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
                 model_params=model_params_payload(agent.model) if agent.model is not None else {},
-                extra_metadata=matrix_run_metadata,
+                extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
             )
             if turn_recorder is not None:
                 turn_recorder.set_run_metadata(metadata)
@@ -1170,7 +1174,18 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     except asyncio.CancelledError:
         if turn_recorder is not None:
             turn_recorder.record_interrupted(
-                run_metadata=metadata or turn_recorder.run_metadata,
+                run_metadata=metadata
+                if metadata is not None
+                else turn_recorder.run_metadata
+                or build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    requester_id=resolved_requester_id,
+                    correlation_id=resolved_correlation_id,
+                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+                ),
                 assistant_text=turn_recorder.assistant_text,
                 completed_tools=turn_recorder.completed_tools,
                 interrupted_tools=turn_recorder.interrupted_tools,
@@ -1184,7 +1199,17 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 partial_text="",
                 completed_tools=[],
                 interrupted_tools=[],
-                run_metadata=metadata,
+                run_metadata=metadata
+                if metadata is not None
+                else build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    requester_id=resolved_requester_id,
+                    correlation_id=resolved_correlation_id,
+                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+                ),
                 is_team=False,
             )
         raise
@@ -1409,10 +1434,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
+    metadata: dict[str, Any] | None = None
+    run_extra_content: dict[str, Any] | None = None
     attempt_run_id = run_id
     prepared_context_input_tokens: int | None = None
     state = _StreamingAttemptState()
-    metadata: dict[str, Any] | None = None
 
     try:
         try:
@@ -1478,6 +1504,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             if agent.model is not None:
                 ai_runtime.install_queued_message_notice_hook(agent.model)
 
+            run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
                 unseen_event_ids,
@@ -1487,7 +1514,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 correlation_id=resolved_correlation_id,
                 tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
                 model_params=model_params_payload(agent.model) if agent.model is not None else {},
-                extra_metadata=matrix_run_metadata,
+                extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
             )
             if turn_recorder is not None:
                 turn_recorder.set_run_metadata(metadata)
@@ -1700,7 +1727,18 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     except asyncio.CancelledError:
         if turn_recorder is not None:
             turn_recorder.record_interrupted(
-                run_metadata=metadata or turn_recorder.run_metadata,
+                run_metadata=metadata
+                if metadata is not None
+                else turn_recorder.run_metadata
+                or build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    requester_id=resolved_requester_id,
+                    correlation_id=resolved_correlation_id,
+                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+                ),
                 assistant_text=state.assistant_text,
                 completed_tools=state.completed_tools,
                 interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
@@ -1714,7 +1752,17 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 partial_text=state.assistant_text,
                 completed_tools=state.completed_tools,
                 interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
-                run_metadata=metadata,
+                run_metadata=metadata
+                if metadata is not None
+                else build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    requester_id=resolved_requester_id,
+                    correlation_id=resolved_correlation_id,
+                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+                ),
                 is_team=False,
             )
         raise

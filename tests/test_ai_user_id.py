@@ -54,6 +54,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
@@ -6253,6 +6254,51 @@ class TestUserIdPassthrough:
         assert payload["tools"]["count"] == 0
 
     @pytest.mark.asyncio
+    async def test_ai_response_persists_prepared_history_metadata(self, tmp_path: Path) -> None:
+        """Non-streaming agent runs should persist the same prepared-history metadata they expose visibly."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = []
+        mock_run_output.run_id = "run-1"
+        mock_run_output.session_id = "session1"
+        mock_run_output.status = RunStatus.completed
+        mock_run_output.model = "test-model"
+        mock_run_output.model_provider = "openai"
+        mock_run_output.metrics = Metrics(input_tokens=800, output_tokens=120, total_tokens=920)
+        recorder = TurnRecorder(user_message="test")
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch(
+                "mindroom.ai_runtime.cached_agent_run",
+                new_callable=AsyncMock,
+                return_value=mock_run_output,
+            ) as mock_run,
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, prepared_context_tokens=1234)
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                reply_to_event_id="$event",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                turn_recorder=recorder,
+            )
+
+        run_metadata = mock_run.await_args.kwargs["metadata"]
+        assert run_metadata[AI_RUN_METADATA_KEY]["prepared_context"] == {"tokens": 1234}
+        assert recorder.run_metadata is not None
+        assert recorder.run_metadata[AI_RUN_METADATA_KEY]["prepared_context"] == {"tokens": 1234}
+
+    @pytest.mark.asyncio
     async def test_ai_response_context_counts_anthropic_cache_tokens(self, tmp_path: Path) -> None:
         """Claude-family cache tokens should count toward context occupancy."""
         mock_agent = MagicMock()
@@ -6651,6 +6697,41 @@ class TestUserIdPassthrough:
         assert payload["model"]["config"] == "large"
         assert payload["model"]["id"] == "large-model"
         assert payload["context"]["window_tokens"] == 32000
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_persists_prepared_history_metadata(self, tmp_path: Path) -> None:
+        """Streaming agent runs should persist the same prepared-history metadata they expose visibly."""
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.__class__.__name__ = "OpenAIChat"
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "GeneralAgent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="hello")
+            yield RunCompletedEvent(run_id="run-stream", session_id="session1")
+
+        mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+        recorder = TurnRecorder(user_message="test")
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent, prepared_context_tokens=5678)
+            async for _chunk in stream_agent_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                reply_to_event_id="$event",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                turn_recorder=recorder,
+            ):
+                pass
+
+        run_metadata = mock_agent.arun.call_args.kwargs["metadata"]
+        assert run_metadata[AI_RUN_METADATA_KEY]["prepared_context"] == {"tokens": 5678}
+        assert recorder.run_metadata is not None
+        assert recorder.run_metadata[AI_RUN_METADATA_KEY]["prepared_context"] == {"tokens": 5678}
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_raises_cancelled_error_for_run_cancelled_event(self, tmp_path: Path) -> None:
