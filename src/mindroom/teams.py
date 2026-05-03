@@ -32,7 +32,8 @@ from mindroom import ai_runtime, model_loading
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent
-from mindroom.ai import build_matrix_run_metadata, build_prepared_history_run_metadata, resolve_run_correlation_id
+from mindroom.ai import build_matrix_run_metadata, resolve_run_correlation_id
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
@@ -1526,7 +1527,7 @@ async def _prepare_materialized_team_execution(
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)
-    run_extra_content = build_prepared_history_run_metadata(prepared_history)
+    run_extra_content = build_prepared_history_metadata_content(prepared_history)
     run_metadata = build_matrix_run_metadata(
         reply_to_event_id,
         prepared_execution.unseen_event_ids,

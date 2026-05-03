@@ -27,7 +27,6 @@ from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
-    build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
 from mindroom.cancellation import build_cancelled_error
@@ -98,7 +97,6 @@ __all__ = [
     "AIStreamChunk",
     "ai_response",
     "build_matrix_run_metadata",
-    "build_prepared_history_run_metadata",
     "resolve_run_correlation_id",
     "stream_agent_response",
 ]
@@ -438,13 +436,6 @@ def resolve_run_correlation_id(
     if reply_to_event_id:
         return reply_to_event_id
     return uuid4().hex
-
-
-def build_prepared_history_run_metadata(prepared_history: PreparedHistoryState | None) -> dict[str, Any] | None:
-    """Build Matrix-visible run metadata for prepared history diagnostics."""
-    return build_prepared_history_metadata_content(prepared_history)
-
-
 def _request_stream_retry(
     state: _StreamingAttemptState,
     *,

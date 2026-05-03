@@ -42,9 +42,9 @@ from mindroom.ai import (
     AIStreamChunk,
     ai_response,
     build_matrix_run_metadata,
-    build_prepared_history_run_metadata,
     stream_agent_response,
 )
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import prepare_bound_team_run_context, render_prepared_team_messages_text
@@ -1546,7 +1546,7 @@ async def prepare_materialized_team_execution(
         execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
     )
-    run_extra_content = build_prepared_history_run_metadata(prepared_execution.prepared_history)
+    run_extra_content = build_prepared_history_metadata_content(prepared_execution.prepared_history)
     run_metadata = build_matrix_run_metadata(
         reply_to_event_id,
         prepared_execution.unseen_event_ids,
