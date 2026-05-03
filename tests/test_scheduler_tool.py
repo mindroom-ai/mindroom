@@ -118,6 +118,24 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scheduler_tool_raises_when_backend_rejects_request() -> None:
+    """Invalid schedule requests should fail the tool call instead of returning error text."""
+    tools = SchedulerTools()
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    context = _make_context(config)
+
+    with (
+        patch(
+            "mindroom.custom_tools.scheduler.schedule_task",
+            new=AsyncMock(return_value=(None, "❌ Failed to schedule: schedule is not valid")),
+        ),
+        tool_runtime_context(context),
+        pytest.raises(RuntimeError, match="schedule is not valid"),
+    ):
+        await tools.schedule("next message")
+
+
+@pytest.mark.asyncio
 async def test_edit_schedule_tool_requires_context() -> None:
     """Edit tool should fail clearly when called outside Matrix response context."""
     tools = SchedulerTools()
@@ -160,6 +178,24 @@ async def test_edit_schedule_tool_calls_backend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_edit_schedule_tool_raises_when_backend_rejects_request() -> None:
+    """Edit failures should fail the tool call instead of returning error text."""
+    tools = SchedulerTools()
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    context = _make_context(config)
+
+    with (
+        patch(
+            "mindroom.custom_tools.scheduler.edit_scheduled_task",
+            new=AsyncMock(return_value="❌ Failed to edit task `task123`."),
+        ),
+        tool_runtime_context(context),
+        pytest.raises(RuntimeError, match="Failed to edit task"),
+    ):
+        await tools.edit_schedule("task123", "tomorrow at 9am check deployment")
+
+
+@pytest.mark.asyncio
 async def test_list_schedules_tool_requires_context() -> None:
     """List tool should fail clearly when called outside Matrix response context."""
     tools = SchedulerTools()
@@ -193,6 +229,24 @@ async def test_list_schedules_tool_calls_backend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_schedules_tool_raises_when_backend_rejects_request() -> None:
+    """List failures should fail the tool call instead of returning error text."""
+    tools = SchedulerTools()
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    context = _make_context(config)
+
+    with (
+        patch(
+            "mindroom.custom_tools.scheduler.list_scheduled_tasks",
+            new=AsyncMock(return_value="Unable to retrieve scheduled tasks."),
+        ),
+        tool_runtime_context(context),
+        pytest.raises(RuntimeError, match="Unable to retrieve scheduled tasks"),
+    ):
+        await tools.list_schedules()
+
+
+@pytest.mark.asyncio
 async def test_cancel_schedule_tool_requires_context() -> None:
     """Cancel tool should fail clearly when called outside Matrix response context."""
     tools = SchedulerTools()
@@ -222,3 +276,21 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
         room_id=context.room_id,
         task_id="task123",
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_schedule_tool_raises_when_backend_rejects_request() -> None:
+    """Cancel failures should fail the tool call instead of returning error text."""
+    tools = SchedulerTools()
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    context = _make_context(config)
+
+    with (
+        patch(
+            "mindroom.custom_tools.scheduler.cancel_scheduled_task",
+            new=AsyncMock(return_value="❌ Task `task123` not found."),
+        ),
+        tool_runtime_context(context),
+        pytest.raises(RuntimeError, match="not found"),
+    ):
+        await tools.cancel_schedule("task123")
