@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +41,15 @@ _ORIGINAL_STATUS_KEY = "mindroom_original_status"
 _INTERRUPTED_REPLAY_STATE = "interrupted"
 _INTERRUPTED_RESPONSE_MARKER = "[interrupted]"
 _MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
+_TRACE_METADATA_KEYS = (
+    "room_id",
+    "thread_id",
+    "reply_to_event_id",
+    "requester_id",
+    "correlation_id",
+    "tools_schema",
+    "model_params",
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +65,7 @@ class InterruptedReplaySnapshot:
     source_event_ids: tuple[str, ...]
     source_event_prompts: tuple[tuple[str, str], ...]
     response_event_id: str | None
+    trace_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _normalized_string_tuple(values: object) -> tuple[str, ...]:
@@ -143,11 +153,14 @@ def render_interrupted_replay_content(snapshot: InterruptedReplaySnapshot) -> st
 
 
 def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
-        MATRIX_SEEN_EVENT_IDS_METADATA_KEY: list(snapshot.seen_event_ids),
-        _ORIGINAL_STATUS_KEY: "cancelled",
-        _INTERRUPTED_REPLAY_STATE_KEY: _INTERRUPTED_REPLAY_STATE,
-    }
+    metadata: dict[str, Any] = dict(snapshot.trace_metadata)
+    metadata.update(
+        {
+            MATRIX_SEEN_EVENT_IDS_METADATA_KEY: list(snapshot.seen_event_ids),
+            _ORIGINAL_STATUS_KEY: "cancelled",
+            _INTERRUPTED_REPLAY_STATE_KEY: _INTERRUPTED_REPLAY_STATE,
+        },
+    )
     if snapshot.source_event_id is not None:
         metadata[MATRIX_EVENT_ID_METADATA_KEY] = snapshot.source_event_id
     if snapshot.source_event_ids:
@@ -211,6 +224,7 @@ def build_interrupted_replay_snapshot(
     source_event_ids = _normalized_string_tuple(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
     source_event_prompts = _normalized_prompt_items(metadata.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY))
     raw_response_event_id = response_event_id or metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+    trace_metadata = {key: metadata[key] for key in _TRACE_METADATA_KEYS if key in metadata}
     return InterruptedReplaySnapshot(
         user_message=(user_message or "").strip(),
         partial_text=(partial_text or "").strip(),
@@ -223,6 +237,7 @@ def build_interrupted_replay_snapshot(
         response_event_id=(
             raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
         ),
+        trace_metadata=trace_metadata,
     )
 
 

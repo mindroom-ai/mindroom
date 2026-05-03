@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, aclosing
 from dataclasses import dataclass, field
 from html import escape
 from typing import TYPE_CHECKING, Annotated, Literal, NoReturn, cast
@@ -46,8 +46,14 @@ from mindroom.history import (
     close_team_runtime_state_dbs,
     open_bound_scope_session_context,
     run_post_response_compaction_check,
+    team_tool_definition_payloads_for_logging,
 )
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
+from mindroom.llm_request_logging import (
+    bind_llm_request_log_context,
+    build_llm_request_log_context,
+    model_params_payload,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.routing import suggest_agent
@@ -240,6 +246,47 @@ class _PreparedOpenAIMaterializedTeamExecution:
     run_metadata: dict[str, object] | None
     unseen_event_ids: list[str]
     post_response_compaction_checks: list[PostResponseCompactionCheck] | None = None
+
+
+def _openai_team_request_log_context(
+    *,
+    team_name: str,
+    session_id: str,
+    requester_id: str | None,
+    prompt: str,
+    metadata: dict[str, object] | None,
+) -> dict[str, object]:
+    correlation_id = metadata.get("correlation_id") if metadata is not None else None
+    return build_llm_request_log_context(
+        agent_id=f"team/{team_name}",
+        session_id=session_id,
+        room_id=None,
+        thread_id=None,
+        reply_to_event_id=None,
+        requester_id=requester_id,
+        correlation_id=correlation_id if isinstance(correlation_id, str) else uuid4().hex,
+        prompt=prompt,
+        model_prompt=None,
+        full_prompt=prompt,
+        metadata=metadata,
+    )
+
+
+async def _openai_team_stream_with_request_log_context[StreamEventT](
+    stream_generator: AsyncGenerator[StreamEventT, None],
+    *,
+    request_context: dict[str, object],
+) -> AsyncIterator[StreamEventT]:
+    async with aclosing(stream_generator) as stream_iterator:
+        with bind_llm_request_log_context(**request_context):
+            stream = stream_iterator.__aiter__()
+        while True:
+            try:
+                with bind_llm_request_log_context(**request_context):
+                    event = await stream.__anext__()
+            except StopAsyncIteration:
+                return
+            yield event
 
 
 def _load_config(
@@ -1546,6 +1593,8 @@ async def prepare_materialized_team_execution(
         thread_id=thread_id,
         requester_id=requester_id,
         correlation_id=correlation_id,
+        tools_schema=team_tool_definition_payloads_for_logging(team),
+        model_params=model_params_payload(team.model) if team.model is not None else {},
         extra_metadata=matrix_run_metadata,
     )
     return _PreparedOpenAIMaterializedTeamExecution(
@@ -1673,12 +1722,21 @@ async def _non_stream_team_completion(
                 logger.exception("Team member preparation failed", team=team_name)
                 return _error_response(500, "Team execution failed", error_type="server_error")
             try:
-                response = await team.arun(
-                    prepared_team_prompt.prompt,
-                    session_id=session_id,
-                    user_id=user,
-                    metadata=prepared_team_prompt.run_metadata,
-                )
+                with bind_llm_request_log_context(
+                    **_openai_team_request_log_context(
+                        team_name=team_name,
+                        session_id=session_id,
+                        requester_id=user or (execution_identity.requester_id if execution_identity else None),
+                        prompt=prepared_team_prompt.prompt,
+                        metadata=prepared_team_prompt.run_metadata,
+                    ),
+                ):
+                    response = await team.arun(
+                        prepared_team_prompt.prompt,
+                        session_id=session_id,
+                        user_id=user,
+                        metadata=prepared_team_prompt.run_metadata,
+                    )
             except Exception:
                 logger.exception("Team execution failed", team=team_name)
                 return _error_response(500, "Team execution failed", error_type="server_error")
@@ -1815,20 +1873,30 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
             await _cleanup()
             return _error_response(500, "Team execution failed", error_type="server_error")
         try:
+            request_log_context = _openai_team_request_log_context(
+                team_name=team_name,
+                session_id=session_id,
+                requester_id=user or (execution_identity.requester_id if execution_identity else None),
+                prompt=prepared_team_prompt.prompt,
+                metadata=prepared_team_prompt.run_metadata,
+            )
             stream = cast(
                 "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
                 stream_with_tool_execution_identity(
                     execution_identity,
-                    stream_factory=lambda: cast(
-                        "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
-                        team.arun(
-                            prepared_team_prompt.prompt,
-                            stream=True,
-                            stream_events=True,
-                            session_id=session_id,
-                            user_id=user,
-                            metadata=prepared_team_prompt.run_metadata,
+                    stream_factory=lambda: _openai_team_stream_with_request_log_context(
+                        cast(
+                            "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
+                            team.arun(
+                                prepared_team_prompt.prompt,
+                                stream=True,
+                                stream_events=True,
+                                session_id=session_id,
+                                user_id=user,
+                                metadata=prepared_team_prompt.run_metadata,
+                            ),
                         ),
+                        request_context=request_log_context,
                     ),
                 ),
             )

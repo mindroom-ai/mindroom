@@ -35,6 +35,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.ai import (
+    _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _PreparedAgentRun,
     ai_response,
@@ -2347,6 +2348,70 @@ async def test_generate_response_marks_transient_model_prompt_for_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_generate_response_strips_transient_model_prompt_from_persisted_session(
+    tmp_path: Path,
+) -> None:
+    """Post-response cleanup should restore persisted user text to the raw turn."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_send_text(*_args: object, **_kwargs: object) -> str:
+            storage.session = AgentSession(
+                session_id="!test:localhost:$thread-root",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+                runs=[
+                    RunOutput(
+                        content="Hello",
+                        messages=[
+                            Message(
+                                role="user",
+                                content=(
+                                    "Describe this image\n\n"
+                                    "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+                                ),
+                            ),
+                            Message(role="assistant", content="Hello"),
+                        ],
+                    ),
+                ],
+            )
+            return "$msg"
+
+        coordinator.deps.delivery_gateway.send_text.side_effect = fake_send_text
+
+        await coordinator.generate_response(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+        )
+
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].content == "Describe this image"
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_marks_transient_model_prompt_for_cleanup(
     tmp_path: Path,
 ) -> None:
@@ -2452,6 +2517,17 @@ async def test_generate_team_response_marks_system_enrichment_for_cleanup(
 
     outcome = mock_post.await_args.args[1]
     assert outcome.strip_transient_enrichment_after_run is True
+
+
+def test_compose_current_turn_prompt_uses_normalized_tail_comparison() -> None:
+    """Whitespace-normalized model prompts should not duplicate the raw turn."""
+    prompt = _compose_current_turn_prompt(
+        raw_prompt=" report ",
+        model_prompt="[2026-03-20 08:15 PDT] report\n\nAvailable attachment IDs: att_report.",
+        prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
+    )
+
+    assert prompt == " report \n\nAvailable attachment IDs: att_report."
 
 
 @pytest.mark.asyncio
@@ -4357,6 +4433,13 @@ class TestUserIdPassthrough:
         persisted_run = cast("RunOutput", persisted_session.runs[0])
         assert persisted_run.status is RunStatus.completed
         assert persisted_run.metadata == {
+            "room_id": None,
+            "thread_id": None,
+            "reply_to_event_id": "e1",
+            "requester_id": None,
+            "correlation_id": "e1",
+            "tools_schema": [],
+            "model_params": {},
             "matrix_event_id": "e1",
             "matrix_seen_event_ids": ["e1"],
             "mindroom_original_status": "cancelled",
@@ -4891,6 +4974,10 @@ class TestUserIdPassthrough:
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path),
                     config=_config(),
+                    room_id="!room:localhost",
+                    thread_id="$thread:localhost",
+                    user_id="@alice:localhost",
+                    reply_to_event_id="$event:localhost",
                     run_id="run-123",
                     run_id_callback=callback_run_ids.append,
                     media=MediaInputs(audio=[MagicMock(name="audio_input")]),
@@ -4904,6 +4991,14 @@ class TestUserIdPassthrough:
         assert seen_run_ids[1] != "run-123"
         assert callback_run_ids == [run_id for run_id in seen_run_ids if run_id is not None]
         assert persisted_run.run_id == seen_run_ids[1]
+        assert persisted_run.metadata is not None
+        assert persisted_run.metadata["room_id"] == "!room:localhost"
+        assert persisted_run.metadata["thread_id"] == "$thread:localhost"
+        assert persisted_run.metadata["requester_id"] == "@alice:localhost"
+        assert persisted_run.metadata["reply_to_event_id"] == "$event:localhost"
+        assert persisted_run.metadata["correlation_id"] == "$event:localhost"
+        assert persisted_run.metadata["tools_schema"] == []
+        assert persisted_run.metadata["model_params"] == {}
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:

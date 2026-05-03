@@ -57,6 +57,7 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
+from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
@@ -3061,6 +3062,7 @@ class TestTeamCompletion:
         mock_team = _make_test_team()
         mock_agents = [_make_test_agent("GeneralAgent")]
         prepared_correlation_ids: list[str] = []
+        request_log_contexts: list[dict[str, object]] = []
 
         async def mock_prepare_team_execution(**kwargs: object) -> SimpleNamespace:
             correlation_id = kwargs["correlation_id"]
@@ -3072,6 +3074,7 @@ class TestTeamCompletion:
             )
 
         async def mock_arun(*_args: object, **kwargs: object) -> TeamRunOutput:
+            request_log_contexts.append(current_llm_request_log_context())
             metadata = kwargs["metadata"]
             assert isinstance(metadata, dict)
             correlation_id = metadata["correlation_id"]
@@ -3124,6 +3127,11 @@ class TestTeamCompletion:
         assert isinstance(correlation_id, str)
         assert re.fullmatch(r"[0-9a-f]{32}", correlation_id)
         assert prepared_correlation_ids == [correlation_id]
+        assert request_log_contexts[0]["agent_id"] == "team/super_team"
+        assert request_log_contexts[0]["session_id"] == "session-123"
+        assert request_log_contexts[0]["requester_id"] == "@api-user:localhost"
+        assert request_log_contexts[0]["correlation_id"] == correlation_id
+        assert request_log_contexts[0]["full_prompt"] == "Build it"
         records = _read_jsonl(_tool_calls_path(runtime_paths))
         assert records[0]["correlation_id"] == correlation_id
         assert records[0]["reply_to_event_id"] is None
@@ -3300,6 +3308,7 @@ class TestTeamCompletion:
         mock_team = _make_test_team()
         mock_agents = [_make_test_agent("GeneralAgent")]
         prepared_correlation_ids: list[str] = []
+        request_log_contexts: list[dict[str, object]] = []
 
         async def mock_prepare_team_execution(**kwargs: object) -> SimpleNamespace:
             correlation_id = kwargs["correlation_id"]
@@ -3311,6 +3320,7 @@ class TestTeamCompletion:
             )
 
         async def mock_stream_events(*_args: object, **kwargs: object) -> AsyncIterator[object]:
+            request_log_contexts.append(current_llm_request_log_context())
             metadata = kwargs["metadata"]
             assert isinstance(metadata, dict)
             correlation_id = metadata["correlation_id"]
@@ -3368,6 +3378,11 @@ class TestTeamCompletion:
         assert isinstance(correlation_id, str)
         assert re.fullmatch(r"[0-9a-f]{32}", correlation_id)
         assert prepared_correlation_ids == [correlation_id]
+        assert request_log_contexts[0]["agent_id"] == "team/super_team"
+        assert request_log_contexts[0]["session_id"] == "session-123"
+        assert request_log_contexts[0]["requester_id"] == "@api-user:localhost"
+        assert request_log_contexts[0]["correlation_id"] == correlation_id
+        assert request_log_contexts[0]["full_prompt"] == "Build it"
         assert "Hello " in body
         assert "world!" in body
         records = _read_jsonl(_tool_calls_path(runtime_paths))
@@ -4628,9 +4643,21 @@ class TestTeamCompletion:
                     ],
                 )
 
-            with patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
-                new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
+            with (
+                patch(
+                    "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                    new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
+                ),
+                patch(
+                    "mindroom.api.openai_compat.team_tool_definition_payloads_for_logging",
+                    return_value=[{"name": "demo_tool", "description": "Demo"}],
+                    create=True,
+                ),
+                patch(
+                    "mindroom.api.openai_compat.model_params_payload",
+                    return_value={"temperature": 0.7},
+                    create=True,
+                ),
             ):
                 prepared_prompt = await openai_compat._prepare_openai_team_prompt(
                     scope_context=scope_context,
@@ -4644,6 +4671,9 @@ class TestTeamCompletion:
                 )
 
         assert prepared_prompt.prompt == "assistant: Previous team reply\n\nAnalyze this."
+        assert prepared_prompt.run_metadata is not None
+        assert prepared_prompt.run_metadata["tools_schema"] == [{"name": "demo_tool", "description": "Demo"}]
+        assert prepared_prompt.run_metadata["model_params"] == {"temperature": 0.7}
 
     def test_collaborate_mode_delegates_to_all(self) -> None:
         """Collaborate mode sets delegate_to_all_members=True on Team."""

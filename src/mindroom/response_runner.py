@@ -11,6 +11,10 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from agno.db.base import SessionType
+from agno.run.agent import RunOutput
+from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
@@ -479,6 +483,35 @@ class ResponseRunner:
             is_team=is_team,
             response_event_id=response_event_id,
         )
+
+    def _strip_transient_enrichment_from_session(
+        self,
+        outcome: ResponseOutcome,
+        *,
+        session_scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> None:
+        """Restore the persisted current user turn after transient model context was used."""
+        if outcome.session_id is None or outcome.session_type is None or outcome.memory_prompt is None:
+            return
+        storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
+        try:
+            session = storage.get_session(outcome.session_id, outcome.session_type)
+            if not isinstance(session, AgentSession | TeamSession) or not session.runs:
+                return
+            for run in reversed(session.runs):
+                if not isinstance(run, RunOutput | TeamRunOutput) or not run.messages:
+                    continue
+                for message in run.messages:
+                    if message.role != "user":
+                        continue
+                    if message.content == outcome.memory_prompt:
+                        return
+                    message.content = outcome.memory_prompt
+                    storage.upsert_session(session)
+                    return
+        finally:
+            storage.close()
 
     def _record_stream_delivery_error(
         self,
@@ -1323,6 +1356,11 @@ class ResponseRunner:
                 persist_response_event_id=persist_response_event_id,
                 execution_identity=tool_dispatch.execution_identity,
                 run_post_response_compaction=run_post_response_compaction_check,
+                strip_transient_enrichment=lambda outcome: self._strip_transient_enrichment_from_session(
+                    outcome,
+                    session_scope=session_scope,
+                    execution_identity=tool_dispatch.execution_identity,
+                ),
             ),
         )
         return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
@@ -2317,6 +2355,11 @@ class ResponseRunner:
             persist_response_event_id=persist_response_event_id,
             execution_identity=execution_identity,
             run_post_response_compaction=run_post_response_compaction_check,
+            strip_transient_enrichment=lambda outcome: self._strip_transient_enrichment_from_session(
+                outcome,
+                session_scope=self.deps.state_writer.history_scope(),
+                execution_identity=execution_identity,
+            ),
         )
         try:
             final_outcome = await lifecycle.finalize(

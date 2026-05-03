@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -39,6 +40,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     prepare_bound_team_run_context,
+    render_prepared_messages_text,
     render_prepared_team_messages_text,
 )
 from mindroom.history import (
@@ -52,7 +54,11 @@ from mindroom.history import (
 from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
-from mindroom.llm_request_logging import model_params_payload
+from mindroom.llm_request_logging import (
+    bind_llm_request_log_context,
+    build_llm_request_log_context,
+    model_params_payload,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -72,7 +78,7 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Collection, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
 
     import nio
     from agno.db.base import BaseDb
@@ -94,6 +100,57 @@ logger = get_logger(__name__)
 
 def _team_tools_schema(team: Team) -> list[dict[str, object]]:
     return team_tool_definition_payloads_for_logging(team)
+
+
+def _team_run_input_text(run_input: str | list[Message]) -> str:
+    if isinstance(run_input, str):
+        return run_input
+    return render_prepared_messages_text(run_input)
+
+
+def _team_request_log_context(
+    *,
+    team_name: str,
+    session_id: str | None,
+    room_id: str | None,
+    thread_id: str | None,
+    reply_to_event_id: str | None,
+    requester_id: str | None,
+    correlation_id: str,
+    prompt: str,
+    run_input: str | list[Message],
+    metadata: dict[str, object] | None,
+) -> dict[str, object]:
+    return build_llm_request_log_context(
+        agent_id=team_name,
+        session_id=session_id or "",
+        room_id=room_id,
+        thread_id=thread_id,
+        reply_to_event_id=reply_to_event_id,
+        requester_id=requester_id,
+        correlation_id=correlation_id,
+        prompt=prompt,
+        model_prompt=None,
+        full_prompt=_team_run_input_text(run_input),
+        metadata=metadata,
+    )
+
+
+async def _stream_team_with_request_log_context[StreamEventT](
+    stream_generator: AsyncGenerator[StreamEventT, None],
+    *,
+    request_context: dict[str, object],
+) -> AsyncIterator[StreamEventT]:
+    async with aclosing(stream_generator) as stream_iterator:
+        with bind_llm_request_log_context(**request_context):
+            stream = stream_iterator.__aiter__()
+        while True:
+            try:
+                with bind_llm_request_log_context(**request_context):
+                    event = await stream.__anext__()
+            except StopAsyncIteration:
+                return
+            yield event
 
 
 # Message length limits for team context and logging
@@ -1531,8 +1588,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
-    unseen_event_ids: list[str] = []
     attempt_run_id = run_id
+    run_metadata: dict[str, Any] | None = None
 
     try:
         with open_bound_scope_session_context(
@@ -1584,7 +1641,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 system_enrichment_items=system_enrichment_items,
             )
             prompt = prepared_execution.prepared_prompt
-            unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
             turn_recorder.set_run_metadata(run_metadata)
             logger.info("executing_team_response", agent_count=len(agents), mode=mode.value)
@@ -1602,13 +1658,27 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                     if current_media_inputs.has_any()
                     else current_prompt
                 )
-                return await team.arun(
-                    prepared_input,
-                    session_id=session_id,
-                    run_id=current_run_id,
-                    user_id=user_id,
-                    metadata=run_metadata,
-                )
+                with bind_llm_request_log_context(
+                    **_team_request_log_context(
+                        team_name=configured_team_name or team_name,
+                        session_id=session_id,
+                        room_id=room_id,
+                        thread_id=thread_id,
+                        reply_to_event_id=reply_to_event_id,
+                        requester_id=requester_id,
+                        correlation_id=correlation_id,
+                        prompt=message,
+                        run_input=prepared_input,
+                        metadata=run_metadata,
+                    ),
+                ):
+                    return await team.arun(
+                        prepared_input,
+                        session_id=session_id,
+                        run_id=current_run_id,
+                        user_id=user_id,
+                        metadata=run_metadata,
+                    )
 
             response: object | None = None
             cleaned_response: RunOutput | TeamRunOutput | None = None
@@ -1749,11 +1819,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 )
     except asyncio.CancelledError:
         turn_recorder.record_interrupted(
-            run_metadata=build_matrix_run_metadata(
-                reply_to_event_id,
-                unseen_event_ids,
-                extra_metadata=matrix_run_metadata,
-            ),
+            run_metadata=run_metadata,
             assistant_text=turn_recorder.assistant_text,
             completed_tools=turn_recorder.completed_tools,
             interrupted_tools=turn_recorder.interrupted_tools,
@@ -1901,6 +1967,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     team_label = f"Team ({', '.join(agent_names)})"
     unseen_event_ids: list[str] = []
     attempt_run_id = run_id
+    run_metadata: dict[str, Any] | None = None
     canonical_per_member: dict[str, str] = {}
     canonical_consensus = ""
     completed_tools: list[ToolTraceEntry] = []
@@ -2183,6 +2250,26 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                         run_id=attempt_run_id,
                         user_id=user_id,
                     )
+                    stream_run_input = (
+                        ai_runtime.attach_media_to_run_input(attempt_prompt, attempt_media_inputs)
+                        if attempt_media_inputs.has_any()
+                        else attempt_prompt
+                    )
+                    raw_stream = _stream_team_with_request_log_context(
+                        cast("AsyncGenerator[Any, None]", raw_stream),
+                        request_context=_team_request_log_context(
+                            team_name=configured_team_name or team_label,
+                            session_id=session_id,
+                            room_id=room_id,
+                            thread_id=thread_id,
+                            reply_to_event_id=reply_to_event_id,
+                            requester_id=requester_id,
+                            correlation_id=correlation_id,
+                            prompt=message,
+                            run_input=stream_run_input,
+                            metadata=run_metadata,
+                        ),
+                    )
                     async for event in raw_stream:
                         if isinstance(event, (TeamRunOutput, RunOutput)):
                             _cleanup_team_notice_state(
@@ -2351,11 +2438,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 )
     except asyncio.CancelledError:
         turn_recorder.record_interrupted(
-            run_metadata=build_matrix_run_metadata(
-                reply_to_event_id,
-                unseen_event_ids,
-                extra_metadata=matrix_run_metadata,
-            ),
+            run_metadata=run_metadata,
             assistant_text=render_canonical_partial_text(),
             completed_tools=completed_tools,
             interrupted_tools=[pending.trace_entry for pending in pending_tools],

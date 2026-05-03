@@ -120,10 +120,12 @@ def _compose_current_turn_prompt(
     if prompt_parts.turn_context:
         prompt_chunks.append(prompt_parts.turn_context)
     model_tail = raw_prompt if not model_prompt else strip_user_turn_time_prefix(model_prompt)
-    if raw_prompt and model_tail == raw_prompt:
+    normalized_raw_prompt = raw_prompt.strip()
+    normalized_model_tail = model_tail.strip()
+    if raw_prompt and normalized_model_tail == normalized_raw_prompt:
         model_tail = ""
-    elif raw_prompt and model_tail.startswith(f"{raw_prompt}\n\n"):
-        model_tail = model_tail[len(raw_prompt) + 2 :].lstrip()
+    elif raw_prompt and normalized_model_tail.startswith(f"{normalized_raw_prompt}\n\n"):
+        model_tail = normalized_model_tail[len(normalized_raw_prompt) + 2 :].lstrip()
     if model_tail:
         prompt_chunks.append(model_tail)
 
@@ -880,6 +882,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
     attempt_run_id = run_id
+    metadata: dict[str, Any] | None = None
     try:
         try:
             _assert_agent_target(agent_name, config)
@@ -1102,11 +1105,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     except asyncio.CancelledError:
         if turn_recorder is not None:
             turn_recorder.record_interrupted(
-                run_metadata=build_matrix_run_metadata(
-                    reply_to_event_id,
-                    unseen_event_ids,
-                    extra_metadata=matrix_run_metadata,
-                ),
+                run_metadata=metadata,
                 assistant_text=turn_recorder.assistant_text,
                 completed_tools=turn_recorder.completed_tools,
                 interrupted_tools=turn_recorder.interrupted_tools,
@@ -1120,11 +1119,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 partial_text="",
                 completed_tools=[],
                 interrupted_tools=[],
-                run_metadata=build_matrix_run_metadata(
-                    reply_to_event_id,
-                    unseen_event_ids,
-                    extra_metadata=matrix_run_metadata,
-                ),
+                run_metadata=metadata,
                 is_team=False,
             )
         raise
@@ -1348,6 +1343,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     unseen_event_ids: list[str] = []
     attempt_run_id = run_id
     state = _StreamingAttemptState()
+    metadata: dict[str, Any] | None = None
 
     try:
         try:
@@ -1625,11 +1621,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     except asyncio.CancelledError:
         if turn_recorder is not None:
             turn_recorder.record_interrupted(
-                run_metadata=build_matrix_run_metadata(
-                    reply_to_event_id,
-                    unseen_event_ids,
-                    extra_metadata=matrix_run_metadata,
-                ),
+                run_metadata=metadata,
                 assistant_text=state.assistant_text,
                 completed_tools=state.completed_tools,
                 interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
@@ -1643,11 +1635,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 partial_text=state.assistant_text,
                 completed_tools=state.completed_tools,
                 interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
-                run_metadata=build_matrix_run_metadata(
-                    reply_to_event_id,
-                    unseen_event_ids,
-                    extra_metadata=matrix_run_metadata,
-                ),
+                run_metadata=metadata,
                 is_team=False,
             )
         raise

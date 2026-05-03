@@ -81,6 +81,7 @@ class PostResponseEffectsDeps:
     queue_memory_persistence: Callable[[], None] | None = None
     run_post_response_compaction: Callable[[Sequence[PostResponseCompactionCheck], str], Awaitable[None]] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
+    strip_transient_enrichment: Callable[[ResponseOutcome], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
 
@@ -206,6 +207,7 @@ class PostResponseEffectsSupport:
         interactive_agent_name: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         persist_response_event_id: Callable[[str, str], None] | None = None,
+        strip_transient_enrichment: Callable[[ResponseOutcome], None] | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
         run_post_response_compaction: PostResponseCompactionRunner | None = None,
     ) -> PostResponseEffectsDeps:
@@ -246,12 +248,13 @@ class PostResponseEffectsSupport:
                 else None
             ),
             persist_response_event_id=persist_response_event_id,
+            strip_transient_enrichment=strip_transient_enrichment,
             should_queue_thread_summary=self.should_queue_thread_summary,
             queue_thread_summary=self.queue_thread_summary,
         )
 
 
-async def apply_post_response_effects(
+async def apply_post_response_effects(  # noqa: C901
     final_delivery_outcome: FinalDeliveryOutcome,
     outcome: ResponseOutcome,
     deps: PostResponseEffectsDeps,
@@ -337,6 +340,16 @@ async def apply_post_response_effects(
                 thread_id=(
                     outcome.interactive_target.resolved_thread_id if outcome.interactive_target is not None else None
                 ),
+            )
+
+    if outcome.strip_transient_enrichment_after_run and deps.strip_transient_enrichment is not None:
+        try:
+            deps.strip_transient_enrichment(outcome)
+        except Exception:
+            deps.logger.exception(
+                "Failed to strip transient enrichment from session history",
+                session_id=outcome.session_id,
+                session_type=outcome.session_type.value if outcome.session_type is not None else None,
             )
 
     if (
