@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.oauth.google import (
-    GOOGLE_IDENTITY_SCOPES,
-    _google_domain_env_names,
-    _google_token_parser,
-)
+from mindroom.oauth.google import GOOGLE_IDENTITY_SCOPES, _google_domain_env_names, _google_token_parser
 from mindroom.oauth.providers import OAuthProvider
 
 GOOGLE_SHEETS_OAUTH_SCOPES = (
