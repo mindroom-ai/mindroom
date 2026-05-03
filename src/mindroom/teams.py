@@ -175,7 +175,6 @@ class _PreparedMaterializedTeamExecution:
 
     messages: tuple[Message, ...]
     run_metadata: dict[str, Any] | None
-    run_extra_content: dict[str, Any] | None
     unseen_event_ids: list[str]
 
     @property
@@ -1518,7 +1517,6 @@ async def _prepare_materialized_team_execution(
     return _PreparedMaterializedTeamExecution(
         messages=prepared_execution.messages,
         run_metadata=run_metadata,
-        run_extra_content=run_extra_content,
         unseen_event_ids=prepared_execution.unseen_event_ids,
     )
 

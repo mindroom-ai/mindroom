@@ -4717,7 +4717,7 @@ def test_build_matrix_prompt_with_thread_history_without_tool_trace_is_unchanged
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(tmp_path: Path) -> None:
+async def test_prepare_agent_and_prompt_budgets_required_compaction_against_actual_prompt(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     live_agent = _agent()
     live_agent.role = "Verbose role " + ("r" * 200)
@@ -4746,12 +4746,10 @@ async def test_prepare_agent_and_prompt_budgets_against_thread_history_fallback(
             thread_history=thread_history,
         )
 
-    expected_fallback_prompt = "alice: Earlier context\n\nbob: More context\n\nCurrent prompt"
     assert mock_prepare.await_args is not None
     assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == estimate_preparation_static_tokens(
         live_agent,
         full_prompt="Current prompt",
-        fallback_full_prompt=expected_fallback_prompt,
     )
 
 

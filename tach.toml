@@ -45,6 +45,7 @@ depends_on = [
     "mindroom.media_fallback",
     "mindroom.media_inputs",
     "mindroom.memory",
+    "mindroom.metadata_merge",
     "mindroom.timing",
     "mindroom.tool_system.events",
 ]

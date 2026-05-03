@@ -438,6 +438,8 @@ def resolve_run_correlation_id(
     if reply_to_event_id:
         return reply_to_event_id
     return uuid4().hex
+
+
 def _request_stream_retry(
     state: _StreamingAttemptState,
     *,
