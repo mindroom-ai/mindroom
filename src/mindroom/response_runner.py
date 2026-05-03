@@ -502,21 +502,6 @@ class ResponseRunner:
         finally:
             storage.close()
 
-    def _transient_system_context_for_agent_cleanup(
-        self,
-        request: ResponseRequest,
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> str:
-        knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
-            self.deps.agent_name,
-            execution_identity=execution_identity,
-        )
-        system_enrichment_items = append_knowledge_availability_enrichment(
-            request.system_enrichment_items,
-            knowledge_resolution.unavailable,
-        )
-        return render_system_enrichment_block(system_enrichment_items)
-
     def _record_stream_delivery_error(
         self,
         *,
@@ -1522,6 +1507,7 @@ class ResponseRunner:
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
         post_response_compaction_checks: list[PostResponseCompactionCheck],
+        transient_system_context_collector: list[str],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> str:
         """Run one non-streaming AI request."""
@@ -1543,6 +1529,7 @@ class ResponseRunner:
                 request.system_enrichment_items,
                 knowledge_resolution.unavailable,
             )
+            transient_system_context_collector.append(render_system_enrichment_block(system_enrichment_items))
             matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
             return await ai_response(
                 agent_name=self.deps.agent_name,
@@ -1610,6 +1597,7 @@ class ResponseRunner:
         run_metadata_content: dict[str, Any],
         compaction_outcomes: list[CompactionOutcome],
         post_response_compaction_checks: list[PostResponseCompactionCheck],
+        transient_system_context_collector: list[str],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> StreamTransportOutcome:
         """Run one streaming AI request and send the streamed Matrix response."""
@@ -1633,6 +1621,7 @@ class ResponseRunner:
             request.system_enrichment_items,
             knowledge_resolution.unavailable,
         )
+        transient_system_context_collector.append(render_system_enrichment_block(system_enrichment_items))
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         response_stream = stream_agent_response(
             agent_name=self.deps.agent_name,
@@ -1717,6 +1706,7 @@ class ResponseRunner:
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
         post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
         run_success_collector: list[bool] | None = None,
+        transient_system_context_collector: list[str] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
     ) -> FinalDeliveryOutcome:
         """Process a message and send a response without streaming."""
@@ -1774,6 +1764,9 @@ class ResponseRunner:
                     run_metadata_content=run_metadata_content,
                     compaction_outcomes=compaction_outcomes,
                     post_response_compaction_checks=post_response_compaction_checks,
+                    transient_system_context_collector=(
+                        transient_system_context_collector if transient_system_context_collector is not None else []
+                    ),
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
@@ -1861,6 +1854,7 @@ class ResponseRunner:
         compaction_outcomes_collector: list[CompactionOutcome] | None = None,
         post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
         run_success_collector: list[bool] | None = None,
+        transient_system_context_collector: list[str] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
         tool_trace_collector: list[Any] | None = None,
         run_metadata_content_collector: dict[str, Any] | None = None,
@@ -1921,6 +1915,9 @@ class ResponseRunner:
                     run_metadata_content=run_metadata_content,
                     compaction_outcomes=compaction_outcomes,
                     post_response_compaction_checks=post_response_compaction_checks,
+                    transient_system_context_collector=(
+                        transient_system_context_collector if transient_system_context_collector is not None else []
+                    ),
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
@@ -2133,6 +2130,7 @@ class ResponseRunner:
         early_delivery_error: BaseException | None = None
         tool_trace: list[Any] = []
         run_metadata_content: dict[str, Any] = {}
+        transient_system_contexts: list[str] = []
         resolved_correlation_id = self._correlation_id_for_request(request)
         resolved_response_envelope = self._response_envelope_for_request(
             request,
@@ -2199,6 +2197,7 @@ class ResponseRunner:
                     compaction_outcomes_collector=compaction_outcomes,
                     post_response_compaction_checks_collector=post_response_compaction_checks,
                     run_success_collector=run_successes,
+                    transient_system_context_collector=transient_system_contexts,
                     on_delivery_started=note_delivery_started,
                     tool_trace_collector=tool_trace,
                     run_metadata_content_collector=run_metadata_content,
@@ -2210,6 +2209,7 @@ class ResponseRunner:
                     compaction_outcomes_collector=compaction_outcomes,
                     post_response_compaction_checks_collector=post_response_compaction_checks,
                     run_success_collector=run_successes,
+                    transient_system_context_collector=transient_system_contexts,
                     on_delivery_started=note_delivery_started,
                 )
 
@@ -2348,7 +2348,11 @@ class ResponseRunner:
                     failure_reason=delivery_failure_reason or "interrupted",
                 )
         assert final_delivery_outcome is not None
-        transient_system_context = self._transient_system_context_for_agent_cleanup(request, execution_identity)
+        transient_system_context = (
+            transient_system_contexts[-1]
+            if transient_system_contexts
+            else render_system_enrichment_block(request.system_enrichment_items)
+        )
         post_response_outcome = ResponseOutcome(
             strip_transient_enrichment_after_run=_should_strip_transient_enrichment(request)
             or bool(transient_system_context),

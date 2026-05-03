@@ -34,6 +34,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
@@ -2583,31 +2584,169 @@ def test_strip_transient_enrichment_targets_response_run_id() -> None:
     assert cast("RunOutput", persisted_session.runs[2]).messages[0].content == "newer enriched prompt"
 
 
-def test_transient_system_context_for_agent_cleanup_includes_knowledge_notice(tmp_path: Path) -> None:
-    """Cleanup should render the same knowledge notice appended for the model run."""
+def test_strip_transient_enrichment_strips_nested_team_member_system_context() -> None:
+    """Team cleanup should recurse into persisted member responses."""
+    transient_system_context = render_system_enrichment_block(
+        (EnrichmentItem(key="weather", text="72F and sunny", cache_policy="volatile"),),
+    )
+    storage = _SessionStorage(
+        TeamSession(
+            session_id="session-1",
+            team_id="ultimate",
+            runs=[
+                TeamRunOutput(
+                    run_id="target-run",
+                    messages=[
+                        Message(role="system", content=f"durable team context\n\n{transient_system_context}"),
+                        Message(role="user", content="current enriched prompt"),
+                    ],
+                    member_responses=[
+                        RunOutput(
+                            run_id="member-run",
+                            messages=[
+                                Message(
+                                    role="system",
+                                    content=f"durable member context\n\n{transient_system_context}",
+                                ),
+                                Message(role="assistant", content="member answer"),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    )
+    storage_view = storage.open()
+
+    changed = strip_transient_enrichment_from_session(
+        storage_view,
+        session_id="session-1",
+        session_type=SessionType.TEAM,
+        response_run_id="target-run",
+        memory_prompt="current raw prompt",
+        transient_system_context=transient_system_context,
+    )
+
+    persisted_session = cast("TeamSession", storage.session)
+    assert changed is True
+    assert persisted_session.runs is not None
+    target_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert target_run.messages is not None
+    assert target_run.messages[0].content == "durable team context"
+    assert target_run.messages[1].content == "current raw prompt"
+    assert target_run.member_responses is not None
+    member_run = cast("RunOutput", target_run.member_responses[0])
+    assert member_run.messages is not None
+    assert member_run.messages[0].content == "durable member context"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_cleanup_uses_model_time_knowledge_notice(tmp_path: Path) -> None:
+    """Cleanup should use the exact knowledge notice appended before the model run."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
-    knowledge_access_support = _knowledge_access_support(
-        unavailable={
-            "docs": KnowledgeAvailabilityDetail(
-                availability=KnowledgeAvailability.INITIALIZING,
-                search_available=False,
-            ),
-        },
-    )
-    coordinator = _build_response_runner(
-        bot,
-        config=config,
-        runtime_paths=runtime_paths,
-        storage_path=tmp_path,
-        requester_id="@alice:localhost",
-        knowledge_access_support=knowledge_access_support,
-    )
+    knowledge_access_support = _knowledge_access_support()
+    knowledge_access_support.resolve_for_agent.side_effect = [
+        KnowledgeResolution(
+            knowledge=None,
+            unavailable={
+                "docs": KnowledgeAvailabilityDetail(
+                    availability=KnowledgeAvailability.INITIALIZING,
+                    search_available=False,
+                ),
+            },
+        ),
+        KnowledgeResolution(knowledge=None, unavailable={}),
+    ]
 
-    rendered_context = coordinator._transient_system_context_for_agent_cleanup(
-        _response_request(prompt="Hello", user_id="@alice:localhost"),
-        execution_identity=None,
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            knowledge_access_support=knowledge_access_support,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+    assert "knowledge_availability" in outcome.transient_system_context
+    assert "Knowledge base `docs` is initializing" in outcome.transient_system_context
+    assert knowledge_access_support.resolve_for_agent.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_response_streaming_cleanup_uses_model_time_knowledge_notice(tmp_path: Path) -> None:
+    """Streaming cleanup should use the exact knowledge notice appended before the model run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    knowledge_access_support = _knowledge_access_support()
+    knowledge_access_support.resolve_for_agent.side_effect = [
+        KnowledgeResolution(
+            knowledge=None,
+            unavailable={
+                "docs": KnowledgeAvailabilityDetail(
+                    availability=KnowledgeAvailability.INITIALIZING,
+                    search_available=False,
+                ),
+            },
+        ),
+        KnowledgeResolution(knowledge=None, unavailable={}),
+    ]
+
+    async def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        yield "Hello"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.stream_agent_response", new=fake_stream_agent_response),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            knowledge_access_support=knowledge_access_support,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+    assert "knowledge_availability" in outcome.transient_system_context
+    assert "Knowledge base `docs` is initializing" in outcome.transient_system_context
+    assert knowledge_access_support.resolve_for_agent.call_count == 1
+
+
+def test_append_knowledge_availability_notice_rendering() -> None:
+    """Knowledge availability notices should render as transient system enrichment."""
+    rendered_context = render_system_enrichment_block(
+        append_knowledge_availability_enrichment(
+            (),
+            {
+                "docs": KnowledgeAvailabilityDetail(
+                    availability=KnowledgeAvailability.INITIALIZING,
+                    search_available=False,
+                ),
+            },
+        ),
     )
 
     assert "knowledge_availability" in rendered_context

@@ -154,12 +154,14 @@ def strip_transient_enrichment_from_session(
     runs = list(reversed(session.runs))
     has_run_ids = any(isinstance(run, RunOutput | TeamRunOutput) and run.run_id for run in runs)
     for run in runs:
-        if not isinstance(run, RunOutput | TeamRunOutput) or not run.messages:
+        if not isinstance(run, RunOutput | TeamRunOutput):
+            continue
+        if not run.messages and not (isinstance(run, TeamRunOutput) and run.member_responses):
             continue
         if response_run_id is not None and has_run_ids and run.run_id != response_run_id:
             continue
         changed = _strip_transient_system_context_from_run(run, transient_system_context)
-        for message in reversed(run.messages):
+        for message in reversed(run.messages or []):
             if message.role != "user":
                 continue
             if message.content != memory_prompt:
@@ -176,12 +178,33 @@ def _strip_transient_system_context_from_run(
     run: RunOutput | TeamRunOutput,
     transient_system_context: str | None,
 ) -> bool:
-    if not transient_system_context or not run.messages:
+    if not transient_system_context:
+        return False
+
+    changed = _strip_transient_system_context_from_messages(run.messages, transient_system_context)
+    if isinstance(run, TeamRunOutput):
+        for member_response in run.member_responses or []:
+            if isinstance(member_response, RunOutput | TeamRunOutput):
+                changed = (
+                    _strip_transient_system_context_from_run(
+                        member_response,
+                        transient_system_context,
+                    )
+                    or changed
+                )
+    return changed
+
+
+def _strip_transient_system_context_from_messages(
+    messages: list[Any] | None,
+    transient_system_context: str,
+) -> bool:
+    if not messages:
         return False
 
     changed = False
     next_messages: list[Any] = []
-    for message in run.messages:
+    for message in messages:
         if message.role != "system" or not isinstance(message.content, str):
             next_messages.append(message)
             continue
@@ -194,7 +217,7 @@ def _strip_transient_system_context_from_run(
             message.content = stripped_content
             next_messages.append(message)
     if changed:
-        run.messages = next_messages
+        messages[:] = next_messages
     return changed
 
 
