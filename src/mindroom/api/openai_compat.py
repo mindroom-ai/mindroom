@@ -1444,38 +1444,6 @@ def _is_failed_team_output(response: TeamRunOutput | RunOutput) -> bool:
     return is_errored_run_output(response) or is_cancelled_run_output(response)
 
 
-def _is_queued_notice_message(message: Message) -> bool:
-    provider_data = message.provider_data
-    return isinstance(provider_data, dict) and provider_data.get("mindroom_queued_message_notice") is True
-
-
-def _scrub_queued_notice_team_scope_context(scope_context: ScopeSessionContext | None) -> None:
-    """Strip stale queued-message notices from a loaded team session before replay."""
-    if scope_context is None or scope_context.session is None:
-        return
-    changed = False
-    for run in scope_context.session.runs or []:
-        if not isinstance(run, (RunOutput, TeamRunOutput)):
-            continue
-        changed = _scrub_queued_notice_run(run) or changed
-    if changed:
-        scope_context.storage.upsert_session(scope_context.session)
-
-
-def _scrub_queued_notice_run(run: RunOutput | TeamRunOutput) -> bool:
-    changed = False
-    if run.messages:
-        filtered_messages = [message for message in run.messages if not _is_queued_notice_message(message)]
-        if len(filtered_messages) != len(run.messages):
-            run.messages = filtered_messages
-            changed = True
-    if isinstance(run, TeamRunOutput):
-        for member_response in run.member_responses or []:
-            if isinstance(member_response, (RunOutput, TeamRunOutput)):
-                changed = _scrub_queued_notice_run(member_response) or changed
-    return changed
-
-
 async def prepare_materialized_team_execution(
     *,
     scope_context: ScopeSessionContext | None,
@@ -1500,7 +1468,6 @@ async def prepare_materialized_team_execution(
     matrix_run_metadata: dict[str, object] | None = None,
 ) -> _PreparedOpenAIMaterializedTeamExecution:
     """Prepare one team run using only public execution-preparation interfaces."""
-    _scrub_queued_notice_team_scope_context(scope_context)
     prepared_execution = await prepare_bound_team_run_context(
         scope_context=scope_context,
         agents=agents,

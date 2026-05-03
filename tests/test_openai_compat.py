@@ -4308,7 +4308,7 @@ class TestTeamCompletion:
             persisted_messages = [
                 message for run in scope_context.session.runs or [] for message in (run.messages or [])
             ]
-        assert any(message.provider_data for message in persisted_messages)
+        assert not any(message.provider_data for message in persisted_messages)
 
     def test_collaborate_mode_delegates_to_all(self) -> None:
         """Collaborate mode sets delegate_to_all_members=True on Team."""
