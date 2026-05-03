@@ -168,6 +168,7 @@ def get_model_instance(
     if config.debug.log_llm_requests:
         install_llm_request_logging(
             model,
+            agent_name=model_name,
             debug_config=config.debug,
             default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
         )

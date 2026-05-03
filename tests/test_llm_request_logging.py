@@ -60,6 +60,7 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:  # noqa
     model = _FakeModel()
     install_llm_request_logging(
         model,
+        agent_name="default",
         debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
         default_log_dir=tmp_path / "unused",
     )
@@ -159,11 +160,34 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:  # noqa
 
 
 @pytest.mark.asyncio
+async def test_llm_request_logging_uses_model_name_when_context_is_unbound(tmp_path: Path) -> None:
+    """Unbound model calls should still keep their configured model-owner attribution."""
+    model = _FakeModel()
+    install_llm_request_logging(
+        model,
+        agent_name="router",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    await model.ainvoke(
+        messages=[Message(role="user", content="route this")],
+        assistant_message=Message(role="assistant"),
+        tools=[],
+    )
+
+    entries = _read_log_entries(tmp_path)
+    assert entries[0]["agent_id"] == "router"
+    assert entries[0]["model_id"] == "test-model"
+
+
+@pytest.mark.asyncio
 async def test_llm_request_logging_disabled_creates_no_file(tmp_path: Path) -> None:
     """Disabled request logging should leave the target log directory untouched."""
     model = _FakeModel()
     install_llm_request_logging(
         model,
+        agent_name="default",
         debug_config=DebugConfig(),
         default_log_dir=tmp_path,
     )

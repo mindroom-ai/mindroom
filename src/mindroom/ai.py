@@ -92,7 +92,6 @@ logger = get_logger(__name__)
 
 __all__ = [
     "AIStreamChunk",
-    "PreparedAgentRun",
     "ai_response",
     "build_matrix_run_metadata",
     "stream_agent_response",
@@ -132,7 +131,7 @@ def _compose_current_turn_prompt(
 
 
 @dataclass(frozen=True)
-class PreparedAgentRun:
+class _PreparedAgentRun:
     """Prepared agent invocation state after history planning."""
 
     agent: Agent
@@ -151,14 +150,18 @@ class PreparedAgentRun:
         return ai_runtime.copy_run_input(self.messages)
 
 
-_PreparedAgentRun = PreparedAgentRun
-
-
 def _next_retry_run_id(run_id: str | None) -> str | None:
     """Return a fresh Agno run identifier for a retry attempt."""
     if run_id is None:
         return None
     return str(uuid4())
+
+
+def _prompt_current_sender_id(user_id: str | None, *, include_openai_compat_guidance: bool) -> str | None:
+    """Return the Matrix current sender ID when prompt formatting should include it."""
+    if include_openai_compat_guidance:
+        return None
+    return user_id
 
 
 def _build_timing_scope(
@@ -921,6 +924,10 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                     model_prompt=model_prompt,
+                    current_sender_id=_prompt_current_sender_id(
+                        user_id,
+                        include_openai_compat_guidance=include_openai_compat_guidance,
+                    ),
                 )
                 if pipeline_timing is not None:
                     pipeline_timing.mark("history_ready")
@@ -1387,6 +1394,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                     model_prompt=model_prompt,
+                    current_sender_id=_prompt_current_sender_id(
+                        user_id,
+                        include_openai_compat_guidance=include_openai_compat_guidance,
+                    ),
                 )
                 if pipeline_timing is not None:
                     pipeline_timing.mark("history_ready")

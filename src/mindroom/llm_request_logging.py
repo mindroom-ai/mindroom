@@ -242,14 +242,10 @@ def bind_llm_request_log_context(**context: object) -> Iterator[None]:
         _REQUEST_CONTEXT.reset(token)
 
 
-def _snapshot_request_log_context() -> dict[str, JSONValue]:
-    """Return a detached copy of the currently bound request-log context."""
-    return cast("dict[str, JSONValue]", _json_safe(_REQUEST_CONTEXT.get() or {}))
-
-
 async def write_llm_request_log(
     *,
     model: Model,
+    agent_name: str,
     messages: Sequence[Message],
     tools: list[dict[str, JSONValue]] | None,
     log_dir: str | None,
@@ -264,6 +260,7 @@ async def write_llm_request_log(
         _daily_log_path(log_dir, default_log_dir, now),
         {
             "timestamp": now.isoformat(),
+            "agent_id": agent_name,
             **resolved_request_context,
             "model_id": model.id,
             "system_prompt": _system_prompt(messages, model),
@@ -279,6 +276,7 @@ async def write_llm_request_log(
 async def _write_llm_request_log_if_present(
     *,
     model: Model,
+    agent_name: str,
     kwargs: dict[str, object],
     log_dir: str | None,
     default_log_dir: Path,
@@ -290,6 +288,7 @@ async def _write_llm_request_log_if_present(
         return
     await write_llm_request_log(
         model=model,
+        agent_name=agent_name,
         messages=messages,
         tools=_request_tools(kwargs.get("tools")),
         log_dir=log_dir,
@@ -301,6 +300,7 @@ async def _write_llm_request_log_if_present(
 def install_llm_request_logging(
     model: Model,
     *,
+    agent_name: str,
     debug_config: DebugConfig,
     default_log_dir: Path,
 ) -> None:
@@ -320,6 +320,7 @@ def install_llm_request_logging(
         async def _invoke() -> ModelResponse:
             await _write_llm_request_log_if_present(
                 model=model,
+                agent_name=agent_name,
                 kwargs=kwargs,
                 log_dir=debug_config.llm_request_log_dir,
                 default_log_dir=default_log_dir,
@@ -335,6 +336,7 @@ def install_llm_request_logging(
         async def _stream() -> AsyncIterator[ModelResponse]:
             await _write_llm_request_log_if_present(
                 model=model,
+                agent_name=agent_name,
                 kwargs=kwargs,
                 log_dir=debug_config.llm_request_log_dir,
                 default_log_dir=default_log_dir,

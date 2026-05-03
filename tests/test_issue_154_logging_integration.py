@@ -18,7 +18,7 @@ from agno.models.message import Message
 from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunContentEvent
 from agno.run.base import RunStatus
 
-from mindroom.ai import PreparedAgentRun, ai_response, stream_agent_response
+from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -205,8 +205,8 @@ def _tool_calls_path(runtime_paths: object) -> Path:
     return tracking_dir(runtime_paths) / "tool_calls.jsonl"
 
 
-def _prepared_prompt_result(agent: object, *, prompt: str = "expanded prompt") -> PreparedAgentRun:
-    return PreparedAgentRun(
+def _prepared_prompt_result(agent: object, *, prompt: str = "expanded prompt") -> _PreparedAgentRun:
+    return _PreparedAgentRun(
         agent=agent,
         messages=(Message(role="user", content=prompt),),
         unseen_event_ids=[],
@@ -258,6 +258,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
     model = _LoggingModel()
     install_llm_request_logging(
         model,
+        agent_name="general",
         debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(llm_log_dir)),
         default_log_dir=tmp_path / "unused",
     )
@@ -406,6 +407,7 @@ async def test_streaming_tool_call_shares_correlation_id_across_streaming_sinks(
     model = _LoggingModel()
     install_llm_request_logging(
         model,
+        agent_name="general",
         debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(llm_log_dir)),
         default_log_dir=tmp_path / "unused",
     )
@@ -478,6 +480,7 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(tmp_pat
     model = _LoggingModel()
     install_llm_request_logging(
         model,
+        agent_name="general",
         debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(llm_log_dir)),
         default_log_dir=tmp_path / "unused",
     )

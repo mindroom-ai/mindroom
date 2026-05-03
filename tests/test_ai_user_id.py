@@ -4074,8 +4074,33 @@ class TestUserIdPassthrough:
                 include_openai_compat_guidance=True,
             )
 
-        assert "current_sender_id" not in mock_prepare.await_args.kwargs
+        assert mock_prepare.await_args.kwargs["current_sender_id"] is None
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
+
+    @pytest.mark.asyncio
+    async def test_ai_response_passes_current_sender_for_matrix_guidance(self, tmp_path: Path) -> None:
+        """Matrix turns should preserve the sender who produced the current prompt."""
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = None
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                user_id="@alice:example.com",
+            )
+
+        assert mock_prepare.await_args.kwargs["current_sender_id"] == "@alice:example.com"
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_raw_prompt_separately_from_model_prompt(self, tmp_path: Path) -> None:
@@ -4160,8 +4185,36 @@ class TestUserIdPassthrough:
                 )
             ]
 
-        assert "current_sender_id" not in mock_prepare.await_args.kwargs
+        assert mock_prepare.await_args.kwargs["current_sender_id"] is None
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_passes_current_sender_for_matrix_guidance(self, tmp_path: Path) -> None:
+        """Streaming Matrix turns should preserve current-sender prompt attribution."""
+        mock_agent = MagicMock()
+
+        async def _empty_stream() -> AsyncIterator[str]:
+            if False:
+                yield ""
+
+        mock_agent.arun = MagicMock(return_value=_empty_stream())
+
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            _ = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    user_id="@alice:example.com",
+                )
+            ]
+
+        assert mock_prepare.await_args.kwargs["current_sender_id"] == "@alice:example.com"
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
@@ -5034,6 +5087,7 @@ class TestUserIdPassthrough:
         model = _DeferredLoggingModel()
         install_llm_request_logging(
             model,
+            agent_name="general",
             debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
             default_log_dir=tmp_path / "unused",
         )
