@@ -165,6 +165,11 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
 )
 
 
+def _append_additional_context(entity: Agent | Team, context_chunk: str) -> None:
+    existing_context = entity.additional_context.strip() if entity.additional_context else ""
+    entity.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
+
+
 @dataclass
 class _PendingTeamTool:
     scope_key: str
@@ -1482,9 +1487,9 @@ async def _prepare_materialized_team_execution(
     """Prepare one materialized team for execution."""
     if system_enrichment_items:
         rendered_system_context = render_system_enrichment_block(system_enrichment_items)
-        team.additional_context = rendered_system_context
+        _append_additional_context(team, rendered_system_context)
         for agent in agents:
-            agent.additional_context = rendered_system_context
+            _append_additional_context(agent, rendered_system_context)
     prepared_execution = await prepare_bound_team_run_context(
         scope_context=scope_context,
         agents=agents,
@@ -1549,6 +1554,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    transient_system_context_collector: list[str] | None = None,
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
@@ -1581,6 +1587,8 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
         system_enrichment_items,
         unavailable_bases,
     )
+    if transient_system_context_collector is not None:
+        transient_system_context_collector.append(render_system_enrichment_block(system_enrichment_items))
     agents = team_members.agents
 
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
@@ -1920,6 +1928,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
+    transient_system_context_collector: list[str] | None = None,
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
@@ -1960,6 +1969,8 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         system_enrichment_items,
         unavailable_bases,
     )
+    if transient_system_context_collector is not None:
+        transient_system_context_collector.append(render_system_enrichment_block(system_enrichment_items))
     agent_names = team_members.display_names
     display_names = team_members.display_names
     team: Team | None = None

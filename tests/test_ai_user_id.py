@@ -83,7 +83,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
-from mindroom.knowledge import KnowledgeResolution
+from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail, KnowledgeResolution
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_fallback import append_inline_media_fallback_prompt
@@ -299,10 +299,18 @@ def _make_bot(
     return bot
 
 
-def _knowledge_access_support(knowledge: object | None = None) -> SimpleNamespace:
+def _knowledge_access_support(
+    knowledge: object | None = None,
+    unavailable: dict[str, KnowledgeAvailabilityDetail] | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         for_agent=MagicMock(return_value=knowledge),
-        resolve_for_agent=MagicMock(return_value=KnowledgeResolution(knowledge=cast("Knowledge | None", knowledge))),
+        resolve_for_agent=MagicMock(
+            return_value=KnowledgeResolution(
+                knowledge=cast("Knowledge | None", knowledge),
+                unavailable=unavailable or {},
+            ),
+        ),
     )
 
 
@@ -334,6 +342,7 @@ def _build_response_runner(
     team_history_storage: object | None = None,
     message_target: MessageTarget | None = None,
     orchestrator: object | None = None,
+    knowledge_access_support: SimpleNamespace | None = None,
 ) -> ResponseRunner:
     """Build a real response runner for one bot-shaped test double."""
 
@@ -452,7 +461,7 @@ def _build_response_runner(
         delivery_gateway=delivery_gateway,
         conversation_cache=bot._conversation_resolver.deps.conversation_cache,
     )
-    bot._knowledge_access_support = _knowledge_access_support()
+    bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
 
     return ResponseRunner(
         ResponseRunnerDeps(
@@ -2572,6 +2581,37 @@ def test_strip_transient_enrichment_targets_response_run_id() -> None:
     assert target_messages[0].content == "durable system context"
     assert target_messages[1].content == "current raw prompt"
     assert cast("RunOutput", persisted_session.runs[2]).messages[0].content == "newer enriched prompt"
+
+
+def test_transient_system_context_for_agent_cleanup_includes_knowledge_notice(tmp_path: Path) -> None:
+    """Cleanup should render the same knowledge notice appended for the model run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    knowledge_access_support = _knowledge_access_support(
+        unavailable={
+            "docs": KnowledgeAvailabilityDetail(
+                availability=KnowledgeAvailability.INITIALIZING,
+                search_available=False,
+            ),
+        },
+    )
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        knowledge_access_support=knowledge_access_support,
+    )
+
+    rendered_context = coordinator._transient_system_context_for_agent_cleanup(
+        _response_request(prompt="Hello", user_id="@alice:localhost"),
+        execution_identity=None,
+    )
+
+    assert "knowledge_availability" in rendered_context
+    assert "Knowledge base `docs` is initializing" in rendered_context
 
 
 @pytest.mark.asyncio

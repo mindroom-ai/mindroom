@@ -502,6 +502,21 @@ class ResponseRunner:
         finally:
             storage.close()
 
+    def _transient_system_context_for_agent_cleanup(
+        self,
+        request: ResponseRequest,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> str:
+        knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
+            self.deps.agent_name,
+            execution_identity=execution_identity,
+        )
+        system_enrichment_items = append_knowledge_availability_enrichment(
+            request.system_enrichment_items,
+            knowledge_resolution.unavailable,
+        )
+        return render_system_enrichment_block(system_enrichment_items)
+
     def _record_stream_delivery_error(
         self,
         *,
@@ -974,6 +989,7 @@ class ResponseRunner:
         delivery_cancelled = False
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         active_event_ids = self._active_response_event_ids(request.room_id)
+        transient_system_contexts: list[str] = []
         team_turn_recorder = self._build_turn_recorder(
             user_message=request.prompt,
             reply_to_event_id=request.reply_to_event_id,
@@ -1041,6 +1057,7 @@ class ResponseRunner:
                             if self.deps.agent_name in self.deps.runtime.config.teams
                             else None,
                             system_enrichment_items=request.system_enrichment_items,
+                            transient_system_context_collector=transient_system_contexts,
                             reason_prefix=team_request.reason_prefix,
                             matrix_run_metadata=matrix_run_metadata,
                             turn_recorder=team_turn_recorder,
@@ -1133,6 +1150,7 @@ class ResponseRunner:
                                     if self.deps.agent_name in self.deps.runtime.config.teams
                                     else None,
                                     system_enrichment_items=request.system_enrichment_items,
+                                    transient_system_context_collector=transient_system_contexts,
                                     reason_prefix=team_request.reason_prefix,
                                     matrix_run_metadata=matrix_run_metadata,
                                     turn_recorder=team_turn_recorder,
@@ -1323,10 +1341,16 @@ class ResponseRunner:
                 ),
             )
         assert final_delivery_outcome is not None
+        transient_system_context = (
+            transient_system_contexts[-1]
+            if transient_system_contexts
+            else render_system_enrichment_block(request.system_enrichment_items)
+        )
         final_outcome = await lifecycle.finalize(
             final_delivery_outcome,
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(
-                strip_transient_enrichment_after_run=_should_strip_transient_enrichment(request),
+                strip_transient_enrichment_after_run=_should_strip_transient_enrichment(request)
+                or bool(transient_system_context),
                 response_run_id=response_run_id,
                 session_id=session_id,
                 session_type=SessionType.TEAM,
@@ -1339,7 +1363,7 @@ class ResponseRunner:
                 thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
                 memory_prompt=_memory_prompt,
                 memory_thread_history=_memory_thread_history,
-                transient_system_context=render_system_enrichment_block(request.system_enrichment_items),
+                transient_system_context=transient_system_context,
             ),
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
@@ -2324,8 +2348,10 @@ class ResponseRunner:
                     failure_reason=delivery_failure_reason or "interrupted",
                 )
         assert final_delivery_outcome is not None
+        transient_system_context = self._transient_system_context_for_agent_cleanup(request, execution_identity)
         post_response_outcome = ResponseOutcome(
-            strip_transient_enrichment_after_run=_should_strip_transient_enrichment(request),
+            strip_transient_enrichment_after_run=_should_strip_transient_enrichment(request)
+            or bool(transient_system_context),
             response_run_id=response_run_id,
             session_id=session_id,
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
@@ -2338,7 +2364,7 @@ class ResponseRunner:
             thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
             memory_prompt=memory_prompt,
             memory_thread_history=memory_thread_history,
-            transient_system_context=render_system_enrichment_block(request.system_enrichment_items),
+            transient_system_context=transient_system_context,
         )
         post_response_deps = self.deps.post_response_effects.build_deps(
             room_id=request.room_id,
