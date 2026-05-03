@@ -138,6 +138,9 @@ class DelegateTools(Toolkit):
                     knowledge=knowledge_resolution.knowledge,
                     user_id=execution_identity.requester_id if execution_identity is not None else None,
                     room_id=room_id,
+                    correlation_id=(
+                        delegated_runtime_context.correlation_id if delegated_runtime_context is not None else None
+                    ),
                     include_interactive_questions=False,
                     execution_identity=execution_identity,
                     delegation_depth=self._delegation_depth + 1,

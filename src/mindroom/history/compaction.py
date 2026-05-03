@@ -542,6 +542,26 @@ def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
     return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
 
 
+def agent_tool_definition_payloads_for_logging(agent: Agent) -> list[dict[str, object]]:
+    """Return model-visible agent tool schemas using Agno's prompt-preparation path."""
+    previous_tool_instructions = agent._tool_instructions
+    try:
+        _session, _run_context, prepared_tools = _prepare_agent_prompt_inputs_for_estimation(agent)
+    finally:
+        agent._tool_instructions = previous_tool_instructions
+    return _prepared_tool_definition_payloads(prepared_tools)
+
+
+def team_tool_definition_payloads_for_logging(team: Team) -> list[dict[str, object]]:
+    """Return model-visible team tool schemas using Agno's prompt-preparation path."""
+    previous_tool_instructions = team._tool_instructions
+    try:
+        _session, prepared_tools = _prepare_team_prompt_inputs_for_estimation(team)
+    finally:
+        team._tool_instructions = previous_tool_instructions
+    return _prepared_tool_definition_payloads(prepared_tools)
+
+
 def _estimate_prepared_tool_definition_tokens(
     prepared_tools: Sequence[Function | dict[str, object]],
     *,

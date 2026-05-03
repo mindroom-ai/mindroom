@@ -308,6 +308,7 @@ Google OAuth client config and Google OAuth token services stay in the primary r
 If a tool runs inside an isolated worker, only the services listed here are available to that worker.
 Leave this unset to keep isolated workers deny-by-default for shared credentials.
 This setting never injects provider env vars such as `OPENAI_API_KEY`.
+
 For worker-routed tools, it only controls which shared credentials MindRoom may load inside isolated workers.
 This setting also does not control local shared-only integrations that stay in the main runtime, such as `homeassistant`.
 Those tools keep using normal shared credentials even when `worker_grantable_credentials` is empty.
@@ -443,6 +444,15 @@ matrix_space:
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 ```
+
+## Debug Logging
+
+`debug.log_llm_requests` enables pre-provider request assembly logging for troubleshooting.
+When enabled, MindRoom writes JSONL request records under `debug.llm_request_log_dir` or `mindroom_data/logs/llm_requests` by default.
+Those records include prompts, messages, tool schemas, model parameters, correlation IDs, requester metadata, and source Matrix event metadata.
+The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs.
+Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
+These artifacts can contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
 
 ## Managed Avatars
 

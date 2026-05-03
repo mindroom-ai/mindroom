@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from collections.abc import AsyncGenerator as AsyncGeneratorABC
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from agno.models.message import Message
 from pydantic import BaseModel
@@ -26,6 +27,16 @@ if TYPE_CHECKING:
     from mindroom.config.models import DebugConfig
 
 _INSTALLED_ATTR = "_mindroom_llm_request_logging_installed"
+
+
+@runtime_checkable
+class _AsyncClosableIterator(Protocol):
+    """Minimal async-iterator surface that can be closed explicitly."""
+
+    async def aclose(self) -> None:
+        """Close the async iterator and release any underlying resources."""
+
+
 _SKIP_MODEL_PARAM_NAMES = {
     "id",
     "name",
@@ -159,12 +170,25 @@ def _snapshot_request_log_context() -> dict[str, JSONValue]:
     return cast("dict[str, JSONValue]", _json_safe(_REQUEST_CONTEXT.get() or {}))
 
 
+def current_llm_request_log_context() -> dict[str, JSONValue]:
+    """Return the current detached request-log context for cross-sink correlation."""
+    return _snapshot_request_log_context()
+
+
+def model_params_payload(model: Model) -> dict[str, JSONValue]:
+    """Return JSON-safe model parameters suitable for durable request metadata."""
+    return _model_params(model)
+
+
 def build_llm_request_log_context(
     *,
+    agent_id: str,
     session_id: str,
     room_id: str | None,
     thread_id: str | None,
     reply_to_event_id: str | None,
+    requester_id: str | None,
+    correlation_id: str,
     prompt: str,
     model_prompt: str | None,
     full_prompt: str,
@@ -172,7 +196,9 @@ def build_llm_request_log_context(
 ) -> dict[str, object]:
     """Build explicit per-request log context for one provider call."""
     context: dict[str, object] = {
+        "agent_id": agent_id,
         "session_id": session_id,
+        "correlation_id": correlation_id,
         "current_turn_prompt": prompt,
         "full_prompt": full_prompt,
     }
@@ -182,6 +208,8 @@ def build_llm_request_log_context(
         context["thread_id"] = thread_id
     if reply_to_event_id:
         context["reply_to_event_id"] = reply_to_event_id
+    if requester_id is not None:
+        context["requester_id"] = requester_id
     if model_prompt is not None:
         context["model_prompt"] = model_prompt
     if not metadata:
@@ -225,6 +253,29 @@ def bind_llm_request_log_context(**context: object) -> Iterator[None]:
         _REQUEST_CONTEXT.reset(token)
 
 
+async def stream_with_llm_request_log_context[StreamEventT](
+    stream_generator: AsyncIterator[StreamEventT],
+    *,
+    request_context: dict[str, object],
+) -> AsyncIterator[StreamEventT]:
+    """Advance one async stream with request-log context bound per item pull."""
+    stream: AsyncIterator[StreamEventT] | None = None
+    try:
+        with bind_llm_request_log_context(**request_context):
+            stream = stream_generator.__aiter__()
+        while True:
+            try:
+                with bind_llm_request_log_context(**request_context):
+                    event = await stream.__anext__()
+            except StopAsyncIteration:
+                return
+            yield event
+    finally:
+        if isinstance(stream, (AsyncGeneratorABC, _AsyncClosableIterator)):
+            with bind_llm_request_log_context(**request_context):
+                await stream.aclose()
+
+
 async def write_llm_request_log(
     *,
     model: Model,
@@ -243,15 +294,15 @@ async def write_llm_request_log(
         _daily_log_path(log_dir, default_log_dir, now),
         {
             "timestamp": now.isoformat(),
+            "agent_id": agent_name,
             **resolved_request_context,
-            "agent_name": agent_name,
             "model_id": model.id,
             "system_prompt": _system_prompt(messages, model),
             "messages": _request_message_payloads(messages),
             "message_count": len(messages),
             "tools": _json_safe(tools),
             "tool_count": len(tools or []),
-            "model_params": _model_params(model),
+            "model_params": model_params_payload(model),
         },
     )
 

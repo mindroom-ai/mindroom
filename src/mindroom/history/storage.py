@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.types import HistoryScope, HistoryScopeState
 
 if TYPE_CHECKING:
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
+    from agno.db.base import BaseDb, SessionType
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
@@ -134,6 +135,110 @@ def consume_pending_force_compaction_scope(
 
     session.session_data = next_session_data or None
     return True
+
+
+def strip_transient_enrichment_from_session(
+    storage: BaseDb,
+    *,
+    session_id: str,
+    session_type: SessionType,
+    response_run_id: str | None = None,
+    memory_prompt: str,
+    transient_system_context: str | None = None,
+) -> bool:
+    """Restore the persisted current user turn after transient model context was used."""
+    session = storage.get_session(session_id, session_type)
+    if not isinstance(session, AgentSession | TeamSession) or not session.runs:
+        return False
+
+    runs = list(reversed(session.runs))
+    has_run_ids = any(isinstance(run, RunOutput | TeamRunOutput) and run.run_id for run in runs)
+    for run in runs:
+        if not isinstance(run, RunOutput | TeamRunOutput):
+            continue
+        if not run.messages and not (isinstance(run, TeamRunOutput) and run.member_responses):
+            continue
+        if response_run_id is not None and has_run_ids and run.run_id != response_run_id:
+            continue
+        changed = _strip_transient_system_context_from_run(run, transient_system_context)
+        for message in reversed(run.messages or []):
+            if message.role != "user":
+                continue
+            if message.content != memory_prompt:
+                message.content = memory_prompt
+                changed = True
+            break
+        if changed:
+            storage.upsert_session(session)
+        return changed
+    return False
+
+
+def _strip_transient_system_context_from_run(
+    run: RunOutput | TeamRunOutput,
+    transient_system_context: str | None,
+) -> bool:
+    if not transient_system_context:
+        return False
+
+    changed = _strip_transient_system_context_from_messages(run.messages, transient_system_context)
+    if isinstance(run, TeamRunOutput):
+        for member_response in run.member_responses or []:
+            if isinstance(member_response, RunOutput | TeamRunOutput):
+                changed = (
+                    _strip_transient_system_context_from_run(
+                        member_response,
+                        transient_system_context,
+                    )
+                    or changed
+                )
+    return changed
+
+
+def _strip_transient_system_context_from_messages(
+    messages: list[Any] | None,
+    transient_system_context: str,
+) -> bool:
+    if not messages:
+        return False
+
+    changed = False
+    next_messages: list[Any] = []
+    for message in messages:
+        if message.role != "system" or not isinstance(message.content, str):
+            next_messages.append(message)
+            continue
+        stripped_content = _remove_transient_system_context(message.content, transient_system_context)
+        if stripped_content == message.content:
+            next_messages.append(message)
+            continue
+        changed = True
+        if stripped_content:
+            message.content = stripped_content
+            next_messages.append(message)
+    if changed:
+        messages[:] = next_messages
+    return changed
+
+
+def _remove_transient_system_context(content: str, transient_system_context: str) -> str:
+    stripped_block = transient_system_context.strip()
+    if not stripped_block:
+        return content
+
+    stripped_content = content.strip()
+    if stripped_content == stripped_block:
+        return ""
+
+    replacements = (
+        f"\n\n{stripped_block}",
+        f"{stripped_block}\n\n",
+        stripped_block,
+    )
+    next_content = content
+    for replacement in replacements:
+        next_content = next_content.replace(replacement, "")
+    return next_content.strip()
 
 
 def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:

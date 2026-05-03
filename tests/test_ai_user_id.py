@@ -34,9 +34,13 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
+    _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _PreparedAgentRun,
+    _stream_completed_without_visible_output,
+    _StreamingAttemptState,
     ai_response,
     build_matrix_run_metadata,
     should_retry_without_inline_media,
@@ -60,7 +64,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history import PreparedHistoryState
+from mindroom.history import PreparedHistoryState, strip_transient_enrichment_from_session
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -75,11 +79,12 @@ from mindroom.hooks import (
     MessageEnvelope,
     SessionHookContext,
     hook,
+    render_system_enrichment_block,
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
-from mindroom.knowledge import KnowledgeResolution
-from mindroom.llm_request_logging import install_llm_request_logging
+from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail, KnowledgeResolution
+from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_fallback import append_inline_media_fallback_prompt
 from mindroom.media_inputs import MediaInputs
@@ -110,7 +115,7 @@ from mindroom.tool_system.worker_routing import (
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, resolve_response_thread_root_for_test
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Generator
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator
     from pathlib import Path
 
     from agno.knowledge.knowledge import Knowledge
@@ -166,9 +171,41 @@ def _config() -> Config:
     )
 
 
+def _config_with_matrix_message() -> Config:
+    return Config(
+        agents={
+            "general": AgentConfig(
+                display_name="General",
+                tools=["matrix_message"],
+            ),
+        },
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+
+
 def _config_with_team() -> Config:
     return Config(
         agents={"general": AgentConfig(display_name="General")},
+        teams={
+            "ultimate": TeamConfig(
+                display_name="Ultimate",
+                role="Coordinate the team",
+                agents=["general"],
+                mode="coordinate",
+            ),
+        },
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+
+
+def _config_with_team_matrix_message() -> Config:
+    return Config(
+        agents={
+            "general": AgentConfig(
+                display_name="General",
+                tools=["matrix_message"],
+            ),
+        },
         teams={
             "ultimate": TeamConfig(
                 display_name="Ultimate",
@@ -294,10 +331,18 @@ def _make_bot(
     return bot
 
 
-def _knowledge_access_support(knowledge: object | None = None) -> SimpleNamespace:
+def _knowledge_access_support(
+    knowledge: object | None = None,
+    unavailable: dict[str, KnowledgeAvailabilityDetail] | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         for_agent=MagicMock(return_value=knowledge),
-        resolve_for_agent=MagicMock(return_value=KnowledgeResolution(knowledge=cast("Knowledge | None", knowledge))),
+        resolve_for_agent=MagicMock(
+            return_value=KnowledgeResolution(
+                knowledge=cast("Knowledge | None", knowledge),
+                unavailable=unavailable or {},
+            ),
+        ),
     )
 
 
@@ -329,6 +374,7 @@ def _build_response_runner(
     team_history_storage: object | None = None,
     message_target: MessageTarget | None = None,
     orchestrator: object | None = None,
+    knowledge_access_support: SimpleNamespace | None = None,
 ) -> ResponseRunner:
     """Build a real response runner for one bot-shaped test double."""
 
@@ -447,7 +493,7 @@ def _build_response_runner(
         delivery_gateway=delivery_gateway,
         conversation_cache=bot._conversation_resolver.deps.conversation_cache,
     )
-    bot._knowledge_access_support = _knowledge_access_support()
+    bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
 
     return ResponseRunner(
         ResponseRunnerDeps(
@@ -543,6 +589,7 @@ def _response_request(
     prompt: str = "Hello",
     model_prompt: str | None = None,
     user_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
@@ -553,6 +600,7 @@ def _response_request(
         prompt=prompt,
         model_prompt=model_prompt,
         user_id=user_id,
+        correlation_id=correlation_id,
     )
 
 
@@ -2273,6 +2321,880 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
 
 
 @pytest.mark.asyncio
+async def test_generate_team_response_helper_preserves_raw_prompt_when_model_prompt_supplies_tail(
+    tmp_path: Path,
+) -> None:
+    """Team responses should keep the raw user text when model_prompt only adds transient tails."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch(
+            "mindroom.response_runner.team_response",
+            new=AsyncMock(return_value="Team answer"),
+        ) as mock_team_response,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    message = mock_team_response.await_args.kwargs["message"]
+    assert "Describe this image" in message
+    assert "Available attachment IDs: att_1" in message
+
+
+@pytest.mark.asyncio
+async def test_generate_response_marks_transient_model_prompt_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Agent responses should scrub transient per-turn model tails after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+@pytest.mark.asyncio
+async def test_generate_response_strips_transient_model_prompt_from_persisted_session(
+    tmp_path: Path,
+) -> None:
+    """Post-response cleanup should restore persisted user text to the raw turn."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_send_text(*_args: object, **_kwargs: object) -> str:
+            storage.session = AgentSession(
+                session_id="!test:localhost:$thread-root",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+                runs=[
+                    RunOutput(
+                        content="Hello",
+                        messages=[
+                            Message(role="user", content="Earlier context"),
+                            Message(role="assistant", content="Earlier answer"),
+                            Message(
+                                role="user",
+                                content=(
+                                    "Describe this image\n\n"
+                                    "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+                                ),
+                            ),
+                            Message(role="assistant", content="Hello"),
+                        ],
+                    ),
+                ],
+            )
+            return "$msg"
+
+        coordinator.deps.delivery_gateway.send_text.side_effect = fake_send_text
+
+        await coordinator.generate_response(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+        )
+
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].content == "Earlier context"
+    assert persisted_run.messages[2].content == "Describe this image"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_marks_matrix_tool_prompt_context_for_cleanup(tmp_path: Path) -> None:
+    """Matrix tool metadata appended during runtime preparation should be scrubbed after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_matrix_message(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    model_prompts: list[str] = []
+
+    async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+        model_prompts.append(cast("str", kwargs["model_prompt"]))
+        return "Hello"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    assert model_prompts
+    assert "[Matrix metadata for tool calls]" in model_prompts[0]
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+    assert outcome.memory_prompt == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_passes_resolved_correlation_id_to_ai_response(tmp_path: Path) -> None:
+    """Edit regeneration can correlate on a different event than the reply anchor."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    seen_kwargs: dict[str, object] = {}
+
+    async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+        seen_kwargs.update(kwargs)
+        return "Hello"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$original"),
+        )
+
+        await coordinator.generate_response(
+            _response_request(
+                prompt="Regenerate this edit",
+                user_id="@alice:localhost",
+                thread_id="$thread-root",
+                reply_to_event_id="$original",
+                correlation_id="$edit",
+            ),
+        )
+
+    assert seen_kwargs["reply_to_event_id"] == "$original"
+    assert seen_kwargs["correlation_id"] == "$edit"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_cleanup_targets_retry_run_id(tmp_path: Path) -> None:
+    """Cleanup should target the persisted retry run instead of the abandoned first run id."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+
+    async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+        run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+        run_id_callback("retry-run")
+        return "Hello"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_send_text(*_args: object, **_kwargs: object) -> str:
+            storage.session = AgentSession(
+                session_id="!test:localhost:$thread-root",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+                runs=[
+                    RunOutput(
+                        run_id="retry-run",
+                        content="Hello",
+                        messages=[
+                            Message(
+                                role="user",
+                                content=(
+                                    "Describe this image\n\n"
+                                    "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+                                ),
+                            ),
+                            Message(role="assistant", content="Hello"),
+                        ],
+                    ),
+                ],
+            )
+            return "$msg"
+
+        coordinator.deps.delivery_gateway.send_text.side_effect = fake_send_text
+
+        await coordinator.generate_response(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+        )
+
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "retry-run"
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].content == "Describe this image"
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_marks_transient_model_prompt_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Team responses should scrub transient per-turn model tails after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+    assert outcome.memory_prompt == "Describe this image"
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_marks_matrix_tool_prompt_context_for_cleanup(tmp_path: Path) -> None:
+    """Team Matrix tool metadata appended during runtime preparation should be scrubbed after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    model_messages: list[str] = []
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        model_messages.append(cast("str", kwargs["message"]))
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert model_messages
+    assert "[Matrix metadata for tool calls]" in model_messages[0]
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+    assert outcome.memory_prompt == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_passes_resolved_correlation_id_to_team_response(tmp_path: Path) -> None:
+    """Team execution should share the lifecycle/tool-runtime correlation id."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    seen_kwargs: dict[str, object] = {}
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        seen_kwargs.update(kwargs)
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$original"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            _response_request(
+                prompt="Regenerate team edit",
+                user_id="@alice:localhost",
+                thread_id="$thread-root",
+                reply_to_event_id="$original",
+                correlation_id="$edit",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert seen_kwargs["reply_to_event_id"] == "$original"
+    assert seen_kwargs["correlation_id"] == "$edit"
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_strips_transient_model_prompt_from_persisted_session(
+    tmp_path: Path,
+) -> None:
+    """Team cleanup should restore the current user turn, not earlier context."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    async def fake_team_response(*_args: object, **_kwargs: object) -> str:
+        storage.session = TeamSession(
+            session_id="!test:localhost:$thread-root",
+            team_id="ultimate",
+            created_at=1,
+            updated_at=1,
+            runs=[
+                TeamRunOutput(
+                    content="Team answer",
+                    messages=[
+                        Message(role="user", content="Earlier context"),
+                        Message(role="assistant", content="Earlier answer"),
+                        Message(
+                            role="user",
+                            content=(
+                                "Describe this image\n\n"
+                                "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+                            ),
+                        ),
+                        Message(role="assistant", content="Team answer"),
+                    ],
+                ),
+            ],
+        )
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].content == "Earlier context"
+    assert persisted_run.messages[2].content == "Describe this image"
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_cleanup_targets_retry_run_id(tmp_path: Path) -> None:
+    """Team cleanup should target the persisted retry run instead of the abandoned first run id."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+        run_id_callback("team-retry-run")
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            side_effect=lambda **_kwargs: _open_team_scope_context(storage),
+        ),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        async def fake_send_text(*_args: object, **_kwargs: object) -> str:
+            storage.session = TeamSession(
+                session_id="!test:localhost:$thread-root",
+                team_id="ultimate",
+                created_at=1,
+                updated_at=1,
+                runs=[
+                    TeamRunOutput(
+                        run_id="team-retry-run",
+                        content="Team answer",
+                        messages=[
+                            Message(
+                                role="user",
+                                content=(
+                                    "Describe this image\n\n"
+                                    "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+                                ),
+                            ),
+                            Message(role="assistant", content="Team answer"),
+                        ],
+                    ),
+                ],
+            )
+            return "$msg"
+
+        coordinator.deps.delivery_gateway.send_text.side_effect = fake_send_text
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "team-retry-run"
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].content == "Describe this image"
+
+
+def test_strip_transient_enrichment_targets_response_run_id() -> None:
+    """Cleanup should not rewrite a newer or older run when the finished run id is known."""
+    transient_system_context = render_system_enrichment_block(
+        (EnrichmentItem(key="weather", text="72F and sunny", cache_policy="volatile"),),
+    )
+    storage = _SessionStorage(
+        AgentSession(
+            session_id="session-1",
+            agent_id="general",
+            runs=[
+                RunOutput(
+                    run_id="older-run",
+                    messages=[Message(role="user", content="older enriched prompt")],
+                ),
+                RunOutput(
+                    run_id="target-run",
+                    messages=[
+                        Message(role="system", content=f"durable system context\n\n{transient_system_context}"),
+                        Message(role="user", content="current enriched prompt"),
+                    ],
+                ),
+                RunOutput(
+                    run_id="newer-run",
+                    messages=[Message(role="user", content="newer enriched prompt")],
+                ),
+            ],
+        ),
+    )
+    storage_view = storage.open()
+
+    changed = strip_transient_enrichment_from_session(
+        storage_view,
+        session_id="session-1",
+        session_type=SessionType.AGENT,
+        response_run_id="target-run",
+        memory_prompt="current raw prompt",
+        transient_system_context=transient_system_context,
+    )
+
+    persisted_session = cast("AgentSession", storage.session)
+    assert changed is True
+    assert persisted_session.runs is not None
+    assert cast("RunOutput", persisted_session.runs[0]).messages[0].content == "older enriched prompt"
+    target_messages = cast("RunOutput", persisted_session.runs[1]).messages
+    assert target_messages is not None
+    assert target_messages[0].content == "durable system context"
+    assert target_messages[1].content == "current raw prompt"
+    assert cast("RunOutput", persisted_session.runs[2]).messages[0].content == "newer enriched prompt"
+
+
+def test_strip_transient_enrichment_strips_nested_team_member_system_context() -> None:
+    """Team cleanup should recurse into persisted member responses."""
+    transient_system_context = render_system_enrichment_block(
+        (EnrichmentItem(key="weather", text="72F and sunny", cache_policy="volatile"),),
+    )
+    storage = _SessionStorage(
+        TeamSession(
+            session_id="session-1",
+            team_id="ultimate",
+            runs=[
+                TeamRunOutput(
+                    run_id="target-run",
+                    messages=[
+                        Message(role="system", content=f"durable team context\n\n{transient_system_context}"),
+                        Message(role="user", content="current enriched prompt"),
+                    ],
+                    member_responses=[
+                        RunOutput(
+                            run_id="member-run",
+                            messages=[
+                                Message(
+                                    role="system",
+                                    content=f"durable member context\n\n{transient_system_context}",
+                                ),
+                                Message(role="assistant", content="member answer"),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    )
+    storage_view = storage.open()
+
+    changed = strip_transient_enrichment_from_session(
+        storage_view,
+        session_id="session-1",
+        session_type=SessionType.TEAM,
+        response_run_id="target-run",
+        memory_prompt="current raw prompt",
+        transient_system_context=transient_system_context,
+    )
+
+    persisted_session = cast("TeamSession", storage.session)
+    assert changed is True
+    assert persisted_session.runs is not None
+    target_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert target_run.messages is not None
+    assert target_run.messages[0].content == "durable team context"
+    assert target_run.messages[1].content == "current raw prompt"
+    assert target_run.member_responses is not None
+    member_run = cast("RunOutput", target_run.member_responses[0])
+    assert member_run.messages is not None
+    assert member_run.messages[0].content == "durable member context"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_cleanup_uses_model_time_knowledge_notice(tmp_path: Path) -> None:
+    """Cleanup should use the exact knowledge notice appended before the model run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    knowledge_access_support = _knowledge_access_support()
+    knowledge_access_support.resolve_for_agent.side_effect = [
+        KnowledgeResolution(
+            knowledge=None,
+            unavailable={
+                "docs": KnowledgeAvailabilityDetail(
+                    availability=KnowledgeAvailability.INITIALIZING,
+                    search_available=False,
+                ),
+            },
+        ),
+        KnowledgeResolution(knowledge=None, unavailable={}),
+    ]
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            knowledge_access_support=knowledge_access_support,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+    assert "knowledge_availability" in outcome.transient_system_context
+    assert "Knowledge base `docs` is initializing" in outcome.transient_system_context
+    assert knowledge_access_support.resolve_for_agent.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_response_streaming_cleanup_uses_model_time_knowledge_notice(tmp_path: Path) -> None:
+    """Streaming cleanup should use the exact knowledge notice appended before the model run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    knowledge_access_support = _knowledge_access_support()
+    knowledge_access_support.resolve_for_agent.side_effect = [
+        KnowledgeResolution(
+            knowledge=None,
+            unavailable={
+                "docs": KnowledgeAvailabilityDetail(
+                    availability=KnowledgeAvailability.INITIALIZING,
+                    search_available=False,
+                ),
+            },
+        ),
+        KnowledgeResolution(knowledge=None, unavailable={}),
+    ]
+
+    async def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        yield "Hello"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.stream_agent_response", new=fake_stream_agent_response),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            knowledge_access_support=knowledge_access_support,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+    assert "knowledge_availability" in outcome.transient_system_context
+    assert "Knowledge base `docs` is initializing" in outcome.transient_system_context
+    assert knowledge_access_support.resolve_for_agent.call_count == 1
+
+
+def test_append_knowledge_availability_notice_rendering() -> None:
+    """Knowledge availability notices should render as transient system enrichment."""
+    rendered_context = render_system_enrichment_block(
+        append_knowledge_availability_enrichment(
+            (),
+            {
+                "docs": KnowledgeAvailabilityDetail(
+                    availability=KnowledgeAvailability.INITIALIZING,
+                    search_available=False,
+                ),
+            },
+        ),
+    )
+
+    assert "knowledge_availability" in rendered_context
+    assert "Knowledge base `docs` is initializing" in rendered_context
+
+
+@pytest.mark.asyncio
+async def test_stream_with_request_log_context_closes_wrapped_stream_on_early_close() -> None:
+    """Closing the wrapper should immediately close the provider stream."""
+    closed = False
+
+    async def source() -> AsyncGenerator[str, None]:
+        nonlocal closed
+        try:
+            yield "first"
+            yield "second"
+        finally:
+            closed = True
+
+    stream = stream_with_llm_request_log_context(source(), request_context={})
+
+    assert await anext(stream) == "first"
+    await stream.aclose()
+
+    assert closed is True
+
+
+@pytest.mark.asyncio
+async def test_generate_response_marks_system_enrichment_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Agent responses should scrub transient system enrichment after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="Hello")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            replace(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),),
+            ),
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_marks_system_enrichment_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Team responses should scrub transient system enrichment after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),),
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+
+
+def test_compose_current_turn_prompt_uses_normalized_tail_comparison() -> None:
+    """Whitespace-normalized model prompts should not duplicate the raw turn."""
+    prompt = _compose_current_turn_prompt(
+        raw_prompt=" report ",
+        model_prompt="[2026-03-20 08:15 PDT] report\n\nAvailable attachment IDs: att_report.",
+        prompt_parts=MemoryPromptParts(session_preamble="", turn_context=""),
+    )
+
+    assert prompt == " report \n\nAvailable attachment IDs: att_report."
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_helper_streaming_emits_session_started_after_persisted_delivery_error(
     tmp_path: Path,
 ) -> None:
@@ -3839,7 +4761,7 @@ class TestUserIdPassthrough:
         assert mock_build_prompt_parts.await_args.args[0] == "raw prompt"
         assert mock_prepare_execution.await_args is not None
         assert mock_prepare_execution.await_args.kwargs["prompt"] == "raw prompt\n\nturn context\n\nmodel metadata"
-        assert mock_agent.additional_context == "existing context\n\nsystem enrichment\n\nsession preamble"
+        assert mock_agent.additional_context == "existing context\n\nsession preamble\n\nsystem enrichment"
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -3894,6 +4816,31 @@ class TestUserIdPassthrough:
 
         assert mock_prepare.await_args.kwargs["current_sender_id"] is None
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
+
+    @pytest.mark.asyncio
+    async def test_ai_response_passes_current_sender_for_matrix_guidance(self, tmp_path: Path) -> None:
+        """Matrix turns should preserve the sender who produced the current prompt."""
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = None
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+        ):
+            mock_prepare.return_value = _prepared_prompt_result(mock_agent)
+
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path),
+                config=_config(),
+                user_id="@alice:example.com",
+            )
+
+        assert mock_prepare.await_args.kwargs["current_sender_id"] == "@alice:example.com"
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_raw_prompt_separately_from_model_prompt(self, tmp_path: Path) -> None:
@@ -3982,11 +4929,8 @@ class TestUserIdPassthrough:
         assert mock_prepare.await_args.kwargs["include_openai_compat_guidance"] is True
 
     @pytest.mark.asyncio
-    async def test_stream_agent_response_passes_raw_prompt_separately_from_model_prompt(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Streaming should preserve the raw prompt when model_prompt is present."""
+    async def test_stream_agent_response_passes_current_sender_for_matrix_guidance(self, tmp_path: Path) -> None:
+        """Streaming Matrix turns should preserve current-sender prompt attribution."""
         mock_agent = MagicMock()
 
         async def _empty_stream() -> AsyncIterator[str]:
@@ -4002,16 +4946,15 @@ class TestUserIdPassthrough:
                 chunk
                 async for chunk in stream_agent_response(
                     agent_name="general",
-                    prompt="raw prompt",
-                    model_prompt="model metadata",
+                    prompt="test",
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path),
                     config=_config(),
+                    user_id="@alice:example.com",
                 )
             ]
 
-        assert mock_prepare.await_args.args[1] == "raw prompt"
-        assert mock_prepare.await_args.kwargs["model_prompt"] == "model metadata"
+        assert mock_prepare.await_args.kwargs["current_sender_id"] == "@alice:example.com"
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
@@ -4154,6 +5097,10 @@ class TestUserIdPassthrough:
         persisted_run = cast("RunOutput", persisted_session.runs[0])
         assert persisted_run.status is RunStatus.completed
         assert persisted_run.metadata == {
+            "reply_to_event_id": "e1",
+            "correlation_id": "e1",
+            "tools_schema": [],
+            "model_params": {},
             "matrix_event_id": "e1",
             "matrix_seen_event_ids": ["e1"],
             "mindroom_original_status": "cancelled",
@@ -4583,28 +5530,24 @@ class TestUserIdPassthrough:
         mock_prepare.assert_awaited_once()
         assert mock_prepare.await_args.args[1] == "raw prompt"
         assert mock_prepare.await_args.kwargs["model_prompt"] == "expanded prompt"
-        assert logged_contexts == [
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": prepared_prompt,
-                "metadata": None,
-            },
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": append_inline_media_fallback_prompt(prepared_prompt),
-                "metadata": None,
-            },
-        ]
+        assert len(logged_contexts) == 2
+        assert logged_contexts[0]["agent_id"] == "general"
+        assert logged_contexts[0]["session_id"] == "session1"
+        assert logged_contexts[0]["room_id"] is None
+        assert logged_contexts[0]["thread_id"] is None
+        assert logged_contexts[0]["reply_to_event_id"] is None
+        assert logged_contexts[0]["requester_id"] is None
+        assert logged_contexts[0]["prompt"] == "raw prompt"
+        assert logged_contexts[0]["model_prompt"] == "expanded prompt"
+        assert logged_contexts[0]["full_prompt"] == prepared_prompt
+        assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
+        assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
+        assert logged_contexts[0]["metadata"] == {
+            "correlation_id": logged_contexts[0]["correlation_id"],
+            "tools_schema": [],
+            "model_params": {},
+        }
+        assert logged_contexts[1]["metadata"] == logged_contexts[0]["metadata"]
 
     @pytest.mark.asyncio
     async def test_ai_response_retries_errored_run_output_with_fresh_run_id(self, tmp_path: Path) -> None:
@@ -4688,6 +5631,10 @@ class TestUserIdPassthrough:
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path),
                     config=_config(),
+                    room_id="!room:localhost",
+                    thread_id="$thread:localhost",
+                    user_id="@alice:localhost",
+                    reply_to_event_id="$event:localhost",
                     run_id="run-123",
                     run_id_callback=callback_run_ids.append,
                     media=MediaInputs(audio=[MagicMock(name="audio_input")]),
@@ -4701,6 +5648,14 @@ class TestUserIdPassthrough:
         assert seen_run_ids[1] != "run-123"
         assert callback_run_ids == [run_id for run_id in seen_run_ids if run_id is not None]
         assert persisted_run.run_id == seen_run_ids[1]
+        assert persisted_run.metadata is not None
+        assert persisted_run.metadata["room_id"] == "!room:localhost"
+        assert persisted_run.metadata["thread_id"] == "$thread:localhost"
+        assert persisted_run.metadata["requester_id"] == "@alice:localhost"
+        assert persisted_run.metadata["reply_to_event_id"] == "$event:localhost"
+        assert persisted_run.metadata["correlation_id"] == "$event:localhost"
+        assert persisted_run.metadata["tools_schema"] == []
+        assert persisted_run.metadata["model_params"] == {}
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_retries_without_media_on_validation_error(self, tmp_path: Path) -> None:
@@ -4814,28 +5769,24 @@ class TestUserIdPassthrough:
         mock_prepare.assert_awaited_once()
         assert mock_prepare.await_args.args[1] == "raw prompt"
         assert mock_prepare.await_args.kwargs["model_prompt"] == "expanded prompt"
-        assert logged_contexts == [
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": prepared_prompt,
-                "metadata": None,
-            },
-            {
-                "session_id": "session1",
-                "room_id": None,
-                "thread_id": None,
-                "reply_to_event_id": None,
-                "prompt": "raw prompt",
-                "model_prompt": "expanded prompt",
-                "full_prompt": append_inline_media_fallback_prompt(prepared_prompt),
-                "metadata": None,
-            },
-        ]
+        assert len(logged_contexts) == 2
+        assert logged_contexts[0]["agent_id"] == "general"
+        assert logged_contexts[0]["session_id"] == "session1"
+        assert logged_contexts[0]["room_id"] is None
+        assert logged_contexts[0]["thread_id"] is None
+        assert logged_contexts[0]["reply_to_event_id"] is None
+        assert logged_contexts[0]["requester_id"] is None
+        assert logged_contexts[0]["prompt"] == "raw prompt"
+        assert logged_contexts[0]["model_prompt"] == "expanded prompt"
+        assert logged_contexts[0]["full_prompt"] == prepared_prompt
+        assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
+        assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
+        assert logged_contexts[0]["metadata"] == {
+            "correlation_id": logged_contexts[0]["correlation_id"],
+            "tools_schema": [],
+            "model_params": {},
+        }
+        assert logged_contexts[1]["metadata"] == logged_contexts[0]["metadata"]
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_keeps_request_log_context_for_deferred_model_call(
@@ -4870,14 +5821,10 @@ class TestUserIdPassthrough:
                 self.db = None
                 self.learning = None
 
-            async def arun(self, run_input: object, **_kwargs: object) -> AsyncIterator[object]:
-                messages = (
-                    [message.model_copy(deep=True) for message in run_input]
-                    if isinstance(run_input, list) and all(isinstance(message, Message) for message in run_input)
-                    else [Message(role="user", content=cast("str", run_input))]
-                )
+            async def arun(self, prompt: str | list[Message], **_kwargs: object) -> AsyncIterator[object]:
+                prompt_messages = prompt if isinstance(prompt, list) else [Message(role="user", content=prompt)]
                 async for _chunk in self.model.ainvoke_stream(
-                    messages=messages,
+                    messages=prompt_messages,
                     assistant_message=Message(role="assistant"),
                     tools=[],
                 ):
@@ -4899,7 +5846,10 @@ class TestUserIdPassthrough:
             },
         )
 
-        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai.agent_tool_definition_payloads_for_logging", return_value=[]),
+        ):
             mock_prepare.return_value = _prepared_prompt_result(agent, prompt=prepared_prompt)
             chunks = [
                 chunk
@@ -4922,15 +5872,22 @@ class TestUserIdPassthrough:
         assert len(log_files) == 1
         entries = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
         assert len(entries) == 1
+        assert entries[0]["agent_id"] == "general"
         assert entries[0]["session_id"] == "session1"
         assert entries[0]["room_id"] == "!room:example.com"
         assert entries[0]["thread_id"] == "$thread:example.com"
         assert entries[0]["reply_to_event_id"] == "$reply:example.com"
+        assert entries[0]["correlation_id"] == "$reply:example.com"
         assert entries[0]["current_turn_prompt"] == "raw prompt"
         assert entries[0]["model_prompt"] == "expanded prompt"
         assert entries[0]["full_prompt"] == prepared_prompt
         assert entries[0]["messages"][0]["role"] == "user"
-        assert entries[0]["messages"][0]["content"] == prepared_prompt
+        logged_content = entries[0]["messages"][0]["content"]
+        if isinstance(logged_content, list):
+            assert len(logged_content) == 1
+            assert logged_content[0]["content"] == prepared_prompt
+        else:
+            assert logged_content == prepared_prompt
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_retries_with_fresh_run_id(self, tmp_path: Path) -> None:
@@ -5352,11 +6309,48 @@ class TestUserIdPassthrough:
         )
 
         assert metadata == {
+            "reply_to_event_id": "$primary",
+            "tools_schema": [],
+            "model_params": {},
             MATRIX_EVENT_ID_METADATA_KEY: "$primary",
             MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$unseen"],
             MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
             MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "first", "$primary": "primary"},
         }
+
+    def test_build_matrix_run_metadata_preserves_existing_trace_fields_without_overrides(self) -> None:
+        """Optional trace fields should not erase already-materialized metadata."""
+        metadata = build_matrix_run_metadata(
+            None,
+            [],
+            extra_metadata={
+                "room_id": "!room:localhost",
+                "thread_id": "$thread",
+                "reply_to_event_id": "$reply",
+                "requester_id": "@alice:localhost",
+                "correlation_id": "corr-existing",
+                "tools_schema": [{"name": "demo"}],
+                "model_params": {"temperature": 0.3},
+            },
+        )
+
+        assert metadata is not None
+        assert metadata["room_id"] == "!room:localhost"
+        assert metadata["thread_id"] == "$thread"
+        assert metadata["reply_to_event_id"] == "$reply"
+        assert metadata["requester_id"] == "@alice:localhost"
+        assert metadata["correlation_id"] == "corr-existing"
+        assert metadata["tools_schema"] == [{"name": "demo"}]
+        assert metadata["model_params"] == {"temperature": 0.3}
+
+    def test_stream_completed_without_visible_output_accepts_final_body_only_completion(self) -> None:
+        """Providers that only emit RunCompletedEvent.content still produced visible text."""
+        state = _StreamingAttemptState(
+            completed_run_event=RunCompletedEvent(run_id="run-1", content="Final answer"),
+            canonical_final_body_candidate="Final answer",
+        )
+
+        assert _stream_completed_without_visible_output(state) is False
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_collects_run_metadata(self, tmp_path: Path) -> None:

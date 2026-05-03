@@ -68,6 +68,8 @@ cache:
 
 # Optional debug logging for pre-provider LLM request assembly data.
 # This writes sensitive prompts, messages, tools, and model params to JSONL.
+# It also records successful tool-call rows in mindroom_data/tracking/tool_calls.jsonl.
+# Tool failures are always recorded in tool_calls.jsonl even when this is disabled.
 # It does not capture the final provider-specific wire payload.
 # Leave disabled unless you are actively debugging request assembly.
 # debug:

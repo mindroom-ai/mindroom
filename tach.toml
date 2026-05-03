@@ -176,7 +176,7 @@ depends_on = [
     "mindroom.approval_events",
     "mindroom.constants",
     "mindroom.logging_config",
-    "mindroom.tool_system.tool_failures",
+    "mindroom.tool_system.tool_calls",
 ]
 visibility = ["mindroom.tool_approval"]
 
@@ -1715,17 +1715,18 @@ path = "mindroom.tool_system.events"
 depends_on = []
 
 [[modules]]
-path = "mindroom.tool_system.tool_failures"
+path = "mindroom.tool_system.tool_calls"
 depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
     "mindroom.hooks",
+    "mindroom.llm_request_logging",
     "mindroom.sync_bridge_state",
     "mindroom.tool_approval",
     "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.tool_failures",
+    "mindroom.tool_system.tool_calls",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -2062,6 +2063,7 @@ expose = [
     "AIStreamChunk",
     "build_matrix_run_metadata",
     "ai_response",
+    "resolve_run_correlation_id",
     "stream_agent_response",
 ]
 from = ["mindroom.ai"]
@@ -2578,6 +2580,7 @@ expose = [
     "ResolvedReplayPlan",
     "ScopeSessionContext",
     "add_pending_force_compaction_scope",
+    "agent_tool_definition_payloads_for_logging",
     "apply_replay_plan",
     "close_agent_runtime_state_dbs",
     "close_team_runtime_state_dbs",
@@ -2598,6 +2601,8 @@ expose = [
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
     "run_post_response_compaction_check",
+    "strip_transient_enrichment_from_session",
+    "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",
     "write_scope_state",
 ]

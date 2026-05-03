@@ -50,6 +50,8 @@ class _SerializedHandledTurnRecord(TypedDict):
     source_event_ids: NotRequired[list[str]]
     source_event_prompts: NotRequired[dict[str, str] | None]
     response_owner: NotRequired[str | None]
+    requester_id: NotRequired[str | None]
+    correlation_id: NotRequired[str | None]
     history_scope: NotRequired[_SerializedHistoryScope | None]
     conversation_target: NotRequired[_SerializedConversationTarget | None]
 
@@ -66,6 +68,8 @@ class HandledTurnState:
     visible_echo_event_id: str | None = None
     source_event_prompts: dict[str, str] | None = None
     response_owner: str | None = None
+    requester_id: str | None = None
+    correlation_id: str | None = None
     history_scope: HistoryScope | None = None
     conversation_target: MessageTarget | None = None
 
@@ -78,6 +82,8 @@ class HandledTurnState:
         visible_echo_event_id: str | None = None,
         source_event_prompts: typing.Mapping[str, str] | None = None,
         response_owner: str | None = None,
+        requester_id: str | None = None,
+        correlation_id: str | None = None,
         history_scope: HistoryScope | None = None,
         conversation_target: MessageTarget | None = None,
     ) -> HandledTurnState:
@@ -92,6 +98,8 @@ class HandledTurnState:
                 source_event_prompts,
             ),
             response_owner=_normalized_response_owner(response_owner),
+            requester_id=_normalized_requester_id(requester_id),
+            correlation_id=_normalized_correlation_id(correlation_id),
             history_scope=_normalized_history_scope(history_scope),
             conversation_target=_normalized_conversation_target(conversation_target),
         )
@@ -105,6 +113,8 @@ class HandledTurnState:
         visible_echo_event_id: str | None = None,
         source_event_prompts: typing.Mapping[str, str] | None = None,
         response_owner: str | None = None,
+        requester_id: str | None = None,
+        correlation_id: str | None = None,
         history_scope: HistoryScope | None = None,
         conversation_target: MessageTarget | None = None,
     ) -> HandledTurnState:
@@ -115,6 +125,8 @@ class HandledTurnState:
             visible_echo_event_id=visible_echo_event_id,
             source_event_prompts=source_event_prompts,
             response_owner=response_owner,
+            requester_id=requester_id,
+            correlation_id=correlation_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
         )
@@ -137,6 +149,8 @@ class HandledTurnState:
             visible_echo_event_id=self.visible_echo_event_id,
             source_event_prompts=self.source_event_prompts,
             response_owner=self.response_owner,
+            requester_id=self.requester_id,
+            correlation_id=self.correlation_id,
             history_scope=self.history_scope,
             conversation_target=self.conversation_target,
         )
@@ -149,6 +163,8 @@ class HandledTurnState:
             visible_echo_event_id=visible_echo_event_id,
             source_event_prompts=self.source_event_prompts,
             response_owner=self.response_owner,
+            requester_id=self.requester_id,
+            correlation_id=self.correlation_id,
             history_scope=self.history_scope,
             conversation_target=self.conversation_target,
         )
@@ -164,6 +180,27 @@ class HandledTurnState:
             visible_echo_event_id=self.visible_echo_event_id,
             source_event_prompts=source_event_prompts,
             response_owner=self.response_owner,
+            requester_id=self.requester_id,
+            correlation_id=self.correlation_id,
+            history_scope=self.history_scope,
+            conversation_target=self.conversation_target,
+        )
+
+    def with_request_context(
+        self,
+        *,
+        requester_id: str | None,
+        correlation_id: str | None,
+    ) -> HandledTurnState:
+        """Return a copy with updated request trace context."""
+        return HandledTurnState.create(
+            self.source_event_ids,
+            response_event_id=self.response_event_id,
+            visible_echo_event_id=self.visible_echo_event_id,
+            source_event_prompts=self.source_event_prompts,
+            response_owner=self.response_owner,
+            requester_id=requester_id,
+            correlation_id=correlation_id,
             history_scope=self.history_scope,
             conversation_target=self.conversation_target,
         )
@@ -172,6 +209,8 @@ class HandledTurnState:
         self,
         *,
         response_owner: str | None,
+        requester_id: str | None = None,
+        correlation_id: str | None = None,
         history_scope: HistoryScope | None,
         conversation_target: MessageTarget | None,
     ) -> HandledTurnState:
@@ -182,6 +221,8 @@ class HandledTurnState:
             visible_echo_event_id=self.visible_echo_event_id,
             source_event_prompts=self.source_event_prompts,
             response_owner=response_owner,
+            requester_id=requester_id if requester_id is not None else self.requester_id,
+            correlation_id=correlation_id if correlation_id is not None else self.correlation_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
         )
@@ -198,6 +239,8 @@ class HandledTurnRecord:
     visible_echo_event_id: str | None = None
     source_event_prompts: dict[str, str] | None = None
     response_owner: str | None = None
+    requester_id: str | None = None
+    correlation_id: str | None = None
     history_scope: HistoryScope | None = None
     conversation_target: MessageTarget | None = None
     timestamp: float = 0.0
@@ -242,6 +285,8 @@ class HandledTurnLedger:
                 visible_echo_event_id=handled_turn.visible_echo_event_id,
                 source_event_prompts=handled_turn.source_event_prompts,
                 response_owner=handled_turn.response_owner,
+                requester_id=handled_turn.requester_id,
+                correlation_id=handled_turn.correlation_id,
                 history_scope=handled_turn.history_scope,
                 conversation_target=handled_turn.conversation_target,
             )
@@ -263,6 +308,8 @@ class HandledTurnLedger:
                 visible_echo_event_id=turn_record.visible_echo_event_id,
                 source_event_prompts=turn_record.source_event_prompts,
                 response_owner=turn_record.response_owner,
+                requester_id=turn_record.requester_id,
+                correlation_id=turn_record.correlation_id,
                 history_scope=turn_record.history_scope,
                 conversation_target=turn_record.conversation_target,
                 anchor_event_id=turn_record.anchor_event_id,
@@ -283,6 +330,8 @@ class HandledTurnLedger:
                 visible_echo_event_id=echo_event_id,
                 source_event_prompts=_prompt_map_for_record(source_event_ids, existing_record),
                 response_owner=_response_owner_for_record(existing_record),
+                requester_id=_requester_id_for_record(existing_record),
+                correlation_id=_correlation_id_for_record(existing_record),
                 history_scope=_history_scope_for_record(existing_record),
                 conversation_target=_conversation_target_for_record(existing_record),
                 anchor_event_id=_anchor_event_id_for_record(source_event_ids, existing_record),
@@ -339,6 +388,8 @@ class HandledTurnLedger:
                 visible_echo_event_id=_visible_echo_event_id_for_record(record),
                 source_event_prompts=_prompt_map_for_record(source_event_ids, record),
                 response_owner=_response_owner_for_record(record),
+                requester_id=_requester_id_for_record(record),
+                correlation_id=_correlation_id_for_record(record),
                 history_scope=_history_scope_for_record(record),
                 conversation_target=_conversation_target_for_record(record),
                 timestamp=record["timestamp"],
@@ -502,6 +553,8 @@ class HandledTurnLedger:
         visible_echo_event_id: str | None,
         source_event_prompts: typing.Mapping[str, str] | None,
         response_owner: str | None,
+        requester_id: str | None,
+        correlation_id: str | None,
         history_scope: HistoryScope | None,
         conversation_target: MessageTarget | None,
         anchor_event_id: str | None = None,
@@ -510,6 +563,8 @@ class HandledTurnLedger:
         visible_echo_event_id = visible_echo_event_id or self._visible_echo_for_sources(source_event_ids)
         prompt_map = self._normalized_prompt_map(source_event_ids, source_event_prompts)
         response_owner = self._normalized_response_owner(source_event_ids, response_owner)
+        requester_id = self._normalized_requester_id(source_event_ids, requester_id)
+        correlation_id = self._normalized_correlation_id(source_event_ids, correlation_id)
         history_scope = self._normalized_history_scope(source_event_ids, history_scope)
         conversation_target = self._normalized_conversation_target(source_event_ids, conversation_target)
         anchor_event_id = self._normalized_anchor_event_id(source_event_ids, anchor_event_id)
@@ -524,6 +579,8 @@ class HandledTurnLedger:
                 visible_echo_event_id=visible_echo_event_id,
                 source_event_prompts=prompt_map,
                 response_owner=response_owner,
+                requester_id=requester_id,
+                correlation_id=correlation_id,
                 history_scope=history_scope,
                 conversation_target=conversation_target,
             )
@@ -570,6 +627,36 @@ class HandledTurnLedger:
             existing_history_scope = _history_scope_for_record(self._responses.get(event_id))
             if existing_history_scope is not None:
                 return existing_history_scope
+        return None
+
+    def _normalized_requester_id(
+        self,
+        source_event_ids: tuple[str, ...],
+        requester_id: str | None,
+    ) -> str | None:
+        """Return the explicit requester or preserve an existing one."""
+        normalized_requester_id = _normalized_requester_id(requester_id)
+        if normalized_requester_id is not None:
+            return normalized_requester_id
+        for event_id in source_event_ids:
+            existing_requester_id = _requester_id_for_record(self._responses.get(event_id))
+            if existing_requester_id is not None:
+                return existing_requester_id
+        return None
+
+    def _normalized_correlation_id(
+        self,
+        source_event_ids: tuple[str, ...],
+        correlation_id: str | None,
+    ) -> str | None:
+        """Return the explicit correlation id or preserve an existing one."""
+        normalized_correlation_id = _normalized_correlation_id(correlation_id)
+        if normalized_correlation_id is not None:
+            return normalized_correlation_id
+        for event_id in source_event_ids:
+            existing_correlation_id = _correlation_id_for_record(self._responses.get(event_id))
+            if existing_correlation_id is not None:
+                return existing_correlation_id
         return None
 
     def _normalized_conversation_target(
@@ -623,6 +710,16 @@ def _normalized_event_id(event_id: str | None) -> str | None:
 def _normalized_response_owner(response_owner: str | None) -> str | None:
     """Return a non-empty response owner or None."""
     return response_owner if isinstance(response_owner, str) and response_owner else None
+
+
+def _normalized_requester_id(requester_id: str | None) -> str | None:
+    """Return a non-empty requester id or None."""
+    return requester_id if isinstance(requester_id, str) and requester_id else None
+
+
+def _normalized_correlation_id(correlation_id: str | None) -> str | None:
+    """Return a non-empty correlation id or None."""
+    return correlation_id if isinstance(correlation_id, str) and correlation_id else None
 
 
 def _normalized_history_scope(history_scope: HistoryScope | None) -> HistoryScope | None:
@@ -684,6 +781,8 @@ def _serialized_record(
     visible_echo_event_id: str | None = None,
     source_event_prompts: typing.Mapping[str, str] | None = None,
     response_owner: str | None = None,
+    requester_id: str | None = None,
+    correlation_id: str | None = None,
     history_scope: HistoryScope | None = None,
     conversation_target: MessageTarget | None = None,
 ) -> _SerializedHandledTurnRecord:
@@ -702,6 +801,10 @@ def _serialized_record(
         record["source_event_prompts"] = dict(source_event_prompts)
     if response_owner is not None:
         record["response_owner"] = response_owner
+    if requester_id is not None:
+        record["requester_id"] = requester_id
+    if correlation_id is not None:
+        record["correlation_id"] = correlation_id
     if history_scope is not None:
         record["history_scope"] = {
             "kind": history_scope.kind,
@@ -781,7 +884,7 @@ def _response_groups(
     )
 
 
-def _normalize_serialized_record(
+def _normalize_serialized_record(  # noqa: C901
     event_id: str,
     raw_record: _SerializedHandledTurnRecordLike,
 ) -> _SerializedHandledTurnRecord:
@@ -807,6 +910,8 @@ def _normalize_serialized_record(
     anchor_event_id = _normalized_event_id(raw_record.get("anchor_event_id"))
     prompt_map = _prompt_map_for_record(normalized_source_event_ids, raw_record)
     response_owner = _response_owner_for_record(raw_record)
+    requester_id = _requester_id_for_record(raw_record)
+    correlation_id = _correlation_id_for_record(raw_record)
     history_scope = _history_scope_for_record(raw_record)
     conversation_target = _conversation_target_for_record(raw_record)
     normalized_record: _SerializedHandledTurnRecord = {
@@ -823,6 +928,10 @@ def _normalize_serialized_record(
         normalized_record["source_event_prompts"] = prompt_map
     if response_owner is not None:
         normalized_record["response_owner"] = response_owner
+    if requester_id is not None:
+        normalized_record["requester_id"] = requester_id
+    if correlation_id is not None:
+        normalized_record["correlation_id"] = correlation_id
     if history_scope is not None:
         normalized_record["history_scope"] = {
             "kind": history_scope.kind,
@@ -886,6 +995,20 @@ def _response_owner_for_record(record: _SerializedHandledTurnRecordLike | None) 
     if record is None:
         return None
     return _normalized_response_owner(record.get("response_owner"))
+
+
+def _requester_id_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:
+    """Return the normalized requester id for one record."""
+    if record is None:
+        return None
+    return _normalized_requester_id(record.get("requester_id"))
+
+
+def _correlation_id_for_record(record: _SerializedHandledTurnRecordLike | None) -> str | None:
+    """Return the normalized correlation id for one record."""
+    if record is None:
+        return None
+    return _normalized_correlation_id(record.get("correlation_id"))
 
 
 def _history_scope_for_record(record: _SerializedHandledTurnRecordLike | None) -> HistoryScope | None:

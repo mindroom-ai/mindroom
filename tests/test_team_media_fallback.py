@@ -41,6 +41,7 @@ from mindroom.history.interrupted_replay import render_interrupted_replay_conten
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge import KnowledgeResolution
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
@@ -827,6 +828,10 @@ async def test_prepare_materialized_team_execution_scrubs_queued_notices_when_ca
                 config=config,
                 runtime_paths=runtime_paths,
                 active_model_name=None,
+                room_id=None,
+                thread_id=None,
+                requester_id=None,
+                correlation_id=None,
                 reply_to_event_id=None,
                 active_event_ids=frozenset(),
                 response_sender_id=None,
@@ -865,6 +870,10 @@ async def test_prepare_materialized_team_execution_forwards_explicit_thread_hist
             config=config,
             runtime_paths=runtime_paths,
             active_model_name=None,
+            room_id=None,
+            thread_id=None,
+            requester_id=None,
+            correlation_id=None,
             reply_to_event_id=None,
             active_event_ids=frozenset(),
             response_sender_id=None,
@@ -877,6 +886,51 @@ async def test_prepare_materialized_team_execution_forwards_explicit_thread_hist
                 missing_sender_label="Unknown",
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_prepare_materialized_team_execution_appends_system_enrichment_context() -> None:
+    """Transient team system context should not replace existing configured context."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    fake_agent = _make_test_agent("GeneralAgent")
+    fake_agent.additional_context = "member configured context"
+    mock_team = _make_test_team(name="General Team")
+    mock_team.additional_context = "team configured context"
+
+    async def fake_prepare_bound_team_execution_context(**_kwargs: object) -> PreparedExecutionContext:
+        return _prepared_team_execution_context(final_prompt="Analyze this.")
+
+    with patch(
+        "mindroom.teams.prepare_bound_team_run_context",
+        new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+    ):
+        await _prepare_materialized_team_execution(
+            scope_context=None,
+            agents=[fake_agent],
+            team=mock_team,
+            message="Analyze this.",
+            thread_history=[],
+            config=config,
+            runtime_paths=runtime_paths,
+            active_model_name=None,
+            room_id=None,
+            thread_id=None,
+            requester_id=None,
+            correlation_id=None,
+            reply_to_event_id=None,
+            active_event_ids=frozenset(),
+            response_sender_id=None,
+            current_sender_id=None,
+            compaction_outcomes_collector=None,
+            configured_team_name=None,
+            system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),),
+        )
+
+    assert mock_team.additional_context.startswith("team configured context\n\n")
+    assert "weather" in mock_team.additional_context
+    assert fake_agent.additional_context.startswith("member configured context\n\n")
+    assert "weather" in fake_agent.additional_context
 
 
 @pytest.mark.asyncio

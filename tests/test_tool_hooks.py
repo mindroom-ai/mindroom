@@ -28,7 +28,7 @@ from mindroom.approval_manager import (
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
 from mindroom.hooks import (
@@ -46,6 +46,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import shutdown_approval_store
@@ -119,6 +120,7 @@ def _config(
     *,
     tools: list[str] | None = None,
     plugins: list[object] | None = None,
+    log_llm_requests: bool = False,
 ) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
@@ -133,6 +135,7 @@ def _config(
             },
             models={"default": ModelConfig(provider="openai", id="test-model")},
             plugins=plugins or [],
+            debug=DebugConfig(log_llm_requests=log_llm_requests),
         ),
         runtime_paths,
     )
@@ -209,13 +212,14 @@ def _tool_runtime_context(
     tmp_path: Path,
     *,
     agent_name: str = "code",
+    log_llm_requests: bool = False,
     hook_message_sender: object | None = None,
     room_state_querier: object | None = None,
     room_state_putter: object | None = None,
     message_received_depth: int = 0,
     hook_registry: HookRegistry | None = None,
 ) -> ToolRuntimeContext:
-    config = _config(tmp_path)
+    config = _config(tmp_path, log_llm_requests=log_llm_requests)
     return ToolRuntimeContext(
         agent_name=agent_name,
         room_id="!room:localhost",
@@ -496,7 +500,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
 
     assert exc_info.value is error
 
-    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_failures.jsonl"
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
 
     assert len(records) == 1
@@ -507,11 +511,13 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
         "channel",
         "room_id",
         "thread_id",
+        "reply_to_event_id",
         "requester_id",
         "session_id",
         "correlation_id",
         "duration_ms",
         "arguments",
+        "success",
         "error_type",
         "error_message",
         "traceback",
@@ -521,9 +527,11 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["channel"] == "matrix"
     assert records[0]["room_id"] == "!room:localhost"
     assert records[0]["thread_id"] == "$resolved-thread"
+    assert records[0]["reply_to_event_id"] is None
     assert records[0]["requester_id"] == "@user:localhost"
     assert records[0]["session_id"] == _SESSION_ID
     assert records[0]["correlation_id"] == "corr-runtime"
+    assert records[0]["success"] is False
     assert records[0]["error_type"] == "ValueError"
     assert records[0]["arguments"] == {
         "api_key": "***redacted***",
@@ -849,6 +857,135 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_bridge_does_not_record_success_rows_by_default(tmp_path: Path) -> None:
+    """Successful tool calls should not create durable audit rows unless debug logging is enabled."""
+    runtime_context = _tool_runtime_context(tmp_path)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+    assert not (runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_tool_after_call_hook_error_does_not_lose_debug_success_row(tmp_path: Path) -> None:
+    """Debug success rows should be persisted before after-call hooks run."""
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def explode_after(_ctx: ToolAfterCallContext) -> None:
+        msg = "after failed"
+        raise RuntimeError(msg)
+
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [explode_after])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(records) == 1
+    assert records[0]["tool_name"] == "read_file"
+    assert records[0]["success"] is True
+    assert records[0]["reply_to_event_id"] is None
+    assert records[0]["correlation_id"] == "corr-runtime"
+    assert records[0]["result"] == {"echo": "notes.txt"}
+
+
+@pytest.mark.asyncio
+async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Path) -> None:
+    """Debug logging failures should not turn successful tools into failed calls."""
+    seen: list[object] = []
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after_call(ctx: ToolAfterCallContext) -> None:
+        seen.append(ctx.result)
+
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [after_call])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    with (
+        tool_runtime_context(runtime_context),
+        tool_execution_identity(_execution_identity()),
+        patch("mindroom.tool_system.tool_calls._append_tool_call_record", side_effect=RuntimeError("disk full")),
+    ):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+    assert seen == [{"echo": "notes.txt"}]
+
+
+@pytest.mark.asyncio
+async def test_oauth_required_tool_result_is_recorded_when_debug_enabled(tmp_path: Path) -> None:
+    """OAuth-required structured returns should be logged like other successful tool results."""
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    assert bridge is not None
+
+    async def next_func(**_kwargs: object) -> None:
+        msg = "Connect Google"
+        raise OAuthConnectionRequired(
+            msg,
+            provider_id="google",
+            connect_url="https://example.test/connect",
+        )
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        result = await bridge("gmail", next_func, {})
+
+    assert isinstance(result, dict)
+    assert result["oauth_connection_required"] is True
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(records) == 1
+    assert records[0]["tool_name"] == "gmail"
+    assert records[0]["success"] is True
+    assert records[0]["result"]["oauth_connection_required"] is True
 
 
 @pytest.mark.asyncio

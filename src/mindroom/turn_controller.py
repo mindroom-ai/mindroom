@@ -986,6 +986,8 @@ class TurnController:
                 HandledTurnState.from_source_event_id(
                     selection.question_event_id,
                     response_event_id=response_event_id,
+                    requester_id=user_id,
+                    correlation_id=selection.question_event_id,
                 ),
             )
             if source_event_id is not None and source_event_id != selection.question_event_id:
@@ -993,6 +995,8 @@ class TurnController:
                     HandledTurnState.from_source_event_id(
                         source_event_id,
                         response_event_id=response_event_id,
+                        requester_id=user_id,
+                        correlation_id=selection.question_event_id,
                     ),
                 )
 
@@ -1113,6 +1117,10 @@ class TurnController:
             ),
         )
         tracked_handled_turn = handled_turn or HandledTurnState.from_source_event_id(event.event_id)
+        tracked_handled_turn = tracked_handled_turn.with_request_context(
+            requester_id=requester_user_id,
+            correlation_id=event.event_id,
+        )
         tracked_handled_turn = self.deps.turn_store.attach_response_context(
             tracked_handled_turn,
             history_scope=None,
@@ -1210,102 +1218,108 @@ class TurnController:
         if dispatch_timing is not None:
             dispatch_timing.note(response_action_kind=action.kind)
 
-        if action.kind == "reject":
-            assert action.rejection_message is not None
-            response_event_id = await self.deps.delivery_gateway.send_text(
-                SendTextRequest(
-                    target=dispatch.target,
-                    response_text=action.rejection_message,
-                ),
-            )
-            self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
-            if dispatch_timing is not None and response_event_id is not None:
-                dispatch_timing.mark_first_visible_reply("final")
-                dispatch_timing.mark("response_complete")
-                dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
-            return
-
-        if not dispatch.context.am_i_mentioned:
-            with bound_log_context(**dispatch.target.log_context):
-                self.deps.logger.info("Will respond: only agent in thread")
-
-        target_member_names: tuple[str, ...] | None = None
-        if action.kind == "team":
-            assert action.form_team is not None
-            assert action.form_team.mode is not None
-            target_member_names = tuple(
-                member.agent_name(self.deps.runtime.config, self.deps.runtime_paths) or member.username
-                for member in action.form_team.eligible_members
-            )
-
-        try:
-            context_ready_monotonic = time.monotonic()
-            payload_ready_monotonic = context_ready_monotonic
-        except Exception as error:
-            response_event_id = await self._finalize_dispatch_failure(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                thread_id=dispatch.context.thread_id,
-                error=error,
-            )
-            if response_event_id is not None:
+        with bound_log_context(
+            agent_id=self.deps.agent_name,
+            requester_id=dispatch.requester_user_id,
+            room_id=dispatch.target.room_id,
+            thread_id=dispatch.target.resolved_thread_id,
+            session_id=dispatch.target.session_id,
+            reply_to_event_id=event.event_id,
+            correlation_id=dispatch.correlation_id,
+        ):
+            if action.kind == "reject":
+                assert action.rejection_message is not None
+                response_event_id = await self.deps.delivery_gateway.send_text(
+                    SendTextRequest(
+                        target=dispatch.target,
+                        response_text=action.rejection_message,
+                    ),
+                )
                 self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
-                if dispatch_timing is not None:
+                if dispatch_timing is not None and response_event_id is not None:
                     dispatch_timing.mark_first_visible_reply("final")
                     dispatch_timing.mark("response_complete")
-                    dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
-            return
+                    dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
+                return
 
-        with bound_log_context(**dispatch.target.log_context):
+            if not dispatch.context.am_i_mentioned:
+                self.deps.logger.info("Will respond: only agent in thread")
+
+            target_member_names: tuple[str, ...] | None = None
+            if action.kind == "team":
+                assert action.form_team is not None
+                assert action.form_team.mode is not None
+                target_member_names = tuple(
+                    member.agent_name(self.deps.runtime.config, self.deps.runtime_paths) or member.username
+                    for member in action.form_team.eligible_members
+                )
+
+            try:
+                context_ready_monotonic = time.monotonic()
+                payload_ready_monotonic = context_ready_monotonic
+            except Exception as error:
+                response_event_id = await self._finalize_dispatch_failure(
+                    room_id=room.room_id,
+                    reply_to_event_id=event.event_id,
+                    thread_id=dispatch.context.thread_id,
+                    error=error,
+                )
+                if response_event_id is not None:
+                    self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+                    if dispatch_timing is not None:
+                        dispatch_timing.mark_first_visible_reply("final")
+                        dispatch_timing.mark("response_complete")
+                        dispatch_timing.emit_summary(self.deps.logger, outcome="dispatch_failure")
+                return
+
             if dispatch_timing is not None and isinstance(dispatch.context.thread_history, ThreadHistoryResult):
                 dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
 
-        with bound_log_context(**dispatch.target.log_context):
             self.deps.logger.info(processing_log, event_id=event.event_id)
-        try:
+            try:
 
-            async def prepare_request_after_lock(request: ResponseRequest) -> ResponseRequest:
-                nonlocal payload_ready_monotonic
-                if dispatch_timing is not None:
-                    dispatch_timing.mark("response_payload_start")
-                dispatch.context.thread_history = request.thread_history
-                dispatch.context.thread_id = request.thread_id
-                dispatch.context.requires_full_thread_history = False
-                payload_builder_started = time.monotonic()
-                payload_builder_outcome = "failed"
-                try:
-                    payload = await payload_builder(dispatch.context)
-                    payload_builder_outcome = "success"
-                finally:
-                    emit_elapsed_timing(
-                        "response_payload.builder",
-                        payload_builder_started,
-                        room_id=request.room_id,
-                        thread_id=request.thread_id,
-                        outcome=payload_builder_outcome,
+                async def prepare_request_after_lock(request: ResponseRequest) -> ResponseRequest:
+                    nonlocal payload_ready_monotonic
+                    if dispatch_timing is not None:
+                        dispatch_timing.mark("response_payload_start")
+                    dispatch.context.thread_history = request.thread_history
+                    dispatch.context.thread_id = request.thread_id
+                    dispatch.context.requires_full_thread_history = False
+                    payload_builder_started = time.monotonic()
+                    payload_builder_outcome = "failed"
+                    try:
+                        payload = await payload_builder(dispatch.context)
+                        payload_builder_outcome = "success"
+                    finally:
+                        emit_elapsed_timing(
+                            "response_payload.builder",
+                            payload_builder_started,
+                            room_id=request.room_id,
+                            thread_id=request.thread_id,
+                            outcome=payload_builder_outcome,
+                        )
+                    prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
+                        dispatch,
+                        payload,
+                        target_entity_name=self.deps.agent_name,
+                        target_member_names=target_member_names,
                     )
-                prepared_payload = await self.deps.ingress_hook_runner.apply_message_enrichment(
-                    dispatch,
-                    payload,
-                    target_entity_name=self.deps.agent_name,
-                    target_member_names=target_member_names,
-                )
-                system_enrichment_items = await self.deps.ingress_hook_runner.apply_system_enrichment(
-                    dispatch,
-                    prepared_payload.envelope,
-                    target_entity_name=self.deps.agent_name,
-                    target_member_names=target_member_names,
-                )
-                if system_enrichment_items:
-                    prepared_payload = type(prepared_payload)(
-                        payload=prepared_payload.payload,
-                        envelope=prepared_payload.envelope,
-                        system_enrichment_items=tuple(system_enrichment_items),
+                    system_enrichment_items = await self.deps.ingress_hook_runner.apply_system_enrichment(
+                        dispatch,
+                        prepared_payload.envelope,
+                        target_entity_name=self.deps.agent_name,
+                        target_member_names=target_member_names,
                     )
-                payload_ready_monotonic = time.monotonic()
-                if dispatch_timing is not None:
-                    dispatch_timing.mark("response_payload_ready")
-                with bound_log_context(**dispatch.target.log_context):
+                    if system_enrichment_items:
+                        prepared_payload = type(prepared_payload)(
+                            payload=prepared_payload.payload,
+                            envelope=prepared_payload.envelope,
+                            strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
+                            system_enrichment_items=tuple(system_enrichment_items),
+                        )
+                    payload_ready_monotonic = time.monotonic()
+                    if dispatch_timing is not None:
+                        dispatch_timing.mark("response_payload_ready")
                     self._log_dispatch_latency(
                         event_id=event.event_id,
                         action_kind=action.kind,
@@ -1314,84 +1328,84 @@ class TurnController:
                         payload_ready_monotonic=payload_ready_monotonic,
                         thread_history=request.thread_history,
                     )
-                return ResponseRequest(
-                    room_id=request.room_id,
-                    reply_to_event_id=request.reply_to_event_id,
-                    thread_id=request.thread_id,
-                    thread_history=request.thread_history,
-                    prompt=prepared_payload.payload.prompt,
-                    model_prompt=prepared_payload.payload.model_prompt,
-                    existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
-                    user_id=request.user_id,
-                    media=prepared_payload.payload.media,
-                    attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
-                    response_envelope=prepared_payload.envelope,
-                    correlation_id=request.correlation_id,
-                    target=request.target,
-                    matrix_run_metadata=request.matrix_run_metadata,
-                    system_enrichment_items=prepared_payload.system_enrichment_items,
-                    requires_full_thread_history=False,
-                    on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
-                    pipeline_timing=request.pipeline_timing,
-                    queued_notice_reservation=request.queued_notice_reservation,
-                )
+                    return ResponseRequest(
+                        room_id=request.room_id,
+                        reply_to_event_id=request.reply_to_event_id,
+                        thread_id=request.thread_id,
+                        thread_history=request.thread_history,
+                        prompt=prepared_payload.payload.prompt,
+                        model_prompt=prepared_payload.payload.model_prompt,
+                        existing_event_id=request.existing_event_id,
+                        existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        user_id=request.user_id,
+                        media=prepared_payload.payload.media,
+                        attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
+                        response_envelope=prepared_payload.envelope,
+                        correlation_id=request.correlation_id,
+                        target=request.target,
+                        matrix_run_metadata=request.matrix_run_metadata,
+                        system_enrichment_items=prepared_payload.system_enrichment_items,
+                        requires_full_thread_history=False,
+                        on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
+                        pipeline_timing=request.pipeline_timing,
+                        queued_notice_reservation=request.queued_notice_reservation,
+                    )
 
-            if action.kind == "team":
-                assert action.form_team is not None
-                assert action.form_team.mode is not None
-                response_event_id = await self.deps.response_runner.generate_team_response_helper(
-                    ResponseRequest(
-                        room_id=room.room_id,
-                        reply_to_event_id=event.event_id,
-                        thread_id=dispatch.context.thread_id,
-                        thread_history=dispatch.context.thread_history,
-                        prompt=event.body,
-                        user_id=dispatch.requester_user_id,
-                        response_envelope=dispatch.envelope,
-                        correlation_id=dispatch.correlation_id,
-                        target=dispatch.target,
-                        matrix_run_metadata=matrix_run_metadata,
-                        requires_full_thread_history=dispatch.context.requires_full_thread_history,
-                        prepare_after_lock=prepare_request_after_lock,
-                        pipeline_timing=dispatch_timing,
-                        queued_notice_reservation=queued_notice_reservation,
-                    ),
-                    team_agents=action.form_team.eligible_members,
-                    team_mode=action.form_team.mode.value,
+                if action.kind == "team":
+                    assert action.form_team is not None
+                    assert action.form_team.mode is not None
+                    response_event_id = await self.deps.response_runner.generate_team_response_helper(
+                        ResponseRequest(
+                            room_id=room.room_id,
+                            reply_to_event_id=event.event_id,
+                            thread_id=dispatch.context.thread_id,
+                            thread_history=dispatch.context.thread_history,
+                            prompt=event.body,
+                            user_id=dispatch.requester_user_id,
+                            response_envelope=dispatch.envelope,
+                            correlation_id=dispatch.correlation_id,
+                            target=dispatch.target,
+                            matrix_run_metadata=matrix_run_metadata,
+                            requires_full_thread_history=dispatch.context.requires_full_thread_history,
+                            prepare_after_lock=prepare_request_after_lock,
+                            pipeline_timing=dispatch_timing,
+                            queued_notice_reservation=queued_notice_reservation,
+                        ),
+                        team_agents=action.form_team.eligible_members,
+                        team_mode=action.form_team.mode.value,
+                    )
+                else:
+                    response_event_id = await self.deps.response_runner.generate_response(
+                        ResponseRequest(
+                            room_id=room.room_id,
+                            reply_to_event_id=event.event_id,
+                            thread_id=dispatch.context.thread_id,
+                            thread_history=dispatch.context.thread_history,
+                            prompt=event.body,
+                            user_id=dispatch.requester_user_id,
+                            response_envelope=dispatch.envelope,
+                            correlation_id=dispatch.correlation_id,
+                            target=dispatch.target,
+                            matrix_run_metadata=matrix_run_metadata,
+                            requires_full_thread_history=dispatch.context.requires_full_thread_history,
+                            prepare_after_lock=prepare_request_after_lock,
+                            pipeline_timing=dispatch_timing,
+                            queued_notice_reservation=queued_notice_reservation,
+                        ),
+                    )
+            except PostLockRequestPreparationError as error:
+                failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
+                response_event_id = await self._finalize_dispatch_failure(
+                    room_id=room.room_id,
+                    reply_to_event_id=event.event_id,
+                    thread_id=dispatch.context.thread_id,
+                    error=failure,
                 )
-            else:
-                response_event_id = await self.deps.response_runner.generate_response(
-                    ResponseRequest(
-                        room_id=room.room_id,
-                        reply_to_event_id=event.event_id,
-                        thread_id=dispatch.context.thread_id,
-                        thread_history=dispatch.context.thread_history,
-                        prompt=event.body,
-                        user_id=dispatch.requester_user_id,
-                        response_envelope=dispatch.envelope,
-                        correlation_id=dispatch.correlation_id,
-                        target=dispatch.target,
-                        matrix_run_metadata=matrix_run_metadata,
-                        requires_full_thread_history=dispatch.context.requires_full_thread_history,
-                        prepare_after_lock=prepare_request_after_lock,
-                        pipeline_timing=dispatch_timing,
-                        queued_notice_reservation=queued_notice_reservation,
-                    ),
-                )
-        except PostLockRequestPreparationError as error:
-            failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
-            response_event_id = await self._finalize_dispatch_failure(
-                room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                thread_id=dispatch.context.thread_id,
-                error=failure,
-            )
+                if response_event_id is not None:
+                    self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
+                return
             if response_event_id is not None:
                 self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
-            return
-        if response_event_id is not None:
-            self._mark_source_events_responded(handled_turn.with_response_event_id(response_event_id))
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
@@ -1649,6 +1663,10 @@ class TurnController:
                 dispatch_timing.mark("dispatch_prepare_ready")
             if dispatch is None:
                 return
+            handled_turn = handled_turn.with_request_context(
+                requester_id=dispatch.requester_user_id,
+                correlation_id=dispatch.correlation_id,
+            )
 
             command = None
             if not media_events and dispatch.envelope.source_kind != "voice":
