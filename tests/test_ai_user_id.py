@@ -40,7 +40,6 @@ from mindroom.ai import (
     _prepare_agent_and_prompt,
     _PreparedAgentRun,
     _stream_completed_without_visible_output,
-    _stream_with_request_log_context,
     _StreamingAttemptState,
     ai_response,
     build_matrix_run_metadata,
@@ -85,7 +84,7 @@ from mindroom.hooks import (
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail, KnowledgeResolution
-from mindroom.llm_request_logging import install_llm_request_logging
+from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_fallback import append_inline_media_fallback_prompt
 from mindroom.media_inputs import MediaInputs
@@ -3020,7 +3019,7 @@ async def test_stream_with_request_log_context_closes_wrapped_stream_on_early_cl
         finally:
             closed = True
 
-    stream = _stream_with_request_log_context(source(), request_context={})
+    stream = stream_with_llm_request_log_context(source(), request_context={})
 
     assert await anext(stream) == "first"
     await stream.aclose()
@@ -5775,7 +5774,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.ai._agent_tools_schema", return_value=[]),
+            patch("mindroom.ai.agent_tool_definition_payloads_for_logging", return_value=[]),
         ):
             mock_prepare.return_value = _prepared_prompt_result(agent, prompt=prepared_prompt)
             chunks = [

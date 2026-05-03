@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import time
-from contextlib import ExitStack, aclosing
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from html import escape
 from typing import TYPE_CHECKING, Annotated, Literal, NoReturn, cast
@@ -53,6 +53,7 @@ from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,
     model_params_payload,
+    stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -270,23 +271,6 @@ def _openai_team_request_log_context(
         full_prompt=prompt,
         metadata=metadata,
     )
-
-
-async def _openai_team_stream_with_request_log_context[StreamEventT](
-    stream_generator: AsyncGenerator[StreamEventT, None],
-    *,
-    request_context: dict[str, object],
-) -> AsyncIterator[StreamEventT]:
-    async with aclosing(stream_generator) as stream_iterator:
-        with bind_llm_request_log_context(**request_context):
-            stream = stream_iterator.__aiter__()
-        while True:
-            try:
-                with bind_llm_request_log_context(**request_context):
-                    event = await stream.__anext__()
-            except StopAsyncIteration:
-                return
-            yield event
 
 
 def _load_config(
@@ -1894,7 +1878,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
                 stream_with_tool_execution_identity(
                     execution_identity,
-                    stream_factory=lambda: _openai_team_stream_with_request_log_context(
+                    stream_factory=lambda: stream_with_llm_request_log_context(
                         cast(
                             "AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None]",
                             team.arun(

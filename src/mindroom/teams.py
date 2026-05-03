@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -58,6 +57,7 @@ from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,
     model_params_payload,
+    stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
@@ -134,23 +134,6 @@ def _team_request_log_context(
         full_prompt=_team_run_input_text(run_input),
         metadata=metadata,
     )
-
-
-async def _stream_team_with_request_log_context[StreamEventT](
-    stream_generator: AsyncGenerator[StreamEventT, None],
-    *,
-    request_context: dict[str, object],
-) -> AsyncIterator[StreamEventT]:
-    async with aclosing(stream_generator) as stream_iterator:
-        with bind_llm_request_log_context(**request_context):
-            stream = stream_iterator.__aiter__()
-        while True:
-            try:
-                with bind_llm_request_log_context(**request_context):
-                    event = await stream.__anext__()
-            except StopAsyncIteration:
-                return
-            yield event
 
 
 # Message length limits for team context and logging
@@ -2266,7 +2249,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                         if attempt_media_inputs.has_any()
                         else attempt_prompt
                     )
-                    raw_stream = _stream_team_with_request_log_context(
+                    raw_stream = stream_with_llm_request_log_context(
                         cast("AsyncGenerator[Any, None]", raw_stream),
                         request_context=_team_request_log_context(
                             team_name=configured_team_name or team_label,

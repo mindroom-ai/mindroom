@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 
 from agno.db.base import SessionType
@@ -60,6 +59,7 @@ from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,
     model_params_payload,
+    stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import should_retry_without_inline_media
@@ -418,18 +418,10 @@ def build_matrix_run_metadata(
     return metadata or None
 
 
-def _resolved_requester_id(user_id: str | None) -> str | None:
-    return user_id
-
-
 def _resolved_correlation_id(reply_to_event_id: str | None) -> str:
     if reply_to_event_id:
         return reply_to_event_id
     return uuid4().hex
-
-
-def _agent_tools_schema(agent: Agent) -> list[dict[str, object]]:
-    return agent_tool_definition_payloads_for_logging(agent)
 
 
 def _request_stream_retry(
@@ -589,24 +581,6 @@ def _attempt_request_log_context(
         full_prompt=render_prepared_messages_text(ai_runtime.copy_run_input(attempt_prompt)),
         metadata=metadata,
     )
-
-
-async def _stream_with_request_log_context[StreamEventT](
-    stream_generator: AsyncIterator[StreamEventT],
-    *,
-    request_context: dict[str, object],
-) -> AsyncIterator[StreamEventT]:
-    """Advance one async stream with request-log context bound per item pull."""
-    async with aclosing(cast("Any", stream_generator)) as stream_iterator:
-        with bind_llm_request_log_context(**request_context):
-            stream = stream_iterator.__aiter__()
-        while True:
-            try:
-                with bind_llm_request_log_context(**request_context):
-                    event = await stream.__anext__()
-            except StopAsyncIteration:
-                return
-            yield event
 
 
 @timed("model_request_to_completion")
@@ -889,7 +863,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         agent_name=agent_name,
     )
     media_inputs = media or MediaInputs()
-    resolved_requester_id = _resolved_requester_id(user_id)
+    resolved_requester_id = user_id
     resolved_correlation_id = _resolved_correlation_id(reply_to_event_id)
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
@@ -964,7 +938,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 thread_id=thread_id,
                 requester_id=resolved_requester_id,
                 correlation_id=resolved_correlation_id,
-                tools_schema=_agent_tools_schema(agent) if agent.model is not None else [],
+                tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
                 model_params=model_params_payload(agent.model) if agent.model is not None else {},
                 extra_metadata=matrix_run_metadata,
             )
@@ -1349,7 +1323,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         agent_name=agent_name,
     )
     media_inputs = media or MediaInputs()
-    resolved_requester_id = _resolved_requester_id(user_id)
+    resolved_requester_id = user_id
     resolved_correlation_id = _resolved_correlation_id(reply_to_event_id)
     agent: Agent | None = None
     scope_context: ScopeSessionContext | None = None
@@ -1428,7 +1402,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 thread_id=thread_id,
                 requester_id=resolved_requester_id,
                 correlation_id=resolved_correlation_id,
-                tools_schema=_agent_tools_schema(agent) if agent.model is not None else [],
+                tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
                 model_params=model_params_payload(agent.model) if agent.model is not None else {},
                 extra_metadata=matrix_run_metadata,
             )
@@ -1484,7 +1458,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 stream_events=True,
                                 metadata=metadata,
                             )
-                        stream_generator = _stream_with_request_log_context(
+                        stream_generator = stream_with_llm_request_log_context(
                             stream_generator,
                             request_context=request_context,
                         )
