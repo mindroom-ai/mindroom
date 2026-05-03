@@ -907,6 +907,19 @@ async def prepare_bound_team_execution_context(
     )
 
 
+def scrub_bound_team_scope_context(
+    *,
+    scope_context: ScopeSessionContext | None,
+    team: Team,
+    entity_name: str | None,
+) -> None:
+    """Strip stale queued-message notices before preparing a bound team run."""
+    ai_runtime.scrub_queued_notice_session_context(
+        scope_context=scope_context,
+        entity_name=entity_name or str(team.name or "Team"),
+    )
+
+
 async def prepare_bound_team_run_context(
     *,
     scope_context: ScopeSessionContext | None,
@@ -930,9 +943,10 @@ async def prepare_bound_team_run_context(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> PreparedExecutionContext:
     """Prepare a team run with queued-notice scrubbing and replay application."""
-    ai_runtime.scrub_queued_notice_session_context(
+    scrub_bound_team_scope_context(
         scope_context=scope_context,
-        entity_name=entity_name or str(team.name or "Team"),
+        team=team,
+        entity_name=entity_name,
     )
     prepared_execution = await prepare_bound_team_execution_context(
         scope_context=scope_context,
