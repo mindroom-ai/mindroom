@@ -507,6 +507,7 @@ class TestDelegateKnowledge:
             event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
             session_id="session-1",
+            correlation_id="corr-parent",
         )
 
         async def fake_ai_response(**kwargs: object) -> str:
@@ -516,6 +517,8 @@ class TestDelegateKnowledge:
             assert context.session_id == kwargs["session_id"]
             assert context.room_id == "!room:example.org"
             assert kwargs["room_id"] == "!room:example.org"
+            assert context.correlation_id == "corr-parent"
+            assert kwargs["correlation_id"] == "corr-parent"
             assert context.active_model_name == "default"
             return "done"
 

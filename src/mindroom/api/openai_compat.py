@@ -1049,7 +1049,7 @@ async def _non_stream_completion(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    user: str | None,
+    _user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -1065,7 +1065,7 @@ async def _non_stream_completion(
         thread_history=thread_history,
         room_id=None,
         knowledge=knowledge,
-        user_id=user,
+        user_id=None,
         include_interactive_questions=False,
         include_openai_compat_guidance=True,
         active_event_ids=set(),
@@ -1256,7 +1256,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    user: str | None,
+    _user: str | None,
     knowledge: Knowledge | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -1276,7 +1276,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
                 thread_history=thread_history,
                 room_id=None,
                 knowledge=knowledge,
-                user_id=user,
+                user_id=None,
                 include_interactive_questions=False,
                 include_openai_compat_guidance=True,
                 active_event_ids=set(),
@@ -1610,7 +1610,6 @@ async def _prepare_openai_team_prompt(
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
-    user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> _PreparedOpenAITeamPrompt:
     """Prepare the final prompt for one OpenAI-compatible team run."""
@@ -1629,7 +1628,7 @@ async def _prepare_openai_team_prompt(
         current_sender_id=None,
         room_id=None,
         thread_id=None,
-        requester_id=user or (execution_identity.requester_id if execution_identity is not None else None),
+        requester_id=execution_identity.requester_id if execution_identity is not None else None,
         correlation_id=uuid4().hex,
         compaction_outcomes_collector=None,
         configured_team_name=team_name,
@@ -1709,7 +1708,6 @@ async def _non_stream_team_completion(
                     runtime_paths=runtime_paths,
                     thread_history=thread_history,
                     post_response_compaction_checks_collector=post_response_compaction_checks,
-                    user=user,
                     execution_identity=execution_identity,
                 )
             except Exception:
@@ -1720,7 +1718,7 @@ async def _non_stream_team_completion(
                     **_openai_team_request_log_context(
                         team_name=team_name,
                         session_id=session_id,
-                        requester_id=user or (execution_identity.requester_id if execution_identity else None),
+                        requester_id=execution_identity.requester_id if execution_identity else None,
                         prompt=prepared_team_prompt.prompt,
                         metadata=prepared_team_prompt.run_metadata,
                     ),
@@ -1859,7 +1857,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 runtime_paths=runtime_paths,
                 thread_history=thread_history,
                 post_response_compaction_checks_collector=post_response_compaction_checks,
-                user=user,
                 execution_identity=execution_identity,
             )
         except Exception:
@@ -1870,7 +1867,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
             request_log_context = _openai_team_request_log_context(
                 team_name=team_name,
                 session_id=session_id,
-                requester_id=user or (execution_identity.requester_id if execution_identity else None),
+                requester_id=execution_identity.requester_id if execution_identity else None,
                 prompt=prepared_team_prompt.prompt,
                 metadata=prepared_team_prompt.run_metadata,
             )

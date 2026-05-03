@@ -1016,8 +1016,8 @@ class TestChatCompletions:
 
             assert mock_ai.call_args.kwargs["knowledge"] is None
 
-    def test_passes_user_id(self, app_client: TestClient) -> None:
-        """Passes user field as user_id to ai_response."""
+    def test_request_body_user_is_not_passed_as_ai_requester(self, app_client: TestClient) -> None:
+        """OpenAI user must not be written as Matrix requester metadata."""
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
             mock_ai.return_value = "Response"
 
@@ -1030,7 +1030,7 @@ class TestChatCompletions:
                 },
             )
 
-            assert mock_ai.call_args.kwargs["user_id"] == "user-123"
+            assert mock_ai.call_args.kwargs["user_id"] is None
 
     def test_request_body_user_is_not_used_for_openai_execution_identity(self, app_client: TestClient) -> None:
         """The OpenAI user field should not become credential-routing identity."""
@@ -3054,7 +3054,7 @@ class TestTeamCompletion:
             agent_name="team/super_team",
             session_id="session-123",
             runtime_paths=runtime_paths,
-            requester_id="@api-user:localhost",
+            requester_id=None,
             room_id=None,
             thread_id=None,
             resolved_thread_id=None,
@@ -3067,6 +3067,7 @@ class TestTeamCompletion:
         async def mock_prepare_team_execution(**kwargs: object) -> SimpleNamespace:
             correlation_id = kwargs["correlation_id"]
             assert isinstance(correlation_id, str)
+            assert kwargs["requester_id"] is None
             prepared_correlation_ids.append(correlation_id)
             return _prepared_team_execution_context(
                 final_prompt="Build it",
@@ -3088,7 +3089,7 @@ class TestTeamCompletion:
                 room_id=None,
                 thread_id=None,
                 reply_to_event_id=None,
-                requester_id="@api-user:localhost",
+                requester_id=None,
                 session_id="session-123",
                 correlation_id=correlation_id,
                 execution_identity=execution_identity,
@@ -3129,7 +3130,7 @@ class TestTeamCompletion:
         assert prepared_correlation_ids == [correlation_id]
         assert request_log_contexts[0]["agent_id"] == "team/super_team"
         assert request_log_contexts[0]["session_id"] == "session-123"
-        assert request_log_contexts[0]["requester_id"] == "@api-user:localhost"
+        assert "requester_id" not in request_log_contexts[0]
         assert request_log_contexts[0]["correlation_id"] == correlation_id
         assert request_log_contexts[0]["full_prompt"] == "Build it"
         records = _read_jsonl(_tool_calls_path(runtime_paths))
@@ -3300,7 +3301,7 @@ class TestTeamCompletion:
             agent_name="team/super_team",
             session_id="session-123",
             runtime_paths=runtime_paths,
-            requester_id="@api-user:localhost",
+            requester_id=None,
             room_id=None,
             thread_id=None,
             resolved_thread_id=None,
@@ -3313,6 +3314,7 @@ class TestTeamCompletion:
         async def mock_prepare_team_execution(**kwargs: object) -> SimpleNamespace:
             correlation_id = kwargs["correlation_id"]
             assert isinstance(correlation_id, str)
+            assert kwargs["requester_id"] is None
             prepared_correlation_ids.append(correlation_id)
             return _prepared_team_execution_context(
                 final_prompt="Build it",
@@ -3334,7 +3336,7 @@ class TestTeamCompletion:
                 room_id=None,
                 thread_id=None,
                 reply_to_event_id=None,
-                requester_id="@api-user:localhost",
+                requester_id=None,
                 session_id="session-123",
                 correlation_id=correlation_id,
                 execution_identity=execution_identity,
@@ -3380,7 +3382,7 @@ class TestTeamCompletion:
         assert prepared_correlation_ids == [correlation_id]
         assert request_log_contexts[0]["agent_id"] == "team/super_team"
         assert request_log_contexts[0]["session_id"] == "session-123"
-        assert request_log_contexts[0]["requester_id"] == "@api-user:localhost"
+        assert "requester_id" not in request_log_contexts[0]
         assert request_log_contexts[0]["correlation_id"] == correlation_id
         assert request_log_contexts[0]["full_prompt"] == "Build it"
         assert "Hello " in body
