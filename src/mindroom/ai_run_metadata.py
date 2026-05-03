@@ -77,7 +77,7 @@ def build_model_request_metrics_fallback(
     if observed_fields is None:
         payload: dict[str, Any] = {key: value for key, value in totals.items() if value > 0}
     else:
-        payload = {key: totals[key] for key in observed_fields if key in totals}
+        payload: dict[str, Any] = {key: totals[key] for key in observed_fields if key in totals}
     total_tokens = payload.get("total_tokens")
     if isinstance(total_tokens, int) and total_tokens <= 0:
         payload.pop("total_tokens")

@@ -237,6 +237,39 @@ def _resolve_tool_context(
     )
 
 
+def _should_record_successful_tool_call(resolved_context: _ResolvedToolContext) -> bool:
+    """Return whether successful tool calls should be durably logged."""
+    return bool(resolved_context.config and resolved_context.config.debug.log_llm_requests)
+
+
+def _record_tool_success_if_debug_enabled(
+    *,
+    tool_name: str,
+    arguments: dict[str, object],
+    result: object,
+    duration_ms: float,
+    resolved_context: _ResolvedToolContext,
+    dispatch_context: ToolDispatchContext | None,
+) -> None:
+    if not _should_record_successful_tool_call(resolved_context):
+        return
+    record_tool_success(
+        tool_name=tool_name,
+        arguments=arguments,
+        result=result,
+        duration_ms=duration_ms,
+        agent_name=resolved_context.agent_name or None,
+        room_id=resolved_context.room_id,
+        thread_id=resolved_context.thread_id,
+        reply_to_event_id=resolved_context.reply_to_event_id,
+        requester_id=resolved_context.requester_id,
+        session_id=resolved_context.session_id,
+        correlation_id=resolved_context.correlation_id,
+        execution_identity=dispatch_context.execution_identity if dispatch_context is not None else None,
+        runtime_paths=resolved_context.runtime_paths,
+    )
+
+
 def _format_declined_result(tool_name: str, reason: str) -> str:
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=reason)
 
@@ -671,22 +704,13 @@ async def _execute_bridge(
         raise
 
     duration_ms = (time.perf_counter() - started_at) * 1000
-    record_tool_success(
+    _record_tool_success_if_debug_enabled(
         tool_name=tool_name,
         arguments=args,
         result=result,
         duration_ms=duration_ms,
-        agent_name=resolved_context.agent_name or None,
-        room_id=resolved_context.room_id,
-        thread_id=resolved_context.thread_id,
-        reply_to_event_id=resolved_context.reply_to_event_id,
-        requester_id=resolved_context.requester_id,
-        session_id=resolved_context.session_id,
-        correlation_id=resolved_context.correlation_id,
-        execution_identity=effective_dispatch_context.execution_identity
-        if effective_dispatch_context is not None
-        else None,
-        runtime_paths=resolved_context.runtime_paths,
+        resolved_context=resolved_context,
+        dispatch_context=effective_dispatch_context,
     )
     if has_after_hooks:
         await _emit_after_call(

@@ -173,6 +173,7 @@ def _config(runtime_paths: object) -> Config:
         Config(
             agents={"general": AgentConfig(display_name="General")},
             models={"default": ModelConfig(provider="openai", id="test-model")},
+            debug=DebugConfig(log_llm_requests=True),
         ),
         runtime_paths,
     )
@@ -265,6 +266,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         HookRegistry.empty(),
         agent_name="general",
         dispatch_context=dispatch_context,
+        config=config,
         runtime_paths=runtime_paths,
     )
     agent = _InvokeAgent(model=model, bridge=bridge, captured_metadata=captured_metadata)
@@ -412,6 +414,7 @@ async def test_streaming_tool_call_shares_correlation_id_across_streaming_sinks(
         HookRegistry.empty(),
         agent_name="general",
         dispatch_context=dispatch_context,
+        config=config,
         runtime_paths=runtime_paths,
     )
     agent = _StreamAgent(model=model, bridge=bridge, captured_metadata=captured_metadata)
@@ -483,6 +486,7 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(tmp_pat
         HookRegistry.empty(),
         agent_name="general",
         dispatch_context=dispatch_context,
+        config=config,
         runtime_paths=runtime_paths,
     )
     agent = _InvokeAgent(model=model, bridge=bridge, captured_metadata=captured_metadata)
