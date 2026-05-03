@@ -1055,7 +1055,10 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
         ("assistant", "Previous team reply"),
         ("user", "Analyze this."),
     )
-    assert captured_prompts == [("Analyze this.", "assistant: Previous team reply\n\nAnalyze this.")]
+    assert captured_prompts == [
+        ("Analyze this.", "assistant: Previous team reply\n\nAnalyze this."),
+        ("assistant: Previous team reply\n\nAnalyze this.", None),
+    ]
 
 
 @pytest.mark.asyncio

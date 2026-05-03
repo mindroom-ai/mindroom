@@ -5551,12 +5551,21 @@ class TestUserIdPassthrough:
         assert logged_contexts[0]["full_prompt"] == prepared_prompt
         assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
         assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
-        assert logged_contexts[0]["metadata"] == {
+        expected_metadata = {
             "correlation_id": logged_contexts[0]["correlation_id"],
             "tools_schema": [],
             "model_params": {},
+            AI_RUN_METADATA_KEY: {
+                "version": 1,
+                "compaction": {
+                    "decision": "none",
+                    "outcome": "none",
+                    "reason": "unclassified",
+                },
+            },
         }
-        assert logged_contexts[1]["metadata"] == logged_contexts[0]["metadata"]
+        assert logged_contexts[0]["metadata"] == expected_metadata
+        assert logged_contexts[1]["metadata"] == expected_metadata
 
     @pytest.mark.asyncio
     async def test_ai_response_retries_errored_run_output_with_fresh_run_id(self, tmp_path: Path) -> None:
@@ -5790,12 +5799,21 @@ class TestUserIdPassthrough:
         assert logged_contexts[0]["full_prompt"] == prepared_prompt
         assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
         assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
-        assert logged_contexts[0]["metadata"] == {
+        expected_metadata = {
             "correlation_id": logged_contexts[0]["correlation_id"],
             "tools_schema": [],
             "model_params": {},
+            AI_RUN_METADATA_KEY: {
+                "version": 1,
+                "compaction": {
+                    "decision": "none",
+                    "outcome": "none",
+                    "reason": "unclassified",
+                },
+            },
         }
-        assert logged_contexts[1]["metadata"] == logged_contexts[0]["metadata"]
+        assert logged_contexts[0]["metadata"] == expected_metadata
+        assert logged_contexts[1]["metadata"] == expected_metadata
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_keeps_request_log_context_for_deferred_model_call(

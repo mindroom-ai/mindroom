@@ -267,6 +267,7 @@ class TestCompactionOutcome:
         assert meta["before_tokens"] == 30_000
         assert meta["after_tokens"] == 12_000
         assert meta["history_budget_tokens"] == 100_000
+        assert meta["threshold_tokens"] == 80_000
         assert meta["compacted_run_count"] == 12
         assert "role_instructions_tokens" not in meta
         assert "tool_definition_tokens" not in meta
@@ -287,6 +288,7 @@ class TestCompactionOutcome:
         meta = outcome.to_notice_metadata()
         assert meta["version"] == 2
         assert meta["history_budget_tokens"] == 100_000
+        assert meta["threshold_tokens"] == 80_000
         assert meta["role_instructions_tokens"] == 2_000
         assert meta["tool_definition_tokens"] == 1_500
         assert meta["current_prompt_tokens"] == 100

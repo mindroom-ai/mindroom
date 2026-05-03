@@ -904,6 +904,19 @@ class DeliveryGateway:
     ) -> str | None:
         """Send the foreground compaction lifecycle notice."""
         body = "Compacting history..."
+        notice_metadata: dict[str, object] = {
+            "version": 3,
+            "status": "running",
+            "mode": event.mode,
+            "session_id": event.session_id,
+            "scope": event.scope,
+            "summary_model": event.summary_model,
+            "before_tokens": event.before_tokens,
+            "history_budget_tokens": event.history_budget_tokens,
+            "runs_before": event.runs_before,
+        }
+        if event.threshold_tokens is not None:
+            notice_metadata["threshold_tokens"] = event.threshold_tokens
         content = build_message_content(
             body,
             formatted_body=f"<em>{html_escape(body)}</em>",
@@ -911,17 +924,7 @@ class DeliveryGateway:
             reply_to_event_id=reply_to_event_id,
             extra_content={
                 "msgtype": "m.notice",
-                constants.COMPACTION_NOTICE_CONTENT_KEY: {
-                    "version": 3,
-                    "status": "running",
-                    "mode": event.mode,
-                    "session_id": event.session_id,
-                    "scope": event.scope,
-                    "summary_model": event.summary_model,
-                    "before_tokens": event.before_tokens,
-                    "history_budget_tokens": event.history_budget_tokens,
-                    "runs_before": event.runs_before,
-                },
+                constants.COMPACTION_NOTICE_CONTENT_KEY: notice_metadata,
                 "com.mindroom.skip_mentions": True,
             },
         )

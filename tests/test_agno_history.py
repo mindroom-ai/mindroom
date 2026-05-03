@@ -727,7 +727,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     assert state.force_compact_before_next_run is False
     assert state.last_compacted_at is not None
 
-    assert prepared.replays_persisted_history is False
+    assert prepared.replays_persisted_history is True
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].summary == "merged summary"
 
@@ -1109,6 +1109,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
             compaction_context_window=16_000,
             before_tokens=0,
             runs_before=1,
+            threshold_tokens=None,
             lifecycle_notice_event_id=None,
             progress_callback=None,
             collect_compaction_hook_messages=False,
@@ -3524,6 +3525,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             compaction_context_window=16_000,
             before_tokens=0,
             runs_before=2,
+            threshold_tokens=None,
             lifecycle_notice_event_id=None,
             progress_callback=None,
             collect_compaction_hook_messages=False,
@@ -3580,6 +3582,7 @@ async def test_rewrite_working_session_for_compaction_ignores_runs_without_stabl
             compaction_context_window=16_000,
             before_tokens=0,
             runs_before=1,
+            threshold_tokens=None,
             lifecycle_notice_event_id=None,
             progress_callback=None,
             collect_compaction_hook_messages=False,
@@ -3768,6 +3771,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
             compaction_context_window=16_000,
             before_tokens=before_tokens,
             runs_before=2,
+            threshold_tokens=None,
             lifecycle_notice_event_id="$notice",
             progress_callback=record_progress,
             collect_compaction_hook_messages=False,
@@ -4717,7 +4721,9 @@ def test_build_matrix_prompt_with_thread_history_without_tool_trace_is_unchanged
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_budgets_required_compaction_against_actual_prompt(tmp_path: Path) -> None:
+async def test_prepare_agent_and_prompt_budgets_required_compaction_against_largest_prompt_variant(
+    tmp_path: Path,
+) -> None:
     config, runtime_paths = _make_config(tmp_path)
     live_agent = _agent()
     live_agent.role = "Verbose role " + ("r" * 200)
@@ -4750,6 +4756,7 @@ async def test_prepare_agent_and_prompt_budgets_required_compaction_against_actu
     assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == estimate_preparation_static_tokens(
         live_agent,
         full_prompt="Current prompt",
+        fallback_full_prompt="alice: Earlier context\n\nbob: More context\n\nCurrent prompt",
     )
 
 
@@ -4839,6 +4846,56 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
 
 
 @pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(reserve_tokens=0),
+        context_window=16,
+    )
+    live_agent = _agent()
+    thread_history = [
+        make_visible_message(sender="alice", body="Old context " + ("o" * 120)),
+        make_visible_message(sender="bob", body="Recent context"),
+    ]
+
+    def fake_estimate_preparation_static_tokens(
+        agent: Agent,
+        *,
+        full_prompt: str,
+        fallback_full_prompt: str | None = None,
+    ) -> int:
+        assert agent is live_agent
+        return estimate_text_tokens(fallback_full_prompt or full_prompt)
+
+    with (
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch(
+            "mindroom.execution_preparation.estimate_preparation_static_tokens",
+            side_effect=fake_estimate_preparation_static_tokens,
+        ),
+        patch(
+            "mindroom.execution_preparation.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
+        ),
+        patch(
+            "mindroom.execution_preparation.finalize_history_preparation",
+            return_value=PreparedHistoryState(replays_persisted_history=False),
+        ),
+    ):
+        prepared_run = await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            thread_history=thread_history,
+        )
+
+    assert prepared_run.prompt_text == "bob: Recent context\n\nCurrent prompt"
+    assert estimate_text_tokens(prepared_run.prompt_text) <= 16
+
+
+@pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_missing_replay(
     tmp_path: Path,
 ) -> None:
@@ -4885,6 +4942,50 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
         'Current message:\n<msg from="@alice:localhost"><![CDATA[What was that?]]></msg>'
     )
     assert "Later reaction" not in prepared_run.prompt_text
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_trims_oversized_full_thread_fallback(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path, context_window=1_000)
+    live_agent = _agent()
+    thread_history = [
+        make_visible_message(
+            sender="@alice:localhost",
+            body="obsolete context " + ("x" * 20_000),
+            event_id="$old",
+        ),
+        make_visible_message(
+            sender="@bob:localhost",
+            body="Recent context to keep.",
+            event_id="$recent",
+        ),
+    ]
+
+    with (
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch(
+            "mindroom.execution_preparation.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
+        ),
+        patch(
+            "mindroom.execution_preparation.finalize_history_preparation",
+            return_value=PreparedHistoryState(replays_persisted_history=False),
+        ),
+    ):
+        prepared_run = await _prepare_agent_and_prompt(
+            "test_agent",
+            "Current prompt",
+            runtime_paths,
+            config,
+            thread_history=thread_history,
+        )
+
+    assert prepared_run.prepared_history.replays_persisted_history is False
+    assert "Recent context to keep." in prepared_run.prompt_text
+    assert "obsolete context" not in prepared_run.prompt_text
 
 
 @pytest.mark.asyncio

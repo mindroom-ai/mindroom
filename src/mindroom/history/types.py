@@ -112,6 +112,7 @@ class CompactionLifecycleStart:
     before_tokens: int
     history_budget_tokens: int | None
     runs_before: int
+    threshold_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,7 @@ class CompactionLifecycleProgress:
     runs_before: int
     compacted_run_count: int
     runs_remaining: int
+    threshold_tokens: int | None = None
     duration_ms: int | None = None
 
     def to_notice_metadata(self) -> dict[str, object]:
@@ -157,6 +159,8 @@ class CompactionLifecycleProgress:
         }
         if self.history_budget_tokens is not None:
             meta["history_budget_tokens"] = self.history_budget_tokens
+        if self.threshold_tokens is not None:
+            meta["threshold_tokens"] = self.threshold_tokens
         if self.duration_ms is not None:
             meta["duration_ms"] = self.duration_ms
         return meta
@@ -272,6 +276,8 @@ class CompactionOutcome:
         }
         if self.history_budget_tokens is not None:
             meta["history_budget_tokens"] = self.history_budget_tokens
+        if self.threshold_tokens:
+            meta["threshold_tokens"] = self.threshold_tokens
         if self.role_instructions_tokens is not None:
             meta["role_instructions_tokens"] = self.role_instructions_tokens
         if self.tool_definition_tokens is not None:

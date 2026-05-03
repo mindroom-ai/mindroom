@@ -515,6 +515,7 @@ async def _run_scope_compaction_with_lifecycle(
             before_tokens=current_history_tokens,
             history_budget_tokens=history_budget,
             runs_before=runs_before,
+            threshold_tokens=execution_plan.trigger_threshold_tokens,
         ),
     )
     try:

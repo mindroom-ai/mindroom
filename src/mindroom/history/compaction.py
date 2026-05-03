@@ -343,6 +343,7 @@ async def compact_scope_history(
         compaction_context_window=compaction_context_window,
         before_tokens=before_tokens,
         runs_before=before_run_count,
+        threshold_tokens=threshold_tokens,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
         collect_compaction_hook_messages=collect_compaction_hook_messages,
@@ -435,6 +436,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     compaction_context_window: int | None,
     before_tokens: int,
     runs_before: int,
+    threshold_tokens: int | None,
     lifecycle_notice_event_id: str | None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     collect_compaction_hook_messages: bool,
@@ -559,6 +561,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             before_tokens=before_tokens,
             available_history_budget=available_history_budget,
             runs_before=runs_before,
+            threshold_tokens=threshold_tokens,
             total_compacted_run_count=total_compacted_run_count,
         )
 
@@ -601,6 +604,7 @@ async def _emit_lifecycle_progress_after_persist(
     before_tokens: int,
     available_history_budget: int | None,
     runs_before: int,
+    threshold_tokens: int | None,
     total_compacted_run_count: int,
 ) -> None:
     """Emit lifecycle progress after a compaction chunk has been durably persisted."""
@@ -632,6 +636,7 @@ async def _emit_lifecycle_progress_after_persist(
             runs_before=runs_before,
             compacted_run_count=total_compacted_run_count,
             runs_remaining=runs_remaining,
+            threshold_tokens=threshold_tokens,
         ),
     )
 

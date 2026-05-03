@@ -513,7 +513,7 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
         patch(
             "mindroom.delivery_gateway.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
-        ),
+        ) as mock_send,
         patch(
             "mindroom.delivery_gateway.edit_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice-edit")),
@@ -530,6 +530,7 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
                 before_tokens=30_000,
                 history_budget_tokens=100_000,
                 runs_before=20,
+                threshold_tokens=80_000,
             ),
         )
         await bot._delivery_gateway.edit_compaction_lifecycle_success(
@@ -542,10 +543,14 @@ async def test_compaction_lifecycle_success_omits_zero_breakdown_fields_in_html_
         )
 
     assert event_id == "$notice"
+    assert mock_send.await_args is not None
+    start_content = mock_send.await_args.args[2]
+    assert start_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
     assert mock_edit.await_args is not None
     sent_content = mock_edit.await_args.args[3]
     assert sent_content["io.mindroom.compaction"]["version"] == 2
     assert sent_content["io.mindroom.compaction"]["history_budget_tokens"] == 100_000
+    assert sent_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
     assert sent_content["io.mindroom.compaction"]["duration_ms"] == 123
     assert sent_content["body"] == outcome.format_notice()
     assert sent_content["body"] == (

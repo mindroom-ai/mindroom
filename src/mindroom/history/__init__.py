@@ -3,6 +3,7 @@
 from mindroom.history.compaction import (
     agent_tool_definition_payloads_for_logging,
     compute_prompt_token_breakdown,
+    normalize_compaction_budget_tokens,
     team_tool_definition_payloads_for_logging,
 )
 from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
@@ -80,6 +81,7 @@ __all__ = [
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
     "manual_compaction_unavailable_message",
+    "normalize_compaction_budget_tokens",
     "note_prepared_history_timing",
     "open_bound_scope_session_context",
     "open_resolved_scope_session_context",
