@@ -253,21 +253,28 @@ def _record_tool_success_if_debug_enabled(
 ) -> None:
     if not _should_record_successful_tool_call(resolved_context):
         return
-    record_tool_success(
-        tool_name=tool_name,
-        arguments=arguments,
-        result=result,
-        duration_ms=duration_ms,
-        agent_name=resolved_context.agent_name or None,
-        room_id=resolved_context.room_id,
-        thread_id=resolved_context.thread_id,
-        reply_to_event_id=resolved_context.reply_to_event_id,
-        requester_id=resolved_context.requester_id,
-        session_id=resolved_context.session_id,
-        correlation_id=resolved_context.correlation_id,
-        execution_identity=dispatch_context.execution_identity if dispatch_context is not None else None,
-        runtime_paths=resolved_context.runtime_paths,
-    )
+    try:
+        record_tool_success(
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result,
+            duration_ms=duration_ms,
+            agent_name=resolved_context.agent_name or None,
+            room_id=resolved_context.room_id,
+            thread_id=resolved_context.thread_id,
+            reply_to_event_id=resolved_context.reply_to_event_id,
+            requester_id=resolved_context.requester_id,
+            session_id=resolved_context.session_id,
+            correlation_id=resolved_context.correlation_id,
+            execution_identity=dispatch_context.execution_identity if dispatch_context is not None else None,
+            runtime_paths=resolved_context.runtime_paths,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to record tool success",
+            tool_name=tool_name,
+            correlation_id=resolved_context.correlation_id,
+        )
 
 
 def _format_declined_result(tool_name: str, reason: str) -> str:
@@ -638,6 +645,15 @@ async def _execute_bridge(
             "provider": exc.provider_id,
             "connect_url": exc.connect_url,
         }
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        _record_tool_success_if_debug_enabled(
+            tool_name=tool_name,
+            arguments=args,
+            result=result,
+            duration_ms=duration_ms,
+            resolved_context=resolved_context,
+            dispatch_context=effective_dispatch_context,
+        )
         if has_after_hooks:
             after_context = ToolAfterCallContext(
                 **resolved_context.hook_context_kwargs(
@@ -647,7 +663,7 @@ async def _execute_bridge(
                 result=result,
                 error=None,
                 blocked=False,
-                duration_ms=(time.perf_counter() - started_at) * 1000,
+                duration_ms=duration_ms,
             )
             await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
         return result

@@ -38,6 +38,8 @@ from mindroom.ai import (
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _PreparedAgentRun,
+    _stream_completed_without_visible_output,
+    _StreamingAttemptState,
     ai_response,
     build_matrix_run_metadata,
     should_retry_without_inline_media,
@@ -61,7 +63,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history import PreparedHistoryState
+from mindroom.history import PreparedHistoryState, strip_transient_enrichment_from_session
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -2518,6 +2520,46 @@ async def test_generate_team_response_strips_transient_model_prompt_from_persist
     assert persisted_run.messages is not None
     assert persisted_run.messages[0].content == "Earlier context"
     assert persisted_run.messages[2].content == "Describe this image"
+
+
+def test_strip_transient_enrichment_targets_response_run_id() -> None:
+    """Cleanup should not rewrite a newer or older run when the finished run id is known."""
+    storage = _SessionStorage(
+        AgentSession(
+            session_id="session-1",
+            agent_id="general",
+            runs=[
+                RunOutput(
+                    run_id="older-run",
+                    messages=[Message(role="user", content="older enriched prompt")],
+                ),
+                RunOutput(
+                    run_id="target-run",
+                    messages=[Message(role="user", content="current enriched prompt")],
+                ),
+                RunOutput(
+                    run_id="newer-run",
+                    messages=[Message(role="user", content="newer enriched prompt")],
+                ),
+            ],
+        ),
+    )
+    storage_view = storage.open()
+
+    changed = strip_transient_enrichment_from_session(
+        storage_view,
+        session_id="session-1",
+        session_type=SessionType.AGENT,
+        response_run_id="target-run",
+        memory_prompt="current raw prompt",
+    )
+
+    persisted_session = cast("AgentSession", storage.session)
+    assert changed is True
+    assert persisted_session.runs is not None
+    assert cast("RunOutput", persisted_session.runs[0]).messages[0].content == "older enriched prompt"
+    assert cast("RunOutput", persisted_session.runs[1]).messages[0].content == "current raw prompt"
+    assert cast("RunOutput", persisted_session.runs[2]).messages[0].content == "newer enriched prompt"
 
 
 @pytest.mark.asyncio
@@ -5728,11 +5770,7 @@ class TestUserIdPassthrough:
         )
 
         assert metadata == {
-            "room_id": None,
-            "thread_id": None,
             "reply_to_event_id": "$primary",
-            "requester_id": None,
-            "correlation_id": None,
             "tools_schema": [],
             "model_params": {},
             MATRIX_EVENT_ID_METADATA_KEY: "$primary",
@@ -5740,6 +5778,40 @@ class TestUserIdPassthrough:
             MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
             MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$first": "first", "$primary": "primary"},
         }
+
+    def test_build_matrix_run_metadata_preserves_existing_trace_fields_without_overrides(self) -> None:
+        """Optional trace fields should not erase already-materialized metadata."""
+        metadata = build_matrix_run_metadata(
+            None,
+            [],
+            extra_metadata={
+                "room_id": "!room:localhost",
+                "thread_id": "$thread",
+                "reply_to_event_id": "$reply",
+                "requester_id": "@alice:localhost",
+                "correlation_id": "corr-existing",
+                "tools_schema": [{"name": "demo"}],
+                "model_params": {"temperature": 0.3},
+            },
+        )
+
+        assert metadata is not None
+        assert metadata["room_id"] == "!room:localhost"
+        assert metadata["thread_id"] == "$thread"
+        assert metadata["reply_to_event_id"] == "$reply"
+        assert metadata["requester_id"] == "@alice:localhost"
+        assert metadata["correlation_id"] == "corr-existing"
+        assert metadata["tools_schema"] == [{"name": "demo"}]
+        assert metadata["model_params"] == {"temperature": 0.3}
+
+    def test_stream_completed_without_visible_output_accepts_final_body_only_completion(self) -> None:
+        """Providers that only emit RunCompletedEvent.content still produced visible text."""
+        state = _StreamingAttemptState(
+            completed_run_event=RunCompletedEvent(run_id="run-1", content="Final answer"),
+            canonical_final_body_candidate="Final answer",
+        )
+
+        assert _stream_completed_without_visible_output(state) is False
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_collects_run_metadata(self, tmp_path: Path) -> None:

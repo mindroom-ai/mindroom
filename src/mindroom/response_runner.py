@@ -495,6 +495,7 @@ class ResponseRunner:
                 storage,
                 session_id=outcome.session_id,
                 session_type=outcome.session_type,
+                response_run_id=outcome.response_run_id,
                 memory_prompt=outcome.memory_prompt,
             )
         finally:

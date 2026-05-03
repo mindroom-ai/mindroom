@@ -379,13 +379,24 @@ def build_matrix_run_metadata(
 ) -> dict[str, Any] | None:
     """Build metadata dict for a run, tracking consumed Matrix event ids."""
     metadata = dict(extra_metadata or {})
-    metadata["room_id"] = room_id
-    metadata["thread_id"] = thread_id
-    metadata["reply_to_event_id"] = reply_to_event_id
-    metadata["requester_id"] = requester_id
-    metadata["correlation_id"] = correlation_id
-    metadata["tools_schema"] = tools_schema if tools_schema is not None else []
-    metadata["model_params"] = model_params if model_params is not None else {}
+    if room_id is not None or extra_metadata is None:
+        metadata["room_id"] = room_id
+    if thread_id is not None or extra_metadata is None:
+        metadata["thread_id"] = thread_id
+    if reply_to_event_id is not None or extra_metadata is None:
+        metadata["reply_to_event_id"] = reply_to_event_id
+    if requester_id is not None or extra_metadata is None:
+        metadata["requester_id"] = requester_id
+    if correlation_id is not None or extra_metadata is None:
+        metadata["correlation_id"] = correlation_id
+    if tools_schema is not None:
+        metadata["tools_schema"] = tools_schema
+    else:
+        metadata.setdefault("tools_schema", [])
+    if model_params is not None:
+        metadata["model_params"] = model_params
+    else:
+        metadata.setdefault("model_params", {})
     source_event_ids = _normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
     if reply_to_event_id:
         seen_event_ids = _normalized_string_list(
@@ -545,7 +556,8 @@ def _track_model_request_metrics(
 
 
 def _stream_completed_without_visible_output(state: _StreamingAttemptState) -> bool:
-    return state.completed_run_event is not None and not state.full_response.strip() and state.observed_tool_calls == 0
+    visible_text = state.full_response.strip() or (state.canonical_final_body_candidate or "").strip()
+    return state.completed_run_event is not None and not visible_text and state.observed_tool_calls == 0
 
 
 def _attempt_request_log_context(

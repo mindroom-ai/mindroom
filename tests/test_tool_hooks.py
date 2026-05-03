@@ -46,6 +46,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import shutdown_approval_store
@@ -917,6 +918,74 @@ async def test_tool_after_call_hook_error_does_not_lose_debug_success_row(tmp_pa
     assert records[0]["reply_to_event_id"] is None
     assert records[0]["correlation_id"] == "corr-runtime"
     assert records[0]["result"] == {"echo": "notes.txt"}
+
+
+@pytest.mark.asyncio
+async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Path) -> None:
+    """Debug logging failures should not turn successful tools into failed calls."""
+    seen: list[object] = []
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after_call(ctx: ToolAfterCallContext) -> None:
+        seen.append(ctx.result)
+
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [after_call])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> dict[str, object]:
+        return {"echo": kwargs["path"]}
+
+    with (
+        tool_runtime_context(runtime_context),
+        tool_execution_identity(_execution_identity()),
+        patch("mindroom.tool_system.tool_hooks.record_tool_success", side_effect=RuntimeError("disk full")),
+    ):
+        result = await bridge("read_file", next_func, {"path": "notes.txt"})
+
+    assert result == {"echo": "notes.txt"}
+    assert seen == [{"echo": "notes.txt"}]
+
+
+@pytest.mark.asyncio
+async def test_oauth_required_tool_result_is_recorded_when_debug_enabled(tmp_path: Path) -> None:
+    """OAuth-required structured returns should be logged like other successful tool results."""
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+    assert bridge is not None
+
+    async def next_func(**_kwargs: object) -> None:
+        msg = "Connect Google"
+        raise OAuthConnectionRequired(
+            msg,
+            provider_id="google",
+            connect_url="https://example.test/connect",
+        )
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        result = await bridge("gmail", next_func, {})
+
+    assert isinstance(result, dict)
+    assert result["oauth_connection_required"] is True
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(records) == 1
+    assert records[0]["tool_name"] == "gmail"
+    assert records[0]["success"] is True
+    assert records[0]["result"]["oauth_connection_required"] is True
 
 
 @pytest.mark.asyncio

@@ -1529,15 +1529,25 @@ def _scrub_queued_notice_team_scope_context(scope_context: ScopeSessionContext |
         return
     changed = False
     for run in scope_context.session.runs or []:
-        if not isinstance(run, (RunOutput, TeamRunOutput)) or not run.messages:
+        if not isinstance(run, (RunOutput, TeamRunOutput)):
             continue
-        filtered_messages = [message for message in run.messages if not _is_queued_notice_message(message)]
-        if len(filtered_messages) == len(run.messages):
-            continue
-        run.messages = filtered_messages
-        changed = True
+        changed = _scrub_queued_notice_run(run) or changed
     if changed:
         scope_context.storage.upsert_session(scope_context.session)
+
+
+def _scrub_queued_notice_run(run: RunOutput | TeamRunOutput) -> bool:
+    changed = False
+    if run.messages:
+        filtered_messages = [message for message in run.messages if not _is_queued_notice_message(message)]
+        if len(filtered_messages) != len(run.messages):
+            run.messages = filtered_messages
+            changed = True
+    if isinstance(run, TeamRunOutput):
+        for member_response in run.member_responses or []:
+            if isinstance(member_response, (RunOutput, TeamRunOutput)):
+                changed = _scrub_queued_notice_run(member_response) or changed
+    return changed
 
 
 async def prepare_materialized_team_execution(

@@ -4613,6 +4613,19 @@ class TestTeamCompletion:
                             provider_data={"mindroom_queued_message_notice": True},
                         ),
                     ],
+                    member_responses=[
+                        RunOutput(
+                            run_id="member-run-queued-notice",
+                            session_id="session-openai-team-prep",
+                            messages=[
+                                Message(
+                                    role="user",
+                                    content=QUEUED_MESSAGE_NOTICE_TEXT,
+                                    provider_data={"mindroom_queued_message_notice": True},
+                                ),
+                            ],
+                        ),
+                    ],
                 ),
             ]
             scope_context.storage.upsert_session(scope_context.session)
@@ -4631,8 +4644,20 @@ class TestTeamCompletion:
                 prepared_scope_context = kwargs["scope_context"]
                 assert prepared_scope_context is not None
                 assert prepared_scope_context.session is not None
+
+                def collect_messages(run: RunOutput | TeamRunOutput) -> list[Message]:
+                    messages = list(run.messages or [])
+                    if isinstance(run, TeamRunOutput):
+                        for member_response in run.member_responses or []:
+                            if isinstance(member_response, (RunOutput, TeamRunOutput)):
+                                messages.extend(collect_messages(member_response))
+                    return messages
+
                 persisted_messages = [
-                    message for run in prepared_scope_context.session.runs or [] for message in (run.messages or [])
+                    message
+                    for run in prepared_scope_context.session.runs or []
+                    if isinstance(run, (RunOutput, TeamRunOutput))
+                    for message in collect_messages(run)
                 ]
                 assert not any(message.provider_data for message in persisted_messages)
                 return _prepared_team_execution_context(

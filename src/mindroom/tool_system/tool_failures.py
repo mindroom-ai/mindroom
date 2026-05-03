@@ -7,7 +7,7 @@ import logging
 import math
 import re
 import traceback
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from threading import Lock
@@ -145,18 +145,35 @@ class ToolCallRecord:
 
     def as_dict(self) -> ToolCallRecordDict:
         """Return the record in JSON-serializable dictionary form."""
-        record: dict[str, JsonValue | str | float | bool | None] = {}
-        for field in fields(self):
-            value = getattr(self, field.name)
-            if field.name == "reply_to_event_id":
-                record[field.name] = value
-                continue
-            if field.name == "result":
-                if self.success or value is not None:
-                    record[field.name] = value
-                continue
-            if value is not None:
-                record[field.name] = value
+        record: dict[str, JsonValue | str | float | bool | None] = {
+            "timestamp": self.timestamp,
+            "tool_name": self.tool_name,
+            "reply_to_event_id": self.reply_to_event_id,
+            "correlation_id": self.correlation_id,
+            "duration_ms": self.duration_ms,
+            "arguments": self.arguments,
+            "success": self.success,
+        }
+        if self.agent_name is not None:
+            record["agent_name"] = self.agent_name
+        if self.channel is not None:
+            record["channel"] = self.channel
+        if self.room_id is not None:
+            record["room_id"] = self.room_id
+        if self.thread_id is not None:
+            record["thread_id"] = self.thread_id
+        if self.requester_id is not None:
+            record["requester_id"] = self.requester_id
+        if self.session_id is not None:
+            record["session_id"] = self.session_id
+        if self.success or self.result is not None:
+            record["result"] = self.result
+        optional_fields: tuple[tuple[str, str | None], ...] = (
+            ("error_type", self.error_type),
+            ("error_message", self.error_message),
+            ("traceback", self.traceback),
+        )
+        record.update({key: value for key, value in optional_fields if value is not None})
         return cast("ToolCallRecordDict", record)
 
 

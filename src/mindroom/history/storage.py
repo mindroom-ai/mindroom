@@ -142,6 +142,7 @@ def strip_transient_enrichment_from_session(
     *,
     session_id: str,
     session_type: SessionType,
+    response_run_id: str | None = None,
     memory_prompt: str,
 ) -> bool:
     """Restore the persisted current user turn after transient model context was used."""
@@ -149,8 +150,12 @@ def strip_transient_enrichment_from_session(
     if not isinstance(session, AgentSession | TeamSession) or not session.runs:
         return False
 
-    for run in reversed(session.runs):
+    runs = list(reversed(session.runs))
+    has_run_ids = any(isinstance(run, RunOutput | TeamRunOutput) and run.run_id for run in runs)
+    for run in runs:
         if not isinstance(run, RunOutput | TeamRunOutput) or not run.messages:
+            continue
+        if response_run_id is not None and has_run_ids and run.run_id != response_run_id:
             continue
         for message in reversed(run.messages):
             if message.role != "user":

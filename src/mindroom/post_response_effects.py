@@ -330,6 +330,7 @@ async def apply_post_response_effects(  # noqa: C901
                 "Failed to strip transient enrichment from session history",
                 session_id=outcome.session_id,
                 session_type=outcome.session_type.value if outcome.session_type is not None else None,
+                run_id=outcome.response_run_id,
             )
 
     if (
