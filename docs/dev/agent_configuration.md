@@ -185,7 +185,7 @@ agents:
 Destructive compaction is enabled by default through `defaults.compaction`, but automatic destructive compaction runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices; crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
 Set `enabled: false` in defaults or the agent override to disable it.
-Manual `compact_context` records a durable request that runs before the next reply in the same thread.
+Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place; otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
 Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)

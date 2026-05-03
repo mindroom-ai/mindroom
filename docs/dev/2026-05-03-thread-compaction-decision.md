@@ -16,7 +16,7 @@ Other rooms and other threads should continue normally.
 
 MindRoom should have three compaction options.
 
-1. Manual requested compaction, where the agent calls the `compact_context` tool and the next reply in that same thread runs forced compaction before answering.
+1. Manual requested compaction, where the agent calls the `compact_context` tool and the next reply in that same conversation scope runs forced compaction before answering.
 2. Required automatic compaction, where history preparation runs compaction before replying because the thread history exceeds the hard context budget.
 3. Disabled automatic compaction, where automatic compaction does not run.
 

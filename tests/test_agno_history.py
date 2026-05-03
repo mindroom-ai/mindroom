@@ -65,7 +65,6 @@ from mindroom.history.compaction import (
 from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
 from mindroom.history.runtime import (
     apply_replay_plan,
-    estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
     open_bound_scope_session_context,
@@ -4721,7 +4720,7 @@ def test_build_matrix_prompt_with_thread_history_without_tool_trace_is_unchanged
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_budgets_required_compaction_against_largest_prompt_variant(
+async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary_prompt(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
@@ -4753,10 +4752,9 @@ async def test_prepare_agent_and_prompt_budgets_required_compaction_against_larg
         )
 
     assert mock_prepare.await_args is not None
-    assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == estimate_preparation_static_tokens(
+    assert mock_prepare.await_args.kwargs["static_prompt_tokens"] == estimate_agent_static_tokens(
         live_agent,
-        full_prompt="Current prompt",
-        fallback_full_prompt="alice: Earlier context\n\nbob: More context\n\nCurrent prompt",
+        "Current prompt",
     )
 
 
@@ -4862,10 +4860,9 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
         agent: Agent,
         *,
         full_prompt: str,
-        fallback_full_prompt: str | None = None,
     ) -> int:
         assert agent is live_agent
-        return estimate_text_tokens(fallback_full_prompt or full_prompt)
+        return estimate_text_tokens(full_prompt)
 
     with (
         patch("mindroom.ai.create_agent", return_value=live_agent),

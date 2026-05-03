@@ -18,7 +18,7 @@ register_builtin_tool_metadata(
     ToolMetadata(
         name="compact_context",
         display_name="Context Compaction",
-        description="Request context compaction before the next reply in this thread",
+        description="Request context compaction before the next reply in this conversation scope",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

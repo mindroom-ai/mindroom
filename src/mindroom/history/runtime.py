@@ -891,7 +891,6 @@ async def prepare_bound_scope_history(
     agents: list[Agent],
     team: Team | None = None,
     full_prompt: str,
-    fallback_full_prompt: str | None = None,
     runtime_paths: RuntimePaths,
     config: Config,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
@@ -917,12 +916,10 @@ async def prepare_bound_scope_history(
                 estimate_preparation_static_tokens_for_team(
                     team,
                     full_prompt=full_prompt,
-                    fallback_full_prompt=fallback_full_prompt,
                 )
                 if team is not None
                 else estimate_preparation_prompt_tokens(
                     full_prompt=full_prompt,
-                    fallback_full_prompt=fallback_full_prompt,
                 )
             ),
             active_model_name=active_model_name,
@@ -938,12 +935,10 @@ async def prepare_bound_scope_history(
         estimate_preparation_static_tokens_for_team(
             team,
             full_prompt=full_prompt,
-            fallback_full_prompt=fallback_full_prompt,
         )
         if team is not None
         else estimate_preparation_prompt_tokens(
             full_prompt=full_prompt,
-            fallback_full_prompt=fallback_full_prompt,
         )
     )
     resolved_inputs = _resolve_entity_preparation_inputs(
@@ -1014,38 +1009,26 @@ def estimate_preparation_static_tokens(
     agent: Agent,
     *,
     full_prompt: str,
-    fallback_full_prompt: str | None = None,
 ) -> int:
-    """Estimate static prompt tokens using the largest prompt variant this run may send."""
-    primary_tokens = estimate_agent_static_tokens(agent, full_prompt)
-    if fallback_full_prompt is None:
-        return primary_tokens
-    return max(primary_tokens, estimate_agent_static_tokens(agent, fallback_full_prompt))
+    """Estimate static prompt tokens for persisted replay planning."""
+    return estimate_agent_static_tokens(agent, full_prompt)
 
 
 def estimate_preparation_prompt_tokens(
     *,
     full_prompt: str,
-    fallback_full_prompt: str | None = None,
 ) -> int:
-    """Estimate prompt-only tokens using the largest prompt variant this run may send."""
-    primary_tokens = estimate_text_tokens(full_prompt)
-    if fallback_full_prompt is None:
-        return primary_tokens
-    return max(primary_tokens, estimate_text_tokens(fallback_full_prompt))
+    """Estimate prompt-only tokens for persisted replay planning."""
+    return estimate_text_tokens(full_prompt)
 
 
 def estimate_preparation_static_tokens_for_team(
     team: Team,
     *,
     full_prompt: str,
-    fallback_full_prompt: str | None = None,
 ) -> int:
-    """Estimate team static tokens using the largest prompt variant this run may send."""
-    primary_tokens = estimate_team_static_tokens(team, full_prompt)
-    if fallback_full_prompt is None:
-        return primary_tokens
-    return max(primary_tokens, estimate_team_static_tokens(team, fallback_full_prompt))
+    """Estimate team static tokens for persisted replay planning."""
+    return estimate_team_static_tokens(team, full_prompt)
 
 
 @contextmanager

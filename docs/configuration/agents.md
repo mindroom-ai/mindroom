@@ -189,7 +189,7 @@ Use `reserve_tokens` to leave hard-budget headroom, use `model` to choose the su
 Replay safety always uses the active runtime model window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 If the current reply needs required compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
-Manual `compact_context` records a durable request that runs before the next reply in the same thread.
+Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
 MindRoom does not run a separate background post-response compaction path.
 It always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
 That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.

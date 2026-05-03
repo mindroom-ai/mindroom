@@ -369,13 +369,13 @@ def _messages_with_capped_context(
     context_messages: Sequence[Message],
     current_sender_id: str | None,
     static_token_budget: int,
-    estimate_static_tokens_fn: Callable[[str, str | None], int],
+    estimate_static_tokens_fn: Callable[[str], int],
     render_messages_text_fn: Callable[[Sequence[Message]], str],
 ) -> tuple[Message, ...]:
     """Return the newest context-message suffix that fits the total static token budget."""
     selected_context: list[Message] = []
     current_only_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
-    current_only_tokens = estimate_static_tokens_fn(render_messages_text_fn(current_only_messages), None)
+    current_only_tokens = estimate_static_tokens_fn(render_messages_text_fn(current_only_messages))
     if current_only_tokens > static_token_budget:
         return current_only_messages
 
@@ -386,7 +386,7 @@ def _messages_with_capped_context(
             context_messages=candidate_context,
             current_sender_id=current_sender_id,
         )
-        if estimate_static_tokens_fn(render_messages_text_fn(candidate_messages), None) > static_token_budget:
+        if estimate_static_tokens_fn(render_messages_text_fn(candidate_messages)) > static_token_budget:
             break
         selected_context = candidate_context
     return _messages_with_current_prompt(
@@ -485,7 +485,7 @@ def _build_thread_history_messages(
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
     static_token_budget: int | None = None,
-    estimate_static_tokens_fn: Callable[[str, str | None], int] | None = None,
+    estimate_static_tokens_fn: Callable[[str], int] | None = None,
     render_messages_text_fn: Callable[[Sequence[Message]], str] | None = None,
 ) -> tuple[Message, ...]:
     """Return canonical request messages for fallback full-thread replay."""
@@ -653,8 +653,8 @@ async def _prepare_execution_context_common(
     response_sender_id: str | None,
     current_sender_id: str | None,
     config: Config,
-    prepare_scope_history_fn: Callable[[str, str | None], Awaitable[PreparedScopeHistory]],
-    estimate_static_tokens_fn: Callable[[str, str | None], int],
+    prepare_scope_history_fn: Callable[[str], Awaitable[PreparedScopeHistory]],
+    estimate_static_tokens_fn: Callable[[str], int],
     render_messages_text_fn: Callable[[Sequence[Message]], str],
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     fallback_static_token_budget: int | None = None,
@@ -698,11 +698,7 @@ async def _prepare_execution_context_common(
             current_sender_id=current_sender_id,
         )
 
-    replay_fallback_prompt = render_messages_text_fn(replay_fallback_messages)
-    prepared_scope_history = await prepare_scope_history_fn(
-        render_messages_text_fn(provisional_messages),
-        replay_fallback_prompt,
-    )
+    prepared_scope_history = await prepare_scope_history_fn(render_messages_text_fn(provisional_messages))
 
     final_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
     if reply_to_event_id and thread_history:
@@ -718,7 +714,7 @@ async def _prepare_execution_context_common(
     else:
         unseen_event_ids = []
 
-    final_static_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages), replay_fallback_prompt)
+    final_static_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
     prepared_history = _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
         config=config,
@@ -729,7 +725,7 @@ async def _prepare_execution_context_common(
         pipeline_timing.mark("prompt_assembly_start")
     if replay_fallback_messages is not None and not prepared_history.replays_persisted_history and thread_history:
         final_messages = replay_fallback_messages
-        fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages), None)
+        fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
         if prepared_history.replay_plan is not None:
             fallback_context_tokens += prepared_history.replay_plan.estimated_tokens
         prepared_history = replace(
@@ -784,7 +780,6 @@ async def prepare_agent_execution_context(
 
     async def _prepare_agent_scope_history(
         prepared_prompt: str,
-        replay_fallback_prompt: str | None,
     ) -> PreparedScopeHistory:
         return await prepare_scope_history(
             agent=agent,
@@ -799,7 +794,6 @@ async def prepare_agent_execution_context(
             static_prompt_tokens=estimate_preparation_static_tokens(
                 agent,
                 full_prompt=prepared_prompt,
-                fallback_full_prompt=replay_fallback_prompt,
             ),
             timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
@@ -809,12 +803,10 @@ async def prepare_agent_execution_context(
 
     def _estimate_agent_static_tokens(
         prepared_prompt: str,
-        replay_fallback_prompt: str | None,
     ) -> int:
         return estimate_preparation_static_tokens(
             agent,
             full_prompt=prepared_prompt,
-            fallback_full_prompt=replay_fallback_prompt,
         )
 
     return await _prepare_execution_context_common(
@@ -865,13 +857,11 @@ async def prepare_bound_team_execution_context(
 
     async def _prepare_team_scope_history(
         prepared_prompt: str,
-        replay_fallback_prompt: str | None,
     ) -> PreparedScopeHistory:
         return await prepare_bound_scope_history(
             agents=agents,
             team=team,
             full_prompt=prepared_prompt,
-            fallback_full_prompt=replay_fallback_prompt,
             runtime_paths=runtime_paths,
             config=config,
             compaction_outcomes_collector=compaction_outcomes_collector,
@@ -886,12 +876,10 @@ async def prepare_bound_team_execution_context(
 
     def _estimate_team_static_tokens(
         prepared_prompt: str,
-        replay_fallback_prompt: str | None,
     ) -> int:
         return estimate_preparation_static_tokens_for_team(
             team,
             full_prompt=prepared_prompt,
-            fallback_full_prompt=replay_fallback_prompt,
         )
 
     return await _prepare_execution_context_common(

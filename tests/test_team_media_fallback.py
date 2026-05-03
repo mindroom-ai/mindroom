@@ -1015,10 +1015,9 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
         team: AgnoTeam,
         *,
         full_prompt: str,
-        fallback_full_prompt: str | None = None,
     ) -> int:
         assert team is mock_team
-        captured_prompts.append((full_prompt, fallback_full_prompt))
+        captured_prompts.append((full_prompt, None))
         return 0
 
     with patch(
@@ -1056,7 +1055,7 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
         ("user", "Analyze this."),
     )
     assert captured_prompts == [
-        ("Analyze this.", "assistant: Previous team reply\n\nAnalyze this."),
+        ("Analyze this.", None),
         ("assistant: Previous team reply\n\nAnalyze this.", None),
     ]
 

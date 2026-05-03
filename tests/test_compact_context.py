@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-COMPACT_CONTEXT_SUCCESS = "Compaction will run before the next reply in this thread."
+COMPACT_CONTEXT_SUCCESS = "Compaction will run before the next reply in this conversation scope."
 
 
 class FakeModel(Model):

@@ -100,7 +100,7 @@ class CompactContextTools(Toolkit):
                 agent=self._agent_name,
                 scope=scope_context.scope.key,
             )
-            return "Compaction will run before the next reply in this thread."
+            return "Compaction will run before the next reply in this conversation scope."
 
     def _resolve_active_compaction_settings(
         self,
