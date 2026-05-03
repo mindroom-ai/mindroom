@@ -172,6 +172,18 @@ def _config() -> Config:
     )
 
 
+def _config_with_matrix_message() -> Config:
+    return Config(
+        agents={
+            "general": AgentConfig(
+                display_name="General",
+                tools=["matrix_message"],
+            ),
+        },
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+
+
 def _config_with_team() -> Config:
     return Config(
         agents={"general": AgentConfig(display_name="General")},
@@ -2429,6 +2441,112 @@ async def test_generate_response_strips_transient_model_prompt_from_persisted_se
 
 
 @pytest.mark.asyncio
+async def test_generate_response_marks_matrix_tool_prompt_context_for_cleanup(tmp_path: Path) -> None:
+    """Matrix tool metadata appended during runtime preparation should be scrubbed after the run."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_matrix_message(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    model_prompts: list[str] = []
+
+    async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+        model_prompts.append(cast("str", kwargs["model_prompt"]))
+        return "Hello"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as mock_post,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        await coordinator.generate_response(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        )
+
+    assert model_prompts
+    assert "[Matrix metadata for tool calls]" in model_prompts[0]
+    outcome = mock_post.await_args.args[1]
+    assert outcome.strip_transient_enrichment_after_run is True
+    assert outcome.memory_prompt == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_cleanup_targets_retry_run_id(tmp_path: Path) -> None:
+    """Cleanup should target the persisted retry run instead of the abandoned first run id."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    storage = _SessionStorage()
+
+    async def fake_ai_response(*_args: object, **kwargs: object) -> str:
+        run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+        run_id_callback("retry-run")
+        return "Hello"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        )
+
+        async def fake_send_text(*_args: object, **_kwargs: object) -> str:
+            storage.session = AgentSession(
+                session_id="!test:localhost:$thread-root",
+                agent_id="general",
+                created_at=1,
+                updated_at=1,
+                runs=[
+                    RunOutput(
+                        run_id="retry-run",
+                        content="Hello",
+                        messages=[
+                            Message(
+                                role="user",
+                                content=(
+                                    "Describe this image\n\n"
+                                    "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+                                ),
+                            ),
+                            Message(role="assistant", content="Hello"),
+                        ],
+                    ),
+                ],
+            )
+            return "$msg"
+
+        coordinator.deps.delivery_gateway.send_text.side_effect = fake_send_text
+
+        await coordinator.generate_response(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+        )
+
+    persisted_session = cast("AgentSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("RunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "retry-run"
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].content == "Describe this image"
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_marks_transient_model_prompt_for_cleanup(
     tmp_path: Path,
 ) -> None:
@@ -2532,6 +2650,82 @@ async def test_generate_team_response_strips_transient_model_prompt_from_persist
     assert persisted_run.messages is not None
     assert persisted_run.messages[0].content == "Earlier context"
     assert persisted_run.messages[2].content == "Describe this image"
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_cleanup_targets_retry_run_id(tmp_path: Path) -> None:
+    """Team cleanup should target the persisted retry run instead of the abandoned first run id."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    storage = _SessionStorage()
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+        run_id_callback("team-retry-run")
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+        patch(
+            "mindroom.teams.open_bound_scope_session_context",
+            side_effect=lambda **_kwargs: _open_team_scope_context(storage),
+        ),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            team_history_storage=storage,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+
+        async def fake_send_text(*_args: object, **_kwargs: object) -> str:
+            storage.session = TeamSession(
+                session_id="!test:localhost:$thread-root",
+                team_id="ultimate",
+                created_at=1,
+                updated_at=1,
+                runs=[
+                    TeamRunOutput(
+                        run_id="team-retry-run",
+                        content="Team answer",
+                        messages=[
+                            Message(
+                                role="user",
+                                content=(
+                                    "Describe this image\n\n"
+                                    "Available attachment IDs: att_1. Use tool calls to inspect or process them."
+                                ),
+                            ),
+                            Message(role="assistant", content="Team answer"),
+                        ],
+                    ),
+                ],
+            )
+            return "$msg"
+
+        coordinator.deps.delivery_gateway.send_text.side_effect = fake_send_text
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
+                model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
+            ),
+            team_agents=[MatrixID.from_agent("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    persisted_session = cast("TeamSession", storage.session)
+    assert persisted_session.runs is not None
+    persisted_run = cast("TeamRunOutput", persisted_session.runs[0])
+    assert persisted_run.run_id == "team-retry-run"
+    assert persisted_run.messages is not None
+    assert persisted_run.messages[0].content == "Describe this image"
 
 
 def test_strip_transient_enrichment_targets_response_run_id() -> None:

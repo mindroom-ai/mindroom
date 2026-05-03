@@ -277,8 +277,21 @@ def prepare_memory_and_model_context(
 def _should_strip_transient_enrichment(request: ResponseRequest) -> bool:
     """Return whether per-turn model context should be scrubbed after delivery."""
     return bool(request.system_enrichment_items) or (
-        request.model_prompt is not None and request.model_prompt != request.prompt
+        request.model_prompt is not None
+        and _model_prompt_has_transient_tail(
+            memory_prompt=request.prompt,
+            model_prompt=request.model_prompt,
+        )
     )
+
+
+def _model_prompt_has_transient_tail(*, memory_prompt: str, model_prompt: str | None) -> bool:
+    """Return whether the actual model prompt adds per-turn context beyond raw user text."""
+    if model_prompt is None:
+        return False
+    normalized_memory_prompt = memory_prompt.strip()
+    normalized_model_prompt = strip_user_turn_time_prefix(model_prompt.strip()).strip()
+    return normalized_model_prompt != normalized_memory_prompt
 
 
 @dataclass(frozen=True)
@@ -1336,7 +1349,7 @@ class ResponseRunner:
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(
                 strip_transient_enrichment_after_run=_should_strip_transient_enrichment(request)
                 or bool(transient_system_context),
-                response_run_id=response_run_id,
+                response_run_id=team_turn_recorder.run_id or response_run_id,
                 session_id=session_id,
                 session_type=SessionType.TEAM,
                 execution_identity=tool_dispatch.execution_identity,
@@ -1508,6 +1521,7 @@ class ResponseRunner:
         compaction_outcomes: list[CompactionOutcome],
         post_response_compaction_checks: list[PostResponseCompactionCheck],
         transient_system_context_collector: list[str],
+        attempt_run_id_collector: list[str],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> str:
         """Run one non-streaming AI request."""
@@ -1519,6 +1533,7 @@ class ResponseRunner:
         def note_attempt_run_id(current_run_id: str) -> None:
             self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
             turn_recorder.set_run_id(current_run_id)
+            attempt_run_id_collector.append(current_run_id)
 
         async def build_response_text() -> str:
             knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
@@ -1598,6 +1613,7 @@ class ResponseRunner:
         compaction_outcomes: list[CompactionOutcome],
         post_response_compaction_checks: list[PostResponseCompactionCheck],
         transient_system_context_collector: list[str],
+        attempt_run_id_collector: list[str],
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> StreamTransportOutcome:
         """Run one streaming AI request and send the streamed Matrix response."""
@@ -1609,6 +1625,7 @@ class ResponseRunner:
         def note_attempt_run_id(current_run_id: str) -> None:
             self.deps.stop_manager.update_run_id(request.existing_event_id, current_run_id)
             turn_recorder.set_run_id(current_run_id)
+            attempt_run_id_collector.append(current_run_id)
 
         def note_visible_response_event_id(response_event_id: str) -> None:
             turn_recorder.set_response_event_id(response_event_id)
@@ -1697,7 +1714,7 @@ class ResponseRunner:
             )
             raise
 
-    async def process_and_respond(  # noqa: C901, PLR0915
+    async def process_and_respond(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -1707,12 +1724,16 @@ class ResponseRunner:
         post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
         run_success_collector: list[bool] | None = None,
         transient_system_context_collector: list[str] | None = None,
+        model_prompt_collector: list[str] | None = None,
+        attempt_run_id_collector: list[str] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
     ) -> FinalDeliveryOutcome:
         """Process a message and send a response without streaming."""
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
         runtime = await self.prepare_non_streaming_runtime(request)
+        if model_prompt_collector is not None:
+            model_prompt_collector.append(runtime.model_prompt)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         response_envelope = self._response_envelope_for_request(
@@ -1767,6 +1788,7 @@ class ResponseRunner:
                     transient_system_context_collector=(
                         transient_system_context_collector if transient_system_context_collector is not None else []
                     ),
+                    attempt_run_id_collector=attempt_run_id_collector if attempt_run_id_collector is not None else [],
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
@@ -1855,6 +1877,8 @@ class ResponseRunner:
         post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
         run_success_collector: list[bool] | None = None,
         transient_system_context_collector: list[str] | None = None,
+        model_prompt_collector: list[str] | None = None,
+        attempt_run_id_collector: list[str] | None = None,
         on_delivery_started: Callable[[str | None], None] | None = None,
         tool_trace_collector: list[Any] | None = None,
         run_metadata_content_collector: dict[str, Any] | None = None,
@@ -1863,6 +1887,8 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
         runtime = await self.prepare_streaming_runtime(request)
+        if model_prompt_collector is not None:
+            model_prompt_collector.append(runtime.model_prompt)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         response_envelope = self._response_envelope_for_request(
@@ -1918,6 +1944,7 @@ class ResponseRunner:
                     transient_system_context_collector=(
                         transient_system_context_collector if transient_system_context_collector is not None else []
                     ),
+                    attempt_run_id_collector=attempt_run_id_collector if attempt_run_id_collector is not None else [],
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
@@ -2131,6 +2158,8 @@ class ResponseRunner:
         tool_trace: list[Any] = []
         run_metadata_content: dict[str, Any] = {}
         transient_system_contexts: list[str] = []
+        model_prompts: list[str] = []
+        attempt_run_ids: list[str] = []
         resolved_correlation_id = self._correlation_id_for_request(request)
         resolved_response_envelope = self._response_envelope_for_request(
             request,
@@ -2198,6 +2227,8 @@ class ResponseRunner:
                     post_response_compaction_checks_collector=post_response_compaction_checks,
                     run_success_collector=run_successes,
                     transient_system_context_collector=transient_system_contexts,
+                    model_prompt_collector=model_prompts,
+                    attempt_run_id_collector=attempt_run_ids,
                     on_delivery_started=note_delivery_started,
                     tool_trace_collector=tool_trace,
                     run_metadata_content_collector=run_metadata_content,
@@ -2210,6 +2241,8 @@ class ResponseRunner:
                     post_response_compaction_checks_collector=post_response_compaction_checks,
                     run_success_collector=run_successes,
                     transient_system_context_collector=transient_system_contexts,
+                    model_prompt_collector=model_prompts,
+                    attempt_run_id_collector=attempt_run_ids,
                     on_delivery_started=note_delivery_started,
                 )
 
@@ -2355,8 +2388,12 @@ class ResponseRunner:
         )
         post_response_outcome = ResponseOutcome(
             strip_transient_enrichment_after_run=_should_strip_transient_enrichment(request)
+            or any(
+                _model_prompt_has_transient_tail(memory_prompt=memory_prompt, model_prompt=model_prompt)
+                for model_prompt in model_prompts
+            )
             or bool(transient_system_context),
-            response_run_id=response_run_id,
+            response_run_id=attempt_run_ids[-1] if attempt_run_ids else response_run_id,
             session_id=session_id,
             session_type=self.deps.state_writer.session_type_for_scope(self.deps.state_writer.history_scope()),
             execution_identity=execution_identity,

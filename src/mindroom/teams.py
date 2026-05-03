@@ -1827,7 +1827,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 )
     except asyncio.CancelledError:
         turn_recorder.record_interrupted(
-            run_metadata=run_metadata,
+            run_metadata=run_metadata or turn_recorder.run_metadata,
             assistant_text=turn_recorder.assistant_text,
             completed_tools=turn_recorder.completed_tools,
             interrupted_tools=turn_recorder.interrupted_tools,
@@ -2449,7 +2449,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 )
     except asyncio.CancelledError:
         turn_recorder.record_interrupted(
-            run_metadata=run_metadata,
+            run_metadata=run_metadata or turn_recorder.run_metadata,
             assistant_text=render_canonical_partial_text(),
             completed_tools=completed_tools,
             interrupted_tools=[pending.trace_entry for pending in pending_tools],

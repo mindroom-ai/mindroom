@@ -1119,7 +1119,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     except asyncio.CancelledError:
         if turn_recorder is not None:
             turn_recorder.record_interrupted(
-                run_metadata=metadata,
+                run_metadata=metadata or turn_recorder.run_metadata,
                 assistant_text=turn_recorder.assistant_text,
                 completed_tools=turn_recorder.completed_tools,
                 interrupted_tools=turn_recorder.interrupted_tools,
@@ -1635,7 +1635,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     except asyncio.CancelledError:
         if turn_recorder is not None:
             turn_recorder.record_interrupted(
-                run_metadata=metadata,
+                run_metadata=metadata or turn_recorder.run_metadata,
                 assistant_text=state.assistant_text,
                 completed_tools=state.completed_tools,
                 interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
