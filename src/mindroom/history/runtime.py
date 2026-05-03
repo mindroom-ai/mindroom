@@ -28,6 +28,7 @@ from mindroom.history.compaction import (
     completed_top_level_runs,
     estimate_agent_static_tokens,
     estimate_prompt_visible_history_tokens,
+    estimate_session_summary_tokens,
     estimate_team_static_tokens,
     runs_for_scope,
 )
@@ -1492,7 +1493,7 @@ def plan_replay_that_fits(
 
     return ResolvedReplayPlan(
         mode="disabled",
-        estimated_tokens=0,
+        estimated_tokens=_session_summary_replay_tokens(session),
         add_history_to_context=False,
     )
 
@@ -1640,10 +1641,20 @@ def _has_effective_persisted_replay(
     scope: HistoryScope,
     replay_plan: ResolvedReplayPlan,
 ) -> bool:
+    if _session_has_summary_replay(session):
+        return True
     if not replay_plan.add_history_to_context:
         return False
-    if runs_for_scope(completed_top_level_runs(session), scope):
-        return True
+    return bool(runs_for_scope(completed_top_level_runs(session), scope))
+
+
+def _session_has_summary_replay(session: AgentSession | TeamSession) -> bool:
     if session.summary is None:
         return False
     return bool(session.summary.summary.strip())
+
+
+def _session_summary_replay_tokens(session: AgentSession | TeamSession) -> int:
+    if session.summary is None:
+        return 0
+    return estimate_session_summary_tokens(session.summary.summary)

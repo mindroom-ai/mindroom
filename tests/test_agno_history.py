@@ -2994,6 +2994,65 @@ def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -
     assert "<previous_summary>" in summary_input
 
 
+def test_build_summary_input_excludes_persisted_system_prompt() -> None:
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="system", content="Persisted system prompt that should not be summarized"),
+            Message(role="user", content="user request"),
+            Message(role="assistant", content="assistant answer"),
+        ],
+    )
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=1_000,
+    )
+
+    assert included_runs == [run]
+    assert "Persisted system prompt" not in summary_input
+    assert "user request" in summary_input
+    assert "assistant answer" in summary_input
+
+
+def test_build_summary_input_honors_tool_call_history_limit() -> None:
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="user", content="use tools"),
+            Message(
+                role="assistant",
+                content="first tool",
+                tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "first", "arguments": "{}"}}],
+            ),
+            Message(role="tool", content="first result", tool_call_id="call-1"),
+            Message(
+                role="assistant",
+                content="second tool",
+                tool_calls=[{"id": "call-2", "type": "function", "function": {"name": "second", "arguments": "{}"}}],
+            ),
+            Message(role="tool", content="second result", tool_call_id="call-2"),
+        ],
+    )
+
+    summary_input, included_runs = _build_summary_input(
+        previous_summary=None,
+        compacted_runs=[run],
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=1,
+        ),
+        max_input_tokens=1_000,
+    )
+
+    assert included_runs == [run]
+    assert "call-1" not in summary_input
+    assert "first result" not in summary_input
+    assert "call-2" in summary_input
+    assert "second result" in summary_input
+
+
 def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:
     session = _session(
         "session-1",
@@ -5147,7 +5206,7 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_forced_compaction_leaves_no_effective_replay_when_no_runs_fit(
+async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_when_no_runs_fit(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(
@@ -5218,8 +5277,8 @@ async def test_prepare_history_for_run_forced_compaction_leaves_no_effective_rep
     assert prepared.compaction_outcomes[0].summary == "merged summary"
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "disabled"
-    assert prepared.replay_plan.estimated_tokens == 0
-    assert prepared.replays_persisted_history is False
+    assert prepared.replay_plan.estimated_tokens > 0
+    assert prepared.replays_persisted_history is True
 
 
 def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> None:

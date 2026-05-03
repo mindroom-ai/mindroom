@@ -31,7 +31,14 @@ from pydantic import BaseModel
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
 from mindroom.history.storage import read_scope_state, update_scope_seen_event_ids, write_scope_state
-from mindroom.history.types import CompactionLifecycleProgress, CompactionOutcome, HistoryScope, HistoryScopeState
+from mindroom.history.types import (
+    CompactionLifecycleProgress,
+    CompactionOutcome,
+    HistoryPolicy,
+    HistoryScope,
+    HistoryScopeState,
+    ResolvedHistorySettings,
+)
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.metadata_merge import deep_merge_metadata
@@ -48,8 +55,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
-    from mindroom.history.types import ResolvedHistorySettings
-
 logger = get_logger(__name__)
 
 _WRAPPER_OVERHEAD_TOKENS = 200
@@ -316,7 +321,7 @@ async def compact_scope_history(
         await _emit_compaction_hook(
             event_name=EVENT_COMPACTION_BEFORE,
             scope=scope,
-            messages=_messages_for_runs(included_runs) if collect_compaction_hook_messages else (),
+            messages=_messages_for_runs(included_runs, history_settings) if collect_compaction_hook_messages else (),
             session_id=session.session_id,
             token_count_before=before_tokens,
             token_count_after=None,
@@ -486,6 +491,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
         summary_input, included_runs = _build_summary_input(
             previous_summary=_current_summary_text(working_session),
             compacted_runs=compactable_runs,
+            history_settings=history_settings,
             max_input_tokens=per_call_summary_input_budget,
         )
         if not included_runs:
@@ -509,6 +515,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             summary_input_budget=per_call_summary_input_budget,
             session_id=session_id,
             scope=scope,
+            history_settings=history_settings,
             timing_scope=timing_scope,
         )
         included_runs = new_summary.included_runs
@@ -525,7 +532,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
         total_compacted_run_count += len(included_runs)
         all_compacted_run_ids.update(compacted_run_ids)
         if collect_compaction_hook_messages:
-            compacted_messages.extend(_messages_for_runs(included_runs))
+            compacted_messages.extend(_messages_for_runs(included_runs, history_settings))
         if pending_selected_run_ids is not None:
             pending_selected_run_ids.difference_update(compacted_run_ids)
 
@@ -1003,6 +1010,7 @@ async def _generate_compaction_summary_with_retry(
     summary_input_budget: int,
     session_id: str,
     scope: HistoryScope,
+    history_settings: ResolvedHistorySettings,
     timing_scope: str | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, retrying once with a smaller input when safe."""
@@ -1052,6 +1060,7 @@ async def _generate_compaction_summary_with_retry(
                 rebuilt_input, rebuilt_runs = _build_summary_input(
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
+                    history_settings=history_settings,
                     max_input_tokens=retry_budget,
                 )
                 if rebuilt_runs:
@@ -1178,7 +1187,9 @@ def _build_summary_input(
     previous_summary: str | None,
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
     max_input_tokens: int,
+    history_settings: ResolvedHistorySettings | None = None,
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
+    resolved_history_settings = history_settings or _default_compaction_history_settings()
     summary_block = ""
     if previous_summary is not None and previous_summary.strip():
         escaped_summary = _escape_xml_content(previous_summary)
@@ -1191,12 +1202,13 @@ def _build_summary_input(
 
     included_runs: list[RunOutput | TeamRunOutput] = []
     for run in compacted_runs:
-        run_tokens = _estimate_serialized_run_tokens(run)
+        run_tokens = _estimate_serialized_run_tokens(run, resolved_history_settings)
         if run_tokens > remaining:
             if not included_runs:
                 return _build_oversized_summary_input(
                     summary_block=summary_block,
                     compacted_runs=[run],
+                    history_settings=resolved_history_settings,
                     max_input_tokens=max_input_tokens,
                 )
             break
@@ -1206,7 +1218,9 @@ def _build_summary_input(
     if not included_runs:
         return summary_block, []
 
-    serialized_runs = "\n\n".join(_serialize_run(run, index) for index, run in enumerate(included_runs))
+    serialized_runs = "\n\n".join(
+        _serialize_run(run, index, resolved_history_settings) for index, run in enumerate(included_runs)
+    )
     return _compose_summary_input(summary_block, serialized_runs), included_runs
 
 
@@ -1214,6 +1228,7 @@ def _build_oversized_summary_input(
     *,
     summary_block: str,
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
+    history_settings: ResolvedHistorySettings,
     max_input_tokens: int,
 ) -> tuple[str, list[RunOutput | TeamRunOutput]]:
     if not compacted_runs:
@@ -1222,6 +1237,7 @@ def _build_oversized_summary_input(
     oversized_excerpt = _serialize_oversized_run_excerpt(
         first_run,
         index=0,
+        history_settings=history_settings,
         max_tokens=_remaining_excerpt_budget(max_input_tokens, summary_block),
     )
     if oversized_excerpt is None:
@@ -1233,16 +1249,17 @@ def _serialize_oversized_run_excerpt(
     run: RunOutput | TeamRunOutput,
     *,
     index: int,
+    history_settings: ResolvedHistorySettings,
     max_tokens: int,
 ) -> str | None:
     if max_tokens <= 0:
         return None
 
-    full_run = _serialize_run(run, index)
+    full_run = _serialize_run(run, index, history_settings)
     if estimate_text_tokens(full_run) <= max_tokens:
         return full_run
 
-    blocks = _excerpt_blocks(run)
+    blocks = _excerpt_blocks(run, history_settings)
     budget_chars = max_tokens * 4
     while budget_chars > 0:
         excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=budget_chars)
@@ -1281,13 +1298,32 @@ def _serialize_run_excerpt(
     return "\n".join(lines)
 
 
-def _excerpt_blocks(run: RunOutput | TeamRunOutput) -> list[_ExcerptBlock]:
+def _default_compaction_history_settings() -> ResolvedHistorySettings:
+    return ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+    )
+
+
+def _compaction_replay_messages(
+    run: RunOutput | TeamRunOutput,
+    history_settings: ResolvedHistorySettings,
+) -> list[Message]:
+    skip_roles = set(_history_skip_roles(history_settings) or [])
+    messages = [deepcopy(message) for message in run.messages or [] if message.role not in skip_roles]
+    if history_settings.max_tool_calls_from_history is not None and messages:
+        filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
+    _strip_stale_anthropic_replay_fields(messages)
+    return messages
+
+
+def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> list[_ExcerptBlock]:
     blocks: list[_ExcerptBlock] = []
     if run.metadata:
         blocks.append(
             _ExcerptBlock("<run_metadata>", stable_serialize(_metadata_for_excerpt(run.metadata)), "</run_metadata>"),
         )
-    for message in run.messages or []:
+    for message in _compaction_replay_messages(run, history_settings):
         content = _render_message_content(message)
         if not content:
             continue
@@ -1328,8 +1364,8 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
     return "\n\n".join(parts)
 
 
-def _estimate_serialized_run_tokens(run: RunOutput | TeamRunOutput) -> int:
-    return estimate_text_tokens(_serialize_run(run, 0))
+def _estimate_serialized_run_tokens(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> int:
+    return estimate_text_tokens(_serialize_run(run, 0, history_settings))
 
 
 def _seen_event_ids_for_runs(runs: Sequence[RunOutput | TeamRunOutput]) -> list[str]:
@@ -1347,18 +1383,21 @@ def _seen_event_ids_for_runs(runs: Sequence[RunOutput | TeamRunOutput]) -> list[
     return sorted(seen_event_ids)
 
 
-def _messages_for_runs(runs: Sequence[RunOutput | TeamRunOutput]) -> list[Message]:
+def _messages_for_runs(
+    runs: Sequence[RunOutput | TeamRunOutput],
+    history_settings: ResolvedHistorySettings,
+) -> list[Message]:
     messages: list[Message] = []
     for run in runs:
-        messages.extend(run.messages or [])
+        messages.extend(_compaction_replay_messages(run, history_settings))
     return messages
 
 
-def _serialize_run(run: RunOutput | TeamRunOutput, index: int) -> str:
+def _serialize_run(run: RunOutput | TeamRunOutput, index: int, history_settings: ResolvedHistorySettings) -> str:
     lines = [_run_open_tag(run, index)]
     if run.metadata:
         lines.extend(["<run_metadata>", _escape_xml_content(stable_serialize(run.metadata)), "</run_metadata>"])
-    for message in run.messages or []:
+    for message in _compaction_replay_messages(run, history_settings):
         lines.extend(_serialize_message(message))
     lines.append("</run>")
     return "\n".join(lines)
