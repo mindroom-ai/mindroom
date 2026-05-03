@@ -27,7 +27,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
-from mindroom.history import prepare_history_for_run
+from mindroom.history import prepare_history_for_run, request_compaction_before_next_reply
 from mindroom.history.runtime import ScopeSessionContext, open_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import (
@@ -231,7 +231,6 @@ def test_compact_context_runtime_annotations_resolve_for_agno_registration(tmp_p
     assert "agent" not in function.parameters["properties"]
     assert "run_context" not in function.parameters["properties"]
     get_type_hints(CompactContextTools.compact_context)
-    get_type_hints(CompactContextTools._resolve_active_compaction_settings)
 
 
 @pytest.mark.asyncio
@@ -256,6 +255,32 @@ async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is True
     assert result == COMPACT_CONTEXT_SUCCESS
+
+
+def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Path) -> None:
+    """Manual compaction scheduling should be available without going through the tool adapter."""
+    config, runtime_paths = _make_config(tmp_path)
+    identity = _execution_identity()
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
+    storage.upsert_session(_session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
+    session_state: dict[str, object] = {}
+
+    result = request_compaction_before_next_reply(
+        agent=_agent(),
+        agent_name="test_agent",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=identity,
+        session_state=session_state,
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
+    assert state.force_compact_before_next_run is True
+    assert result.message == COMPACT_CONTEXT_SUCCESS
+    assert result.session_state is session_state
 
 
 @pytest.mark.asyncio
@@ -304,16 +329,8 @@ async def test_compact_context_closes_scope_storage_after_budget_error(tmp_path:
 
     with (
         patch(
-            "mindroom.custom_tools.compact_context.open_scope_session_context",
+            "mindroom.history.manual.open_scope_session_context",
             return_value=_patched_scope_context(scope_context),
-        ),
-        patch.object(
-            tool,
-            "_resolve_active_compaction_settings",
-            return_value=(
-                SimpleNamespace(model_name="default", context_window=None),
-                config.get_entity_compaction_config("test_agent"),
-            ),
         ),
     ):
         result = await tool.compact_context(agent=_agent())
@@ -343,16 +360,8 @@ async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path
 
     with (
         patch(
-            "mindroom.custom_tools.compact_context.open_scope_session_context",
+            "mindroom.history.manual.open_scope_session_context",
             return_value=_patched_scope_context(scope_context),
-        ),
-        patch.object(
-            tool,
-            "_resolve_active_compaction_settings",
-            return_value=(
-                SimpleNamespace(model_name="default", context_window=48_000),
-                config.get_entity_compaction_config("test_agent"),
-            ),
         ),
     ):
         result = await tool.compact_context(agent=_agent())
