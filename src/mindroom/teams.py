@@ -1592,6 +1592,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
+    unseen_event_ids: list[str] = []
     attempt_run_id = run_id
     run_metadata: dict[str, Any] | None = None
 
@@ -1646,6 +1647,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 system_enrichment_items=system_enrichment_items,
             )
             prompt = prepared_execution.prepared_prompt
+            unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
             turn_recorder.set_run_metadata(run_metadata)
             logger.info("executing_team_response", agent_count=len(agents), mode=mode.value)
@@ -1824,7 +1826,18 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 )
     except asyncio.CancelledError:
         turn_recorder.record_interrupted(
-            run_metadata=run_metadata or turn_recorder.run_metadata,
+            run_metadata=run_metadata
+            if run_metadata is not None
+            else turn_recorder.run_metadata
+            or build_matrix_run_metadata(
+                reply_to_event_id,
+                unseen_event_ids,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=requester_id,
+                correlation_id=correlation_id,
+                extra_metadata=matrix_run_metadata,
+            ),
             assistant_text=turn_recorder.assistant_text,
             completed_tools=turn_recorder.completed_tools,
             interrupted_tools=turn_recorder.interrupted_tools,
@@ -2463,7 +2476,18 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 )
     except asyncio.CancelledError:
         turn_recorder.record_interrupted(
-            run_metadata=run_metadata or turn_recorder.run_metadata,
+            run_metadata=run_metadata
+            if run_metadata is not None
+            else turn_recorder.run_metadata
+            or build_matrix_run_metadata(
+                reply_to_event_id,
+                unseen_event_ids,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=requester_id,
+                correlation_id=correlation_id,
+                extra_metadata=matrix_run_metadata,
+            ),
             assistant_text=render_canonical_partial_text(),
             completed_tools=completed_tools,
             interrupted_tools=[pending.trace_entry for pending in pending_tools],

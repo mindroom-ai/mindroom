@@ -1760,6 +1760,15 @@ async def test_team_response_tracks_retry_run_id_after_hard_cancellation() -> No
         patch("mindroom.teams.create_agent", return_value=fake_agent),
         patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        patch(
+            "mindroom.teams.prepare_bound_team_run_context",
+            new=AsyncMock(
+                return_value=_prepared_team_execution_context(
+                    final_prompt="Analyze this.",
+                    prepared_context_tokens=44_000,
+                ),
+            ),
+        ),
         pytest.raises(asyncio.CancelledError),
     ):
         await team_response(
@@ -1785,6 +1794,8 @@ async def test_team_response_tracks_retry_run_id_after_hard_cancellation() -> No
     assert second_call.kwargs["run_id"] != "run-123"
     assert callback_run_ids == [first_call.kwargs["run_id"], second_call.kwargs["run_id"]]
     assert recorder.run_id == second_call.kwargs["run_id"]
+    assert recorder.run_metadata is not None
+    assert recorder.run_metadata[AI_RUN_METADATA_KEY]["prepared_context"] == {"tokens": 44_000}
 
 
 @pytest.mark.asyncio
@@ -2804,6 +2815,15 @@ async def test_team_response_stream_tracks_retry_run_id_after_hard_cancellation(
         patch("mindroom.teams._materialize_team_members", return_value=team_members),
         patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
         patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+        patch(
+            "mindroom.teams.prepare_bound_team_run_context",
+            new=AsyncMock(
+                return_value=_prepared_team_execution_context(
+                    final_prompt="Analyze this.",
+                    prepared_context_tokens=55_000,
+                ),
+            ),
+        ),
         pytest.raises(asyncio.CancelledError),
     ):
         _chunks = [
@@ -2830,6 +2850,8 @@ async def test_team_response_stream_tracks_retry_run_id_after_hard_cancellation(
     assert call_run_ids[1] != "run-789"
     assert callback_run_ids == [run_id for run_id in call_run_ids if run_id is not None]
     assert recorder.run_id == call_run_ids[1]
+    assert recorder.run_metadata is not None
+    assert recorder.run_metadata[AI_RUN_METADATA_KEY]["prepared_context"] == {"tokens": 55_000}
 
 
 @pytest.mark.asyncio
