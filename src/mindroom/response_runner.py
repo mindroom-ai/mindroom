@@ -21,7 +21,7 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import HistoryScope, run_post_response_compaction_check, strip_transient_enrichment_from_session
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.hooks import EnrichmentItem, MessageEnvelope
+from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_system_enrichment_block
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import should_use_streaming
@@ -497,6 +497,7 @@ class ResponseRunner:
                 session_type=outcome.session_type,
                 response_run_id=outcome.response_run_id,
                 memory_prompt=outcome.memory_prompt,
+                transient_system_context=outcome.transient_system_context,
             )
         finally:
             storage.close()
@@ -1338,6 +1339,7 @@ class ResponseRunner:
                 thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
                 memory_prompt=_memory_prompt,
                 memory_thread_history=_memory_thread_history,
+                transient_system_context=render_system_enrichment_block(request.system_enrichment_items),
             ),
             post_response_deps=lambda: self.deps.post_response_effects.build_deps(
                 room_id=request.room_id,
@@ -2336,6 +2338,7 @@ class ResponseRunner:
             thread_summary_message_count_hint=thread_summary_message_count_hint(request.thread_history),
             memory_prompt=memory_prompt,
             memory_thread_history=memory_thread_history,
+            transient_system_context=render_system_enrichment_block(request.system_enrichment_items),
         )
         post_response_deps = self.deps.post_response_effects.build_deps(
             room_id=request.room_id,

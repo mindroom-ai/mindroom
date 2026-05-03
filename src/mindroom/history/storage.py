@@ -144,6 +144,7 @@ def strip_transient_enrichment_from_session(
     session_type: SessionType,
     response_run_id: str | None = None,
     memory_prompt: str,
+    transient_system_context: str | None = None,
 ) -> bool:
     """Restore the persisted current user turn after transient model context was used."""
     session = storage.get_session(session_id, session_type)
@@ -157,15 +158,64 @@ def strip_transient_enrichment_from_session(
             continue
         if response_run_id is not None and has_run_ids and run.run_id != response_run_id:
             continue
+        changed = _strip_transient_system_context_from_run(run, transient_system_context)
         for message in reversed(run.messages):
             if message.role != "user":
                 continue
-            if message.content == memory_prompt:
-                return False
-            message.content = memory_prompt
+            if message.content != memory_prompt:
+                message.content = memory_prompt
+                changed = True
+            break
+        if changed:
             storage.upsert_session(session)
-            return True
+        return changed
     return False
+
+
+def _strip_transient_system_context_from_run(
+    run: RunOutput | TeamRunOutput,
+    transient_system_context: str | None,
+) -> bool:
+    if not transient_system_context or not run.messages:
+        return False
+
+    changed = False
+    next_messages: list[Any] = []
+    for message in run.messages:
+        if message.role != "system" or not isinstance(message.content, str):
+            next_messages.append(message)
+            continue
+        stripped_content = _remove_transient_system_context(message.content, transient_system_context)
+        if stripped_content == message.content:
+            next_messages.append(message)
+            continue
+        changed = True
+        if stripped_content:
+            message.content = stripped_content
+            next_messages.append(message)
+    if changed:
+        run.messages = next_messages
+    return changed
+
+
+def _remove_transient_system_context(content: str, transient_system_context: str) -> str:
+    stripped_block = transient_system_context.strip()
+    if not stripped_block:
+        return content
+
+    stripped_content = content.strip()
+    if stripped_content == stripped_block:
+        return ""
+
+    replacements = (
+        f"\n\n{stripped_block}",
+        f"{stripped_block}\n\n",
+        stripped_block,
+    )
+    next_content = content
+    for replacement in replacements:
+        next_content = next_content.replace(replacement, "")
+    return next_content.strip()
 
 
 def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:

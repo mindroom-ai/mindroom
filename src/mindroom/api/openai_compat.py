@@ -955,7 +955,7 @@ async def chat_completions(  # noqa: C901, PLR0912
         agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
-        requester_id=None,
+        requester_id=req.user,
         room_id=None,
         thread_id=None,
         resolved_thread_id=None,

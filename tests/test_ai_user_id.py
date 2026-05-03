@@ -39,6 +39,7 @@ from mindroom.ai import (
     _prepare_agent_and_prompt,
     _PreparedAgentRun,
     _stream_completed_without_visible_output,
+    _stream_with_request_log_context,
     _StreamingAttemptState,
     ai_response,
     build_matrix_run_metadata,
@@ -78,6 +79,7 @@ from mindroom.hooks import (
     MessageEnvelope,
     SessionHookContext,
     hook,
+    render_system_enrichment_block,
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
@@ -113,7 +115,7 @@ from mindroom.tool_system.worker_routing import (
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, resolve_response_thread_root_for_test
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Generator
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator
     from pathlib import Path
 
     from agno.knowledge.knowledge import Knowledge
@@ -2524,6 +2526,9 @@ async def test_generate_team_response_strips_transient_model_prompt_from_persist
 
 def test_strip_transient_enrichment_targets_response_run_id() -> None:
     """Cleanup should not rewrite a newer or older run when the finished run id is known."""
+    transient_system_context = render_system_enrichment_block(
+        (EnrichmentItem(key="weather", text="72F and sunny", cache_policy="volatile"),),
+    )
     storage = _SessionStorage(
         AgentSession(
             session_id="session-1",
@@ -2535,7 +2540,10 @@ def test_strip_transient_enrichment_targets_response_run_id() -> None:
                 ),
                 RunOutput(
                     run_id="target-run",
-                    messages=[Message(role="user", content="current enriched prompt")],
+                    messages=[
+                        Message(role="system", content=f"durable system context\n\n{transient_system_context}"),
+                        Message(role="user", content="current enriched prompt"),
+                    ],
                 ),
                 RunOutput(
                     run_id="newer-run",
@@ -2552,14 +2560,39 @@ def test_strip_transient_enrichment_targets_response_run_id() -> None:
         session_type=SessionType.AGENT,
         response_run_id="target-run",
         memory_prompt="current raw prompt",
+        transient_system_context=transient_system_context,
     )
 
     persisted_session = cast("AgentSession", storage.session)
     assert changed is True
     assert persisted_session.runs is not None
     assert cast("RunOutput", persisted_session.runs[0]).messages[0].content == "older enriched prompt"
-    assert cast("RunOutput", persisted_session.runs[1]).messages[0].content == "current raw prompt"
+    target_messages = cast("RunOutput", persisted_session.runs[1]).messages
+    assert target_messages is not None
+    assert target_messages[0].content == "durable system context"
+    assert target_messages[1].content == "current raw prompt"
     assert cast("RunOutput", persisted_session.runs[2]).messages[0].content == "newer enriched prompt"
+
+
+@pytest.mark.asyncio
+async def test_stream_with_request_log_context_closes_wrapped_stream_on_early_close() -> None:
+    """Closing the wrapper should immediately close the provider stream."""
+    closed = False
+
+    async def source() -> AsyncGenerator[str, None]:
+        nonlocal closed
+        try:
+            yield "first"
+            yield "second"
+        finally:
+            closed = True
+
+    stream = _stream_with_request_log_context(source(), request_context={})
+
+    assert await anext(stream) == "first"
+    await stream.aclose()
+
+    assert closed is True
 
 
 @pytest.mark.asyncio

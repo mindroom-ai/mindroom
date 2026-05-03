@@ -64,6 +64,7 @@ class ResponseOutcome:
     thread_summary_message_count_hint: int | None = None
     memory_prompt: str | None = None
     memory_thread_history: Sequence[ResolvedVisibleMessage] | None = None
+    transient_system_context: str | None = None
 
 
 @dataclass(frozen=True)

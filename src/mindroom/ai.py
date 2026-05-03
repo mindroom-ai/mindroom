@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 from uuid import uuid4
 
 from agno.db.base import SessionType
@@ -596,15 +597,16 @@ async def _stream_with_request_log_context[StreamEventT](
     request_context: dict[str, object],
 ) -> AsyncIterator[StreamEventT]:
     """Advance one async stream with request-log context bound per item pull."""
-    with bind_llm_request_log_context(**request_context):
-        stream_iterator = stream_generator.__aiter__()
-    while True:
-        try:
-            with bind_llm_request_log_context(**request_context):
-                event = await stream_iterator.__anext__()
-        except StopAsyncIteration:
-            return
-        yield event
+    async with aclosing(cast("Any", stream_generator)) as stream_iterator:
+        with bind_llm_request_log_context(**request_context):
+            stream = stream_iterator.__aiter__()
+        while True:
+            try:
+                with bind_llm_request_log_context(**request_context):
+                    event = await stream.__anext__()
+            except StopAsyncIteration:
+                return
+            yield event
 
 
 @timed("model_request_to_completion")
