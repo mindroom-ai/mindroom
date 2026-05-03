@@ -37,12 +37,12 @@ from agno.session.team import TeamSession
 from mindroom.ai import (
     _prepare_agent_and_prompt,
     _PreparedAgentRun,
-    _serialize_metrics,
     ai_response,
     build_matrix_run_metadata,
     should_retry_without_inline_media,
     stream_agent_response,
 )
+from mindroom.ai_run_metadata import _serialize_metrics
 from mindroom.bot import AgentBot
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig, TeamConfig
