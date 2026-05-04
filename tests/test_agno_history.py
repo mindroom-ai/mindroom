@@ -110,7 +110,6 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.prepared_conversation_chain import (
     CompactionSummaryRequest,
     PreparedConversationChain,
-    build_cold_cache_compaction_summary_request,
     build_compaction_summary_request,
     build_matrix_prompt_with_thread_history,
     build_persisted_run_chain,
@@ -3349,46 +3348,39 @@ def test_warm_cache_compaction_request_preserves_prepared_chain_prefix() -> None
     assert request.included_run_ids == ("run-1",)
 
 
-def test_cold_cache_compaction_request_strips_static_messages_without_splitting_tool_results() -> None:
+def test_warm_cache_compaction_request_strips_stale_anthropic_replay_fields_after_summary_prompt() -> None:
     chain = build_persisted_run_chain(
         [
             _completed_run(
                 "run-1",
                 messages=[
-                    Message(role="system", content="static setup"),
-                    Message(role="user", content="Run a command"),
+                    Message(
+                        role="user",
+                        content="Question",
+                    ),
                     Message(
                         role="assistant",
-                        content="Using a tool",
-                        tool_calls=[
-                            {
-                                "id": "call-1",
-                                "type": "function",
-                                "function": {"name": "shell", "arguments": "{}"},
-                            },
-                        ],
+                        content="Answer",
+                        provider_data={"signature": "sig-1", "keep": "yes"},
+                        reasoning_content="thinking",
+                        redacted_reasoning_content="redacted",
                     ),
-                    Message(role="tool", content="command output", tool_call_id="call-1"),
-                    Message(role="assistant", content="Done"),
                 ],
             ),
         ],
         history_settings=ResolvedHistorySettings(
             policy=HistoryPolicy(mode="all"),
             max_tool_calls_from_history=None,
-            skip_history_system_role=False,
         ),
     )
 
-    request = build_cold_cache_compaction_summary_request(chain, previous_summary=None)
-    roles = [message.role for message in request.messages]
-    contents = [str(message.content) for message in request.messages]
+    request = build_warm_cache_compaction_summary_request(chain, previous_summary=None)
+    assistant = request.messages[1]
 
-    assert roles[:4] == ["user", "user", "assistant", "tool"]
-    assert "static setup" not in contents
-    assert "Static agent instructions and tool definitions were omitted" in contents[0]
-    assert request.messages[2].tool_calls
-    assert request.messages[3].tool_call_id == "call-1"
+    assert request.messages[:-1] == request.chain.messages
+    assert assistant.provider_data == {"keep": "yes"}
+    assert assistant.reasoning_content is None
+    assert assistant.redacted_reasoning_content is None
 
 
 @pytest.mark.asyncio

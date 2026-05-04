@@ -42,7 +42,6 @@ type PreparedConversationChainSource = Literal[
     "matrix_thread_fallback",
     "persisted_runs",
     "warm_cache_compaction",
-    "cold_cache_compaction",
 ]
 
 _DEFAULT_UNSEEN_MESSAGES_HEADER = "Messages since your last response:"
@@ -68,10 +67,6 @@ _PARTIAL_REPLY_SENDER_LABELS = {
 }
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
-_COLD_CACHE_STATIC_OMISSION_NOTE = (
-    "Static agent instructions and tool definitions were omitted from this cold-cache compaction request. "
-    "They do not need to be summarized."
-)
 _COMPACTION_SUMMARY_INSTRUCTION = """\
 You are updating a durable conversation handoff summary for a future model call.
 
@@ -104,14 +99,11 @@ Write a plain-text summary in exactly this markdown structure:
 """
 
 
-class _PartialReplyKind(str, Enum):
+class PartialReplyKind(str, Enum):
     """Classification for a self-authored partial reply preserved in prompt context."""
 
     IN_PROGRESS = "in_progress"
     INTERRUPTED = "interrupted"
-
-
-PartialReplyKind = _PartialReplyKind
 
 
 @dataclass(frozen=True)
@@ -577,10 +569,10 @@ def get_unseen_messages_for_sender(
     seen_event_ids: set[str],
     current_event_id: str | None,
     active_event_ids: Collection[str],
-) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
+) -> tuple[list[ResolvedVisibleMessage], set[PartialReplyKind], set[str]]:
     """Filter thread_history to unseen messages for one Matrix sender."""
     unseen: list[ResolvedVisibleMessage] = []
-    partial_reply_kinds: set[_PartialReplyKind] = set()
+    partial_reply_kinds: set[PartialReplyKind] = set()
     in_progress_event_ids: set[str] = set()
     for msg in thread_history:
         event_id = msg.event_id
@@ -593,18 +585,18 @@ def get_unseen_messages_for_sender(
         if isinstance(content, dict) and COMPACTION_NOTICE_CONTENT_KEY in content:
             continue
         if sender_id and sender == sender_id and not is_relayed_user_message(msg):
-            partial_kind = _classify_partial_reply(
+            partial_kind = classify_partial_reply(
                 msg,
                 active_event_ids=active_event_ids,
             )
-            if partial_kind is _PartialReplyKind.INTERRUPTED:
+            if partial_kind is PartialReplyKind.INTERRUPTED:
                 continue
             if partial_kind is not None:
                 cleaned_body = clean_partial_reply_text(msg.body)
                 if not cleaned_body:
                     continue
                 partial_reply_kinds.add(partial_kind)
-                if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
+                if partial_kind is PartialReplyKind.IN_PROGRESS and event_id is not None:
                     in_progress_event_ids.add(event_id)
                 unseen.append(
                     replace_visible_message(
@@ -657,41 +649,12 @@ def build_warm_cache_compaction_summary_request(
     )
 
 
-def build_cold_cache_compaction_summary_request(
-    chain: PreparedConversationChain,
-    *,
-    previous_summary: str | None,
-) -> CompactionSummaryRequest:
-    """Build a summary request from the same chain after omitting static setup messages."""
-    stripped_messages = tuple(message.model_copy(deep=True) for message in chain.messages if message.role != "system")
-    if len(stripped_messages) != len(chain.messages):
-        stripped_messages = (
-            Message(role="user", content=_COLD_CACHE_STATIC_OMISSION_NOTE),
-            *stripped_messages,
-        )
-    validate_tool_result_adjacency(stripped_messages)
-    cold_chain = replace(
-        chain,
-        source="cold_cache_compaction",
-        messages=stripped_messages,
-        rendered_text=render_prepared_messages_text(stripped_messages),
-        estimated_tokens=estimate_history_messages_tokens(list(stripped_messages)),
-    )
-    return _build_compaction_summary_request_from_prefix(
-        chain=cold_chain,
-        prefix_messages=stripped_messages,
-        previous_summary=previous_summary,
-        source="cold_cache_compaction",
-    )
-
-
 def build_compaction_summary_request(
     *,
     previous_summary: str | None,
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
     history_settings: ResolvedHistorySettings,
     max_input_tokens: int,
-    cold_cache: bool = False,
 ) -> tuple[CompactionSummaryRequest | None, list[RunOutput | TeamRunOutput]]:
     """Select a run prefix and build the chain-based summary request for one compaction chunk."""
     remaining = max_input_tokens - _summary_instruction_tokens(previous_summary)
@@ -709,7 +672,6 @@ def build_compaction_summary_request(
                     max_prefix_tokens=remaining,
                     max_input_tokens=max_input_tokens,
                     previous_summary=previous_summary,
-                    cold_cache=cold_cache,
                 )
                 if request is None:
                     return None, []
@@ -723,7 +685,6 @@ def build_compaction_summary_request(
         request = _summary_request_from_chain(
             chain,
             previous_summary=previous_summary,
-            cold_cache=cold_cache,
         )
         if request.estimated_tokens <= max_input_tokens:
             return request, included_runs
@@ -734,7 +695,6 @@ def build_compaction_summary_request(
                 max_prefix_tokens=remaining + _estimate_run_chain_tokens(included_runs[0], history_settings),
                 max_input_tokens=max_input_tokens,
                 previous_summary=previous_summary,
-                cold_cache=cold_cache,
             )
             if request is not None:
                 return request, included_runs
@@ -911,10 +871,7 @@ def _summary_request_from_chain(
     chain: PreparedConversationChain,
     *,
     previous_summary: str | None,
-    cold_cache: bool,
 ) -> CompactionSummaryRequest:
-    if cold_cache:
-        return build_cold_cache_compaction_summary_request(chain, previous_summary=previous_summary)
     return build_warm_cache_compaction_summary_request(chain, previous_summary=previous_summary)
 
 
@@ -925,18 +882,21 @@ def _build_compaction_summary_request_from_prefix(
     previous_summary: str | None,
     source: PreparedConversationChainSource,
 ) -> CompactionSummaryRequest:
-    messages = (
-        *prefix_messages,
+    messages = [
+        *[message.model_copy(deep=True) for message in prefix_messages],
         Message(role="user", content=compaction_summary_instruction(previous_summary)),
-    )
+    ]
+    strip_stale_anthropic_replay_fields(messages)
+    sanitized_prefix = tuple(messages[:-1])
+    request_messages = tuple(messages)
     rendered_text = render_prepared_messages_text(messages)
     return CompactionSummaryRequest(
-        messages=messages,
+        messages=request_messages,
         chain=replace(
             chain,
             source=source,
-            messages=prefix_messages,
-            rendered_text=render_prepared_messages_text(prefix_messages),
+            messages=sanitized_prefix,
+            rendered_text=render_prepared_messages_text(sanitized_prefix),
         ),
         included_run_ids=chain.source_run_ids,
         rendered_text=rendered_text,
@@ -955,7 +915,6 @@ def _build_oversized_summary_request(
     max_prefix_tokens: int,
     max_input_tokens: int,
     previous_summary: str | None,
-    cold_cache: bool,
 ) -> CompactionSummaryRequest | None:
     budget = max_prefix_tokens
     while budget > 0:
@@ -969,7 +928,6 @@ def _build_oversized_summary_request(
         request = _summary_request_from_chain(
             chain,
             previous_summary=previous_summary,
-            cold_cache=cold_cache,
         )
         if request.estimated_tokens <= max_input_tokens:
             return request
@@ -1041,48 +999,39 @@ def _plain_oversized_excerpt_message(message: Message, content: str) -> Message:
     return Message(role=role, content=content)
 
 
-def _classify_partial_reply(
+def classify_partial_reply(
     msg: ResolvedVisibleMessage,
     *,
     active_event_ids: Collection[str],
-) -> _PartialReplyKind | None:
+) -> PartialReplyKind | None:
     """Classify a self-authored partial reply from persisted stream metadata first."""
     status = msg.stream_status
     if status == STREAM_STATUS_COMPLETED:
         return None
 
-    partial_kind: _PartialReplyKind | None = None
+    partial_kind: PartialReplyKind | None = None
     if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED}:
-        partial_kind = _PartialReplyKind.INTERRUPTED
+        partial_kind = PartialReplyKind.INTERRUPTED
     elif status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
         event_id = msg.event_id
         if isinstance(event_id, str):
-            return _PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else _PartialReplyKind.INTERRUPTED
-        partial_kind = _PartialReplyKind.IN_PROGRESS
+            return PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else PartialReplyKind.INTERRUPTED
+        partial_kind = PartialReplyKind.IN_PROGRESS
     else:
         body = msg.body
         if is_interrupted_partial_reply(body):
-            partial_kind = _PartialReplyKind.INTERRUPTED
+            partial_kind = PartialReplyKind.INTERRUPTED
 
     return partial_kind
 
 
-def classify_partial_reply(
-    msg: ResolvedVisibleMessage,
-    *,
-    active_event_ids: Collection[str],
-) -> _PartialReplyKind | None:
-    """Classify a self-authored partial reply from persisted stream metadata."""
-    return _classify_partial_reply(msg, active_event_ids=active_event_ids)
-
-
-def _build_unseen_messages_header(partial_reply_kinds: set[_PartialReplyKind]) -> str:
+def _build_unseen_messages_header(partial_reply_kinds: set[PartialReplyKind]) -> str:
     """Choose the unseen-context guidance for the partial-reply mix present."""
     if not partial_reply_kinds:
         return _DEFAULT_UNSEEN_MESSAGES_HEADER
-    if partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}:
+    if partial_reply_kinds == {PartialReplyKind.INTERRUPTED}:
         return _INTERRUPTED_PARTIAL_REPLY_HEADER
-    if partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}:
+    if partial_reply_kinds == {PartialReplyKind.IN_PROGRESS}:
         return _IN_PROGRESS_PARTIAL_REPLY_HEADER
     return _MIXED_PARTIAL_REPLY_HEADER
 
