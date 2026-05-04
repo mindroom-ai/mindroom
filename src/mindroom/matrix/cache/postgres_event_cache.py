@@ -748,7 +748,7 @@ class PostgresEventCache:
                         result = await callback(db)
                         await db.commit()
                     except BaseException:
-                        await self._rollback_best_effort(db, operation=operation)
+                        await self._runtime._rollback_best_effort(db, operation=operation)
                         raise
             except EventCacheBackendUnavailableError as exc:
                 transient_error = exc
@@ -767,18 +767,6 @@ class PostgresEventCache:
                 self._forget_flushed_pending_invalidations(room_id, flushed_pending)
                 return result
         raise _cache_backend_unavailable(operation, transient_error or RuntimeError("operation did not run"))
-
-    async def _rollback_best_effort(self, db: psycopg.AsyncConnection, *, operation: str) -> None:
-        try:
-            await db.rollback()
-        except Exception as exc:
-            logger.debug(
-                "Ignoring Postgres event cache rollback failure",
-                namespace=self._runtime.namespace,
-                operation=operation,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
 
     async def _flush_pending_invalidations(
         self,

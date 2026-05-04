@@ -37,8 +37,12 @@ from mindroom.runtime_support import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+    from typing import Protocol
 
     from mindroom.matrix.cache import ConversationEventCache
+
+    class _RollbackDb(Protocol):
+        async def rollback(self) -> None: ...
 
 
 def _message_event(
@@ -257,6 +261,7 @@ def test_build_event_cache_uses_postgres_when_configured(tmp_path: Path) -> None
     assert cache.namespace == "tenant-a"
 
 
+@pytest.mark.asyncio
 async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -271,6 +276,10 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
         assert operation == "cancelled_callback"
         yield db
 
+    async def rollback_best_effort(db_arg: _RollbackDb, *, operation: str) -> None:
+        assert operation == "cancelled_callback"
+        await db_arg.rollback()
+
     monkeypatch.setattr(
         cache,
         "_runtime",
@@ -278,6 +287,7 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
             is_disabled=False,
             namespace="tenant-a",
             acquire_db_operation=acquire_db_operation,
+            _rollback_best_effort=rollback_best_effort,
         ),
     )
     monkeypatch.setattr(cache, "_flush_pending_invalidations", AsyncMock(return_value=()))
@@ -297,6 +307,7 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
     db.commit.assert_not_awaited()
 
 
+@pytest.mark.asyncio
 async def test_postgres_runtime_rolls_back_cancelled_advisory_lock() -> None:
     """Cancellation while acquiring the advisory lock must rollback the implicit transaction."""
     cancel_reason = "lock wait cancelled"
