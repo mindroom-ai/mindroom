@@ -396,6 +396,7 @@ async def send_thread_summary_event(
         latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
             room_id,
             thread_id,
+            caller_label="thread_summary_send",
         )
     except Exception as exc:
         logger.warning(

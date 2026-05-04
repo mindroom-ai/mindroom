@@ -619,6 +619,7 @@ async def test_send_context_attachments_reuses_latest_thread_event_id_for_multip
     context.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         context.room_id,
         context.thread_id,
+        caller_label="attachment_tool_send",
     )
     first_call = mock_send.await_args_list[0]
     second_call = mock_send.await_args_list[1]
@@ -779,6 +780,7 @@ async def test_send_context_attachments_inherits_resolved_thread_scope(tmp_path:
     ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         ctx.room_id,
         "$thread-root:localhost",
+        caller_label="attachment_tool_send",
     )
     assert mocked.await_args.kwargs["thread_id"] == "$thread-root:localhost"
 

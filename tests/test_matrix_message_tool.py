@@ -7,7 +7,7 @@ import json
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
-from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, call, patch
 
 import nio
 import pytest
@@ -274,6 +274,7 @@ async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         ctx.room_id,
         None,
+        caller_label="matrix_message_tool_send",
     )
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
@@ -415,6 +416,12 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
     assert payload["attachment_thread_id"] == "$evt"
     assert payload["attachment_event_ids"] == ["$file_evt"]
     assert payload["resolved_attachment_ids"] == ["att_upload"]
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_has_awaits(
+        [
+            call(ctx.room_id, None, caller_label="matrix_message_tool_send"),
+            call(ctx.room_id, "$evt", caller_label="attachment_tool_send"),
+        ],
+    )
     mock_send.assert_awaited_once()
     mock_send_file.assert_awaited_once_with(
         ctx.client,
@@ -697,6 +704,11 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
+    )
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        ctx.room_id,
+        None,
+        caller_label="matrix_message_tool_attachment",
     )
     mock_send_attachment_paths.assert_awaited_once()
     assert mock_send_attachment_paths.await_args.args == (ctx,)
@@ -2368,6 +2380,7 @@ async def test_matrix_message_edit_happy_path() -> None:
     ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         ctx.room_id,
         "$ctx-thread:localhost",
+        caller_label="matrix_message_tool_edit",
     )
     ctx.conversation_cache.get_thread_history.assert_not_awaited()
 

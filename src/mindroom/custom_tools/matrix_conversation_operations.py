@@ -74,6 +74,7 @@ class MatrixMessageOperations:
         latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
             room_id,
             thread_id,
+            caller_label="matrix_message_tool_send",
         )
         extra_content: dict[str, Any] = {}
         if ignore_mentions:
@@ -217,6 +218,7 @@ class MatrixMessageOperations:
                 latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
                     room_id,
                     effective_thread_id,
+                    caller_label="matrix_message_tool_attachment",
                 )
                 first_attachment_event_id = await send_file_message(
                     context.client,
@@ -628,6 +630,7 @@ class MatrixMessageOperations:
             latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
                 room_id,
                 thread_id,
+                caller_label="matrix_message_tool_edit",
             )
             if latest_thread_event_id is None:
                 latest_thread_event_id = target

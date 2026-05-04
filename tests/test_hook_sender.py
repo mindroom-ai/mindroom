@@ -541,6 +541,7 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
     bot._conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         "!room:localhost",
         "$thread",
+        caller_label="hook_sender",
     )
 
 

@@ -1168,6 +1168,7 @@ class TestSendSummaryEvent:
         conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
             "!room:x",
             "$root1",
+            caller_label="thread_summary_send",
         )
         conversation_cache.notify_outbound_message.assert_called_once_with("!room:x", "$s1", content)
 

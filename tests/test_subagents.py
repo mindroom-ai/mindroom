@@ -249,6 +249,7 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
     ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
         ctx.room_id,
         ctx.thread_id,
+        caller_label="subagent_tool_send",
     )
     content = send_mock.await_args.args[2]
     assert content["m.relates_to"]["event_id"] == ctx.thread_id

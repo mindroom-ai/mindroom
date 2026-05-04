@@ -753,6 +753,7 @@ async def _build_workflow_message_content(
         latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
             workflow.room_id,
             target.resolved_thread_id,
+            caller_label="scheduled_workflow_message",
         )
     return format_message_with_mentions(
         config,
@@ -777,6 +778,7 @@ async def _build_scheduled_failure_content(
         latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
             workflow.room_id,
             target.resolved_thread_id,
+            caller_label="scheduled_workflow_failure",
         )
     return build_message_content(
         body=error_message,

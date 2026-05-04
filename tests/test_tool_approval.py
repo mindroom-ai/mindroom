@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import nio
 import pytest
@@ -1266,6 +1266,12 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     assert sent_contents[0]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
     assert sent_contents[1]["m.new_content"]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
     assert code_bot.latest_thread_event_id_if_needed.await_count == 2
+    code_bot.latest_thread_event_id_if_needed.assert_has_awaits(
+        [
+            call("!room:localhost", "$thread", caller_label="approval_transport_thread_relation"),
+            call("!room:localhost", "$thread", caller_label="approval_transport_thread_relation"),
+        ],
+    )
     router_bot.latest_thread_event_id_if_needed.assert_not_awaited()
 
 

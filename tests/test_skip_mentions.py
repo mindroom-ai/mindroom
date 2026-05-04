@@ -21,6 +21,7 @@ from mindroom.delivery_gateway import (
     EditTextRequest,
     FinalDeliveryRequest,
     SendTextRequest,
+    StreamingDeliveryRequest,
 )
 from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.logging_config import get_logger, setup_logging
@@ -38,6 +39,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
 
@@ -355,6 +357,12 @@ async def test_delivery_gateway_send_text_logs_target_thread_context(
     assert payload["event"] == "Sent response"
     assert payload["room_id"] == "!test:server"
     assert payload["thread_id"] == "$thread"
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        "!test:server",
+        "$thread",
+        "$event123",
+        caller_label="delivery_send_text",
+    )
 
 
 @pytest.mark.asyncio
@@ -384,6 +392,12 @@ async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_
     assert record_args[1] == "$response"
     assert record_args[2]["m.relates_to"]["event_id"] == "$thread"
     assert record_args[2]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        "!test:server",
+        "$thread",
+        None,
+        caller_label="delivery_send_text",
+    )
 
 
 @pytest.mark.asyncio
@@ -415,6 +429,44 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
     assert record_args[2]["m.relates_to"]["rel_type"] == "m.replace"
     assert record_args[2]["m.relates_to"]["event_id"] == "$original"
     assert "m.relates_to" not in record_args[2]["m.new_content"]
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        "!test:server",
+        "$thread",
+        caller_label="delivery_edit_text",
+    )
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_deliver_stream_labels_latest_thread_lookup(tmp_path: Path) -> None:
+    """Streaming delivery should attribute its latest-thread lookup."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    target = MessageTarget.resolve("!test:server", "$thread", "$root")
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+        return_value="$latest",
+    )
+
+    async def stream() -> AsyncIterator[str]:
+        yield "hello"
+
+    with patch(
+        "mindroom.delivery_gateway.send_streaming_response",
+        new=AsyncMock(return_value=SimpleNamespace(event_id="$stream", final_visible_body="hello")),
+    ):
+        await gateway.deliver_stream(
+            StreamingDeliveryRequest(
+                target=target,
+                response_stream=stream(),
+                existing_event_id="$existing",
+            ),
+        )
+
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+        "!test:server",
+        "$thread",
+        "$root",
+        "$existing",
+        caller_label="delivery_stream",
+    )
 
 
 @pytest.mark.asyncio
