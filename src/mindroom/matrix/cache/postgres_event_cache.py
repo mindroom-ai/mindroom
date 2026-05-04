@@ -135,7 +135,7 @@ async def _close_postgres_connection_best_effort(
 async def initialize_postgres_event_cache_db(
     database_url: str,
     *,
-    namespace: str = "",
+    namespace: str,
 ) -> psycopg.AsyncConnection:
     """Open the PostgreSQL database and ensure the event-cache schema exists."""
     db = await psycopg.AsyncConnection.connect(database_url)

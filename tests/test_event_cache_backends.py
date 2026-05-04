@@ -250,7 +250,10 @@ async def test_sqlite_event_cache_write_operation_rolls_back_cancelled_writer(
     """Cancellation inside a SQLite cache write must not leave the shared connection in a transaction."""
     cache = SqliteEventCache(tmp_path / "event_cache.db")
     cancel_reason = "stop requested"
-    db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+    db = SimpleNamespace(
+        commit=AsyncMock(),
+        rollback=AsyncMock(side_effect=RuntimeError("rollback failed")),
+    )
 
     @asynccontextmanager
     async def acquire_db_operation(room_id: str, *, operation: str) -> AsyncIterator[object]:
@@ -290,7 +293,7 @@ async def test_sqlite_event_cache_initialize_closes_db_after_cancellation(
     """Cancellation during SQLite cache initialization must close the half-initialized connection."""
     cancel_reason = "init cancelled"
     db = SimpleNamespace(
-        close=AsyncMock(),
+        close=AsyncMock(side_effect=RuntimeError("close failed")),
         execute=AsyncMock(),
     )
 
@@ -348,7 +351,10 @@ async def test_postgres_event_cache_initialize_attempts_cleanup_without_masking_
     monkeypatch.setattr("mindroom.matrix.cache.postgres_event_cache.create_postgres_event_cache_schema", create_schema)
 
     with pytest.raises(asyncio.CancelledError, match=cancel_reason):
-        await initialize_postgres_event_cache_db("postgresql://cache:test@localhost/mindroom")
+        await initialize_postgres_event_cache_db(
+            "postgresql://cache:test@localhost/mindroom",
+            namespace="tenant-a",
+        )
 
     db.rollback.assert_awaited_once()
     db.close.assert_awaited_once()
