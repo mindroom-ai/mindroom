@@ -377,6 +377,66 @@ class TestCredentialsSync:
         cm = CredentialsManager(base_path=credentials_dir)
         assert cm.get_api_key("openai") == "sk-test-openai-key"
 
+    def test_invalid_declared_credential_seed_shape_does_not_block_builtin_sync(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Decoded-but-invalid seed declarations should not abort provider env syncing."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-key")
+        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_JSON", json.dumps({"seeds": "not-a-list"}))
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.get_api_key("openai") == "sk-test-openai-key"
+
+    def test_invalid_declared_credential_seed_entry_does_not_block_later_valid_seed(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One invalid optional seed should not prevent later valid seeds from syncing."""
+        monkeypatch.setenv("OAUTH_CLIENT_ID", "client-id")
+        monkeypatch.setenv("OAUTH_CLIENT_SECRET", "client-secret")
+        monkeypatch.setenv(
+            "MINDROOM_CREDENTIAL_SEEDS_JSON",
+            json.dumps(
+                [
+                    {
+                        "service": 123,
+                        "credentials": {"token": {"value": "bad"}},
+                    },
+                    {
+                        "service": "google_oauth_client",
+                        "credentials": {
+                            "client_id": {"env": "OAUTH_CLIENT_ID"},
+                            "client_secret": {"env": "OAUTH_CLIENT_SECRET"},
+                        },
+                    },
+                ],
+            ),
+        )
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("google_oauth_client") == {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "_source": "env",
+        }
+
     def test_declared_credential_seed_env_names_stay_out_of_runtime_env_views(
         self,
         tmp_path: Path,

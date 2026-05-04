@@ -166,7 +166,14 @@ def _decode_seed_entries(
             log_context["path"] = str(source_path)
         logger.warning("credential_seed_declaration_json_invalid", **log_context)
         return []
-    return _coerce_seed_entries(raw_value, source=source_env_var)
+    try:
+        return _coerce_seed_entries(raw_value, source=source_env_var)
+    except (TypeError, ValueError) as exc:
+        log_context = {"env_var": source_env_var, "error": str(exc)}
+        if source_path is not None:
+            log_context["path"] = str(source_path)
+        logger.warning("credential_seed_declaration_invalid", **log_context)
+        return []
 
 
 def _load_declared_credential_seeds(runtime_paths: RuntimePaths) -> list[_CredentialSeedDeclaration]:
@@ -269,10 +276,22 @@ def _sync_declared_credential_seeds(runtime_paths: RuntimePaths) -> int:
         seed = declaration.seed
         raw_service = seed.get("service")
         if not isinstance(raw_service, str):
-            msg = "Credential seed must include a string service name"
-            raise TypeError(msg)
-        service = validate_service_name(raw_service)
-        credentials = _resolve_seed_credentials(seed, service=service, runtime_paths=runtime_paths)
+            logger.warning(
+                "credential_seed_declaration_invalid",
+                env_var=declaration.source_env_var,
+                error="Credential seed must include a string service name",
+            )
+            continue
+        try:
+            service = validate_service_name(raw_service)
+            credentials = _resolve_seed_credentials(seed, service=service, runtime_paths=runtime_paths)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "credential_seed_declaration_invalid",
+                env_var=declaration.source_env_var,
+                error=str(exc),
+            )
+            continue
         if credentials is None:
             continue
         if _sync_service_credentials(
