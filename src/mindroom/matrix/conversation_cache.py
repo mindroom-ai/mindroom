@@ -148,6 +148,8 @@ class ConversationCacheProtocol(Protocol):
         self,
         room_id: str,
         thread_id: str,
+        *,
+        caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve advisory thread context for non-dispatch callers."""
 
@@ -164,6 +166,8 @@ class ConversationCacheProtocol(Protocol):
         self,
         room_id: str,
         thread_id: str,
+        *,
+        caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve strict dispatch thread context using only fresh cache data or a homeserver refill."""
 
@@ -185,6 +189,8 @@ class ConversationCacheProtocol(Protocol):
         thread_id: str | None,
         reply_to_event_id: str | None = None,
         existing_event_id: str | None = None,
+        *,
+        caller_label: str = "latest_thread_event_lookup",
     ) -> str | None:
         """Resolve the latest visible thread event when MSC3440 fallback needs it."""
 
@@ -788,6 +794,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self,
         room_id: str,
         thread_id: str,
+        *,
+        caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve advisory thread context for non-dispatch callers."""
         return await self._read_thread_memoized(
@@ -795,7 +803,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             full_history=False,
             dispatch_safe=False,
-            caller_label="unknown",
+            caller_label=caller_label,
         )
 
     async def get_thread_history(
@@ -831,19 +839,25 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     thread_id,
                     caller_label=caller_label,
                 )
-            return await self.get_dispatch_thread_snapshot(room_id, thread_id)
+            return await self.get_dispatch_thread_snapshot(
+                room_id,
+                thread_id,
+                caller_label=caller_label,
+            )
         if full_history:
             return await self.get_thread_history(
                 room_id,
                 thread_id,
                 caller_label=caller_label,
             )
-        return await self.get_thread_snapshot(room_id, thread_id)
+        return await self.get_thread_snapshot(room_id, thread_id, caller_label=caller_label)
 
     async def get_dispatch_thread_snapshot(
         self,
         room_id: str,
         thread_id: str,
+        *,
+        caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve strict dispatch thread context using only fresh cache data or a homeserver refill."""
         return await self._read_thread_memoized(
@@ -851,7 +865,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             full_history=False,
             dispatch_safe=True,
-            caller_label="unknown",
+            caller_label=caller_label,
         )
 
     async def get_dispatch_thread_history(
@@ -889,6 +903,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_id: str | None,
         reply_to_event_id: str | None = None,
         existing_event_id: str | None = None,
+        *,
+        caller_label: str = "latest_thread_event_lookup",
     ) -> str | None:
         """Resolve the latest visible thread event when MSC3440 fallback needs it."""
         return await self._reads.get_latest_thread_event_id_if_needed(
@@ -896,6 +912,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             reply_to_event_id=reply_to_event_id,
             existing_event_id=existing_event_id,
+            caller_label=caller_label,
         )
 
     def notify_outbound_message(

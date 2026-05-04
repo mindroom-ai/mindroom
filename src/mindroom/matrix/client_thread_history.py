@@ -106,6 +106,9 @@ def _log_thread_history_refresh(
         sidecar_hydration_ms=diagnostics.get("sidecar_hydration_ms", 0.0),
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         cache_reject_reason=diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC),
+        thread_read_source=diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC),
+        thread_read_degraded=diagnostics.get(THREAD_HISTORY_DEGRADED_DIAGNOSTIC, False),
+        thread_read_error=diagnostics.get(THREAD_HISTORY_ERROR_DIAGNOSTIC),
     )
 
 

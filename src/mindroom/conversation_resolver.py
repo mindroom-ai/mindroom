@@ -506,6 +506,7 @@ class ConversationResolver:
         event: DispatchEvent,
         *,
         payload_metadata: DispatchPayloadMetadata | None = None,
+        caller_label: str = "dispatch_context",
     ) -> MessageContext:
         """Extract lightweight routing context without hydrating full thread history."""
         return await self.extract_message_context_impl(
@@ -514,6 +515,7 @@ class ConversationResolver:
             full_history=False,
             dispatch_safe=True,
             payload_metadata=payload_metadata,
+            caller_label=caller_label,
         )
 
     async def extract_trusted_router_relay_context(
@@ -573,6 +575,7 @@ class ConversationResolver:
         *,
         full_history: bool = True,
         payload_metadata: DispatchPayloadMetadata | None = None,
+        caller_label: str = "message_context",
     ) -> MessageContext:
         """Extract message context, optionally using a lightweight thread snapshot."""
         return await self.extract_message_context_impl(
@@ -581,6 +584,7 @@ class ConversationResolver:
             full_history=full_history,
             dispatch_safe=False,
             payload_metadata=payload_metadata,
+            caller_label=caller_label,
         )
 
     async def extract_message_context_impl(

@@ -9044,6 +9044,7 @@ class TestAgentBot:
         mock_snapshot.assert_awaited_once_with(
             room.room_id,
             "$thread_root",
+            caller_label="dispatch_context",
         )
         mock_history.assert_not_awaited()
 
@@ -9114,7 +9115,7 @@ class TestAgentBot:
             event_cache=bot.event_cache,
             cache_write_guard_started_at=ANY,
             trusted_sender_ids=trusted_sender_ids,
-            caller_label="unknown",
+            caller_label="dispatch_context",
             coordinator_queue_wait_ms=ANY,
         )
 

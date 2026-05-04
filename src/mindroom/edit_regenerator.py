@@ -136,6 +136,7 @@ class EditRegenerator:
         context = await self.deps.resolver.extract_message_context(
             room,
             event,
+            caller_label="edit_regeneration_context",
         )
         loaded_turn = self.deps.turn_store.load_turn(
             room=room,

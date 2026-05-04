@@ -1446,7 +1446,7 @@ class TestMatrixConversationCacheThreadReads:
         access._reads.fetch_thread_history_from_client.assert_awaited_once_with(
             "!room:localhost",
             "$thread-root:localhost",
-            caller_label="unknown",
+            caller_label="latest_thread_event_lookup",
             coordinator_queue_wait_ms=0.0,
         )
 
@@ -6752,6 +6752,27 @@ class TestThreadingBehavior:
             caller_label="test_label",
         )
 
+        expected_snapshot = thread_history_result(
+            [_message(event_id="$thread:localhost", body="Root")],
+            is_full_history=False,
+        )
+        access.get_dispatch_thread_snapshot = AsyncMock(return_value=expected_snapshot)
+
+        snapshot_result = await access.get_thread_messages(
+            "!test:localhost",
+            "$thread:localhost",
+            full_history=False,
+            dispatch_safe=True,
+            caller_label="snapshot_label",
+        )
+
+        assert snapshot_result == expected_snapshot
+        access.get_dispatch_thread_snapshot.assert_awaited_once_with(
+            "!test:localhost",
+            "$thread:localhost",
+            caller_label="snapshot_label",
+        )
+
     @pytest.mark.asyncio
     async def test_live_event_cache_update_recovers_after_same_room_failure(self) -> None:
         """A failed same-room cache update should not block the next queued write."""
@@ -8877,7 +8898,7 @@ class TestThreadingBehavior:
             "$thread_root:localhost",
             full_history=False,
             dispatch_safe=True,
-            caller_label="unknown",
+            caller_label="dispatch_context",
         )
 
     @pytest.mark.asyncio

@@ -762,11 +762,10 @@ class TurnController:
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
         ):
-            context_kwargs = {"payload_metadata": payload_metadata} if payload_metadata is not None else {}
             context = await self.deps.resolver.extract_trusted_router_relay_context(
                 room,
                 event,
-                **context_kwargs,
+                payload_metadata=payload_metadata,
             )
             emit_elapsed_timing(
                 "dispatch_handoff.prepare_dispatch.extract_context",
@@ -774,11 +773,10 @@ class TurnController:
                 path="trusted_router_relay",
             )
         else:
-            context_kwargs = {"payload_metadata": payload_metadata} if payload_metadata is not None else {}
             context = await self.deps.resolver.extract_dispatch_context(
                 room,
                 event,
-                **context_kwargs,
+                payload_metadata=payload_metadata,
             )
             emit_elapsed_timing(
                 "dispatch_handoff.prepare_dispatch.extract_context",

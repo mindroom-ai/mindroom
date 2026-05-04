@@ -1631,6 +1631,7 @@ class TestExtractedModuleLoggerRebinding:
         bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
             room.room_id,
             "$thread-root:localhost",
+            caller_label="dispatch_context",
         )
 
 

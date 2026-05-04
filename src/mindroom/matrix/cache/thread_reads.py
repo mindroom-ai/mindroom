@@ -24,6 +24,20 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
+class ThreadHistoryFetcher(typing.Protocol):
+    """Client-backed thread-history fetcher with refresh diagnostics metadata."""
+
+    def __call__(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str,
+        coordinator_queue_wait_ms: float,
+    ) -> typing.Awaitable[ThreadHistoryResult]:
+        """Fetch one thread from cache/source and attach refresh diagnostics."""
+
+
 class ThreadReadPolicy:
     """Own thread-history reads for one cache facade."""
 
@@ -32,10 +46,10 @@ class ThreadReadPolicy:
         *,
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
-        fetch_thread_history_from_client: typing.Callable[..., typing.Awaitable[ThreadHistoryResult]],
-        fetch_thread_snapshot_from_client: typing.Callable[..., typing.Awaitable[ThreadHistoryResult]],
-        fetch_dispatch_thread_history_from_client: typing.Callable[..., typing.Awaitable[ThreadHistoryResult]],
-        fetch_dispatch_thread_snapshot_from_client: typing.Callable[..., typing.Awaitable[ThreadHistoryResult]],
+        fetch_thread_history_from_client: ThreadHistoryFetcher,
+        fetch_thread_snapshot_from_client: ThreadHistoryFetcher,
+        fetch_dispatch_thread_history_from_client: ThreadHistoryFetcher,
+        fetch_dispatch_thread_snapshot_from_client: ThreadHistoryFetcher,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
@@ -79,13 +93,14 @@ class ThreadReadPolicy:
         room_id: str,
         thread_id: str,
         *,
-        fetcher: typing.Callable[..., typing.Awaitable[ThreadHistoryResult]],
+        fetcher: ThreadHistoryFetcher,
         name: str,
         full_history: bool,
         caller_label: str,
-        coordinator_queue_wait_ms: float,
+        queue_wait_started: float,
     ) -> ThreadHistoryResult:
         async def load() -> ThreadHistoryResult:
+            coordinator_queue_wait_ms = round((time.perf_counter() - queue_wait_started) * 1000, 1)
             thread_history = await fetcher(
                 room_id,
                 thread_id,
@@ -122,7 +137,6 @@ class ThreadReadPolicy:
         """Resolve one thread read through the same-thread barrier and fetch selection path."""
         queue_wait_started = time.perf_counter()
         await self._wait_for_pending_thread_cache_updates(room_id, thread_id)
-        coordinator_queue_wait_ms = round((time.perf_counter() - queue_wait_started) * 1000, 1)
         if full_history and dispatch_safe:
             return await self._run_thread_read(
                 room_id,
@@ -131,7 +145,7 @@ class ThreadReadPolicy:
                 name="matrix_cache_refresh_dispatch_thread_history",
                 full_history=True,
                 caller_label=caller_label,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                queue_wait_started=queue_wait_started,
             )
         if full_history:
             return await self._run_thread_read(
@@ -141,7 +155,7 @@ class ThreadReadPolicy:
                 name="matrix_cache_refresh_thread_history",
                 full_history=True,
                 caller_label=caller_label,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                queue_wait_started=queue_wait_started,
             )
         if dispatch_safe:
             return await self._run_thread_read(
@@ -151,7 +165,7 @@ class ThreadReadPolicy:
                 name="matrix_cache_refresh_dispatch_thread_snapshot",
                 full_history=False,
                 caller_label=caller_label,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                queue_wait_started=queue_wait_started,
             )
         return await self._run_thread_read(
             room_id,
@@ -160,7 +174,7 @@ class ThreadReadPolicy:
             name="matrix_cache_refresh_thread_snapshot",
             full_history=False,
             caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            queue_wait_started=queue_wait_started,
         )
 
     async def get_latest_thread_event_id_if_needed(
@@ -169,6 +183,8 @@ class ThreadReadPolicy:
         thread_id: str | None,
         reply_to_event_id: str | None = None,
         existing_event_id: str | None = None,
+        *,
+        caller_label: str = "latest_thread_event_lookup",
     ) -> str | None:
         """Resolve the latest visible thread event when MSC3440 fallback needs it."""
         if thread_id is None or existing_event_id is not None or reply_to_event_id is not None:
@@ -179,7 +195,7 @@ class ThreadReadPolicy:
                 thread_id,
                 full_history=True,
                 dispatch_safe=False,
-                caller_label="unknown",
+                caller_label=caller_label,
             )
         except Exception as exc:
             self.logger.warning(
