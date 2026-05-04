@@ -44,18 +44,6 @@ The transform validates that tool-call and tool-result adjacency remains intact.
 
 The runtime compaction path uses this warm-cache transform for summary chunk requests.
 
-## Cold-Cache Transform
-
-The module also provides a cold-cache transform from the same prepared chain.
-
-The cold-cache transform removes system-role setup messages and inserts a short note that static agent instructions and tool definitions were omitted.
-
-It preserves conversation turns and tool activity that affect future state.
-
-It validates that tool results are not separated from the tool calls they answer.
-
-The cold-cache transform is currently a pure helper covered by tests, not a separate runtime policy branch.
-
 ## Boundary Decisions
 
 Prepared-chain construction is intentionally pure and does not write durable history.
@@ -85,8 +73,6 @@ The legacy XML summary-input helper was removed, so compaction has one serializa
 Unit tests cover prepared-chain materialization from persisted replay.
 
 Unit tests assert that warm-cache compaction preserves the prepared-chain prefix before the final summary instruction.
-
-Unit tests assert that cold-cache stripping does not break tool-call and tool-result adjacency.
 
 Unit tests assert that `compact_scope_history` sends the chain-shaped summary request to the summary model.
 
