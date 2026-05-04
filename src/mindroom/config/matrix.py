@@ -21,9 +21,29 @@ if TYPE_CHECKING:
 
 _RoomAccessMode = Literal["single_user_private", "multi_user"]
 _MultiUserJoinRule = Literal["public", "knock"]
+MatrixSyncMode = Literal["auto", "classic", "sliding"]
 RoomJoinRule = Literal["invite", "public", "knock"]
 RoomDirectoryVisibility = Literal["public", "private"]
 _MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
+
+
+class MatrixSyncConfig(BaseModel):
+    """Configuration for Matrix event sync transport."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: MatrixSyncMode = Field(
+        default="auto",
+        description=(
+            "Matrix sync transport. 'auto' uses MSC4186 Simplified Sliding Sync when supported by the Matrix "
+            "client, 'classic' uses /v3/sync, and 'sliding' requires MSC4186 support."
+        ),
+    )
+    sliding_timeline_limit: int = Field(
+        default=20,
+        ge=1,
+        description="Timeline event limit for each room requested through Simplified Sliding Sync.",
+    )
 
 
 class MindRoomUserConfig(BaseModel):

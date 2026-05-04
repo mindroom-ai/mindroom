@@ -71,7 +71,10 @@ Use `build_message_content()` from `message_builder.py` to construct thread-awar
 
 ### Sync Loop
 
-Each agent bot runs its own sync loop with 30-second long-polling timeout. Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
+Each agent bot runs its own sync loop with a 30-second long-polling timeout.
+The default `matrix_sync.mode: auto` uses MSC4186 Simplified Sliding Sync when the installed `mindroom-nio` client exposes `sliding_sync_forever()`, otherwise it uses classic `/v3/sync`.
+Set `matrix_sync.mode: classic` to force classic sync, or `matrix_sync.mode: sliding` to require Simplified Sliding Sync support.
+Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
 Events are processed in background tasks:
 

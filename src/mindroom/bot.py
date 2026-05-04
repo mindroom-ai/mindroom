@@ -51,6 +51,7 @@ from mindroom.matrix.sync_certification import (
     start_from_loaded_token,
     sync_cache_write_diagnostics,
 )
+from mindroom.matrix.sync_loop import run_matrix_sync_forever
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
 from mindroom.memory import store_conversation_memory
@@ -1341,7 +1342,14 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        await self.client.sync_forever(timeout=_SYNC_TIMEOUT_MS, full_state=not self._first_sync_done)
+        await run_matrix_sync_forever(
+            self.client,
+            config=self.config,
+            agent_name=self.agent_name,
+            room_ids=self.rooms,
+            timeout_ms=_SYNC_TIMEOUT_MS,
+            first_sync_done=self._first_sync_done,
+        )
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         await self._room_lifecycle.on_invite(room, event)
