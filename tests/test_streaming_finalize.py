@@ -700,7 +700,6 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             ResponseOutcome(interactive_target=target),
             support.build_deps(
                 room_id=target.room_id,
-                thread_id=target.resolved_thread_id,
                 interactive_agent_name="code",
             ),
         )

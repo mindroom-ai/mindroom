@@ -194,7 +194,7 @@ export interface Agent {
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
-  compaction?: CompactionConfig | null; // Per-agent auto-compaction overrides
+  compaction?: CompactionConfig | null; // Per-agent required-compaction overrides
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   worker_tools?: string[]; // Tool names to route through scoped workers (overrides defaults)
@@ -218,7 +218,7 @@ export interface Team {
   rooms: string[];
   mode: "coordinate" | "collaborate";
   model?: string; // Optional team-specific model
-  compaction?: CompactionConfig | null; // Per-team auto-compaction overrides
+  compaction?: CompactionConfig | null; // Per-team required-compaction overrides
   num_history_runs?: number | null; // Number of prior scoped runs to include as team history
   num_history_messages?: number | null; // Max team-scoped history messages (mutually exclusive with num_history_runs)
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from team history

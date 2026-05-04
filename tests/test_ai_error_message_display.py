@@ -22,7 +22,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.final_delivery import StreamTransportOutcome
-from mindroom.history.types import HistoryScope
+from mindroom.history import HistoryScope, PreparedHistoryState
 from mindroom.hooks import HookRegistry
 from mindroom.knowledge import KnowledgeResolution
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -146,6 +146,7 @@ def _prepared_run(agent: object, *, prompt: str = "Help me with something") -> S
         agent=agent,
         run_input=[Message(role="user", content=prompt)],
         unseen_event_ids=[],
+        prepared_history=PreparedHistoryState(),
     )
 
 

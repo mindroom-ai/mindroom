@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from agno.db.base import SessionType
 from agno.models.message import Message
+from agno.models.metrics import Metrics
 from agno.run.agent import (
     ModelRequestCompletedEvent,
     RunCancelledEvent,
@@ -26,6 +27,7 @@ from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
+    build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
 from mindroom.cancellation import build_cancelled_error
@@ -47,6 +49,7 @@ from mindroom.history import (
     apply_replay_plan,
     close_agent_runtime_state_dbs,
     compute_prompt_token_breakdown,
+    note_prepared_history_timing,
     open_resolved_scope_session_context,
 )
 from mindroom.history.interrupted_replay import (
@@ -65,6 +68,7 @@ from mindroom.logging_config import get_logger
 from mindroom.media_fallback import should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
+from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
 from mindroom.tool_system.events import (
     complete_pending_tool_block,
@@ -82,7 +86,7 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
-    from mindroom.history import CompactionLifecycle, PostResponseCompactionCheck
+    from mindroom.history import CompactionLifecycle
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -565,6 +569,48 @@ def _stream_completed_without_visible_output(state: _StreamingAttemptState) -> b
     return state.completed_run_event is not None and not visible_text and state.observed_tool_calls == 0
 
 
+def _metrics_comparison_payload(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
+    if metrics is None:
+        return None
+    if isinstance(metrics, Metrics):
+        metrics_dict = metrics.to_dict()
+        return metrics_dict if isinstance(metrics_dict, dict) else None
+    return metrics
+
+
+def _usage_metric_int(metrics: Metrics | dict[str, Any] | None, key: str) -> int | None:
+    payload = _metrics_comparison_payload(metrics)
+    if payload is None:
+        return None
+    value = payload.get(key)
+    return value if isinstance(value, int) else None
+
+
+def _request_metrics_are_more_complete(
+    completed_metrics: Metrics | dict[str, Any] | None,
+    request_metrics: dict[str, Any] | None,
+) -> bool:
+    if request_metrics is None:
+        return False
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        request_value = _usage_metric_int(request_metrics, key)
+        completed_value = _usage_metric_int(completed_metrics, key)
+        if request_value is not None and completed_value is not None and request_value > completed_value:
+            return True
+    return False
+
+
+def _select_streaming_usage_metrics(
+    completed_metrics: Metrics | None,
+    request_metrics: dict[str, Any] | None,
+) -> tuple[Metrics | dict[str, Any] | None, dict[str, Any] | None]:
+    if completed_metrics is None:
+        return request_metrics, None
+    if _request_metrics_are_more_complete(completed_metrics, request_metrics):
+        return request_metrics, completed_metrics.to_dict()
+    return completed_metrics, request_metrics
+
+
 def _attempt_request_log_context(
     *,
     agent_id: str,
@@ -633,6 +679,28 @@ def _assert_agent_target(agent_name: str, config: Config) -> None:
         raise ValueError(msg)
 
 
+def _current_sender_id_kwargs(
+    user_id: str | None,
+    *,
+    include_openai_compat_guidance: bool,
+) -> dict[str, str | None]:
+    """Return prompt-preparation kwargs without Matrix sender metadata for OpenAI-compatible calls."""
+    if include_openai_compat_guidance:
+        return {"current_sender_id": None}
+    return {
+        "current_sender_id": _prompt_current_sender_id(
+            user_id,
+            include_openai_compat_guidance=include_openai_compat_guidance,
+        ),
+    }
+
+
+def _mark_pipeline_timing(pipeline_timing: DispatchPipelineTiming | None, label: str) -> None:
+    """Record one dispatch timing mark when turn-level timing is available."""
+    if pipeline_timing is not None:
+        pipeline_timing.mark(label)
+
+
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     agent_name: str,
@@ -649,7 +717,6 @@ async def _prepare_agent_and_prompt(
     active_event_ids: Collection[str] = frozenset(),
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -658,6 +725,7 @@ async def _prepare_agent_and_prompt(
     timing_scope: str | None = None,
     model_prompt: str | None = None,
     current_sender_id: str | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedAgentRun:
     """Prepare agent and full prompt for AI processing.
 
@@ -665,6 +733,7 @@ async def _prepare_agent_and_prompt(
     """
     _assert_agent_target(agent_name, config)
     storage_path = runtime_paths.storage_root
+    _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
     prompt_parts = await build_memory_prompt_parts(
         prompt,
         agent_name,
@@ -679,6 +748,7 @@ async def _prepare_agent_and_prompt(
         model_prompt=model_prompt,
         prompt_parts=prompt_parts,
     )
+    _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
 
     runtime_model = config.resolve_runtime_model(
         entity_name=agent_name,
@@ -689,6 +759,7 @@ async def _prepare_agent_and_prompt(
     if resolved_session_id is None and scope_context is not None and scope_context.session is not None:
         resolved_session_id = scope_context.session.session_id
 
+    _mark_pipeline_timing(pipeline_timing, "agent_build_start")
     agent = create_agent(
         agent_name,
         config,
@@ -713,6 +784,7 @@ async def _prepare_agent_and_prompt(
                 timing_scope=timing_scope,
             ),
         )
+    _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
     prepared_execution = await prepare_agent_execution_context(
         scope_context=scope_context,
@@ -729,18 +801,9 @@ async def _prepare_agent_and_prompt(
         compaction_lifecycle=compaction_lifecycle,
         current_sender_id=current_sender_id,
         timing_scope=timing_scope,
+        pipeline_timing=pipeline_timing,
     )
-    prepared_history = PreparedHistoryState(
-        compaction_outcomes=prepared_execution.compaction_outcomes,
-        replay_plan=prepared_execution.replay_plan,
-        replays_persisted_history=prepared_execution.replays_persisted_history,
-        compaction_decision=(
-            prepared_execution.compaction_decision
-            if prepared_execution.compaction_decision is not None
-            else PreparedHistoryState().compaction_decision
-        ),
-        post_response_compaction_checks=list(prepared_execution.post_response_compaction_checks or []),
-    )
+    prepared_history = prepared_execution.prepared_history
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
     unseen_event_ids = prepared_execution.unseen_event_ids
@@ -758,14 +821,13 @@ async def _prepare_agent_and_prompt(
             replay_plan=prepared_history.replay_plan,
             replays_persisted_history=prepared_history.replays_persisted_history,
             compaction_decision=prepared_history.compaction_decision,
-            post_response_compaction_checks=prepared_history.post_response_compaction_checks,
+            compaction_reply_outcome=prepared_history.compaction_reply_outcome,
+            prepared_context_tokens=prepared_history.prepared_context_tokens,
+            estimated_context_tokens=prepared_history.estimated_context_tokens,
         )
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.clear()
             compaction_outcomes_collector.extend(enriched_outcomes)
-    if post_response_compaction_checks_collector is not None:
-        post_response_compaction_checks_collector.extend(prepared_history.post_response_compaction_checks)
-
     logger.info(
         "Preparing agent and prompt",
         agent=agent_name,
@@ -804,7 +866,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -849,10 +910,8 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
         compaction_outcomes_collector: Optional list that receives completed
-            compaction outcomes from auto-compaction and manual `compact_context`
+            compaction outcomes from required compaction and manual `compact_context`
             tool calls during this run.
-        post_response_compaction_checks_collector: Optional list that receives
-            post-response compaction checks from this run.
         compaction_lifecycle: Optional lifecycle sink for ordered foreground
             compaction notices.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
@@ -887,8 +946,9 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
-    attempt_run_id = run_id
     metadata: dict[str, Any] | None = None
+    run_extra_content: dict[str, Any] | None = None
+    attempt_run_id = run_id
     try:
         try:
             _assert_agent_target(agent_name, config)
@@ -925,7 +985,6 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     active_event_ids=active_event_ids,
                     execution_identity=execution_identity,
                     compaction_outcomes_collector=compaction_outcomes_collector,
-                    post_response_compaction_checks_collector=post_response_compaction_checks_collector,
                     compaction_lifecycle=compaction_lifecycle,
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
@@ -933,13 +992,15 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                     model_prompt=model_prompt,
-                    current_sender_id=_prompt_current_sender_id(
+                    **_current_sender_id_kwargs(
                         user_id,
                         include_openai_compat_guidance=include_openai_compat_guidance,
                     ),
+                    pipeline_timing=pipeline_timing,
                 )
                 if pipeline_timing is not None:
                     pipeline_timing.mark("history_ready")
+                    note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
             except Exception as e:
                 logger.exception("Error preparing agent", agent=agent_name)
                 return get_user_friendly_error_message(e, agent_name)
@@ -949,6 +1010,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             if agent.model is not None:
                 ai_runtime.install_queued_message_notice_hook(agent.model)
 
+            run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
                 unseen_event_ids,
@@ -958,7 +1020,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 correlation_id=resolved_correlation_id,
                 tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
                 model_params=model_params_payload(agent.model) if agent.model is not None else {},
-                extra_metadata=matrix_run_metadata,
+                extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
             )
             if turn_recorder is not None:
                 turn_recorder.set_run_metadata(metadata)
@@ -1062,7 +1124,9 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     model_provider=response.model_provider,
                     room_id=room_id,
                     metrics=response.metrics,
+                    context_input_tokens=prepared_run.prepared_history.estimated_context_tokens,
                     tool_count=len(response.tools) if response.tools is not None else 0,
+                    prepared_history=prepared_run.prepared_history,
                 )
                 if run_metadata:
                     run_metadata_collector.update(run_metadata)
@@ -1111,7 +1175,18 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
     except asyncio.CancelledError:
         if turn_recorder is not None:
             turn_recorder.record_interrupted(
-                run_metadata=metadata or turn_recorder.run_metadata,
+                run_metadata=metadata
+                if metadata is not None
+                else turn_recorder.run_metadata
+                or build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    requester_id=resolved_requester_id,
+                    correlation_id=resolved_correlation_id,
+                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+                ),
                 assistant_text=turn_recorder.assistant_text,
                 completed_tools=turn_recorder.completed_tools,
                 interrupted_tools=turn_recorder.interrupted_tools,
@@ -1125,7 +1200,17 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                 partial_text="",
                 completed_tools=[],
                 interrupted_tools=[],
-                run_metadata=metadata,
+                run_metadata=metadata
+                if metadata is not None
+                else build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    requester_id=resolved_requester_id,
+                    correlation_id=resolved_correlation_id,
+                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+                ),
                 is_team=False,
             )
         raise
@@ -1272,7 +1357,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     run_metadata_collector: dict[str, Any] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
@@ -1315,10 +1399,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         execution_identity: Request execution identity used to resolve scoped
             agent state, sessions, and memory consistently for this run.
         compaction_outcomes_collector: Optional list that receives completed
-            compaction outcomes from auto-compaction and manual `compact_context`
+            compaction outcomes from required compaction and manual `compact_context`
             tool calls during this run.
-        post_response_compaction_checks_collector: Optional list that receives
-            post-response compaction checks from this run.
         compaction_lifecycle: Optional lifecycle sink for ordered foreground
             compaction notices.
         delegation_depth: Current nested delegation depth for delegated-agent runs.
@@ -1353,9 +1435,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     scope_context: ScopeSessionContext | None = None
     standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
-    attempt_run_id = run_id
-    state = _StreamingAttemptState()
     metadata: dict[str, Any] | None = None
+    run_extra_content: dict[str, Any] | None = None
+    attempt_run_id = run_id
+    prepared_context_input_tokens: int | None = None
+    state = _StreamingAttemptState()
 
     try:
         try:
@@ -1394,7 +1478,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     active_event_ids=active_event_ids,
                     execution_identity=execution_identity,
                     compaction_outcomes_collector=compaction_outcomes_collector,
-                    post_response_compaction_checks_collector=post_response_compaction_checks_collector,
                     compaction_lifecycle=compaction_lifecycle,
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
@@ -1402,13 +1485,15 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                     model_prompt=model_prompt,
-                    current_sender_id=_prompt_current_sender_id(
+                    **_current_sender_id_kwargs(
                         user_id,
                         include_openai_compat_guidance=include_openai_compat_guidance,
                     ),
+                    pipeline_timing=pipeline_timing,
                 )
                 if pipeline_timing is not None:
                     pipeline_timing.mark("history_ready")
+                    note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
             except Exception as e:
                 logger.exception("Error preparing agent for streaming", agent=agent_name)
                 yield get_user_friendly_error_message(e, agent_name)
@@ -1416,9 +1501,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             agent = prepared_run.agent
             run_input = prepared_run.run_input
             unseen_event_ids = prepared_run.unseen_event_ids
+            prepared_context_input_tokens = prepared_run.prepared_history.estimated_context_tokens
             if agent.model is not None:
                 ai_runtime.install_queued_message_notice_hook(agent.model)
 
+            run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
             metadata = build_matrix_run_metadata(
                 reply_to_event_id,
                 unseen_event_ids,
@@ -1428,7 +1515,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 correlation_id=resolved_correlation_id,
                 tools_schema=agent_tool_definition_payloads_for_logging(agent) if agent.model is not None else [],
                 model_params=model_params_payload(agent.model) if agent.model is not None else {},
-                extra_metadata=matrix_run_metadata,
+                extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
             )
             if turn_recorder is not None:
                 turn_recorder.set_run_metadata(metadata)
@@ -1554,10 +1641,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 model_provider=state.latest_model_provider,
                                 room_id=room_id,
                                 metrics=fallback_metrics,
+                                context_input_tokens=prepared_context_input_tokens,
                                 context_raw_input_tokens=state.latest_request_input_tokens,
                                 context_cache_read_tokens=state.latest_request_cache_read_tokens,
                                 context_cache_write_tokens=state.latest_request_cache_write_tokens,
                                 tool_count=state.observed_tool_calls,
+                                prepared_history=prepared_run.prepared_history,
                             )
                             if cancelled_metadata:
                                 run_metadata_collector.update(cancelled_metadata)
@@ -1587,6 +1676,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     final_status = (
                         RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed
                     )
+                    usage_metrics, usage_metrics_fallback = _select_streaming_usage_metrics(
+                        state.completed_run_event.metrics if state.completed_run_event is not None else None,
+                        fallback_metrics,
+                    )
                     run_metadata = build_ai_run_metadata_content(
                         agent_name=agent_name,
                         config=config,
@@ -1602,8 +1695,9 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         model=state.latest_model_id,
                         model_provider=state.latest_model_provider,
                         room_id=room_id,
-                        metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
-                        metrics_fallback=fallback_metrics,
+                        metrics=usage_metrics,
+                        metrics_fallback=usage_metrics_fallback,
+                        context_input_tokens=prepared_context_input_tokens,
                         context_raw_input_tokens=state.latest_request_input_tokens,
                         context_cache_read_tokens=state.latest_request_cache_read_tokens,
                         context_cache_write_tokens=state.latest_request_cache_write_tokens,
@@ -1612,6 +1706,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             if state.completed_run_event is not None and state.completed_run_event.tools is not None
                             else state.observed_tool_calls
                         ),
+                        prepared_history=prepared_run.prepared_history,
                     )
                     if run_metadata:
                         run_metadata_collector.update(run_metadata)
@@ -1633,7 +1728,18 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     except asyncio.CancelledError:
         if turn_recorder is not None:
             turn_recorder.record_interrupted(
-                run_metadata=metadata or turn_recorder.run_metadata,
+                run_metadata=metadata
+                if metadata is not None
+                else turn_recorder.run_metadata
+                or build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    requester_id=resolved_requester_id,
+                    correlation_id=resolved_correlation_id,
+                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+                ),
                 assistant_text=state.assistant_text,
                 completed_tools=state.completed_tools,
                 interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
@@ -1647,7 +1753,17 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                 partial_text=state.assistant_text,
                 completed_tools=state.completed_tools,
                 interrupted_tools=[pending.trace_entry for pending in state.pending_tools],
-                run_metadata=metadata,
+                run_metadata=metadata
+                if metadata is not None
+                else build_matrix_run_metadata(
+                    reply_to_event_id,
+                    unseen_event_ids,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    requester_id=resolved_requester_id,
+                    correlation_id=resolved_correlation_id,
+                    extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
+                ),
                 is_team=False,
             )
         raise

@@ -37,7 +37,6 @@ from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.history.types import PostResponseCompactionCheck
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.interactive import InteractiveMetadata
@@ -462,51 +461,6 @@ async def test_post_response_effects_strips_transient_enrichment_when_flagged() 
 
 
 @pytest.mark.asyncio
-async def test_post_response_effects_strips_transient_enrichment_before_compaction() -> None:
-    """Compaction should only see persisted history after transient cleanup."""
-    calls: list[str] = []
-    outcome = ResponseOutcome(
-        strip_transient_enrichment_after_run=True,
-        session_id="session-1",
-        session_type=SessionType.AGENT,
-        post_response_compaction_checks=(
-            PostResponseCompactionCheck(
-                agent_name="general",
-                session_id="session-1",
-                scope_kind="agent",
-                scope_id="general",
-                execution_plan=MagicMock(),
-                active_context_window=4096,
-            ),
-        ),
-    )
-
-    def cleanup(_outcome: ResponseOutcome) -> None:
-        calls.append("cleanup")
-
-    async def compact(_checks: object, _response_event_id: str) -> None:
-        calls.append("compact")
-
-    await apply_post_response_effects(
-        FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$response",
-            is_visible_response=True,
-            final_visible_body="response",
-            delivery_kind="sent",
-        ),
-        outcome,
-        PostResponseEffectsDeps(
-            logger=MagicMock(),
-            strip_transient_enrichment=cleanup,
-            run_post_response_compaction=compact,
-        ),
-    )
-
-    assert calls == ["cleanup", "compact"]
-
-
-@pytest.mark.asyncio
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(tmp_path: Path) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)
@@ -531,7 +485,6 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     )
     deps = support.build_deps(
         room_id="!room:localhost",
-        thread_id="$thread",
         interactive_agent_name="general",
     )
     thread_history = [

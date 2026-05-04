@@ -17,6 +17,7 @@ from agno.session.team import TeamSession
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
@@ -40,7 +41,6 @@ _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _ORIGINAL_STATUS_KEY = "mindroom_original_status"
 _INTERRUPTED_REPLAY_STATE = "interrupted"
 _INTERRUPTED_RESPONSE_MARKER = "[interrupted]"
-_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 _TRACE_METADATA_KEYS = (
     "room_id",
     "thread_id",
@@ -168,7 +168,7 @@ def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[st
     if snapshot.source_event_prompts:
         metadata[MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(snapshot.source_event_prompts)
     if snapshot.response_event_id is not None:
-        metadata[_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = snapshot.response_event_id
+        metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = snapshot.response_event_id
     return metadata
 
 
@@ -223,7 +223,7 @@ def build_interrupted_replay_snapshot(
     source_event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
     source_event_ids = _normalized_string_tuple(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
     source_event_prompts = _normalized_prompt_items(metadata.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY))
-    raw_response_event_id = response_event_id or metadata.get(_MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+    raw_response_event_id = response_event_id or metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
     trace_metadata = {key: metadata[key] for key in _TRACE_METADATA_KEYS if key in metadata}
     return InterruptedReplaySnapshot(
         user_message=(user_message or "").strip(),

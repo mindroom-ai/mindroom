@@ -3,7 +3,13 @@
 from mindroom.history.compaction import (
     agent_tool_definition_payloads_for_logging,
     compute_prompt_token_breakdown,
+    normalize_compaction_budget_tokens,
     team_tool_definition_payloads_for_logging,
+)
+from mindroom.history.manual import (
+    MANUAL_COMPACTION_SUCCESS_MESSAGE,
+    ManualCompactionRequestResult,
+    request_compaction_before_next_reply,
 )
 from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
 from mindroom.history.runtime import (
@@ -16,6 +22,7 @@ from mindroom.history.runtime import (
     estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
+    note_prepared_history_timing,
     open_bound_scope_session_context,
     open_resolved_scope_session_context,
     open_scope_session_context,
@@ -23,7 +30,6 @@ from mindroom.history.runtime import (
     prepare_history_for_run,
     prepare_scope_history,
     resolve_bound_team_scope_context,
-    run_post_response_compaction_check,
 )
 from mindroom.history.storage import (
     add_pending_force_compaction_scope,
@@ -37,13 +43,14 @@ from mindroom.history.types import (
     CompactionDecision,
     CompactionLifecycle,
     CompactionLifecycleFailure,
+    CompactionLifecycleProgress,
     CompactionLifecycleStart,
     CompactionLifecycleSuccess,
     CompactionOutcome,
+    CompactionReplyOutcome,
     HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
-    PostResponseCompactionCheck,
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
@@ -51,16 +58,19 @@ from mindroom.history.types import (
 )
 
 __all__ = [
+    "MANUAL_COMPACTION_SUCCESS_MESSAGE",
     "CompactionDecision",
     "CompactionLifecycle",
     "CompactionLifecycleFailure",
+    "CompactionLifecycleProgress",
     "CompactionLifecycleStart",
     "CompactionLifecycleSuccess",
     "CompactionOutcome",
+    "CompactionReplyOutcome",
     "HistoryPolicy",
     "HistoryScope",
     "HistoryScopeState",
-    "PostResponseCompactionCheck",
+    "ManualCompactionRequestResult",
     "PreparedHistoryState",
     "PreparedScopeHistory",
     "ResolvedHistoryExecutionPlan",
@@ -78,6 +88,8 @@ __all__ = [
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
     "manual_compaction_unavailable_message",
+    "normalize_compaction_budget_tokens",
+    "note_prepared_history_timing",
     "open_bound_scope_session_context",
     "open_resolved_scope_session_context",
     "open_scope_session_context",
@@ -86,9 +98,9 @@ __all__ = [
     "prepare_scope_history",
     "read_scope_seen_event_ids",
     "read_scope_state",
+    "request_compaction_before_next_reply",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
-    "run_post_response_compaction_check",
     "strip_transient_enrichment_from_session",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",

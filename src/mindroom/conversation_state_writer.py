@@ -10,6 +10,7 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history import HistoryScope, create_scope_session_storage
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
 
@@ -108,9 +109,9 @@ class ConversationStateWriter:
             if not isinstance(run, (RunOutput, TeamRunOutput)) or run.run_id != run_id:
                 continue
             metadata = dict(run.metadata or {})
-            if metadata.get("matrix_response_event_id") == response_event_id:
+            if metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
                 return
-            metadata["matrix_response_event_id"] = response_event_id
+            metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
             run.metadata = metadata
             storage.upsert_session(session)
             return

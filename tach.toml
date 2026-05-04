@@ -45,6 +45,7 @@ depends_on = [
     "mindroom.media_fallback",
     "mindroom.media_inputs",
     "mindroom.memory",
+    "mindroom.metadata_merge",
     "mindroom.timing",
     "mindroom.tool_system.events",
 ]
@@ -165,6 +166,10 @@ visibility = [
     "mindroom.topic_generator",
     "mindroom.voice_handler",
 ]
+
+[[modules]]
+path = "mindroom.metadata_merge"
+depends_on = []
 
 [[modules]]
 path = "mindroom.agent_policy"
@@ -359,6 +364,7 @@ path = "mindroom.api.openai_compat"
 depends_on = [
     "mindroom.agent_run_context",
     "mindroom.ai",
+    "mindroom.ai_run_metadata",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.execution_preparation",
@@ -366,6 +372,7 @@ depends_on = [
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.metadata_merge",
     "mindroom.routing",
     "mindroom.teams",
     "mindroom.tool_system.events",
@@ -637,6 +644,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.logging_config",
+    "mindroom.metadata_merge",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
@@ -827,6 +835,7 @@ depends_on = [
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.ai_run_metadata",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.history",
@@ -890,6 +899,7 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.authorization",
     "mindroom.cancellation",
@@ -903,6 +913,7 @@ depends_on = [
     "mindroom.matrix.rooms",
     "mindroom.media_fallback",
     "mindroom.media_inputs",
+    "mindroom.metadata_merge",
     "mindroom.model_loading",
     "mindroom.team_exact_members",
     "mindroom.tool_system.events",
@@ -1473,6 +1484,7 @@ depends_on = [
 path = "mindroom.conversation_state_writer"
 depends_on = [
     "mindroom.agent_storage",
+    "mindroom.constants",
     "mindroom.history",
     "mindroom.runtime_protocols",
 ]
@@ -2590,6 +2602,8 @@ expose = [
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
     "manual_compaction_unavailable_message",
+    "normalize_compaction_budget_tokens",
+    "note_prepared_history_timing",
     "open_bound_scope_session_context",
     "open_resolved_scope_session_context",
     "open_scope_session_context",
@@ -2600,7 +2614,6 @@ expose = [
     "read_scope_state",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
-    "run_post_response_compaction_check",
     "strip_transient_enrichment_from_session",
     "team_tool_definition_payloads_for_logging",
     "update_scope_seen_event_ids",

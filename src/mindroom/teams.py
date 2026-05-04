@@ -32,6 +32,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent
 from mindroom.ai import build_matrix_run_metadata, resolve_run_correlation_id
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
@@ -45,6 +46,7 @@ from mindroom.execution_preparation import (
 from mindroom.history import (
     ScopeSessionContext,
     close_team_runtime_state_dbs,
+    note_prepared_history_timing,
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
     team_tool_definition_payloads_for_logging,
@@ -63,6 +65,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
+from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,
@@ -86,12 +89,13 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history import CompactionLifecycle, CompactionOutcome, PostResponseCompactionCheck
+    from mindroom.history import CompactionLifecycle, CompactionOutcome
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.runtime_protocols import OrchestratorRuntime
+    from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -1457,10 +1461,10 @@ async def _prepare_materialized_team_execution(
     correlation_id: str | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
     configured_team_name: str | None,
-    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
@@ -1490,9 +1494,13 @@ async def _prepare_materialized_team_execution(
         compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,
+        pipeline_timing=pipeline_timing,
     )
-    if post_response_compaction_checks_collector is not None:
-        post_response_compaction_checks_collector.extend(prepared_execution.post_response_compaction_checks or [])
+    prepared_history = prepared_execution.prepared_history
+    if pipeline_timing is not None:
+        pipeline_timing.mark("history_ready")
+        note_prepared_history_timing(pipeline_timing, prepared_history)
+    run_extra_content = build_prepared_history_metadata_content(prepared_history)
     run_metadata = build_matrix_run_metadata(
         reply_to_event_id,
         prepared_execution.unseen_event_ids,
@@ -1502,7 +1510,7 @@ async def _prepare_materialized_team_execution(
         correlation_id=correlation_id,
         tools_schema=team_tool_definition_payloads_for_logging(team),
         model_params=model_params_payload(team.model) if team.model is not None else {},
-        extra_metadata=matrix_run_metadata,
+        extra_metadata=deep_merge_metadata(matrix_run_metadata, run_extra_content),
     )
     return _PreparedMaterializedTeamExecution(
         messages=prepared_execution.messages,
@@ -1529,12 +1537,12 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     transient_system_context_collector: list[str] | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
@@ -1580,6 +1588,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
     media_inputs = media or MediaInputs()
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
+    unseen_event_ids: list[str] = []
     attempt_run_id = run_id
     run_metadata: dict[str, Any] | None = None
 
@@ -1593,10 +1602,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             team_name=configured_team_name,
         ) as opened_scope_context:
             scope_context = opened_scope_context
-            ai_runtime.scrub_queued_notice_session_context(
-                scope_context=scope_context,
-                entity_name=configured_team_name or team_name,
-            )
             team = build_materialized_team_instance(
                 requested_agent_names=team_members.requested_agent_names,
                 agents=agents,
@@ -1625,14 +1630,15 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 requester_id=requester_id,
                 correlation_id=correlation_id,
                 compaction_outcomes_collector=compaction_outcomes_collector,
-                post_response_compaction_checks_collector=post_response_compaction_checks_collector,
                 compaction_lifecycle=compaction_lifecycle,
                 configured_team_name=configured_team_name,
                 thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
                 matrix_run_metadata=matrix_run_metadata,
+                pipeline_timing=pipeline_timing,
                 system_enrichment_items=system_enrichment_items,
             )
             prompt = prepared_execution.prepared_prompt
+            unseen_event_ids = prepared_execution.unseen_event_ids
             run_metadata = prepared_execution.run_metadata
             turn_recorder.set_run_metadata(run_metadata)
             logger.info("executing_team_response", agent_count=len(agents), mode=mode.value)
@@ -1811,7 +1817,18 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 )
     except asyncio.CancelledError:
         turn_recorder.record_interrupted(
-            run_metadata=run_metadata or turn_recorder.run_metadata,
+            run_metadata=run_metadata
+            if run_metadata is not None
+            else turn_recorder.run_metadata
+            or build_matrix_run_metadata(
+                reply_to_event_id,
+                unseen_event_ids,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=requester_id,
+                correlation_id=correlation_id,
+                extra_metadata=matrix_run_metadata,
+            ),
             assistant_text=turn_recorder.assistant_text,
             completed_tools=turn_recorder.completed_tools,
             interrupted_tools=turn_recorder.interrupted_tools,
@@ -1908,12 +1925,12 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     active_event_ids: Collection[str] = frozenset(),
     response_sender_id: str | None = None,
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     configured_team_name: str | None = None,
     matrix_run_metadata: dict[str, Any] | None = None,
     system_enrichment_items: Sequence[EnrichmentItem] = (),
     transient_system_context_collector: list[str] | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
     *,
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
@@ -1988,10 +2005,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             team_name=configured_team_name,
         ) as opened_scope_context:
             scope_context = opened_scope_context
-            ai_runtime.scrub_queued_notice_session_context(
-                scope_context=scope_context,
-                entity_name=team_label,
-            )
             team = build_materialized_team_instance(
                 requested_agent_names=team_members.requested_agent_names,
                 agents=team_members.agents,
@@ -2020,11 +2033,11 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 requester_id=requester_id,
                 correlation_id=correlation_id,
                 compaction_outcomes_collector=compaction_outcomes_collector,
-                post_response_compaction_checks_collector=post_response_compaction_checks_collector,
                 compaction_lifecycle=compaction_lifecycle,
                 configured_team_name=configured_team_name,
                 thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
                 matrix_run_metadata=matrix_run_metadata,
+                pipeline_timing=pipeline_timing,
                 system_enrichment_items=system_enrichment_items,
             )
             prepared_prompt = prepared_execution.prepared_prompt
@@ -2428,6 +2441,17 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                             session_id=session_id,
                             event_ids=[reply_to_event_id, *unseen_event_ids],
                         )
+                    if emitted_output:
+                        canonical_text = render_canonical_partial_text()
+                        turn_recorder.record_completed(
+                            run_metadata=run_metadata,
+                            assistant_text=(
+                                _format_team_header(team_members.display_names) + canonical_text
+                                if canonical_text
+                                else ""
+                            ),
+                            completed_tools=completed_tools,
+                        )
                     return
             finally:
                 _cleanup_team_notice_state(
@@ -2438,7 +2462,18 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 )
     except asyncio.CancelledError:
         turn_recorder.record_interrupted(
-            run_metadata=run_metadata or turn_recorder.run_metadata,
+            run_metadata=run_metadata
+            if run_metadata is not None
+            else turn_recorder.run_metadata
+            or build_matrix_run_metadata(
+                reply_to_event_id,
+                unseen_event_ids,
+                room_id=room_id,
+                thread_id=thread_id,
+                requester_id=requester_id,
+                correlation_id=correlation_id,
+                extra_metadata=matrix_run_metadata,
+            ),
             assistant_text=render_canonical_partial_text(),
             completed_tools=completed_tools,
             interrupted_tools=[pending.trace_entry for pending in pending_tools],

@@ -462,8 +462,7 @@ def mark_published_index_refresh_succeeded(key: PublishedIndexKey) -> None:
     )
 
 
-def _state_collection_name(key: PublishedIndexKey, state: PublishedIndexState) -> str:
-    _ = key
+def _state_collection_name(state: PublishedIndexState) -> str:
     if state.collection is None:
         msg = "Published knowledge metadata is missing a collection name"
         raise ValueError(msg)
@@ -480,7 +479,7 @@ def _build_published_index_vector_db(
     return cast(
         "_PublishedIndexVectorDb",
         manager_module.ChromaDb(
-            collection=_state_collection_name(key, state),
+            collection=_state_collection_name(state),
             path=str(published_index_storage_path(key)),
             persistent_client=True,
             embedder=manager_module._create_embedder(config, runtime_paths),

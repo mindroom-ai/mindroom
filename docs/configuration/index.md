@@ -242,7 +242,8 @@ teams:
     num_history_runs: 8            # Optional: Team-scoped replay policy
     num_history_messages: null     # Optional: Mutually exclusive with num_history_runs
     max_tool_calls_from_history: 6 # Optional: Limit replayed tool call messages
-    compaction:                    # Optional: Team-scoped auto-compaction overrides
+    compaction:                    # Optional: Team-scoped required-compaction overrides
+      # Soft thresholds do not compact by themselves while history still fits.
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
@@ -277,8 +278,9 @@ defaults:
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
   compress_tool_results: false     # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
-  # Auto-compaction is enabled by default.
-  # Set enabled: false to disable destructive compaction globally.
+  # Required compaction is enabled by default.
+  # Soft thresholds do not compact by themselves while history still fits.
+  # Set enabled: false to disable automatic pre-reply compaction globally.
   compaction:
     enabled: true
     threshold_percent: 0.8
@@ -315,10 +317,11 @@ Those tools keep using normal shared credentials even when `worker_grantable_cre
 `google_vertex_adc` is intentionally not supported here because isolated workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; use that auth path only in the main runtime.
 Sandbox-proxied execution is stricter than direct local execution: ordinary runtime `.env` values and provider env do not carry over unless they are explicitly passed through.
 
-# Auto-compaction is destructive inside the active session.
+# Required compaction is destructive inside the active session.
 # It uses one Matrix lifecycle notice that is edited in place.
-# It runs before a reply only when needed for that reply.
-# Otherwise it runs immediately after a successful reply when the updated session crosses the threshold.
+# It runs before a reply when raw history exceeds the hard replay budget.
+# It also runs before the next reply after a manual compact_context request.
+# Otherwise MindRoom leaves the stored session unchanged and relies on replay fitting for that reply.
 # It rewrites the stored session summary and removes compacted raw runs from the live session.
 # Agno then replays only the summary plus recent runs.
 # Use __MINDROOM_INHERIT__ inside a tool override to clear one inherited authored field

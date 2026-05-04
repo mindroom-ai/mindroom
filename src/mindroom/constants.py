@@ -22,7 +22,7 @@ from dotenv import dotenv_values
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
-MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS = 300.0
+MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
@@ -969,6 +969,7 @@ VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
 MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
+MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"

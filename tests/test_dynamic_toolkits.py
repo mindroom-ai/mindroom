@@ -25,6 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
+from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.knowledge import KnowledgeResolution
 from mindroom.memory import MemoryPromptParts
 from mindroom.teams import materialize_exact_team_members
@@ -969,14 +970,16 @@ async def test_ai_response_rebuilds_agent_with_loaded_dynamic_toolkits(tmp_path:
         loaded_toolkits=["research"],
     )
     model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-    prepared_execution = SimpleNamespace(
+    prepared_execution = PreparedExecutionContext(
         messages=(Message(role="user", content="enhanced prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
         replays_persisted_history=False,
         compaction_outcomes=[],
         compaction_decision=None,
-        post_response_compaction_checks=[],
+        compaction_reply_outcome="none",
+        prepared_context_tokens=None,
+        estimated_context_tokens=None,
     )
     run_output = MagicMock()
     run_output.content = "ok"

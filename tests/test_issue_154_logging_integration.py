@@ -23,7 +23,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
-from mindroom.constants import tracking_dir
+from mindroom.constants import AI_RUN_METADATA_KEY, tracking_dir
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import PreparedHistoryState
 from mindroom.hooks import HookRegistry
@@ -377,6 +377,14 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
     assert log_payload["session_id"] == target.session_id
     assert log_payload["reply_to_event_id"] == "$event:localhost"
     assert metadata == {
+        AI_RUN_METADATA_KEY: {
+            "version": 1,
+            "compaction": {
+                "decision": "none",
+                "outcome": "none",
+                "reason": "unclassified",
+            },
+        },
         "room_id": "!test:localhost",
         "thread_id": "$thread-root:localhost",
         "reply_to_event_id": "$event:localhost",

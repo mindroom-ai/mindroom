@@ -181,7 +181,14 @@ agents:
 - **num_history_runs**: Number of prior Agno runs to include as history context (per-agent override)
 - **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
 - **compress_tool_results**: Compress tool results in history to save context (per-agent override, inherits a default of `false`, and can invalidate Anthropic/Vertex Claude prompt caches when enabled)
-- **compaction**: Optional per-agent auto-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed. Destructive compaction is enabled by default through `defaults.compaction`. Set `enabled: false` in defaults or the agent override to disable it. Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place; otherwise MindRoom re-checks the updated session after a successful visible reply and compacts immediately if the next reply would cross the threshold. Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
+- **compaction**: Optional per-agent required-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed.
+Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
+`threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices; crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
+Set `enabled: false` in defaults or the agent override to disable automatic pre-reply compaction.
+Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
+Manual `compact_context` remains available when a compaction model and context window are configured.
+Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place; otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
+Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)
 - **show_tool_calls**: Whether to show tool call details inline in responses (per-agent override). When disabled, routed tools may still show generic worker warmup copy, but it never includes tool identifiers or tool-trace metadata
 - **worker_tools**: Tool names to route through scoped workers (overrides defaults; `null` uses the built-in default routing policy)
@@ -213,7 +220,8 @@ teams:
     num_history_runs: 8  # Optional team-scoped replay policy
     num_history_messages: null  # Optional; mutually exclusive with num_history_runs
     max_tool_calls_from_history: 6  # Optional replay trimming for tool calls
-    compaction:  # Optional team-scoped auto-compaction overrides
+    compaction:  # Optional team-scoped required-compaction overrides
+      # Soft thresholds do not compact by themselves while history still fits.
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
@@ -228,7 +236,7 @@ teams:
 Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 - **num_history_runs / num_history_messages**: Optional team-owned replay policy for named teams
 - **max_tool_calls_from_history**: Optional cap on replayed tool call messages for the shared team scope
-- **compaction**: Optional team-owned auto-compaction overrides for the shared team scope
+- **compaction**: Optional team-owned required-compaction overrides for the shared team scope
 
 Named teams use these explicit team settings for replay and compaction when provided.
 Dynamic teams have no named config block, so they inherit replay and compaction settings from `defaults`.

@@ -406,7 +406,9 @@ describe("TeamEditor", () => {
     render(<TeamEditor />);
 
     fireEvent.click(
-      screen.getByRole("checkbox", { name: /enable auto-compaction/i }),
+      screen.getByRole("checkbox", {
+        name: /enable automatic required compaction/i,
+      }),
     );
 
     await waitFor(() => {
@@ -450,7 +452,7 @@ describe("TeamEditor", () => {
     });
   });
 
-  it("shows auto-compaction as disabled for a pure team model clear when defaults are disabled", () => {
+  it("shows automatic required compaction as disabled for a pure team model clear when defaults are disabled", () => {
     const compactionTeam: Team = {
       ...mockTeam,
       compaction: { model: null },
@@ -502,10 +504,12 @@ describe("TeamEditor", () => {
 
     render(<TeamEditor />);
 
-    expect(screen.getByLabelText("Enable auto-compaction")).not.toBeChecked();
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).not.toBeChecked();
   });
 
-  it("shows auto-compaction as disabled for an empty team compaction override when defaults are disabled", () => {
+  it("shows automatic required compaction as disabled for an empty team compaction override when defaults are disabled", () => {
     const compactionTeam: Team = {
       ...mockTeam,
       compaction: {},
@@ -557,10 +561,12 @@ describe("TeamEditor", () => {
 
     render(<TeamEditor />);
 
-    expect(screen.getByLabelText("Enable auto-compaction")).not.toBeChecked();
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).not.toBeChecked();
   });
 
-  it("shows auto-compaction as enabled when defaults.compaction is omitted", () => {
+  it("shows automatic required compaction as enabled when defaults.compaction is omitted", () => {
     (useConfigStore as any).mockReturnValue({
       teams: [mockTeam],
       agents: mockAgents,
@@ -601,10 +607,12 @@ describe("TeamEditor", () => {
 
     render(<TeamEditor />);
 
-    expect(screen.getByLabelText("Enable auto-compaction")).toBeChecked();
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).toBeChecked();
   });
 
-  it("shows auto-compaction as disabled when defaults.compaction is null", () => {
+  it("shows automatic required compaction as disabled when defaults.compaction is null", () => {
     (useConfigStore as any).mockReturnValue({
       teams: [mockTeam],
       agents: mockAgents,
@@ -648,10 +656,12 @@ describe("TeamEditor", () => {
 
     render(<TeamEditor />);
 
-    expect(screen.getByLabelText("Enable auto-compaction")).not.toBeChecked();
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).not.toBeChecked();
   });
 
-  it("shows auto-compaction as enabled when defaults.compaction is an authored empty object", () => {
+  it("shows automatic required compaction as enabled when defaults.compaction is an authored empty object", () => {
     (useConfigStore as any).mockReturnValue({
       teams: [mockTeam],
       agents: mockAgents,
@@ -695,7 +705,9 @@ describe("TeamEditor", () => {
 
     render(<TeamEditor />);
 
-    expect(screen.getByLabelText("Enable auto-compaction")).toBeChecked();
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).toBeChecked();
   });
 
   it("displays team members with checkboxes", () => {

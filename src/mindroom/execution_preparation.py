@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING
 from xml.sax.saxutils import quoteattr as xml_quoteattr
@@ -30,6 +30,7 @@ from mindroom.history import (
     estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
+    normalize_compaction_budget_tokens,
     prepare_bound_scope_history,
     prepare_scope_history,
     read_scope_seen_event_ids,
@@ -46,8 +47,14 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.config.main import Config
-    from mindroom.history import CompactionDecision, CompactionLifecycle, CompactionOutcome, PostResponseCompactionCheck
+    from mindroom.history import (
+        CompactionDecision,
+        CompactionLifecycle,
+        CompactionOutcome,
+        CompactionReplyOutcome,
+    )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.timing import DispatchPipelineTiming
 
 logger = get_logger(__name__)
 
@@ -91,7 +98,9 @@ class PreparedExecutionContext:
     replays_persisted_history: bool
     compaction_outcomes: list[CompactionOutcome]
     compaction_decision: CompactionDecision | None = None
-    post_response_compaction_checks: list[PostResponseCompactionCheck] | None = None
+    compaction_reply_outcome: CompactionReplyOutcome = "none"
+    prepared_context_tokens: int | None = None
+    estimated_context_tokens: int | None = None
 
     @property
     def final_prompt(self) -> str:
@@ -102,6 +111,22 @@ class PreparedExecutionContext:
     def context_messages(self) -> tuple[Message, ...]:
         """Return replayed context messages without the current user turn."""
         return self.messages[:-1]
+
+    @property
+    def prepared_history(self) -> PreparedHistoryState:
+        """Return the history diagnostics prepared for this execution."""
+        default_decision = PreparedHistoryState().compaction_decision
+        return PreparedHistoryState(
+            compaction_outcomes=self.compaction_outcomes,
+            replay_plan=self.replay_plan,
+            replays_persisted_history=self.replays_persisted_history,
+            compaction_decision=(
+                self.compaction_decision if self.compaction_decision is not None else default_decision
+            ),
+            compaction_reply_outcome=self.compaction_reply_outcome,
+            prepared_context_tokens=self.prepared_context_tokens,
+            estimated_context_tokens=self.estimated_context_tokens,
+        )
 
 
 @dataclass(frozen=True)
@@ -337,6 +362,39 @@ def _context_messages_from_visible_messages(
     )
 
 
+def _messages_with_capped_context(
+    prompt: str,
+    *,
+    context_messages: Sequence[Message],
+    current_sender_id: str | None,
+    static_token_budget: int,
+    estimate_static_tokens_fn: Callable[[str], int],
+    render_messages_text_fn: Callable[[Sequence[Message]], str],
+) -> tuple[Message, ...]:
+    """Return the newest context-message suffix that fits the total static token budget."""
+    selected_context: list[Message] = []
+    current_only_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
+    current_only_tokens = estimate_static_tokens_fn(render_messages_text_fn(current_only_messages))
+    if current_only_tokens > static_token_budget:
+        return current_only_messages
+
+    for context_message in reversed(context_messages):
+        candidate_context = [context_message, *selected_context]
+        candidate_messages = _messages_with_current_prompt(
+            prompt,
+            context_messages=candidate_context,
+            current_sender_id=current_sender_id,
+        )
+        if estimate_static_tokens_fn(render_messages_text_fn(candidate_messages)) > static_token_budget:
+            break
+        selected_context = candidate_context
+    return _messages_with_current_prompt(
+        prompt,
+        context_messages=selected_context,
+        current_sender_id=current_sender_id,
+    )
+
+
 def _messages_with_current_prompt(
     prompt: str,
     *,
@@ -425,21 +483,77 @@ def _build_thread_history_messages(
     max_messages: int | None = None,
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
+    static_token_budget: int | None = None,
+    estimate_static_tokens_fn: Callable[[str], int] | None = None,
+    render_messages_text_fn: Callable[[Sequence[Message]], str] | None = None,
 ) -> tuple[Message, ...]:
     """Return canonical request messages for fallback full-thread replay."""
     if not thread_history:
         return _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
+    context_messages = _context_messages_from_visible_messages(
+        thread_history,
+        response_sender_id=response_sender_id,
+        max_messages=max_messages,
+        max_message_length=max_message_length,
+        missing_sender_label=missing_sender_label,
+    )
+    if (
+        static_token_budget is not None
+        and estimate_static_tokens_fn is not None
+        and render_messages_text_fn is not None
+    ):
+        return _messages_with_capped_context(
+            prompt,
+            context_messages=context_messages,
+            current_sender_id=current_sender_id,
+            static_token_budget=static_token_budget,
+            estimate_static_tokens_fn=estimate_static_tokens_fn,
+            render_messages_text_fn=render_messages_text_fn,
+        )
     return _messages_with_current_prompt(
         prompt,
-        context_messages=_context_messages_from_visible_messages(
-            thread_history,
-            response_sender_id=response_sender_id,
-            max_messages=max_messages,
-            max_message_length=max_message_length,
-            missing_sender_label=missing_sender_label,
-        ),
+        context_messages=context_messages,
         current_sender_id=current_sender_id,
     )
+
+
+def _fallback_static_token_budget(*, context_window: int | None, reserve_tokens: int) -> int | None:
+    """Return the total static-token budget available to Matrix-thread fallback prompts."""
+    if context_window is None or context_window <= 0:
+        return None
+    return max(0, context_window - normalize_compaction_budget_tokens(reserve_tokens, context_window))
+
+
+def _thread_history_before_current_event(
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    current_event_id: str | None,
+) -> Sequence[ResolvedVisibleMessage] | None:
+    """Return full-context fallback history up to, but not including, the current event."""
+    if not thread_history or current_event_id is None:
+        return thread_history
+    preceding_messages: list[ResolvedVisibleMessage] = []
+    for msg in thread_history:
+        if msg.event_id == current_event_id:
+            return tuple(preceding_messages)
+        preceding_messages.append(msg)
+    return tuple(preceding_messages)
+
+
+def _sanitize_thread_history_for_replay(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    response_sender_id: str | None,
+    active_event_ids: Collection[str],
+) -> tuple[ResolvedVisibleMessage, ...]:
+    """Apply unseen-context sanitization before fallback full-thread replay."""
+    sanitized, _, _ = _get_unseen_messages_for_sender(
+        thread_history,
+        sender_id=response_sender_id,
+        seen_event_ids=set(),
+        current_event_id=None,
+        active_event_ids=active_event_ids,
+    )
+    return tuple(sanitized)
 
 
 def _get_unseen_event_ids_for_metadata(
@@ -518,11 +632,13 @@ def _finalize_prepared_history(
     prepared_scope_history: PreparedScopeHistory,
     config: Config,
     static_prompt_tokens: int,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedHistoryState:
     return finalize_history_preparation(
         prepared_scope_history=prepared_scope_history,
         config=config,
         static_prompt_tokens=static_prompt_tokens,
+        pipeline_timing=pipeline_timing,
     )
 
 
@@ -536,31 +652,37 @@ async def _prepare_execution_context_common(
     response_sender_id: str | None,
     current_sender_id: str | None,
     config: Config,
-    prepare_scope_history_fn: Callable[[str, str | None], Awaitable[PreparedScopeHistory]],
-    estimate_static_tokens_fn: Callable[[str, str | None], int],
+    prepare_scope_history_fn: Callable[[str], Awaitable[PreparedScopeHistory]],
+    estimate_static_tokens_fn: Callable[[str], int],
     render_messages_text_fn: Callable[[Sequence[Message]], str],
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
+    fallback_static_token_budget: int | None = None,
     timing_scope: str | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     del timing_scope
     seen_event_ids = _scope_seen_event_ids(scope_context)
-    replay_fallback_messages = (
-        None
-        if reply_to_event_id and thread_history
-        else _build_thread_history_messages(
-            prompt,
-            thread_history,
+    fallback_thread_history = _thread_history_before_current_event(thread_history, reply_to_event_id)
+    if fallback_thread_history is not None:
+        fallback_thread_history = _sanitize_thread_history_for_replay(
+            fallback_thread_history,
             response_sender_id=response_sender_id,
-            current_sender_id=current_sender_id,
-            max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
-            max_message_length=(
-                thread_history_render_limits.max_message_length if thread_history_render_limits else None
-            ),
-            missing_sender_label=(
-                thread_history_render_limits.missing_sender_label if thread_history_render_limits else None
-            ),
+            active_event_ids=active_event_ids,
         )
+    replay_fallback_messages = _build_thread_history_messages(
+        prompt,
+        fallback_thread_history,
+        response_sender_id=response_sender_id,
+        current_sender_id=current_sender_id,
+        max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
+        max_message_length=(thread_history_render_limits.max_message_length if thread_history_render_limits else None),
+        missing_sender_label=(
+            thread_history_render_limits.missing_sender_label if thread_history_render_limits else None
+        ),
+        static_token_budget=fallback_static_token_budget,
+        estimate_static_tokens_fn=estimate_static_tokens_fn,
+        render_messages_text_fn=render_messages_text_fn,
     )
 
     provisional_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
@@ -575,10 +697,7 @@ async def _prepare_execution_context_common(
             current_sender_id=current_sender_id,
         )
 
-    prepared_scope_history = await prepare_scope_history_fn(
-        render_messages_text_fn(provisional_messages),
-        render_messages_text_fn(replay_fallback_messages) if replay_fallback_messages is not None else None,
-    )
+    prepared_scope_history = await prepare_scope_history_fn(render_messages_text_fn(provisional_messages))
 
     final_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
     if reply_to_event_id and thread_history:
@@ -594,25 +713,38 @@ async def _prepare_execution_context_common(
     else:
         unseen_event_ids = []
 
+    final_static_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
     prepared_history = _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
         config=config,
-        static_prompt_tokens=estimate_static_tokens_fn(
-            render_messages_text_fn(final_messages),
-            render_messages_text_fn(replay_fallback_messages) if replay_fallback_messages is not None else None,
-        ),
+        static_prompt_tokens=final_static_tokens,
+        pipeline_timing=pipeline_timing,
     )
+    if pipeline_timing is not None:
+        pipeline_timing.mark("prompt_assembly_start")
     if replay_fallback_messages is not None and not prepared_history.replays_persisted_history and thread_history:
         final_messages = replay_fallback_messages
+        fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
+        if prepared_history.replay_plan is not None:
+            fallback_context_tokens += prepared_history.replay_plan.estimated_tokens
+        prepared_history = replace(
+            prepared_history,
+            prepared_context_tokens=fallback_context_tokens,
+            estimated_context_tokens=fallback_context_tokens,
+        )
+    if pipeline_timing is not None:
+        pipeline_timing.mark("prompt_assembly_ready")
 
     return PreparedExecutionContext(
         messages=final_messages,
         replay_plan=prepared_history.replay_plan,
+        estimated_context_tokens=prepared_history.estimated_context_tokens,
         unseen_event_ids=unseen_event_ids,
         replays_persisted_history=prepared_history.replays_persisted_history,
         compaction_outcomes=prepared_history.compaction_outcomes,
         compaction_decision=prepared_history.compaction_decision,
-        post_response_compaction_checks=prepared_history.post_response_compaction_checks,
+        compaction_reply_outcome=prepared_history.compaction_reply_outcome,
+        prepared_context_tokens=prepared_history.prepared_context_tokens,
     )
 
 
@@ -633,6 +765,7 @@ async def prepare_agent_execution_context(
     compaction_lifecycle: CompactionLifecycle | None = None,
     current_sender_id: str | None = None,
     timing_scope: str | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
     response_sender_id = config.get_ids(runtime_paths).get(agent_name)
@@ -645,7 +778,6 @@ async def prepare_agent_execution_context(
 
     async def _prepare_agent_scope_history(
         prepared_prompt: str,
-        replay_fallback_prompt: str | None,
     ) -> PreparedScopeHistory:
         return await prepare_scope_history(
             agent=agent,
@@ -660,10 +792,18 @@ async def prepare_agent_execution_context(
             static_prompt_tokens=estimate_preparation_static_tokens(
                 agent,
                 full_prompt=prepared_prompt,
-                fallback_full_prompt=replay_fallback_prompt,
             ),
             timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
+            pipeline_timing=pipeline_timing,
+        )
+
+    def _estimate_agent_static_tokens(
+        prepared_prompt: str,
+    ) -> int:
+        return estimate_preparation_static_tokens(
+            agent,
+            full_prompt=prepared_prompt,
         )
 
     return await _prepare_execution_context_common(
@@ -676,14 +816,15 @@ async def prepare_agent_execution_context(
         current_sender_id=current_sender_id,
         config=config,
         prepare_scope_history_fn=_prepare_agent_scope_history,
-        estimate_static_tokens_fn=lambda prepared_prompt, replay_fallback_prompt: estimate_preparation_static_tokens(
-            agent,
-            full_prompt=prepared_prompt,
-            fallback_full_prompt=replay_fallback_prompt,
-        ),
+        estimate_static_tokens_fn=_estimate_agent_static_tokens,
         render_messages_text_fn=render_prepared_messages_text,
         thread_history_render_limits=None,
+        fallback_static_token_budget=_fallback_static_token_budget(
+            context_window=runtime_model.context_window,
+            reserve_tokens=config.get_entity_compaction_config(agent_name).reserve_tokens,
+        ),
         timing_scope=timing_scope,
+        pipeline_timing=pipeline_timing,
     )
 
 
@@ -706,18 +847,17 @@ async def prepare_bound_team_execution_context(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
 
     async def _prepare_team_scope_history(
         prepared_prompt: str,
-        replay_fallback_prompt: str | None,
     ) -> PreparedScopeHistory:
         return await prepare_bound_scope_history(
             agents=agents,
             team=team,
             full_prompt=prepared_prompt,
-            fallback_full_prompt=replay_fallback_prompt,
             runtime_paths=runtime_paths,
             config=config,
             compaction_outcomes_collector=compaction_outcomes_collector,
@@ -726,6 +866,15 @@ async def prepare_bound_team_execution_context(
             active_model_name=active_model_name,
             active_context_window=active_context_window,
             compaction_lifecycle=compaction_lifecycle,
+            pipeline_timing=pipeline_timing,
+        )
+
+    def _estimate_team_static_tokens(
+        prepared_prompt: str,
+    ) -> int:
+        return estimate_preparation_static_tokens_for_team(
+            team,
+            full_prompt=prepared_prompt,
         )
 
     return await _prepare_execution_context_common(
@@ -738,15 +887,31 @@ async def prepare_bound_team_execution_context(
         current_sender_id=current_sender_id,
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
-        estimate_static_tokens_fn=lambda prepared_prompt, replay_fallback_prompt: (
-            estimate_preparation_static_tokens_for_team(
-                team,
-                full_prompt=prepared_prompt,
-                fallback_full_prompt=replay_fallback_prompt,
-            )
-        ),
+        estimate_static_tokens_fn=_estimate_team_static_tokens,
         render_messages_text_fn=render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,
+        fallback_static_token_budget=_fallback_static_token_budget(
+            context_window=active_context_window,
+            reserve_tokens=(
+                config.get_entity_compaction_config(team_name).reserve_tokens
+                if team_name is not None and team_name in config.teams
+                else config.get_default_compaction_config().reserve_tokens
+            ),
+        ),
+        pipeline_timing=pipeline_timing,
+    )
+
+
+def _scrub_bound_team_scope_context(
+    *,
+    scope_context: ScopeSessionContext | None,
+    team: Team,
+    entity_name: str | None,
+) -> None:
+    """Strip stale queued-message notices before preparing a bound team run."""
+    ai_runtime.scrub_queued_notice_session_context(
+        scope_context=scope_context,
+        entity_name=entity_name or str(team.name or "Team"),
     )
 
 
@@ -769,11 +934,13 @@ async def prepare_bound_team_run_context(
     compaction_outcomes_collector: list[CompactionOutcome] | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedExecutionContext:
     """Prepare a team run with queued-notice scrubbing and replay application."""
-    ai_runtime.scrub_queued_notice_session_context(
+    _scrub_bound_team_scope_context(
         scope_context=scope_context,
-        entity_name=entity_name or str(team.name or "Team"),
+        team=team,
+        entity_name=entity_name,
     )
     prepared_execution = await prepare_bound_team_execution_context(
         scope_context=scope_context,
@@ -793,6 +960,7 @@ async def prepare_bound_team_run_context(
         compaction_outcomes_collector=compaction_outcomes_collector,
         compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,
+        pipeline_timing=pipeline_timing,
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
