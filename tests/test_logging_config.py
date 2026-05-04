@@ -157,6 +157,48 @@ def test_setup_logging_logger_level_overrides_accept_whitespace_and_semicolons(
     assert payload["logger"] == "mindroom.example"
 
 
+def test_setup_logging_defaults_quiet_noisy_nio_crypto_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default logger levels should quiet noisy Matrix crypto warning bursts only."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    monkeypatch.delenv("MINDROOM_LOGGER_LEVELS", raising=False)
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    logging.getLogger("nio.crypto.log").warning("Error decrypting megolm event, no session found")
+    get_logger("mindroom.delivery").warning("delivery_error_visible")
+
+    lines = capsys.readouterr().err.strip().splitlines()
+
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["event"] == "delivery_error_visible"
+    assert payload["logger"] == "mindroom.delivery"
+
+
+def test_setup_logging_allows_explicit_nio_crypto_warning_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Operators should be able to re-enable Matrix crypto warnings for diagnostics."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    monkeypatch.setenv("MINDROOM_LOGGER_LEVELS", "nio.crypto:WARNING")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    logging.getLogger("nio.crypto.log").warning("Error decrypting megolm event, no session found")
+
+    payload = _last_stderr_payload(capsys)
+
+    assert payload["event"] == "Error decrypting megolm event, no session found"
+    assert payload["level"] == "warning"
+    assert payload["logger"] == "nio.crypto.log"
+
+
 def test_setup_logging_json_mode_foreign_logger_inherits_bound_log_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

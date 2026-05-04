@@ -22,6 +22,9 @@ _DEFAULT_LOGGER_LEVELS = {
     # Reduce verbosity of nio (Matrix) library by default.
     "nio": "WARNING",
     "nio.client": "WARNING",
+    # Matrix crypto decrypt warnings can arrive in bursts when sessions are
+    # missing. Keep them available through MINDROOM_LOGGER_LEVELS when needed.
+    "nio.crypto": "ERROR",
     "nio.responses": "WARNING",
 }
 
