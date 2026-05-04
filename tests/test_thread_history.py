@@ -3305,6 +3305,88 @@ class TestThreadHistoryCache:
         }
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("fetcher_name", "is_full_history"),
+        [
+            ("fetch_thread_history", True),
+            ("fetch_thread_snapshot", False),
+            ("fetch_dispatch_thread_history", True),
+            ("fetch_dispatch_thread_snapshot", False),
+        ],
+    )
+    async def test_thread_fetchers_log_refresh_diagnostics_for_cache_hit(
+        self,
+        fetcher_name: str,
+        is_full_history: bool,
+    ) -> None:
+        """Usable cache hits should emit the same structured refresh diagnostics."""
+        logger = MagicMock()
+        cached_history = ThreadHistoryResult(
+            [
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="cached",
+                    event_id="$thread_root",
+                    content={"body": "cached"},
+                ),
+            ],
+            is_full_history=is_full_history,
+            diagnostics={
+                "cache_read_ms": 5.5,
+                "resolution_ms": 3.2,
+                "sidecar_hydration_ms": 1.4,
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
+            },
+        )
+        homeserver_fetch = AsyncMock()
+
+        with (
+            patch.object(matrix_client_module, "logger", logger),
+            patch(
+                "mindroom.matrix.client_thread_history._load_cached_thread_history_if_usable",
+                new=AsyncMock(return_value=(cached_history, None)),
+            ),
+            patch(
+                "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
+                new=homeserver_fetch,
+            ),
+        ):
+            history = await getattr(matrix_client_module, fetcher_name)(
+                AsyncMock(),
+                "!room:localhost",
+                "$thread_root",
+                event_cache=_event_cache(),
+                caller_label="cache_hit_test",
+                coordinator_queue_wait_ms=34.5,
+            )
+
+        assert history == cached_history
+        homeserver_fetch.assert_not_awaited()
+        refreshed_log = next(
+            call
+            for call in logger.info.call_args_list
+            if call.args and call.args[0] == "matrix_cache_thread_history_refreshed"
+        )
+        assert refreshed_log.kwargs == {
+            "room_id": "!room:localhost",
+            "thread_id": "$thread_root",
+            "caller_label": "cache_hit_test",
+            "mode": "cache_hit",
+            "cache_read_ms": 5.5,
+            "homeserver_fetch_ms": 0.0,
+            "homeserver_scan_pages": 0,
+            "homeserver_scanned_event_count": 0,
+            "homeserver_thread_event_count": 0,
+            "resolution_ms": 3.2,
+            "sidecar_hydration_ms": 1.4,
+            "coordinator_queue_wait_ms": 34.5,
+            "cache_reject_reason": None,
+            "thread_read_source": THREAD_HISTORY_SOURCE_CACHE,
+            "thread_read_degraded": False,
+            "thread_read_error": None,
+        }
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_logs_stale_fallback_diagnostics(self) -> None:
         """Stale fallbacks should be visible in the structured refresh diagnostics."""
         logger = MagicMock()

@@ -112,6 +112,25 @@ def _log_thread_history_refresh(
     )
 
 
+def _log_cached_thread_history_refresh(
+    *,
+    room_id: str,
+    thread_id: str,
+    caller_label: str,
+    cached_history: ThreadHistoryResult,
+    coordinator_queue_wait_ms: float,
+) -> None:
+    """Emit refresh diagnostics for a usable durable-cache hit."""
+    _log_thread_history_refresh(
+        room_id=room_id,
+        thread_id=thread_id,
+        caller_label=caller_label,
+        mode="cache_hit",
+        diagnostics=cached_history.diagnostics,
+        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+    )
+
+
 class RoomThreadsPageError(ValueError):
     """Raised when a single /threads page request fails."""
 
@@ -792,6 +811,13 @@ async def fetch_thread_history(
         )
     else:
         if cached_history is not None:
+            _log_cached_thread_history_refresh(
+                room_id=room_id,
+                thread_id=thread_id,
+                caller_label=caller_label,
+                cached_history=cached_history,
+                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            )
             return cached_history
     return await refresh_thread_history_from_source(
         client,
@@ -838,6 +864,13 @@ async def fetch_thread_snapshot(
         )
     else:
         if cached_history is not None:
+            _log_cached_thread_history_refresh(
+                room_id=room_id,
+                thread_id=thread_id,
+                caller_label=caller_label,
+                cached_history=cached_history,
+                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            )
             return cached_history
     return await refresh_thread_history_from_source(
         client,
@@ -885,6 +918,13 @@ async def fetch_dispatch_thread_history(
         )
     else:
         if cached_history is not None:
+            _log_cached_thread_history_refresh(
+                room_id=room_id,
+                thread_id=thread_id,
+                caller_label=caller_label,
+                cached_history=cached_history,
+                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            )
             return cached_history
     return await refresh_thread_history_from_source(
         client,
@@ -932,6 +972,13 @@ async def fetch_dispatch_thread_snapshot(
         )
     else:
         if cached_history is not None:
+            _log_cached_thread_history_refresh(
+                room_id=room_id,
+                thread_id=thread_id,
+                caller_label=caller_label,
+                cached_history=cached_history,
+                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            )
             return cached_history
     return await refresh_thread_history_from_source(
         client,
