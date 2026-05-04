@@ -53,7 +53,7 @@ async def initialize_event_cache_db(db_path: Path) -> aiosqlite.Connection:
         await reset_stale_cache_if_needed(db, db_path=db_path)
         await create_event_cache_schema(db)
         await db.commit()
-    except Exception:
+    except BaseException:
         await db.close()
         raise
     return db
@@ -440,7 +440,7 @@ class SqliteEventCache:
             try:
                 result = await writer(db)
                 await db.commit()
-            except Exception:
+            except BaseException:
                 await db.rollback()
                 raise
         return result
