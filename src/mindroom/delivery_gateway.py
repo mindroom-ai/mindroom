@@ -545,6 +545,7 @@ class DeliveryGateway:
                     resolved_target.room_id,
                     effective_thread_id,
                     resolved_target.reply_to_event_id,
+                    caller_label="delivery_send_text",
                 )
             )
             content = format_message_with_mentions(
@@ -599,6 +600,7 @@ class DeliveryGateway:
                 await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
                     target.room_id,
                     target.resolved_thread_id,
+                    caller_label="delivery_edit_text",
                 )
             )
             content = build_threaded_edit_content(
@@ -1013,6 +1015,7 @@ class DeliveryGateway:
             target.resolved_thread_id,
             target.reply_to_event_id,
             event_id,
+            caller_label="delivery_compaction_lifecycle_edit",
         )
         content = build_message_content(
             body,
@@ -1049,6 +1052,7 @@ class DeliveryGateway:
             request.target.resolved_thread_id,
             request.target.reply_to_event_id,
             request.existing_event_id,
+            caller_label="delivery_stream",
         )
         return await send_streaming_response(
             client,

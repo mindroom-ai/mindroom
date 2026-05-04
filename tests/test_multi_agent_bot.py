@@ -4508,6 +4508,47 @@ class TestAgentBot:
         assert seen == [("$plain-reply", "$thread-root")]
 
     @pytest.mark.asyncio
+    async def test_reaction_hooks_label_thread_membership_reads(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """reaction:received hooks should attribute thread proof refreshes."""
+        seen: list[tuple[str, str | None]] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def record_reaction(ctx: ReactionReceivedContext) -> None:
+            seen.append((ctx.target_event_id, ctx.thread_id))
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock()
+        access = MagicMock()
+        bot._conversation_resolver.thread_membership_access = MagicMock(return_value=access)
+        bot._conversation_resolver.resolve_related_event_thread_id_best_effort = AsyncMock(return_value="$thread-root")
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.reacts_to = "$plain-reply"
+
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)):
+            await bot._on_reaction(room, event)
+
+        bot._conversation_resolver.thread_membership_access.assert_called_once_with(
+            full_history=False,
+            dispatch_safe=True,
+            caller_label="reaction_hook_context",
+        )
+        bot._conversation_resolver.resolve_related_event_thread_id_best_effort.assert_awaited_once_with(
+            room.room_id,
+            "$plain-reply",
+            access=access,
+        )
+        assert seen == [("$plain-reply", "$thread-root")]
+
+    @pytest.mark.asyncio
     async def test_reaction_hooks_inherit_thread_transitively_through_plain_reply_chain(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -5017,7 +5058,17 @@ class TestAgentBot:
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
 
-        async def cached_history_refresh(_room_id: str, _thread_id: str) -> list[ResolvedVisibleMessage]:
+        async def cached_history_refresh(
+            _room_id: str,
+            _thread_id: str,
+            *,
+            full_history: bool,
+            dispatch_safe: bool,
+            caller_label: str,
+        ) -> list[ResolvedVisibleMessage]:
+            assert full_history is True
+            assert dispatch_safe is True
+            assert caller_label == "dispatch_post_lock_refresh"
             return fresh_history
 
         with (
@@ -5040,7 +5091,7 @@ class TestAgentBot:
             ),
             patch.object(
                 bot._conversation_cache,
-                "get_dispatch_thread_history",
+                "get_thread_messages",
                 new=AsyncMock(side_effect=cached_history_refresh),
             ) as mock_get_thread_history,
             patch_response_runner_module(
@@ -5061,7 +5112,13 @@ class TestAgentBot:
                 )
 
         assert _handled_response_event_id(resolution) == "$response"
-        mock_get_thread_history.assert_awaited_once_with("!test:localhost", "$thread")
+        mock_get_thread_history.assert_awaited_once_with(
+            "!test:localhost",
+            "$thread",
+            full_history=True,
+            dispatch_safe=True,
+            caller_label="dispatch_post_lock_refresh",
+        )
         request = mock_process.await_args.args[0]
         assert list(request.thread_history) == fresh_history
         assert request.thread_history[0].stream_status == STREAM_STATUS_COMPLETED
@@ -9028,6 +9085,7 @@ class TestAgentBot:
         mock_snapshot.assert_awaited_once_with(
             room.room_id,
             "$thread_root",
+            caller_label="dispatch_context",
         )
         mock_history.assert_not_awaited()
 
@@ -9098,6 +9156,8 @@ class TestAgentBot:
             event_cache=bot.event_cache,
             cache_write_guard_started_at=ANY,
             trusted_sender_ids=trusted_sender_ids,
+            caller_label="dispatch_context",
+            coordinator_queue_wait_ms=ANY,
         )
 
     @pytest.mark.asyncio

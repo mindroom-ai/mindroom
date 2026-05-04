@@ -588,9 +588,19 @@ class AgentBot:
         """Return when this bot runtime started."""
         return self._runtime_view.runtime_started_at
 
-    async def latest_thread_event_id_if_needed(self, room_id: str, thread_id: str) -> str | None:
+    async def latest_thread_event_id_if_needed(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "agent_bot_latest_thread_event_lookup",
+    ) -> str | None:
         """Return the latest event id for one Matrix thread when the cache knows it."""
-        return await self._conversation_cache.get_latest_thread_event_id_if_needed(room_id, thread_id)
+        return await self._conversation_cache.get_latest_thread_event_id_if_needed(
+            room_id,
+            thread_id,
+            caller_label=caller_label,
+        )
 
     @property
     def hook_registry(self) -> HookRegistry:
@@ -723,6 +733,7 @@ class AgentBot:
                     access=self._conversation_resolver.thread_membership_access(
                         full_history=False,
                         dispatch_safe=True,
+                        caller_label="reaction_hook_context",
                     ),
                 )
             except Exception as exc:

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.logging_config import bound_log_context
 from mindroom.timing import emit_timing_event, timing_enabled
 
 if TYPE_CHECKING:
@@ -496,10 +497,10 @@ class _EventCacheWriteCoordinator:
         loop = asyncio.get_running_loop()
         start_signal: asyncio.Future[None] = loop.create_future()
 
-        if not instrument_timing:
-
-            async def run_when_scheduled() -> object:
-                await start_signal
+        async def run_update() -> object:
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            with bound_log_context(task_name=current_task.get_name()):
                 self._log_coalesced_update_if_needed(
                     room_id=room_id,
                     thread_id=thread_id,
@@ -508,6 +509,12 @@ class _EventCacheWriteCoordinator:
                     update_state=update_state,
                 )
                 return await update_state.update_coro_factory()
+
+        if not instrument_timing:
+
+            async def run_when_scheduled() -> object:
+                await start_signal
+                return await run_update()
 
         else:
             queued_at = time.perf_counter()
@@ -518,14 +525,7 @@ class _EventCacheWriteCoordinator:
                 try:
                     await start_signal
                     update_started = time.perf_counter()
-                    self._log_coalesced_update_if_needed(
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        kind=kind,
-                        name=name,
-                        update_state=update_state,
-                    )
-                    return await update_state.update_coro_factory()
+                    return await run_update()
                 except asyncio.CancelledError:
                     outcome = "cancelled"
                     raise

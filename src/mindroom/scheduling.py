@@ -753,6 +753,7 @@ async def _build_workflow_message_content(
         latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
             workflow.room_id,
             target.resolved_thread_id,
+            caller_label="scheduled_workflow_message",
         )
     return format_message_with_mentions(
         config,
@@ -777,6 +778,7 @@ async def _build_scheduled_failure_content(
         latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
             workflow.room_id,
             target.resolved_thread_id,
+            caller_label="scheduled_workflow_failure",
         )
     return build_message_content(
         body=error_message,
@@ -1274,7 +1276,13 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         available_agents = list(sender_visible_room_agents)
     else:
         if thread_id:
-            thread_history = list(await conversation_cache.get_thread_history(room_id, thread_id))
+            thread_history = list(
+                await conversation_cache.get_thread_history(
+                    room_id,
+                    thread_id,
+                    caller_label="schedule_existing_thread",
+                ),
+            )
             thread_agents = get_agents_in_thread(thread_history, config, runtime_paths)
             available_agents = [agent for agent in thread_agents if agent in sender_visible_room_agents]
 

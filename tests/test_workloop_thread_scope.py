@@ -111,6 +111,10 @@ def _copy_plugin_root(tmp_path: Path) -> Path:
             "from . import commands, formatting, poke, state, todos, types as workloop_types",
             f"from {package_prefix} import commands, formatting, poke, state, todos, types as workloop_types",
         )
+        module_text = module_text.replace(
+            "from . import commands, formatting, poke, runtime as workloop_runtime, state, todos",
+            f"from {package_prefix} import commands, formatting, poke, runtime as workloop_runtime, state, todos",
+        )
         module_text = module_text.replace("from .formatting import ", f"from {package_prefix}.formatting import ")
         module_text = module_text.replace("from .poke import ", f"from {package_prefix}.poke import ")
         module_text = module_text.replace("from .runtime import ", f"from {package_prefix}.runtime import ")

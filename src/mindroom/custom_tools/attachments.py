@@ -258,6 +258,7 @@ async def _send_attachment_paths(
     latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
         room_id,
         thread_id,
+        caller_label="attachment_tool_send",
     )
     for attachment_path in attachment_paths:
         attachment_event_id = await send_file_message(

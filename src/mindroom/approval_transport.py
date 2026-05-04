@@ -41,7 +41,13 @@ class _ApprovalTransportBot(Protocol):
     client: nio.AsyncClient | None
     event_cache: ConversationEventCache
 
-    async def latest_thread_event_id_if_needed(self, room_id: str, thread_id: str) -> str | None:
+    async def latest_thread_event_id_if_needed(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "agent_bot_latest_thread_event_lookup",
+    ) -> str | None:
         """Return the latest event id for one Matrix thread when known."""
         ...
 
@@ -134,6 +140,7 @@ class ApprovalMatrixTransport:
             resolved_latest_event_id = await bot.latest_thread_event_id_if_needed(
                 room_id,
                 thread_id,
+                caller_label="approval_transport_thread_relation",
             )
             if resolved_latest_event_id is not None:
                 latest_thread_event_id = resolved_latest_event_id

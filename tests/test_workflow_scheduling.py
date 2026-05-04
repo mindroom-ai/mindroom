@@ -23,6 +23,7 @@ from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
     SchedulingRuntime,
+    _build_scheduled_failure_content,
     _execute_scheduled_workflow,
     _parse_workflow_schedule,
     _validate_conditional_workflow,
@@ -48,6 +49,7 @@ def _conversation_cache(
 ) -> AsyncMock:
     access = AsyncMock()
     access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
+    access.get_thread_messages = AsyncMock(return_value=list(thread_history or []))
     access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
     access.notify_outbound_message = Mock()
     return access
@@ -435,6 +437,7 @@ class TestExecuteScheduledWorkflow:
         conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
             "!room:server",
             "$thread123",
+            caller_label="scheduled_workflow_message",
         )
         mock_send.assert_awaited_once()
         call_args = mock_send.await_args
@@ -496,6 +499,34 @@ class TestExecuteScheduledWorkflow:
         assert config.get_ids(runtime_paths_for(config))["analyst"].full_id in content["body"]
         assert "m.relates_to" not in content
         assert content[ORIGINAL_SENDER_KEY] == "@user:server"
+
+    async def test_scheduled_failure_content_labels_latest_thread_lookup(self) -> None:
+        """Scheduled failure replies should attribute latest-thread lookups."""
+        workflow = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime.now(UTC),
+            message="Run report",
+            description="report",
+            thread_id="$thread123",
+            room_id="!room:server",
+            created_by="@user:server",
+        )
+        target = MessageTarget.resolve("!room:server", "$thread123", None)
+        conversation_cache = _conversation_cache(latest_thread_event_id="$latest456")
+
+        content = await _build_scheduled_failure_content(
+            workflow,
+            target,
+            "Workflow failed",
+            conversation_cache,
+        )
+
+        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest456"
+        conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
+            "!room:server",
+            "$thread123",
+            caller_label="scheduled_workflow_failure",
+        )
 
     async def test_execute_workflow_simple_reminder(self) -> None:
         """Test executing a simple reminder without agents."""

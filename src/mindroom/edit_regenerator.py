@@ -102,6 +102,7 @@ class EditRegenerator:
             self._client(),
             room.room_id,
             conversation_target.resolved_thread_id,
+            caller_label="edit_regeneration_context",
         )
         return MessageContext(
             am_i_mentioned=context.am_i_mentioned,
@@ -132,7 +133,11 @@ class EditRegenerator:
             self._logger().debug("ignoring_edit_from_other_agent", agent=sender_agent_name)
             return
 
-        context = await self.deps.resolver.extract_message_context(room, event)
+        context = await self.deps.resolver.extract_message_context(
+            room,
+            event,
+            caller_label="edit_regeneration_context",
+        )
         loaded_turn = self.deps.turn_store.load_turn(
             room=room,
             thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,

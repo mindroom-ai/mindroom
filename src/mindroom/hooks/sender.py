@@ -74,6 +74,7 @@ async def send_hook_message(
     latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
         room_id,
         thread_id,
+        caller_label="hook_sender",
     )
     content = format_message_with_mentions(
         config,
