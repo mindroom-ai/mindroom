@@ -1077,6 +1077,39 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
     assert list_knowledge_files(config, "docs", docs_path) == []
 
 
+def test_knowledge_file_listing_filters_unsupported_extensions_before_filesystem_safety_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported files should not pay per-file symlink or strict resolve checks."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    ignored_path = docs_path / "ignored.bin"
+    ignored_path.write_bytes(b"not semantic")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    original_is_symlink = Path.is_symlink
+    original_resolve = Path.resolve
+
+    def _is_symlink(self: Path) -> bool:
+        if self.name == ignored_path.name:
+            msg = "unsupported files should be filtered before symlink checks"
+            raise AssertionError(msg)
+        return original_is_symlink(self)
+
+    def _resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        strict = bool(args[0]) if args else bool(kwargs.get("strict", False))
+        if self.name == ignored_path.name and strict:
+            msg = "unsupported files should be filtered before strict resolution"
+            raise AssertionError(msg)
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_symlink", _is_symlink)
+    monkeypatch.setattr(Path, "resolve", _resolve)
+
+    assert list_knowledge_files(config, "docs", docs_path) == []
+
+
 @pytest.mark.asyncio
 async def test_index_metadata_without_source_signature_is_unavailable_and_schedules_refresh(
     tmp_path: Path,

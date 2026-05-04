@@ -594,39 +594,56 @@ def include_semantic_knowledge_relative_path(config: Config, base_id: str, relat
     return suffix not in exclude_extensions
 
 
-def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
-    try:
-        relative_path = path.relative_to(root)
-    except ValueError:
-        return True
+@dataclass
+class _KnowledgePathFilter:
+    config: Config
+    base_id: str
+    root: Path
+    _directory_symlink_cache: dict[Path, bool] = field(default_factory=dict)
 
-    current = root
-    for part in relative_path.parts:
-        current = current / part
-        if current.is_symlink():
+    def include_file(self, file_path: Path) -> bool:
+        """Return whether a file belongs to the managed semantic file set."""
+        candidate = file_path if file_path.is_absolute() else self.root / file_path
+        try:
+            relative_path = candidate.relative_to(self.root)
+        except ValueError:
+            return False
+
+        if not include_semantic_knowledge_relative_path(self.config, self.base_id, relative_path.as_posix()):
+            return False
+        if self._directory_is_symlink_or_under_symlink(candidate.parent):
+            return False
+        if candidate.is_symlink():
+            return False
+        try:
+            resolved_candidate = candidate.resolve(strict=True)
+            resolved_candidate.relative_to(self.root)
+        except (OSError, ValueError):
+            return False
+        return candidate.is_file()
+
+    def _directory_is_symlink_or_under_symlink(self, directory: Path) -> bool:
+        try:
+            relative_path = directory.relative_to(self.root)
+        except ValueError:
             return True
-    return False
+
+        current = self.root
+        for part in relative_path.parts:
+            current = current / part
+            cached = self._directory_symlink_cache.get(current)
+            if cached is None:
+                cached = current.is_symlink()
+                self._directory_symlink_cache[current] = cached
+            if cached:
+                return True
+        return False
 
 
 def include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, file_path: Path) -> bool:
     """Return whether a file belongs to the managed semantic file set."""
     root = knowledge_root.resolve()
-    candidate = file_path if file_path.is_absolute() else root / file_path
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        return False
-    if _path_is_symlink_or_under_symlink(root, candidate):
-        return False
-    try:
-        resolved_candidate = candidate.resolve(strict=True)
-        resolved_candidate.relative_to(root)
-    except (OSError, ValueError):
-        return False
-    if not candidate.is_file():
-        return False
-    relative_path = candidate.relative_to(root)
-    return include_semantic_knowledge_relative_path(config, base_id, relative_path.as_posix())
+    return _KnowledgePathFilter(config=config, base_id=base_id, root=root).include_file(file_path)
 
 
 def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
@@ -635,13 +652,14 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
     if not root.is_dir():
         return []
 
+    path_filter = _KnowledgePathFilter(config=config, base_id=base_id, root=root)
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         current_dir = Path(dirpath)
         dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
         for filename in filenames:
             path = current_dir / filename
-            if include_knowledge_file(config, base_id, root, path):
+            if path_filter.include_file(path):
                 files.append(path)
     return sorted(files)
 
@@ -653,10 +671,11 @@ def _semantic_file_paths_from_relative_paths(
     relative_paths: Iterable[str],
 ) -> list[Path]:
     root = knowledge_root.resolve()
+    path_filter = _KnowledgePathFilter(config=config, base_id=base_id, root=root)
     files: list[Path] = []
     for relative_path in sorted(set(relative_paths)):
         path = root / relative_path
-        if include_knowledge_file(config, base_id, root, path):
+        if path_filter.include_file(path):
             files.append(path)
     return files
 
