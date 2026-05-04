@@ -70,6 +70,9 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `model_loading.py` | Model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `prepared_conversation_chain.py` | Canonical prepared message-chain builder for Matrix context, Agno replay, partial replies, and compaction inputs |
+| `history/agno_forked_request.py` | Agno-only adapter that builds forked provider requests without running a full Agent or Team turn |
+| `history/compaction_provider_request.py` | MindRoom glue that adapts compaction summary requests to Agno forked provider requests and static prompt estimates |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |
@@ -93,6 +96,7 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 | `voice_handler.py` | Voice message download, transcription, and command recognition |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `streaming.py` | Response streaming via progressive message edits |
+| `partial_reply_text.py` | Shared partial-reply marker parsing and formatting for streaming and history preparation |
 | `agent_prompts.py` | Rich built-in prompts for named agents (code, research, etc.) |
 | `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachment_media.py` | Convert attachment records to Agno media objects |

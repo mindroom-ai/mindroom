@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from agno.db.base import SessionType
+from agno.models.anthropic.claude import Claude
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
@@ -48,7 +49,7 @@ from mindroom.prepared_conversation_chain import (
     strip_stale_anthropic_replay_fields,
 )
 from mindroom.timing import timed
-from mindroom.token_budget import estimate_text_tokens
+from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
@@ -74,6 +75,10 @@ class _CompactionProviderTimeoutError(Exception):
     def __init__(self, original: TimeoutError) -> None:
         super().__init__(str(original))
         self.original = original
+
+
+class _CompactionProviderRequestTooLargeError(RuntimeError):
+    """Raised before sending a provider-visible compaction request that exceeds the budget."""
 
 
 def _consume_detached_compaction_request_result(
@@ -742,6 +747,25 @@ async def _generate_compaction_summary_with_retry(
                 session=session,
                 provider_request_builder=provider_request_builder,
             )
+            estimated_input_tokens = _estimate_compaction_provider_request_tokens(provider_request)
+            if estimated_input_tokens > budget:
+                adjusted_budget = _summary_request_budget_for_provider_overhead(
+                    summary_request=summary_request,
+                    provider_estimated_tokens=estimated_input_tokens,
+                    provider_budget=budget,
+                )
+                if attempt == 1 and 0 < adjusted_budget < summary_request.estimated_tokens:
+                    rebuilt_request, rebuilt_runs = _build_summary_request(
+                        previous_summary=previous_summary,
+                        compacted_runs=compactable_runs,
+                        history_settings=history_settings,
+                        max_input_tokens=adjusted_budget,
+                    )
+                    if rebuilt_request is not None and rebuilt_runs:
+                        summary_request = rebuilt_request
+                        included_runs = rebuilt_runs
+                        continue
+                _raise_provider_request_too_large(estimated_input_tokens, budget)
             summary = await _generate_compaction_summary(
                 model=model,
                 messages=list(provider_request.messages),
@@ -834,6 +858,52 @@ async def _build_compaction_provider_request(
     return await provider_request_builder(summary_request, session)
 
 
+def _estimate_compaction_provider_request_tokens(provider_request: CompactionProviderRequest) -> int:
+    tool_tokens = len(stable_serialize(list(provider_request.tools))) // 4 if provider_request.tools else 0
+    return estimate_history_messages_tokens(list(provider_request.messages)) + tool_tokens
+
+
+def _summary_request_budget_for_provider_overhead(
+    *,
+    summary_request: CompactionSummaryRequest,
+    provider_estimated_tokens: int,
+    provider_budget: int,
+) -> int:
+    provider_overhead_tokens = max(0, provider_estimated_tokens - summary_request.estimated_tokens)
+    return provider_budget - provider_overhead_tokens
+
+
+def _raise_provider_request_too_large(estimated_input_tokens: int, budget: int) -> None:
+    msg = (
+        "provider-visible compaction request is too large "
+        f"({estimated_input_tokens} estimated tokens > {budget} budget)"
+    )
+    raise _CompactionProviderRequestTooLargeError(msg)
+
+
+def _compaction_summary_request_model(
+    model: Model,
+    *,
+    tools: Sequence[dict] | None,
+    tool_choice: str | dict[str, object] | None,
+) -> Model:
+    if not tools or not _is_no_tool_choice(tool_choice) or not isinstance(model, Claude):
+        return model
+    request_model = copy(model)
+    request_params = dict(request_model.request_params or {})
+    request_params["tool_choice"] = {"type": "none"}
+    request_model.request_params = request_params
+    return request_model
+
+
+def _is_no_tool_choice(tool_choice: str | dict[str, object] | None) -> bool:
+    if tool_choice == "none":
+        return True
+    if isinstance(tool_choice, dict):
+        return tool_choice.get("type") == "none"
+    return False
+
+
 @timed("system_prompt_assembly.history_prepare.compaction.summary_model_request")
 async def _generate_compaction_summary(
     *,
@@ -847,11 +917,16 @@ async def _generate_compaction_summary(
     del timing_scope
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     request_messages = [message.model_copy(deep=True) for message in messages]
+    request_model = _compaction_summary_request_model(
+        model,
+        tools=tools,
+        tool_choice=tool_choice,
+    )
 
     async def _request_summary() -> ModelResponse:
         try:
             request_tools: list[dict] | None = list(tools) if tools else None
-            return await model.aresponse(
+            return await request_model.aresponse(
                 messages=request_messages,
                 tools=cast("list[Function | dict] | None", request_tools),
                 tool_choice=tool_choice,

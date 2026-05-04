@@ -44,7 +44,6 @@ __all__ = [
     "build_team_compaction_provider_request",
     "compute_prompt_token_breakdown",
     "estimate_agent_static_tokens",
-    "estimate_static_tokens",
     "estimate_team_static_tokens",
     "estimate_tool_definition_tokens",
     "team_tool_definition_payloads_for_logging",
@@ -87,19 +86,6 @@ async def build_team_compaction_provider_request(
         final_user_message=summary_request.messages[-1],
         synthetic_run_id=_synthetic_compaction_run_id(summary_request),
     )
-
-
-def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate system and current-user prompt tokens outside persisted replay."""
-    static_chars = len(agent.role or "")
-    instructions = agent.instructions
-    if isinstance(instructions, str):
-        static_chars += len(instructions)
-    elif isinstance(instructions, list):
-        for instruction in instructions:
-            static_chars += len(str(instruction))
-    static_chars += len(full_prompt)
-    return (static_chars // 4) + estimate_tool_definition_tokens(agent)
 
 
 def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:

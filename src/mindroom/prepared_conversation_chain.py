@@ -624,6 +624,7 @@ def build_persisted_run_chain(
         messages.extend(compaction_replay_messages(run, history_settings))
         if isinstance(run.run_id, str) and run.run_id:
             source_run_ids.append(run.run_id)
+    strip_stale_anthropic_replay_fields(messages)
     rendered_text = render_prepared_messages_text(messages)
     return PreparedConversationChain(
         messages=tuple(messages),
@@ -747,7 +748,7 @@ def compaction_replay_messages(
     if history_settings.max_tool_calls_from_history is not None and messages:
         filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
     strip_stale_anthropic_replay_fields(messages)
-    return messages
+    return [_compaction_safe_replay_message(message) for message in messages]
 
 
 def history_messages_for_session(
@@ -910,10 +911,21 @@ def plain_compaction_summary_messages(messages: Sequence[Message]) -> tuple[Mess
 
 
 def _plain_compaction_summary_message(message: Message) -> Message:
-    if message.role != "tool" and not message.tool_calls and message.tool_call_id is None:
+    if (
+        message.role != "tool"
+        and not message.tool_calls
+        and message.tool_call_id is None
+        and not _message_has_media(message)
+    ):
         return message.model_copy(deep=True)
     role = message.role if message.role in {"assistant", "system", "user"} else "user"
     return Message(role=role, content=_oversized_excerpt_content(message))
+
+
+def _compaction_safe_replay_message(message: Message) -> Message:
+    if not _message_has_media(message):
+        return message
+    return _plain_oversized_excerpt_message(message, _oversized_excerpt_content(message))
 
 
 def _estimate_run_chain_tokens(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> int:
@@ -1000,7 +1012,7 @@ def _oversized_excerpt_content(message: Message) -> str:
     if message.tool_calls:
         parts.append(f"Tool calls: {stable_serialize(message.tool_calls)}")
     for tag, media_value in message_media_entries(message):
-        if media_value is None:
+        if not _media_value_present(media_value):
             continue
         parts.append(f"{tag}: {stable_serialize(media_payload_snapshot(media_value))}")
     return "\n".join(parts)
@@ -1096,10 +1108,22 @@ def _estimated_message_chars(message: Message) -> int:
 def _estimate_message_media_chars(message: Message) -> int:
     media_chars = 0
     for _tag, media_value in message_media_entries(message):
-        if media_value is None:
+        if not _media_value_present(media_value):
             continue
         media_chars += len(stable_serialize(media_payload_snapshot(media_value)))
     return media_chars
+
+
+def _message_has_media(message: Message) -> bool:
+    return any(_media_value_present(media_value) for _tag, media_value in message_media_entries(message))
+
+
+def _media_value_present(media_value: object) -> bool:
+    if media_value is None:
+        return False
+    if isinstance(media_value, Sequence) and not isinstance(media_value, (str, bytes, bytearray)):
+        return bool(media_value)
+    return True
 
 
 def _truncate_excerpt(text: str, max_chars: int) -> str:
