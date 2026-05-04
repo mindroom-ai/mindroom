@@ -41,14 +41,14 @@ from mindroom.history.interrupted_replay import (
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_delivery import MatrixExpectedDeliveryPolicyError, build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import _clear_oversized_nonterminal_streaming_edit_rate_limits
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
-from mindroom.response_runner import ResponseRequest
+from mindroom.response_runner import ResponseRequest, _log_streaming_delivery_error
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
     INTERRUPTED_RESPONSE_NOTE,
@@ -3197,6 +3197,84 @@ class TestStreamingBehavior:
 
         assert terminal_texts[-1].startswith("**[Response interrupted by an error:")
         assert "hello" not in exc_info.value.accumulated_text
+
+    @pytest.mark.asyncio
+    async def test_policy_delivery_failure_logs_compactly_and_skips_terminal_retry(self) -> None:
+        """Deterministic Matrix policy rejections should not emit traceback retries."""
+        mock_client = _make_matrix_client_mock()
+
+        class ImmediateStreamingResponse(StreamingResponse):
+            def __init__(self, **kwargs: object) -> None:
+                super().__init__(**kwargs)
+                self.update_interval = 0.0
+                self.min_update_interval = 0.0
+                self.progress_update_interval = 0.0
+                self.min_char_update_interval = 0.0
+                self.update_char_threshold = 1
+                self.min_update_char_threshold = 1
+
+        policy_error = MatrixExpectedDeliveryPolicyError(
+            room_id="!test:localhost",
+            operation="edit_message",
+            cache_bypass=False,
+            exception_type="OlmUnverifiedDeviceError",
+        )
+
+        async def stream() -> AsyncIterator[str]:
+            yield "hello"
+
+        with (
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=policy_error)) as mock_edit,
+            patch("mindroom.streaming.logger.exception") as mock_streaming_exception,
+            pytest.raises(StreamingDeliveryError) as exc_info,
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                room_id="!test:localhost",
+                reply_to_event_id="$original_123",
+                thread_id=None,
+                sender_domain="localhost",
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                room_mode=True,
+                streaming_cls=ImmediateStreamingResponse,
+            )
+
+        assert exc_info.value.error is policy_error
+        assert mock_edit.await_count == 2
+        mock_streaming_exception.assert_not_called()
+
+    def test_response_runner_logs_policy_delivery_failure_without_traceback(self) -> None:
+        """Response-level delivery logging should keep policy rejections compact."""
+        policy_error = MatrixExpectedDeliveryPolicyError(
+            room_id="!test:localhost",
+            operation="edit_message",
+            cache_bypass=False,
+            exception_type="OlmUnverifiedDeviceError",
+        )
+        delivery_error = StreamingDeliveryError(
+            policy_error,
+            event_id="$thinking_123",
+            accumulated_text="hello",
+            tool_trace=[],
+            transport_outcome=StreamTransportOutcome(
+                last_physical_stream_event_id="$thinking_123",
+                terminal_status="error",
+                rendered_body="hello",
+                visible_body_state="visible_body",
+            ),
+        )
+        logger = MagicMock()
+
+        _log_streaming_delivery_error(logger, response_label="Bot", error=delivery_error)
+
+        logger.exception.assert_not_called()
+        logger.warning.assert_called_once()
+        assert logger.warning.call_args.args == ("Bot streaming response rejected by Matrix delivery policy",)
+        assert "exc_info" not in logger.warning.call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_send_or_edit_message_commits_frozen_preawait_snapshot(self) -> None:

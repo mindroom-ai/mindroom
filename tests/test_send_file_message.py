@@ -11,6 +11,7 @@ import pytest
 from nio.exceptions import OlmUnverifiedDeviceError
 
 from mindroom.config.main import Config
+from mindroom.matrix import client_delivery as client_delivery_module
 from mindroom.matrix.client import DeliveredMatrixEvent, join_room
 from mindroom.matrix.client_delivery import (
     _msgtype_for_mimetype,
@@ -581,8 +582,8 @@ class TestSendMessageResult:
         client.room_send.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_room_send_raises_unverified_device_error(self) -> None:
-        """Local E2EE trust failures should not escape text send delivery."""
+    async def test_raises_policy_error_when_room_send_raises_unverified_device_error(self) -> None:
+        """Local E2EE trust failures should surface as typed policy rejections."""
         client = _mock_client()
         client.room_send.side_effect = OlmUnverifiedDeviceError(
             SimpleNamespace(user_id="@private:localhost", device_id="SECRETDEVICE"),
@@ -595,15 +596,17 @@ class TestSendMessageResult:
                 new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
             ),
             patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
+            pytest.raises(client_delivery_module.MatrixExpectedDeliveryPolicyError) as exc_info,
         ):
-            result = await send_message_result(
+            await send_message_result(
                 client,
                 "!room:localhost",
                 {"body": "hello", "msgtype": "m.text"},
                 config=Config(),
             )
 
-        assert result is None
+        assert exc_info.value.operation == "send_message"
+        assert exc_info.value.exception_type == "OlmUnverifiedDeviceError"
         mock_error.assert_called_once()
         assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
         assert mock_error.call_args.kwargs["exception_type"] == "OlmUnverifiedDeviceError"
@@ -612,8 +615,8 @@ class TestSendMessageResult:
         )
 
     @pytest.mark.asyncio
-    async def test_edit_returns_none_when_room_send_raises_unverified_device_error(self) -> None:
-        """Local E2EE trust failures should not escape edit delivery."""
+    async def test_edit_raises_policy_error_when_room_send_raises_unverified_device_error(self) -> None:
+        """Local E2EE trust failures should surface as typed edit policy rejections."""
         client = _mock_client()
         client.room_send.side_effect = OlmUnverifiedDeviceError(
             SimpleNamespace(user_id="@private:localhost", device_id="SECRETDEVICE"),
@@ -626,8 +629,9 @@ class TestSendMessageResult:
                 new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
             ),
             patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
+            pytest.raises(client_delivery_module.MatrixExpectedDeliveryPolicyError) as exc_info,
         ):
-            result = await edit_message_result(
+            await edit_message_result(
                 client,
                 "!room:localhost",
                 "$placeholder",
@@ -636,14 +640,14 @@ class TestSendMessageResult:
                 config=Config(),
             )
 
-        assert result is None
+        assert exc_info.value.operation == "edit_message"
         assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
         assert mock_error.call_args.kwargs["operation"] == "edit_message"
         assert mock_error.call_args.kwargs["exception_type"] == "OlmUnverifiedDeviceError"
 
     @pytest.mark.asyncio
-    async def test_unexpected_room_send_exception_logs_generic_sanitized_message(self) -> None:
-        """Unexpected local delivery exceptions should log type plus a safe generic message."""
+    async def test_unexpected_room_send_exception_propagates_with_sanitized_log(self) -> None:
+        """Unexpected local delivery exceptions should keep traceback ownership for callers."""
         client = _mock_client()
         client.room_send.side_effect = RuntimeError(
             "failed token=supersecret for @private:localhost via https://matrix.example/private",
@@ -655,15 +659,15 @@ class TestSendMessageResult:
                 new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
             ),
             patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
+            pytest.raises(RuntimeError, match="failed token=supersecret"),
         ):
-            result = await send_message_result(
+            await send_message_result(
                 client,
                 "!room:localhost",
                 {"body": "hello", "msgtype": "m.text"},
                 config=Config(),
             )
 
-        assert result is None
         assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
         assert mock_error.call_args.kwargs["exception_type"] == "RuntimeError"
         assert mock_error.call_args.kwargs["error_message"] == "Matrix delivery raised an unexpected local exception."

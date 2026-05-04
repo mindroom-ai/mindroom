@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
+    MatrixExpectedDeliveryPolicyError,
     cached_room,  # noqa: F401
     edit_message_result,
+    is_expected_matrix_delivery_policy_error,
     send_file_message,
     send_message_result,
 )
@@ -36,6 +38,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, repl
 
 __all__ = [
     "DeliveredMatrixEvent",
+    "MatrixExpectedDeliveryPolicyError",
     "PermanentMatrixStartupError",
     "ResolvedVisibleMessage",
     "RoomThreadsPageError",
@@ -48,6 +51,7 @@ __all__ = [
     "get_room_name",
     "get_room_threads_page",
     "invite_to_room",
+    "is_expected_matrix_delivery_policy_error",
     "join_room",
     "leave_room",
     "login",
