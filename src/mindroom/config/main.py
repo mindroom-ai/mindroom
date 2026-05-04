@@ -25,7 +25,13 @@ from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.config.matrix import CacheConfig, MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
+from mindroom.config.matrix import (
+    CacheConfig,
+    MatrixRoomAccessConfig,
+    MatrixSpaceConfig,
+    MatrixSyncConfig,
+    MindRoomUserConfig,
+)
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import (
     CompactionConfig,
@@ -384,6 +390,10 @@ class Config(BaseModel):
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     cache: CacheConfig = Field(default_factory=CacheConfig, description="Persistent Matrix event cache")
+    matrix_sync: MatrixSyncConfig = Field(
+        default_factory=MatrixSyncConfig,
+        description="Matrix event sync transport configuration",
+    )
     timezone: str = Field(
         default="UTC",
         description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
