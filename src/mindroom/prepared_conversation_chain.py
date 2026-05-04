@@ -887,8 +887,7 @@ def _build_compaction_summary_request_from_prefix(
         *[message.model_copy(deep=True) for message in prefix_messages],
         Message(role="user", content=compaction_summary_instruction(previous_summary)),
     ]
-    strip_stale_anthropic_replay_fields(messages)
-    sanitized_prefix = tuple(messages[:-1])
+    preserved_prefix = tuple(messages[:-1])
     request_messages = tuple(messages)
     rendered_text = render_prepared_messages_text(messages)
     return CompactionSummaryRequest(
@@ -896,13 +895,25 @@ def _build_compaction_summary_request_from_prefix(
         chain=replace(
             chain,
             source=source,
-            messages=sanitized_prefix,
-            rendered_text=render_prepared_messages_text(sanitized_prefix),
+            messages=preserved_prefix,
+            rendered_text=render_prepared_messages_text(preserved_prefix),
         ),
         included_run_ids=chain.source_run_ids,
         rendered_text=rendered_text,
         estimated_tokens=estimate_history_messages_tokens(list(messages)),
     )
+
+
+def plain_compaction_summary_messages(messages: Sequence[Message]) -> tuple[Message, ...]:
+    """Return compaction request messages without provider-native tool history."""
+    return tuple(_plain_compaction_summary_message(message) for message in messages)
+
+
+def _plain_compaction_summary_message(message: Message) -> Message:
+    if message.role != "tool" and not message.tool_calls and message.tool_call_id is None:
+        return message.model_copy(deep=True)
+    role = message.role if message.role in {"assistant", "system", "user"} else "user"
+    return Message(role=role, content=_oversized_excerpt_content(message))
 
 
 def _estimate_run_chain_tokens(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> int:

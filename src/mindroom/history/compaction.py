@@ -44,6 +44,7 @@ from mindroom.prepared_conversation_chain import (
     build_persisted_run_chain,
     estimate_history_messages_tokens,
     history_messages_for_session,
+    plain_compaction_summary_messages,
     strip_stale_anthropic_replay_fields,
 )
 from mindroom.timing import timed
@@ -828,7 +829,7 @@ async def _build_compaction_provider_request(
 ) -> CompactionProviderRequest:
     if provider_request_builder is None:
         return CompactionProviderRequest(
-            messages=tuple(message.model_copy(deep=True) for message in summary_request.messages),
+            messages=plain_compaction_summary_messages(summary_request.messages),
         )
     return await provider_request_builder(summary_request, session)
 
