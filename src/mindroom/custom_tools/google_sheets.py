@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.googlesheets import GoogleSheetsTools as AgnoGoogleSheetsTools
 
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
@@ -28,7 +29,7 @@ _CONFIG_FIELD_INIT_ARG_ALIASES = {
 }
 
 
-class GoogleSheetsTools(ScopedOAuthClientMixin, AgnoGoogleSheetsTools):
+class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleSheetsTools):
     """Google Sheets tools wrapper that uses MindRoom's credential management."""
 
     _oauth_provider = google_sheets_oauth_provider()
