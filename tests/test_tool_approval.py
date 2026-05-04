@@ -1217,9 +1217,11 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
         room_id: str,
         message_type: str,
         content: dict[str, Any],
+        ignore_unverified_devices: bool = False,
     ) -> nio.RoomSendResponse:
         assert room_id == "!room:localhost"
         assert message_type == "io.mindroom.tool_approval"
+        assert ignore_unverified_devices is False
         sent_contents.append(content)
         event_id = "$approval-edit" if "m.new_content" in content else "$approval"
         return nio.RoomSendResponse(event_id=event_id, room_id=room_id)

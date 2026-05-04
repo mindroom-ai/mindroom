@@ -156,7 +156,7 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
+        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
@@ -188,7 +188,7 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
+        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
@@ -231,7 +231,7 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
+        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
@@ -264,7 +264,7 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
+        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
@@ -387,7 +387,7 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
+        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
@@ -621,7 +621,7 @@ class TestSendFileMessageMsgtype:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
+        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
@@ -651,7 +651,7 @@ class TestSendFileMessageMsgtype:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict) -> DeliveredMatrixEvent:
+        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
             nonlocal sent_content
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)

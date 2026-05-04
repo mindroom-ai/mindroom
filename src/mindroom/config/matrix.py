@@ -89,6 +89,20 @@ class MatrixSpaceConfig(BaseModel):
         return normalized
 
 
+class MatrixDeliveryConfig(BaseModel):
+    """Configuration for outgoing Matrix event delivery."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ignore_unverified_devices: bool = Field(
+        default=False,
+        description=(
+            "Whether outgoing encrypted Matrix sends should ignore unverified devices. "
+            "The default keeps nio's device-trust checks enabled."
+        ),
+    )
+
+
 class MatrixRoomAccessConfig(BaseModel):
     """Configuration for managed Matrix room access and discoverability."""
 

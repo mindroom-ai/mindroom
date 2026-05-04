@@ -925,7 +925,7 @@ class StreamingResponse:
 
     async def _send_initial_content(self, client: nio.AsyncClient, *, content: dict[str, Any]) -> bool:
         """Send the initial streaming event."""
-        delivered = await send_message_result(client, self.room_id, content)
+        delivered = await send_message_result(client, self.room_id, content, config=self.config)
         if delivered is None:
             return False
         self.event_id = delivered.event_id
@@ -945,7 +945,14 @@ class StreamingResponse:
     ) -> bool:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
-        delivered = await edit_message_result(client, self.room_id, self.event_id, content, display_text)
+        delivered = await edit_message_result(
+            client,
+            self.room_id,
+            self.event_id,
+            content,
+            display_text,
+            config=self.config,
+        )
         if delivered is None:
             return False
         await self._record_streaming_edit(delivered.event_id, content_sent=delivered.content_sent)

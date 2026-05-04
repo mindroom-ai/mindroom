@@ -90,6 +90,7 @@ def _runner(
                 stop_manager=resolved_stop_manager,
                 logger=MagicMock(),
                 show_stop_button=lambda: show_stop_button,
+                ignore_unverified_devices=lambda: False,
                 notify_outbound_event=MagicMock(),
                 notify_outbound_redaction=MagicMock(),
             ),
@@ -184,7 +185,10 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
     )
     assert stop_manager.added_buttons == ["$thinking"]
     assert stop_manager.add_stop_button_kwargs == [
-        {"notify_outbound_event": runner.deps.notify_outbound_event},
+        {
+            "ignore_unverified_devices": False,
+            "notify_outbound_event": runner.deps.notify_outbound_event,
+        },
     ]
     assert stop_manager.cleared_messages == [("$thinking", True)]
     assert stop_manager.clear_message_kwargs == [

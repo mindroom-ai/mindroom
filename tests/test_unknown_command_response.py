@@ -92,6 +92,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
         _client: AsyncMock,
         room_id: str,
         content: dict,
+        **_kwargs: object,
     ) -> object:
         # Extract thread_id from content if present
         thread_id = None
@@ -203,6 +204,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
         _client: AsyncMock,
         room_id: str,
         content: dict,
+        **_kwargs: object,
     ) -> object:
         # Extract thread_id from content if present
         thread_id = None
@@ -330,6 +332,7 @@ async def test_unknown_command_with_reply_stays_plain_reply(tmp_path: Path) -> N
         _client: AsyncMock,
         room_id: str,
         content: dict,
+        **_kwargs: object,
     ) -> object:
         # Extract thread_id from content if present
         thread_id = None

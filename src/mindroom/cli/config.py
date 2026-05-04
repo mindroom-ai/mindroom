@@ -832,6 +832,9 @@ matrix_space:
   enabled: true
   name: MindRoom
 
+matrix_delivery:
+  ignore_unverified_devices: false
+
 knowledge_bases:
   mind_memory:
     path: {mind_memory_knowledge_path}
@@ -957,6 +960,9 @@ mindroom_user:
 matrix_space:
   enabled: true
   name: MindRoom
+
+matrix_delivery:
+  ignore_unverified_devices: false
 
 authorization:
   default_room_access: false

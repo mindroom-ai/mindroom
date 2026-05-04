@@ -822,6 +822,7 @@ class MatrixApiTools(Toolkit):
                 room_id=room_id,
                 message_type=normalized_event_type,
                 content=normalized_content,
+                ignore_unverified_devices=context.config.matrix_delivery.ignore_unverified_devices,
             )
         except Exception as exc:
             self._audit_write(

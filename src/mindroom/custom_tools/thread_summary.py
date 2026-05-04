@@ -108,6 +108,7 @@ class ThreadSummaryTools(Toolkit):
                 resolved_room_id,
                 normalized_thread_id,
                 summary,
+                config=context.config,
                 conversation_cache=conversation_cache,
             )
         except ThreadSummaryWriteError as exc:

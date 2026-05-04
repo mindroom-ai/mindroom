@@ -12,6 +12,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
@@ -295,15 +296,23 @@ def _cleanup() -> None:
     _pending_changes.clear()
 
 
-async def add_confirmation_reactions(client: nio.AsyncClient, room_id: str, event_id: str) -> None:
+async def add_confirmation_reactions(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    *,
+    config: Config | None = None,
+) -> None:
     """Add confirmation reaction buttons to a config change message.
 
     Args:
         client: The Matrix client
         room_id: The room ID
         event_id: The event ID of the message to add reactions to
+        config: Optional active config for Matrix delivery policy
 
     """
+    ignore_unverified_devices = False if config is None else config.matrix_delivery.ignore_unverified_devices
     # Add ✅ reaction
     confirm_response = await client.room_send(
         room_id=room_id,
@@ -315,6 +324,7 @@ async def add_confirmation_reactions(client: nio.AsyncClient, room_id: str, even
                 "key": "✅",
             },
         },
+        ignore_unverified_devices=ignore_unverified_devices,
     )
     if not isinstance(confirm_response, nio.RoomSendResponse):
         logger.warning("Failed to add confirm reaction", error=str(confirm_response))
@@ -330,6 +340,7 @@ async def add_confirmation_reactions(client: nio.AsyncClient, room_id: str, even
                 "key": "❌",
             },
         },
+        ignore_unverified_devices=ignore_unverified_devices,
     )
     if not isinstance(cancel_response, nio.RoomSendResponse):
         logger.warning("Failed to add cancel reaction", error=str(cancel_response))

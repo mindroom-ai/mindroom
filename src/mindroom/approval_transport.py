@@ -181,10 +181,13 @@ class ApprovalMatrixTransport:
                 thread_id,
                 _approval_relation_agent_name(send_content, fallback=bot.agent_name),
             )
+        config = self.config_provider()
+        ignore_unverified_devices = False if config is None else config.matrix_delivery.ignore_unverified_devices
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
             content=send_content,
+            ignore_unverified_devices=ignore_unverified_devices,
         )
         if isinstance(response, nio.RoomSendResponse):
             sender_user_id = bot.client.user_id
@@ -284,10 +287,13 @@ class ApprovalMatrixTransport:
                 thread_id,
                 _approval_relation_agent_name(new_content, fallback=bot.agent_name),
             )
+        config = self.config_provider()
+        ignore_unverified_devices = False if config is None else config.matrix_delivery.ignore_unverified_devices
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
             content=build_matrix_edit_content(event_id, replacement_content),
+            ignore_unverified_devices=ignore_unverified_devices,
         )
         if not isinstance(response, nio.RoomSendResponse):
             logger.warning(
@@ -371,10 +377,13 @@ class ApprovalMatrixTransport:
             reply_to_event_id=approval_event_id,
             extra_content={"msgtype": "m.notice"},
         )
+        config = self.config_provider()
+        ignore_unverified_devices = False if config is None else config.matrix_delivery.ignore_unverified_devices
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="m.room.message",
             content=content,
+            ignore_unverified_devices=ignore_unverified_devices,
         )
         if isinstance(response, nio.RoomSendResponse):
             return True

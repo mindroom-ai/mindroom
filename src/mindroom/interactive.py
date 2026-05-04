@@ -715,6 +715,8 @@ async def add_reaction_buttons(
     room_id: str,
     event_id: str,
     options: list[dict[str, str]],
+    *,
+    ignore_unverified_devices: bool = False,
 ) -> None:
     """Add reaction buttons to a message.
 
@@ -723,6 +725,7 @@ async def add_reaction_buttons(
         room_id: The room ID
         event_id: The event ID of the message to add reactions to
         options: List of option dictionaries with 'emoji' keys
+        ignore_unverified_devices: Whether Matrix delivery should ignore unverified devices
 
     """
     for opt in options:
@@ -737,6 +740,7 @@ async def add_reaction_buttons(
                     "key": emoji_char,
                 },
             },
+            ignore_unverified_devices=ignore_unverified_devices,
         )
         if not isinstance(reaction_response, nio.RoomSendResponse):
             logger.warning("Failed to add reaction", emoji=emoji_char, error=str(reaction_response))

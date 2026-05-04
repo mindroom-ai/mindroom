@@ -350,6 +350,7 @@ class StopManager:
         client: AsyncClient,
         message_id: str,
         *,
+        ignore_unverified_devices: bool = False,
         notify_outbound_event: Callable[[str, dict[str, object]], None] | None = None,
     ) -> str | None:
         """Add a stop button reaction to a tracked message."""
@@ -374,6 +375,7 @@ class StopManager:
                         "key": "🛑",
                     },
                 },
+                ignore_unverified_devices=ignore_unverified_devices,
             )
             if isinstance(response, nio.RoomSendResponse):
                 event_id = str(response.event_id)

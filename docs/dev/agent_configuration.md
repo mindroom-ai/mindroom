@@ -25,11 +25,12 @@ The configuration file has these top-level sections:
 10. **authorization** - Fine-grained user and room permissions
 11. **matrix_room_access** - Managed room access mode and discoverability
 12. **matrix_space** - Optional root Matrix Space for grouping rooms
-13. **mindroom_user** - Internal MindRoom user account settings
-14. **timezone** - Timezone for scheduled tasks (default: `UTC`)
-15. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
-16. **room_models** - Per-room model overrides
-17. **plugins** - Plugin paths for tool/skill extensions
+13. **matrix_delivery** - Outgoing Matrix delivery policy
+14. **mindroom_user** - Internal MindRoom user account settings
+15. **timezone** - Timezone for scheduled tasks (default: `UTC`)
+16. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
+17. **room_models** - Per-room model overrides
+18. **plugins** - Plugin paths for tool/skill extensions
 
 ## Model Configuration
 
@@ -340,6 +341,18 @@ matrix_space:
   enabled: true  # Create and maintain a root Space (default: true)
   name: "MindRoom"  # Display name for the root Space
 ```
+
+## Matrix Delivery Configuration
+
+Configure outgoing Matrix delivery policy:
+
+```yaml
+matrix_delivery:
+  ignore_unverified_devices: false  # Keep Matrix E2EE device-trust checks enabled by default
+```
+
+Set `ignore_unverified_devices` to `true` only when the operator intentionally accepts delivery to encrypted rooms that contain unverified devices.
+This can improve bot delivery semantics, but Matrix may encrypt outgoing messages for devices the bot has not verified.
 
 ## Defaults Configuration
 

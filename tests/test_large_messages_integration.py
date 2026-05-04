@@ -11,6 +11,7 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom.config.matrix import MatrixDeliveryConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
@@ -44,8 +45,17 @@ class MockClient:
         self.uploads: list[dict] = []
         self.should_upload_succeed = should_upload_succeed
 
-    async def room_send(self, room_id: str, message_type: str, content: dict) -> MagicMock:  # noqa: ARG002
+    async def room_send(
+        self,
+        room_id: str,
+        message_type: str,
+        content: dict,
+        *,
+        ignore_unverified_devices: bool = False,
+    ) -> MagicMock:
         """Mock sending a message."""
+        assert message_type == "m.room.message"
+        assert ignore_unverified_devices is False
         self.messages_sent.append(("send", room_id, content))
 
         # Create a mock that passes isinstance check
@@ -75,6 +85,7 @@ class MockConfig:
     def __init__(self) -> None:
         self.agents = {}
         self.defaults = DefaultsConfig()
+        self.matrix_delivery = MatrixDeliveryConfig()
 
 
 def _runtime_paths() -> RuntimePaths:

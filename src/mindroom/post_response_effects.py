@@ -129,6 +129,7 @@ class PostResponseEffectsSupport:
             room_id,
             event_id,
             interactive_metadata.options_as_list(),
+            ignore_unverified_devices=self.runtime.config.matrix_delivery.ignore_unverified_devices,
         )
 
     def queue_thread_summary(

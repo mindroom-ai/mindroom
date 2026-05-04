@@ -561,7 +561,7 @@ class DeliveryGateway:
             )
         if request.skip_mentions:
             content["com.mindroom.skip_mentions"] = True
-        delivered = await send_message_result(client, resolved_target.room_id, content)
+        delivered = await send_message_result(client, resolved_target.room_id, content, config=config)
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 resolved_target.room_id,
@@ -620,6 +620,7 @@ class DeliveryGateway:
             request.event_id,
             content,
             request.new_text,
+            config=config,
         )
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
@@ -930,7 +931,7 @@ class DeliveryGateway:
                 "com.mindroom.skip_mentions": True,
             },
         )
-        delivered = await send_message_result(self._client(), target.room_id, content)
+        delivered = await send_message_result(self._client(), target.room_id, content, config=self.deps.runtime.config)
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,
@@ -1029,7 +1030,14 @@ class DeliveryGateway:
                 "com.mindroom.skip_mentions": True,
             },
         )
-        delivered = await edit_message_result(self._client(), target.room_id, event_id, content, body)
+        delivered = await edit_message_result(
+            self._client(),
+            target.room_id,
+            event_id,
+            content,
+            body,
+            config=self.deps.runtime.config,
+        )
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,

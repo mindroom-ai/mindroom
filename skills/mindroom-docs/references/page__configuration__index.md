@@ -439,9 +439,17 @@ matrix_space:
   enabled: true                    # Default: true (create a root Matrix Space for managed rooms)
   name: MindRoom                   # Default: "MindRoom" (display name for the root Space)
 
+# Matrix delivery policy (optional)
+matrix_delivery:
+  ignore_unverified_devices: false # Default: false (keep Matrix E2EE device-trust checks enabled)
+
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 ```
+
+`matrix_delivery.ignore_unverified_devices` is an explicit opt-in for outgoing encrypted Matrix sends.
+Leave it `false` to preserve Matrix E2EE device-trust checks.
+Setting it to `true` can improve bot delivery when rooms contain unverified devices, but Matrix may encrypt messages for devices the bot has not verified.
 
 ## Credential Seeds
 

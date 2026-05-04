@@ -674,6 +674,7 @@ class TestMaybeGenerateThreadSummary:
             5,
             "default",
             self.conversation_cache,
+            config=config,
         )
         assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 
@@ -711,6 +712,7 @@ class TestMaybeGenerateThreadSummary:
             5,
             "default",
             self.conversation_cache,
+            config=config,
         )
         assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
 

@@ -571,6 +571,7 @@ async def test_sessions_spawn_sets_summary_after_spawn(
         1,
         "manual",
         ctx.conversation_cache,
+        config=ctx.config,
     )
     update_mock.assert_called_once_with(ctx.room_id, "$event", 1)
 
@@ -813,6 +814,7 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
         1,
         "manual",
         ctx.conversation_cache,
+        config=ctx.config,
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,
@@ -854,6 +856,7 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
         0,
         "manual",
         ctx.conversation_cache,
+        config=ctx.config,
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,
@@ -905,6 +908,7 @@ async def test_sessions_spawn_skips_reuse_when_registry_entry_lacks_thread_id(
         1,
         "manual",
         ctx.conversation_cache,
+        config=ctx.config,
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,
@@ -956,6 +960,7 @@ async def test_sessions_spawn_reuse_derives_thread_id_from_session_key(
         0,
         "manual",
         ctx.conversation_cache,
+        config=ctx.config,
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,
@@ -1001,6 +1006,7 @@ async def test_sessions_spawn_skips_room_level_reuse_candidates(
         1,
         "manual",
         ctx.conversation_cache,
+        config=ctx.config,
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,

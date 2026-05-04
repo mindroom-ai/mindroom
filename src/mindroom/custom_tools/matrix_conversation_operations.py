@@ -90,7 +90,7 @@ class MatrixMessageOperations:
             latest_thread_event_id=latest_thread_event_id,
             extra_content=extra_content or None,
         )
-        delivered = await send_message_result(context.client, room_id, content)
+        delivered = await send_message_result(context.client, room_id, content, config=context.config)
         if delivered is not None:
             context.conversation_cache.notify_outbound_message(
                 room_id,
@@ -129,6 +129,7 @@ class MatrixMessageOperations:
             room_id,
             event_id,
             response.interactive_metadata.options_as_list(),
+            ignore_unverified_devices=context.config.matrix_delivery.ignore_unverified_devices,
         )
 
     async def _message_send_or_reply(  # noqa: C901, PLR0911, PLR0912
@@ -224,6 +225,7 @@ class MatrixMessageOperations:
                     context.client,
                     room_id,
                     first_attachment_path,
+                    config=context.config,
                     thread_id=effective_thread_id,
                     latest_thread_event_id=latest_thread_event_id,
                     conversation_cache=context.conversation_cache,
@@ -343,6 +345,7 @@ class MatrixMessageOperations:
             room_id=room_id,
             message_type="m.reaction",
             content=content,
+            ignore_unverified_devices=context.config.matrix_delivery.ignore_unverified_devices,
         )
         if isinstance(response, nio.RoomSendResponse):
             return self._result(
@@ -646,7 +649,14 @@ class MatrixMessageOperations:
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
         )
-        delivered = await edit_message_result(context.client, room_id, target, content, formatted_text)
+        delivered = await edit_message_result(
+            context.client,
+            room_id,
+            target,
+            content,
+            formatted_text,
+            config=context.config,
+        )
         if delivered is None:
             return self._result(
                 "error",
@@ -675,6 +685,7 @@ class MatrixMessageOperations:
                 room_id,
                 target,
                 interactive_response.interactive_metadata.options_as_list(),
+                ignore_unverified_devices=context.config.matrix_delivery.ignore_unverified_devices,
             )
 
         return self._result(
