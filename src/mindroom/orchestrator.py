@@ -155,6 +155,13 @@ def _raise_embedded_api_server_exit(api_server: _EmbeddedApiServerContext, *, re
     raise RuntimeError(msg)
 
 
+def _raise_orchestrator_exit(*, reason: str) -> NoReturn:
+    """Raise the fatal lifecycle error for an unexpected orchestrator exit."""
+    logger.error("fatal_orchestrator_exit", reason=reason)
+    msg = "MindRoom orchestrator exited unexpectedly"
+    raise RuntimeError(msg)
+
+
 @dataclass
 class _ConfigReloadDrainState:
     """Track response-drain state for a queued config reload."""
@@ -1808,6 +1815,14 @@ async def _wait_for_runtime_completion(
     if api_task is not None:
         monitored_tasks.add(api_task)
     done, _pending = await asyncio.wait(monitored_tasks, return_when=asyncio.FIRST_COMPLETED)
+    logger.info(
+        "runtime_completion_detected",
+        completed_tasks=sorted(task.get_name() for task in done),
+        orchestrator_done=orchestrator_task in done,
+        api_done=api_task in done if api_task is not None else False,
+        shutdown_requested_done=shutdown_wait_task in done,
+        shutdown_requested=shutdown_requested.is_set(),
+    )
     await _consume_completed_runtime_tasks(
         done,
         orchestrator_task=orchestrator_task,
@@ -1844,17 +1859,41 @@ async def _consume_completed_runtime_tasks(
         if task is None or task not in done:
             continue
         try:
+            task_name = task.get_name()
             if api_task is not None and task is api_task:
                 await _await_api_task_completion(
                     api_task,
                     shutdown_requested=shutdown_requested,
                     api_server=api_server,
                 )
+                logger.info(
+                    "runtime_task_completed",
+                    task_name=task_name,
+                    shutdown_requested=shutdown_requested.is_set(),
+                )
                 continue
             await task
+            if task is orchestrator_task:
+                if shutdown_requested.is_set():
+                    logger.info(
+                        "orchestrator_task_completed_after_shutdown_request",
+                        task_name=task_name,
+                    )
+                    continue
+                _raise_orchestrator_exit(
+                    reason="Orchestrator task finished while application shutdown was not requested",
+                )
+            logger.info(
+                "runtime_task_completed",
+                task_name=task_name,
+                shutdown_requested=shutdown_requested.is_set(),
+            )
+            continue
         except asyncio.CancelledError:
+            logger.info("runtime_task_cancelled", task_name=task.get_name())
             continue
         except Exception as exc:
+            logger.exception("runtime_task_failed", task_name=task.get_name())
             failures.append(exc)
     if failures:
         raise failures[0]

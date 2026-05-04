@@ -1533,6 +1533,31 @@ class TestAgentBot:
             await asyncio.gather(orchestrator_task, shutdown_wait_task, api_task, return_exceptions=True)
 
     @pytest.mark.asyncio
+    async def test_runtime_completion_raises_when_orchestrator_returns_without_shutdown_request(self) -> None:
+        """A clean orchestrator return without a shutdown signal should restart the service."""
+        shutdown_requested = asyncio.Event()
+
+        async def _orchestrator_done() -> None:
+            return None
+
+        orchestrator_task = asyncio.create_task(_orchestrator_done(), name="orchestrator")
+        shutdown_wait_task = asyncio.create_task(shutdown_requested.wait(), name="application_shutdown_wait")
+        await asyncio.sleep(0)
+
+        try:
+            with pytest.raises(RuntimeError, match="MindRoom orchestrator exited unexpectedly"):
+                await _wait_for_runtime_completion(
+                    orchestrator_task=orchestrator_task,
+                    shutdown_wait_task=shutdown_wait_task,
+                    api_task=None,
+                    shutdown_requested=shutdown_requested,
+                    api_server=_EmbeddedApiServerContext(host="127.0.0.1", port=0),
+                )
+        finally:
+            shutdown_wait_task.cancel()
+            await asyncio.gather(orchestrator_task, shutdown_wait_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
     async def test_orchestrator_main_logs_api_shutdown_timeout_before_cancelling_stuck_api_task(
         self,
         tmp_path: Path,
@@ -1811,7 +1836,7 @@ class TestAgentBot:
         observed_logging_root: Path | None = None
         observed_credentials_root: Path | None = None
         mock_orchestrator = MagicMock()
-        mock_orchestrator.start = AsyncMock()
+        mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("stop after storage capture"))
         mock_orchestrator.stop = AsyncMock()
 
         def _capture_logging(*, level: str, runtime_paths: RuntimePaths) -> None:
@@ -1827,6 +1852,7 @@ class TestAgentBot:
             patch("mindroom.orchestrator.setup_logging", side_effect=_capture_logging),
             patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_capture_credentials_sync),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            pytest.raises(RuntimeError, match="stop after storage capture"),
         ):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(runtime_storage), api=False)
 
