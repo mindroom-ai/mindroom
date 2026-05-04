@@ -8902,6 +8902,54 @@ class TestThreadingBehavior:
         )
 
     @pytest.mark.asyncio
+    async def test_coalescing_thread_id_labels_thread_membership_reads(self, bot: AgentBot) -> None:
+        """Ingress coalescing should attribute any thread proof refreshes it triggers."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain1:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        access = MagicMock()
+        resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
+
+        with (
+            patch.object(
+                resolver,
+                "thread_membership_access",
+                MagicMock(return_value=access),
+            ) as mock_access,
+            patch(
+                "mindroom.conversation_resolver.resolve_event_thread_id_best_effort",
+                new=AsyncMock(return_value="$thread_root:localhost"),
+            ) as mock_resolve,
+        ):
+            thread_id = await resolver.coalescing_thread_id(room, event)
+
+        assert thread_id == "$thread_root:localhost"
+        mock_access.assert_called_once_with(
+            full_history=False,
+            dispatch_safe=True,
+            caller_label="coalescing_thread_id",
+        )
+        mock_resolve.assert_awaited_once_with(
+            room.room_id,
+            EventInfo.from_event(event.source),
+            event_id=event.event_id,
+            access=access,
+        )
+
+    @pytest.mark.asyncio
     async def test_full_history_thread_resolution_uses_full_history_to_prove_root(
         self,
         bot: AgentBot,

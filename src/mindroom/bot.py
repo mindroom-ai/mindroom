@@ -723,6 +723,7 @@ class AgentBot:
                     access=self._conversation_resolver.thread_membership_access(
                         full_history=False,
                         dispatch_safe=True,
+                        caller_label="reaction_hook_context",
                     ),
                 )
             except Exception as exc:

@@ -344,6 +344,7 @@ class ConversationResolver:
                 access=self.thread_membership_access(
                     full_history=False,
                     dispatch_safe=True,
+                    caller_label="coalescing_thread_id",
                 ),
             )
         except Exception as exc:

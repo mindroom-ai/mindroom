@@ -585,6 +585,7 @@ class TurnController:
         thread_history = await self.deps.conversation_cache.get_dispatch_thread_snapshot(
             room.room_id,
             thread_id,
+            caller_label="router_pre_ingress_skip",
         )
         return thread_requires_explicit_agent_targeting(
             thread_history,

@@ -4591,3 +4591,41 @@ async def test_router_early_skip_keeps_sidecar_preview_for_hydration(tmp_path: P
     )
 
     assert should_skip is False
+
+
+@pytest.mark.asyncio
+async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) -> None:
+    """Router skip checks should attribute dispatch-safe snapshot refreshes."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = cast(
+        "nio.RoomMessageText",
+        nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1000,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "plain follow-up",
+                },
+            },
+        ),
+    )
+    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=[])
+
+    should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
+        room,
+        event,
+        requester_user_id="@user:localhost",
+        thread_id="$thread",
+    )
+
+    assert should_skip is False
+    bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+        room.room_id,
+        "$thread",
+        caller_label="router_pre_ingress_skip",
+    )

@@ -4508,6 +4508,47 @@ class TestAgentBot:
         assert seen == [("$plain-reply", "$thread-root")]
 
     @pytest.mark.asyncio
+    async def test_reaction_hooks_label_thread_membership_reads(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """reaction:received hooks should attribute thread proof refreshes."""
+        seen: list[tuple[str, str | None]] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def record_reaction(ctx: ReactionReceivedContext) -> None:
+            seen.append((ctx.target_event_id, ctx.thread_id))
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock()
+        access = MagicMock()
+        bot._conversation_resolver.thread_membership_access = MagicMock(return_value=access)
+        bot._conversation_resolver.resolve_related_event_thread_id_best_effort = AsyncMock(return_value="$thread-root")
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.reacts_to = "$plain-reply"
+
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)):
+            await bot._on_reaction(room, event)
+
+        bot._conversation_resolver.thread_membership_access.assert_called_once_with(
+            full_history=False,
+            dispatch_safe=True,
+            caller_label="reaction_hook_context",
+        )
+        bot._conversation_resolver.resolve_related_event_thread_id_best_effort.assert_awaited_once_with(
+            room.room_id,
+            "$plain-reply",
+            access=access,
+        )
+        assert seen == [("$plain-reply", "$thread-root")]
+
+    @pytest.mark.asyncio
     async def test_reaction_hooks_inherit_thread_transitively_through_plain_reply_chain(
         self,
         mock_agent_user: AgentMatrixUser,
