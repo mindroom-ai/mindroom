@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 __all__ = ["bound_log_context", "get_logger", "setup_logging"]
 
 
+_DEFAULT_LOGGER_LEVELS = {
+    # Reduce verbosity of nio (Matrix) library by default.
+    "nio": "WARNING",
+    "nio.client": "WARNING",
+    "nio.responses": "WARNING",
+}
+
+
 class _NioValidationFilter(logging.Filter):
     """Filter out harmless nio validation warnings that confuse AI agents."""
 
@@ -39,6 +47,59 @@ class _NioValidationFilter(logging.Filter):
                 # Similar harmless warning for room_id
                 return False
         return True
+
+
+def _normalize_log_level(level: str) -> str:
+    normalized = level.strip().upper()
+    if normalized not in logging.getLevelNamesMapping():
+        msg = f"Unsupported log level: {level!r}"
+        raise ValueError(msg)
+    return normalized
+
+
+def _parse_logger_level_overrides(value: str | None) -> dict[str, str]:
+    """Parse `logger:LEVEL` entries from MINDROOM_LOGGER_LEVELS."""
+    if value is None or not value.strip():
+        return {}
+
+    overrides: dict[str, str] = {}
+    for raw_entry in value.replace(";", ",").split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            msg = f"Invalid MINDROOM_LOGGER_LEVELS entry {entry!r}; expected logger:LEVEL"
+            raise ValueError(msg)
+        logger_name, level = (part.strip() for part in entry.split(":", maxsplit=1))
+        if not logger_name:
+            msg = f"Invalid MINDROOM_LOGGER_LEVELS entry {entry!r}; logger name is empty"
+            raise ValueError(msg)
+        overrides[logger_name] = _normalize_log_level(level)
+    return overrides
+
+
+def _build_logger_levels(
+    *,
+    global_level: str,
+    override_config: str | None,
+) -> tuple[str, dict[str, dict[str, object]]]:
+    """Build logger config and the handler threshold needed to emit it."""
+    level_numbers = logging.getLevelNamesMapping()
+    root_level = _normalize_log_level(global_level)
+    logger_levels = {
+        **_DEFAULT_LOGGER_LEVELS,
+        **_parse_logger_level_overrides(override_config),
+    }
+    handler_level = min((root_level, *logger_levels.values()), key=level_numbers.__getitem__)
+    loggers: dict[str, dict[str, object]] = {
+        "": {  # Root logger
+            "handlers": ["console", "file"],
+            "level": root_level,
+            "propagate": False,
+        },
+    }
+    loggers.update({logger_name: {"level": logger_level} for logger_name, logger_level in logger_levels.items()})
+    return handler_level, loggers
 
 
 def setup_logging(
@@ -71,6 +132,10 @@ def setup_logging(
     ]
     log_format = os.getenv("MINDROOM_LOG_FORMAT", "text").strip().lower()
     renderer_name = "json" if log_format == "json" else "text"
+    handler_level, loggers = _build_logger_levels(
+        global_level=level,
+        override_config=os.getenv("MINDROOM_LOGGER_LEVELS"),
+    )
 
     text_processors = [
         structlog.stdlib.ProcessorFormatter.remove_processors_meta,
@@ -121,14 +186,14 @@ def setup_logging(
             },
             "handlers": {
                 "console": {
-                    "level": level.upper(),
+                    "level": handler_level,
                     "class": "logging.StreamHandler",
                     "stream": "ext://sys.stderr",
                     "formatter": "json" if renderer_name == "json" else "colored",
                     "filters": ["nio_validation"],
                 },
                 "file": {
-                    "level": level.upper(),
+                    "level": handler_level,
                     "class": "logging.FileHandler",
                     "filename": str(log_file),
                     "mode": "a",
@@ -137,23 +202,7 @@ def setup_logging(
                     "filters": ["nio_validation"],
                 },
             },
-            "loggers": {
-                "": {  # Root logger
-                    "handlers": ["console", "file"],
-                    "level": level.upper(),
-                    "propagate": False,
-                },
-                # Reduce verbosity of nio (Matrix) library
-                "nio": {
-                    "level": "WARNING",
-                },
-                "nio.client": {
-                    "level": "WARNING",
-                },
-                "nio.responses": {
-                    "level": "WARNING",
-                },
-            },
+            "loggers": loggers,
         },
     )
 

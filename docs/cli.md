@@ -517,6 +517,13 @@ mindroom run
 mindroom run --log-level DEBUG
 ```
 
+To debug MindRoom internals without enabling debug logs from every dependency, keep
+the global level at `INFO` and set targeted logger overrides:
+
+```bash
+LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
+```
+
 ### Custom storage path
 
 ```bash
