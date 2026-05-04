@@ -651,6 +651,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
             event_cache=self.runtime.event_cache,
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
+            caller_label="startup_thread_prewarm",
+            coordinator_queue_wait_ms=0.0,
         )
 
     async def _startup_thread_prewarm_ids(

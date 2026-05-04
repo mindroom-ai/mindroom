@@ -735,6 +735,8 @@ async def test_startup_thread_prewarm_refresh_waits_for_background_warm(tmp_path
 
     assert result.messages == []
     fetch_dispatch_thread_snapshot.assert_awaited_once()
+    assert fetch_dispatch_thread_snapshot.await_args.kwargs["caller_label"] == "startup_thread_prewarm"
+    assert fetch_dispatch_thread_snapshot.await_args.kwargs["coordinator_queue_wait_ms"] == 0.0
 
 
 @pytest.mark.asyncio
