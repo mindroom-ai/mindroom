@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +21,12 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+class ValidCredentials:
+    """Minimal valid credential object for constructor tests."""
+
+    valid = True
 
 
 @pytest.fixture
@@ -73,6 +81,33 @@ def test_google_wrappers_allow_isolating_worker_scopes(
     )
 
     assert isinstance(tool, tool_class)
+
+
+@pytest.mark.parametrize("tool_class", [GmailTools, GoogleCalendarTools, GoogleDriveTools, GoogleSheetsTools])
+def test_google_service_cache_is_isolated_per_thread(
+    tool_class: type[Any],
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Google API clients should not share httplib2-backed service objects across threads."""
+    tool = tool_class(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+        creds=ValidCredentials(),
+    )
+    barrier = threading.Barrier(2)
+
+    def set_and_read_thread_service() -> bool:
+        thread_service = object()
+        tool.service = thread_service
+        barrier.wait(timeout=5)
+        return tool.service is thread_service
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: set_and_read_thread_service(), range(2)))
+
+    assert results == [True, True]
 
 
 @pytest.mark.parametrize(
