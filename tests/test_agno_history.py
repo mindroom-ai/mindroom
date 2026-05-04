@@ -3369,7 +3369,7 @@ def test_warm_cache_compaction_request_preserves_prepared_chain_prefix() -> None
     assert request.included_run_ids == ("run-1",)
 
 
-def test_warm_cache_compaction_request_strips_stale_anthropic_replay_fields_after_summary_prompt() -> None:
+def test_warm_cache_compaction_request_preserves_prepared_anthropic_prefix_fields() -> None:
     chain = build_persisted_run_chain(
         [
             _completed_run(
@@ -3399,9 +3399,9 @@ def test_warm_cache_compaction_request_strips_stale_anthropic_replay_fields_afte
     assistant = request.messages[1]
 
     assert request.messages[:-1] == request.chain.messages
-    assert assistant.provider_data == {"keep": "yes"}
-    assert assistant.reasoning_content is None
-    assert assistant.redacted_reasoning_content is None
+    assert assistant.provider_data == {"signature": "sig-1", "keep": "yes"}
+    assert assistant.reasoning_content == "thinking"
+    assert assistant.redacted_reasoning_content == "redacted"
 
 
 @pytest.mark.asyncio
@@ -3554,6 +3554,18 @@ async def test_prepare_history_for_run_explicit_different_compaction_model_keeps
                 "run-1",
                 messages=[
                     Message(role="user", content="First question"),
+                    Message(
+                        role="assistant",
+                        content="I will search docs.",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "search_docs", "arguments": '{"query":"cache"}'},
+                            },
+                        ],
+                    ),
+                    Message(role="tool", content="Tool result text", tool_call_id="call-1"),
                     Message(role="assistant", content="First answer"),
                 ],
             ),
@@ -3590,8 +3602,21 @@ async def test_prepare_history_for_run_explicit_different_compaction_model_keeps
             active_context_window=64_000,
         )
 
-    assert [message.content for message in summary_model.seen_messages[:-1]] == ["First question", "First answer"]
+    assert [message.role for message in summary_model.seen_messages[:-1]] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert [message.content for message in summary_model.seen_messages[:-1]] == [
+        "First question",
+        'I will search docs.\nTool calls: [{"function":{"arguments":"{\\"query\\":\\"cache\\"}","name":"search_docs"},"id":"call-1","type":"function"}]',
+        "Tool result for call-1:\nTool result text",
+        "First answer",
+    ]
     assert summary_model.seen_messages[0].role == "user"
+    assert all(not message.tool_calls for message in summary_model.seen_messages)
+    assert all(message.tool_call_id is None for message in summary_model.seen_messages)
     assert "Return only the summary text." in str(summary_model.seen_messages[-1].content)
     assert not summary_model.seen_tools
 
