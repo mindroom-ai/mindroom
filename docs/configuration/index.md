@@ -448,6 +448,31 @@ matrix_space:
 timezone: America/Los_Angeles      # Default: UTC
 ```
 
+## Credential Seeds
+
+MindRoom can bootstrap additional shared credential services at startup from explicit seed declarations.
+Use this for deployment-managed credentials that should live in `CredentialsManager` without requiring inline one-off migration scripts.
+Seeded credentials are marked `_source=env`: MindRoom updates them on later startups, but it never overwrites dashboard-managed credentials (`_source=ui`) or legacy credentials with no source marker.
+
+Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path, or `MINDROOM_CREDENTIAL_SEEDS_JSON` to equivalent inline JSON.
+Relative file paths resolve from the config directory.
+Credential fields can read from env vars, from files, or from literal values:
+
+```json
+[
+  {
+    "service": "example_oauth_client",
+    "credentials": {
+      "client_id": {"env": "EXAMPLE_CLIENT_ID"},
+      "client_secret": {"env": "EXAMPLE_CLIENT_SECRET"}
+    }
+  }
+]
+```
+
+Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
+If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+
 ## Debug Logging
 
 `debug.log_llm_requests` enables pre-provider request assembly logging for troubleshooting.

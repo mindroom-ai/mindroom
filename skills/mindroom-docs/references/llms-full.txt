@@ -1170,6 +1170,26 @@ matrix_space:
 timezone: America/Los_Angeles      # Default: UTC
 ```
 
+## Credential Seeds
+
+MindRoom can bootstrap additional shared credential services at startup from explicit seed declarations. Use this for deployment-managed credentials that should live in `CredentialsManager` without requiring inline one-off migration scripts. Seeded credentials are marked `_source=env`: MindRoom updates them on later startups, but it never overwrites dashboard-managed credentials (`_source=ui`) or legacy credentials with no source marker.
+
+Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path, or `MINDROOM_CREDENTIAL_SEEDS_JSON` to equivalent inline JSON. Relative file paths resolve from the config directory. Credential fields can read from env vars, from files, or from literal values:
+
+```
+[
+  {
+    "service": "example_oauth_client",
+    "credentials": {
+      "client_id": {"env": "EXAMPLE_CLIENT_ID"},
+      "client_secret": {"env": "EXAMPLE_CLIENT_SECRET"}
+    }
+  }
+]
+```
+
+Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file. If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential document.
+
 ## Debug Logging
 
 `debug.log_llm_requests` enables pre-provider request assembly logging for troubleshooting. When enabled, MindRoom writes JSONL request records under `debug.llm_request_log_dir` or `mindroom_data/logs/llm_requests` by default. Those records include prompts, messages, tool schemas, model parameters, correlation IDs, requester metadata, and source Matrix event metadata. The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs. Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled. These artifacts can contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
@@ -11638,6 +11658,22 @@ Store these fields on the client config service:
 ```
 
 `redirect_uri` is optional when `MINDROOM_PUBLIC_URL` or the local default origin is correct. Only provider-specific client config services use stored `redirect_uri`. The shared `google_oauth_client` service ignores `redirect_uri` and derives each provider's callback URI. Dashboard credential responses redact `client_secret`. Saving redacted client config may omit or blank `client_secret` only when `client_id` is unchanged. Changing `client_id` requires submitting the matching new `client_secret`. First-time client config saves require `client_id` and `client_secret`. Client config services are not worker-grantable and are never mirrored into worker containers. Client config services cannot be copied into ordinary credential services.
+
+For non-interactive deployments, you can seed the shared client config service at startup with `MINDROOM_CREDENTIAL_SEEDS_FILE`:
+
+```
+[
+  {
+    "service": "google_oauth_client",
+    "credentials": {
+      "client_id": {"env": "GOOGLE_CLIENT_ID"},
+      "client_secret": {"env": "GOOGLE_CLIENT_SECRET"}
+    }
+  }
+]
+```
+
+The referenced env vars may also use the `*_FILE` convention, such as `GOOGLE_CLIENT_SECRET_FILE`. MindRoom updates env-sourced seeded credentials on restart, but it does not overwrite dashboard-managed client config.
 
 ## Environment Variables
 
