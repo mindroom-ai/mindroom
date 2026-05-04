@@ -18,10 +18,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agno.agent import Agent
 from agno.media import Image
-from agno.models.anthropic.claude import Claude
+from agno.models.anthropic.claude import Claude as AnthropicClaude
 from agno.models.base import Model
 from agno.models.message import Message
 from agno.models.response import ModelResponse
+from agno.models.vertexai.claude import Claude as VertexClaude
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -129,6 +130,7 @@ from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 from tests.conftest import bind_runtime_paths, make_conversation_cache_mock, make_event_cache_mock, make_visible_message
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
@@ -1158,8 +1160,8 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
         )
 
 
-def test_compaction_summary_anthropic_model_forwards_tool_choice_none_without_mutating_model() -> None:
-    tool_payload = {
+def _tool_payload() -> dict[str, object]:
+    return {
         "type": "function",
         "function": {
             "name": "search_docs",
@@ -1171,7 +1173,36 @@ def test_compaction_summary_anthropic_model_forwards_tool_choice_none_without_mu
             },
         },
     }
-    model = Claude(id="claude-test", api_key="test-key")
+
+
+def _closure_references_object(function: object, target: object) -> bool:
+    stack = [function]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+        if current is target:
+            return True
+        if inspect.ismethod(current) and current.__self__ is target:
+            return True
+        closure = getattr(current, "__closure__", None)
+        if closure is None:
+            continue
+        for cell in closure:
+            value = cell.cell_contents
+            if value is target:
+                return True
+            if inspect.ismethod(value) or inspect.isfunction(value):
+                stack.append(value)
+    return False
+
+
+def test_compaction_summary_anthropic_model_forwards_tool_choice_none_without_mutating_model() -> None:
+    tool_payload = _tool_payload()
+    model = AnthropicClaude(id="claude-test", api_key="test-key")
 
     request_model = _compaction_summary_request_model(
         model,
@@ -1184,6 +1215,100 @@ def test_compaction_summary_anthropic_model_forwards_tool_choice_none_without_mu
     kwargs = request_model._prepare_request_kwargs("", tools=[tool_payload], messages=[])
     assert kwargs["tool_choice"] == {"type": "none"}
     assert "tools" in kwargs
+
+
+def test_compaction_summary_vertex_claude_copy_rebinds_prompt_cache_hook() -> None:
+    tool_payload = _tool_payload()
+    model = VertexClaude(id="claude-test", project_id="test-project", region="us-central1")
+    install_vertex_claude_prompt_cache_hook(model)
+
+    request_model = _compaction_summary_request_model(
+        model,
+        tools=[tool_payload],
+        tool_choice="none",
+    )
+
+    assert request_model is not model
+    assert request_model.request_params == {"tool_choice": {"type": "none"}}
+    assert _closure_references_object(request_model.ainvoke, request_model)
+    assert not _closure_references_object(request_model.ainvoke, model)
+
+
+@pytest.mark.asyncio
+async def test_agent_compaction_provider_request_uses_previous_summary_from_system_context_once() -> None:
+    agent = _agent()
+    agent.add_session_summary_to_context = True
+    agent.role = "Engineer"
+    session = _session(
+        "session-1",
+        summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
+    )
+    chain = PreparedConversationChain(
+        messages=(Message(role="user", content="New work"), Message(role="assistant", content="New result")),
+        rendered_text="New work\nNew result",
+        source="persisted_runs",
+        source_run_ids=("run-1",),
+        estimated_tokens=10,
+    )
+    summary_request = build_warm_cache_compaction_summary_request(
+        chain,
+        previous_summary="Existing durable summary",
+    )
+
+    provider_request = await build_agent_compaction_provider_request(summary_request, session, agent=agent)
+
+    assert "Existing durable summary" in str(provider_request.messages[0].content)
+    assert "Existing durable summary" not in str(provider_request.messages[-1].content)
+    assert "Already included in the system context" in str(provider_request.messages[-1].content)
+
+
+def test_compaction_summary_request_converts_media_tool_call_group_to_plain_messages() -> None:
+    tool_payload = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "render_chart", "arguments": "{}"},
+    }
+    request, included_runs = build_compaction_summary_request(
+        previous_summary=None,
+        compacted_runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="Render the chart."),
+                    Message(role="assistant", content=None, tool_calls=[tool_payload]),
+                    Message(
+                        role="tool",
+                        content="Chart rendered.",
+                        tool_call_id="call-1",
+                        images=[
+                            Image(
+                                id="chart-image",
+                                content=b"chart-bytes-that-should-not-be-replayed",
+                                format="png",
+                                mime_type="image/png",
+                            ),
+                        ],
+                    ),
+                    Message(role="assistant", content="The chart is ready."),
+                ],
+            ),
+        ],
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+        max_input_tokens=4_000,
+    )
+
+    assert request is not None
+    assert included_runs
+    assert [message.role for message in request.chain.messages] == ["user", "assistant", "user", "assistant"]
+    assert all(not message.tool_calls for message in request.chain.messages)
+    assert all(message.tool_call_id is None for message in request.chain.messages)
+    assert "Tool calls:" in str(request.chain.messages[1].content)
+    assert "Chart rendered." in str(request.chain.messages[2].content)
+    assert "images:" in str(request.chain.messages[2].content)
+    assert "chart-bytes-that-should-not-be-replayed" not in str(request.chain.messages[2].content)
 
 
 @pytest.mark.asyncio

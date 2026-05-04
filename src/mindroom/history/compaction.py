@@ -51,6 +51,7 @@ from mindroom.prepared_conversation_chain import (
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
+from mindroom.vertex_claude_prompt_cache import rebind_vertex_claude_prompt_cache_hook
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -893,6 +894,7 @@ def _compaction_summary_request_model(
     request_params = dict(request_model.request_params or {})
     request_params["tool_choice"] = {"type": "none"}
     request_model.request_params = request_params
+    rebind_vertex_claude_prompt_cache_hook(request_model)
     return request_model
 
 

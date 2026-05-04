@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from agno.models.message import Message
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
@@ -22,7 +23,7 @@ from mindroom.history.agno_forked_request import (
     preserve_tool_instructions,
     team_tool_definition_payloads_for_logging,
 )
-from mindroom.prepared_conversation_chain import CompactionSummaryRequest
+from mindroom.prepared_conversation_chain import CompactionSummaryRequest, compaction_summary_instruction
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 
 if TYPE_CHECKING:
@@ -64,7 +65,11 @@ async def build_agent_compaction_provider_request(
         agent=agent,
         source_session=session,
         prefix_messages=summary_request.chain.messages,
-        final_user_message=summary_request.messages[-1],
+        final_user_message=_final_summary_message(
+            summary_request,
+            session=session,
+            add_session_summary_to_context=bool(agent.add_session_summary_to_context),
+        ),
         synthetic_run_id=_synthetic_compaction_run_id(summary_request),
     )
 
@@ -83,9 +88,27 @@ async def build_team_compaction_provider_request(
         team=team,
         source_session=session,
         prefix_messages=summary_request.chain.messages,
-        final_user_message=summary_request.messages[-1],
+        final_user_message=_final_summary_message(
+            summary_request,
+            session=session,
+            add_session_summary_to_context=bool(team.add_session_summary_to_context),
+        ),
         synthetic_run_id=_synthetic_compaction_run_id(summary_request),
     )
+
+
+def _final_summary_message(
+    summary_request: CompactionSummaryRequest,
+    *,
+    session: AgentSession | TeamSession,
+    add_session_summary_to_context: bool,
+) -> Message:
+    if add_session_summary_to_context and session.summary is not None:
+        return Message(
+            role="user",
+            content=compaction_summary_instruction(None, previous_summary_in_context=True),
+        )
+    return summary_request.messages[-1]
 
 
 def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:

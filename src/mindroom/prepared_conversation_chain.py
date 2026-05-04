@@ -98,6 +98,7 @@ Write a plain-text summary in exactly this markdown structure:
 ## Next Steps
 ## Critical Context
 """
+_PREVIOUS_SUMMARY_IN_CONTEXT_NOTE = "Already included in the system context as the summary of previous interactions."
 
 
 class PartialReplyKind(str, Enum):
@@ -705,9 +706,16 @@ def build_compaction_summary_request(
     return None, []
 
 
-def compaction_summary_instruction(previous_summary: str | None) -> str:
+def compaction_summary_instruction(
+    previous_summary: str | None,
+    *,
+    previous_summary_in_context: bool = False,
+) -> str:
     """Return the final user instruction appended by compaction transforms."""
-    summary = previous_summary.strip() if previous_summary is not None and previous_summary.strip() else "None."
+    if previous_summary_in_context:
+        summary = _PREVIOUS_SUMMARY_IN_CONTEXT_NOTE
+    else:
+        summary = previous_summary.strip() if previous_summary is not None and previous_summary.strip() else "None."
     return _COMPACTION_SUMMARY_INSTRUCTION.format(previous_summary=summary)
 
 
@@ -748,7 +756,7 @@ def compaction_replay_messages(
     if history_settings.max_tool_calls_from_history is not None and messages:
         filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
     strip_stale_anthropic_replay_fields(messages)
-    return [_compaction_safe_replay_message(message) for message in messages]
+    return _compaction_safe_replay_messages(messages)
 
 
 def history_messages_for_session(
@@ -926,6 +934,36 @@ def _compaction_safe_replay_message(message: Message) -> Message:
     if not _message_has_media(message):
         return message
     return _plain_oversized_excerpt_message(message, _oversized_excerpt_content(message))
+
+
+def _compaction_safe_replay_messages(messages: Sequence[Message]) -> list[Message]:
+    replay_messages: list[Message] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        tool_call_ids = _tool_call_ids(message) if message.role == "assistant" else []
+        if not tool_call_ids:
+            replay_messages.append(_compaction_safe_replay_message(message))
+            index += 1
+            continue
+
+        group = [message]
+        remaining_tool_call_ids = list(tool_call_ids)
+        next_index = index + 1
+        while remaining_tool_call_ids and next_index < len(messages):
+            candidate = messages[next_index]
+            if candidate.role != "tool" or candidate.tool_call_id not in remaining_tool_call_ids:
+                break
+            group.append(candidate)
+            remaining_tool_call_ids.remove(candidate.tool_call_id)
+            next_index += 1
+
+        if any(_message_has_media(group_message) for group_message in group):
+            replay_messages.extend(_plain_compaction_summary_message(group_message) for group_message in group)
+        else:
+            replay_messages.extend(group)
+        index = next_index
+    return replay_messages
 
 
 def _estimate_run_chain_tokens(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> int:
