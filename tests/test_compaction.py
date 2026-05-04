@@ -413,6 +413,48 @@ def test_ai_run_metadata_fallback_usage_only_backfills_missing_fields(tmp_path: 
     assert usage["time_to_first_token"] == format(0.12, ".12g")
 
 
+def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_path: Path) -> None:
+    """Context cache counters should not exceed the context size exposed to clients."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            defaults=DefaultsConfig(tools=[]),
+            models={
+                "default": ModelConfig(
+                    provider="vertexai_claude",
+                    id="claude-opus-4-7",
+                    context_window=200_000,
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+
+    metadata = build_ai_run_metadata_content(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="claude-opus-4-7",
+        model_provider="VertexAI",
+        metrics={"input_tokens": 153_294, "cache_read_tokens": 281_264},
+        context_input_tokens=153_294,
+        context_cache_read_tokens=281_264,
+        context_cache_write_tokens=500,
+    )
+
+    assert metadata is not None
+    context = metadata[AI_RUN_METADATA_KEY]["context"]
+    assert context["input_tokens"] == 153_294
+    assert context["window_tokens"] == 200_000
+    assert context["cache_read_input_tokens"] == 153_294
+    assert context["uncached_input_tokens"] == 0
+    assert "cache_write_input_tokens" not in context
+
+
 def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
     """Team history storage is scoped to the shared conversation, not the sender."""
     config, runtime_paths = _make_prepare_config(tmp_path)

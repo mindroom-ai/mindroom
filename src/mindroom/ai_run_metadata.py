@@ -110,15 +110,23 @@ def _build_context_payload(
         "input_tokens": context_input_tokens,
         "window_tokens": context_window,
     }
+    bounded_cache_read_tokens: int | None = None
     if cache_read_tokens is not None and cache_read_tokens > 0:
-        payload["cache_read_input_tokens"] = cache_read_tokens
-    if cache_write_tokens is not None and cache_write_tokens > 0:
-        payload["cache_write_input_tokens"] = cache_write_tokens
+        bounded_cache_read_tokens = min(cache_read_tokens, context_input_tokens)
+        if bounded_cache_read_tokens > 0:
+            payload["cache_read_input_tokens"] = bounded_cache_read_tokens
+    uncached_input_tokens: int | None = None
     if cache_read_tokens is not None or cache_write_tokens is not None:
         # Cache writes were not read from cache, so they remain in the non-cache-read bucket.
-        uncached_input_tokens = context_input_tokens - (cache_read_tokens or 0)
+        uncached_input_tokens = context_input_tokens - (bounded_cache_read_tokens or 0)
         if uncached_input_tokens >= 0:
             payload["uncached_input_tokens"] = uncached_input_tokens
+    if (
+        cache_write_tokens is not None
+        and cache_write_tokens > 0
+        and (uncached_input_tokens is None or cache_write_tokens <= uncached_input_tokens)
+    ):
+        payload["cache_write_input_tokens"] = cache_write_tokens
     return payload
 
 
