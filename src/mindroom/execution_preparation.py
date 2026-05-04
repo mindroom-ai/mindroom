@@ -55,7 +55,6 @@ if TYPE_CHECKING:
     )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.timing import DispatchPipelineTiming
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -767,7 +766,6 @@ async def prepare_agent_execution_context(
     current_sender_id: str | None = None,
     timing_scope: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
     response_sender_id = config.get_ids(runtime_paths).get(agent_name)
@@ -798,7 +796,6 @@ async def prepare_agent_execution_context(
             timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
-            execution_identity=execution_identity,
         )
 
     def _estimate_agent_static_tokens(
@@ -851,7 +848,6 @@ async def prepare_bound_team_execution_context(
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
 
@@ -871,7 +867,6 @@ async def prepare_bound_team_execution_context(
             active_context_window=active_context_window,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
-            execution_identity=execution_identity,
         )
 
     def _estimate_team_static_tokens(
@@ -940,7 +935,6 @@ async def prepare_bound_team_run_context(
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> PreparedExecutionContext:
     """Prepare a team run with queued-notice scrubbing and replay application."""
     scrub_bound_team_scope_context(
@@ -967,7 +961,6 @@ async def prepare_bound_team_run_context(
         compaction_lifecycle=compaction_lifecycle,
         thread_history_render_limits=thread_history_render_limits,
         pipeline_timing=pipeline_timing,
-        execution_identity=execution_identity,
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)

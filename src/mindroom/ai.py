@@ -802,7 +802,6 @@ async def _prepare_agent_and_prompt(
         current_sender_id=current_sender_id,
         timing_scope=timing_scope,
         pipeline_timing=pipeline_timing,
-        execution_identity=execution_identity,
     )
     prepared_history = prepared_execution.prepared_history
     if prepared_execution.replay_plan is not None:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -45,7 +46,13 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.execution_preparation import PreparedExecutionContext, build_matrix_prompt_with_thread_history
+from mindroom.execution_preparation import (
+    PreparedExecutionContext,
+    build_matrix_prompt_with_thread_history,
+    prepare_agent_execution_context,
+    prepare_bound_team_execution_context,
+    prepare_bound_team_run_context,
+)
 from mindroom.history import PreparedHistoryState, prepare_history_for_run
 from mindroom.history.compaction import (
     _build_summary_input,
@@ -71,6 +78,7 @@ from mindroom.history.runtime import (
     open_scope_session_context,
     plan_replay_that_fits,
     prepare_bound_scope_history,
+    prepare_scope_history,
 )
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
@@ -109,6 +117,14 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.conftest import bind_runtime_paths, make_conversation_cache_mock, make_event_cache_mock, make_visible_message
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
+
+
+def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:
+    assert "execution_identity" not in inspect.signature(prepare_agent_execution_context).parameters
+    assert "execution_identity" not in inspect.signature(prepare_bound_team_execution_context).parameters
+    assert "execution_identity" not in inspect.signature(prepare_bound_team_run_context).parameters
+    assert "execution_identity" not in inspect.signature(prepare_bound_scope_history).parameters
+    assert "execution_identity" not in inspect.signature(prepare_scope_history).parameters
 
 
 @dataclass

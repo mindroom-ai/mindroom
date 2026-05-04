@@ -356,10 +356,8 @@ async def prepare_scope_history(  # noqa: C901
     timing_scope: str | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning."""
-    _ = execution_identity
     resolved_inputs = _resolve_preparation_inputs(
         agent=agent,
         agent_name=agent_name,
@@ -843,7 +841,6 @@ async def prepare_history_for_run(
             execution_plan=execution_plan,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
-            execution_identity=execution_identity,
         )
     else:
         with open_scope_session_context(
@@ -874,7 +871,6 @@ async def prepare_history_for_run(
                 execution_plan=execution_plan,
                 compaction_lifecycle=compaction_lifecycle,
                 pipeline_timing=pipeline_timing,
-                execution_identity=execution_identity,
             )
     return finalize_history_preparation(
         prepared_scope_history=prepared_scope_history,
@@ -900,7 +896,6 @@ async def prepare_bound_scope_history(
     active_context_window: int | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> PreparedScopeHistory:
     """Prepare one team-owned scope by compacting its persisted session before the run."""
     bound_scope = resolve_bound_team_scope_context(
@@ -966,7 +961,6 @@ async def prepare_bound_scope_history(
         execution_plan=resolved_inputs.execution_plan,
         compaction_lifecycle=compaction_lifecycle,
         pipeline_timing=pipeline_timing,
-        execution_identity=execution_identity,
     )
 
 

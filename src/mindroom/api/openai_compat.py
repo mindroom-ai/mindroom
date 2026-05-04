@@ -1468,7 +1468,6 @@ async def prepare_materialized_team_execution(
     correlation_id: str | None,
     compaction_outcomes_collector: list[CompactionOutcome] | None,
     configured_team_name: str | None,
-    execution_identity: ToolExecutionIdentity | None = None,
     matrix_run_metadata: dict[str, object] | None = None,
 ) -> _PreparedOpenAIMaterializedTeamExecution:
     """Prepare one team run using only public execution-preparation interfaces."""
@@ -1495,7 +1494,6 @@ async def prepare_materialized_team_execution(
         active_event_ids=active_event_ids,
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
-        execution_identity=execution_identity,
         compaction_outcomes_collector=compaction_outcomes_collector,
     )
     run_extra_content = build_prepared_history_metadata_content(prepared_execution.prepared_history)
@@ -1554,7 +1552,6 @@ async def _prepare_openai_team_prompt(
         correlation_id=uuid4().hex,
         compaction_outcomes_collector=None,
         configured_team_name=team_name,
-        execution_identity=execution_identity,
         matrix_run_metadata=None,
     )
     return _PreparedOpenAITeamPrompt(
