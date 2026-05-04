@@ -114,6 +114,49 @@ def test_setup_logging_json_mode_includes_logger_for_foreign_logger(
     assert "timestamp" in payload
 
 
+def test_setup_logging_logger_level_overrides_allow_selective_debug(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Logger overrides should allow MindRoom debug logs without enabling every library."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    monkeypatch.setenv("MINDROOM_LOGGER_LEVELS", "mindroom:DEBUG,httpx:WARNING")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    get_logger("mindroom.test").debug("mindroom_debug_visible")
+    logging.getLogger("httpx").info("httpx_info_hidden")
+
+    lines = capsys.readouterr().err.strip().splitlines()
+
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["event"] == "mindroom_debug_visible"
+    assert payload["level"] == "debug"
+    assert payload["logger"] == "mindroom.test"
+
+
+def test_setup_logging_logger_level_overrides_accept_whitespace_and_semicolons(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Operators can use comma or semicolon separated logger override lists."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    monkeypatch.setenv("MINDROOM_LOGGER_LEVELS", " mindroom : DEBUG ; anthropic : ERROR ")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    logging.getLogger("anthropic").warning("anthropic_warning_hidden")
+    logging.getLogger("mindroom.example").debug("mindroom_debug_visible")
+
+    payload = _last_stderr_payload(capsys)
+
+    assert payload["event"] == "mindroom_debug_visible"
+    assert payload["logger"] == "mindroom.example"
+
+
 def test_setup_logging_json_mode_foreign_logger_inherits_bound_log_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

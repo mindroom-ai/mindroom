@@ -66,6 +66,7 @@ tool_approval:
 | `MINDROOM_STORAGE_PATH` | Data storage directory | `mindroom_data/` next to config |
 | `MINDROOM_CONFIG_TEMPLATE` | Path to a config template. When set and `config.yaml` does not exist, MindRoom copies this template to the config path. Used in Docker containers to seed config from bundled templates | Same as config path |
 | `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
+| `MINDROOM_LOGGER_LEVELS` | Optional comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING` | unset |
 
 ### Matrix
 
