@@ -37,6 +37,7 @@ from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_RUNNER_TOKEN_HASH,
     ANNOTATION_STARTUP_MANIFEST_HASH,
     ANNOTATION_TEMPLATE_HASH,
+    ANNOTATION_WORKER_KEY,
     worker_auth_token,
 )
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
@@ -588,7 +589,12 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     ]
     assert auth_secret["metadata"]["ownerReferences"] == core_api.created_bodies[0]["metadata"]["ownerReferences"]
     template_annotations = deployment["spec"]["template"]["metadata"]["annotations"]
-    assert set(template_annotations) == {ANNOTATION_RUNNER_TOKEN_HASH, ANNOTATION_STARTUP_MANIFEST_HASH}
+    assert set(template_annotations) == {
+        ANNOTATION_RUNNER_TOKEN_HASH,
+        ANNOTATION_STARTUP_MANIFEST_HASH,
+        ANNOTATION_WORKER_KEY,
+    }
+    assert template_annotations[ANNOTATION_WORKER_KEY] == worker_key
     assert template_annotations[ANNOTATION_RUNNER_TOKEN_HASH] == kubernetes_resources_module.worker_auth_token_hash(
         _TEST_AUTH_TOKEN,
         worker_key,
@@ -1143,6 +1149,7 @@ def test_kubernetes_backend_renders_configured_annotations_on_worker_pod_templat
         runtime_paths=runtime_paths,
         extra_annotations={
             "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
+            ANNOTATION_WORKER_KEY: "user-supplied-value",
             ANNOTATION_STARTUP_MANIFEST_HASH: "user-supplied-value",
         },
     )
@@ -1153,10 +1160,12 @@ def test_kubernetes_backend_renders_configured_annotations_on_worker_pod_templat
     startup_manifest = _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)
     committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
     assert annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] == "false"
+    assert annotations[ANNOTATION_WORKER_KEY] == _TEST_SCOPED_WORKER_KEY_A
     assert annotations[ANNOTATION_STARTUP_MANIFEST_HASH] == startup_manifest_sha256(
         committed_runtime,
         tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
     )
+    assert annotations[ANNOTATION_WORKER_KEY] != "user-supplied-value"
     assert annotations[ANNOTATION_STARTUP_MANIFEST_HASH] != "user-supplied-value"
 
 

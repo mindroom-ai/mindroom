@@ -674,6 +674,7 @@ class KubernetesResourceManager:
             local_dedicated_root=(self.storage_root / state_subpath).resolve(),
         )
         template_annotations = dict(self.config.extra_annotations)
+        template_annotations[ANNOTATION_WORKER_KEY] = worker_key
         template_annotations[ANNOTATION_STARTUP_MANIFEST_HASH] = startup_manifest_hash
         token_hash = worker_auth_token_hash(self.auth_token, worker_key)
         if token_hash is None:
