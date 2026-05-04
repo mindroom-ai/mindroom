@@ -3,23 +3,25 @@
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import Any, cast
+
+
+class _GoogleServiceThreadState(threading.local):
+    def __init__(self) -> None:
+        self.service: Any | None = None
 
 
 class ThreadLocalGoogleServiceMixin:
     """Cache googleapiclient service objects per worker thread."""
 
-    def _google_service_state(self) -> threading.local:
-        state = self.__dict__.get("_google_service_thread_state")
-        if state is None:
-            state = threading.local()
-            self.__dict__["_google_service_thread_state"] = state
-        return state
+    def _google_service_state(self) -> _GoogleServiceThreadState:
+        state = self.__dict__.setdefault("_google_service_thread_state", _GoogleServiceThreadState())
+        return cast("_GoogleServiceThreadState", state)
 
     @property
     def service(self) -> Any | None:  # noqa: ANN401
         """Return the Google API service cached for the current worker thread."""
-        return getattr(self._google_service_state(), "service", None)
+        return self._google_service_state().service
 
     @service.setter
     def service(self, value: Any | None) -> None:  # noqa: ANN401
