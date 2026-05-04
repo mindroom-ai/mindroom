@@ -21,11 +21,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.execution_preparation import _PreparedExecutionContext
-from mindroom.history.compaction import (
-    _estimate_tool_definition_tokens,
-    compute_prompt_token_breakdown,
-)
 from mindroom.history.policy import classify_compaction_decision
+from mindroom.history.provider_request import (
+    compute_prompt_token_breakdown,
+    estimate_tool_definition_tokens,
+)
 from mindroom.history.runtime import create_scope_session_storage
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import (
@@ -534,7 +534,7 @@ class TestEstimateToolDefinitionTokens:
 
     def test_no_tools(self) -> None:
         agent = _make_agent()
-        assert _estimate_tool_definition_tokens(agent) == 0
+        assert estimate_tool_definition_tokens(agent) == 0
 
     def test_with_toolkit(self) -> None:
         func = Function(
@@ -546,7 +546,7 @@ class TestEstimateToolDefinitionTokens:
         toolkit.functions = {"test_func": func}
         agent = _make_agent()
         agent.tools = [toolkit]
-        tokens = _estimate_tool_definition_tokens(agent)
+        tokens = estimate_tool_definition_tokens(agent)
         assert tokens > 0
 
     def test_with_function(self) -> None:
@@ -557,7 +557,7 @@ class TestEstimateToolDefinitionTokens:
         )
         agent = _make_agent()
         agent.tools = [func]
-        tokens = _estimate_tool_definition_tokens(agent)
+        tokens = estimate_tool_definition_tokens(agent)
         assert tokens > 0
 
 

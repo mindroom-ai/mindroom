@@ -110,6 +110,8 @@ Crossing that soft trigger while still within the hard budget leaves the stored 
 Use `enabled: false` to disable automatic pre-reply compaction for a team.
 Replay safety always uses the active team model window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
+Leaving `compaction.model` unset lets compaction use the active team model and preserve the provider-visible request prefix for prompt-cache reuse.
+A different `compaction.model` is an escape hatch and should not be expected to reuse the active reply model's provider prompt cache.
 Manual `compact_context` remains available when a compaction model and context window are configured.
 Compaction uses an in-room lifecycle notice that is edited in place.
 
