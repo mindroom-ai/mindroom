@@ -146,6 +146,37 @@ def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch
     assert "__validation__" in module_name
 
 
+def test_module_origin_within_root_caches_path_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated origin checks for one module file should not re-resolve the path."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    module_path = plugin_root / "helper.py"
+    module_path.write_text("VALUE = 1\n", encoding="utf-8")
+    module = ModuleType("demo.helper")
+    module.__file__ = str(module_path)
+    resolve_calls = 0
+    original_resolve = Path.resolve
+
+    def counted_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        nonlocal resolve_calls
+        if self == Path(str(module_path)):
+            resolve_calls += 1
+        return original_resolve(self, *args, **kwargs)
+
+    metadata_module._resolved_module_file.cache_clear()
+    monkeypatch.setattr(metadata_module.Path, "resolve", counted_resolve)
+    try:
+        assert metadata_module._module_origin_within_root(module, plugin_root)
+        assert metadata_module._module_origin_within_root(module, plugin_root)
+    finally:
+        metadata_module._resolved_module_file.cache_clear()
+
+    assert resolve_calls == 1
+
+
 def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
