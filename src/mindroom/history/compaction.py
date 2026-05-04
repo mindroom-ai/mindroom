@@ -3,33 +3,24 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
-from html import escape
-from typing import TYPE_CHECKING, TypeGuard, cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from agno.agent._tools import determine_tools_for_model
 from agno.db.base import SessionType
-from agno.models.message import Message
-from agno.run import RunContext
+from agno.models.anthropic.claude import Claude
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
-from agno.team._tools import _determine_tools_for_model as determine_team_tools_for_model
-from agno.tools import Toolkit
-from agno.tools.function import Function
-from agno.utils.message import filter_tool_calls
-from pydantic import BaseModel
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+from mindroom.history.compaction_provider_request import CompactionProviderRequest, CompactionProviderRequestBuilder
 from mindroom.history.storage import (
     metadata_with_merged_seen_event_ids,
     read_scope_state,
@@ -48,59 +39,35 @@ from mindroom.history.types import (
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.prepared_conversation_chain import (
+    CompactionSummaryRequest,
+    build_compaction_summary_request,
+    build_persisted_run_chain,
+    estimate_history_messages_tokens,
+    history_messages_for_session,
+    plain_compaction_summary_messages,
+    strip_stale_anthropic_replay_fields,
+)
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
+from mindroom.vertex_claude_prompt_cache import rebind_vertex_claude_prompt_cache_hook
 
 if TYPE_CHECKING:
-    from agno.agent import Agent
+    from collections.abc import Awaitable, Callable, Sequence
+
     from agno.db.base import BaseDb
     from agno.models.base import Model
+    from agno.models.message import Message
     from agno.models.response import ModelResponse
-    from agno.team import Team
+    from agno.session.agent import AgentSession
+    from agno.tools.function import Function
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
 logger = get_logger(__name__)
 
-_WRAPPER_OVERHEAD_TOKENS = 200
-_OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
-_EXCERPT_METADATA_OMIT_KEYS = frozenset(
-    {
-        "model_params",
-        "tools_schema",
-    },
-)
-_STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
-type _ToolDefinition = dict[str, object]
-_COMPACTION_SUMMARY_PROMPT = """\
-You are updating a durable conversation handoff summary for a future model call.
-
-You will receive:
-1. An optional <previous_summary> block that already contains everything summarized before this compaction.
-2. A <new_conversation> block containing only the runs that became old enough to compact in this pass.
-
-Your job is to produce one merged handoff summary as plain text.
-Return only the summary text.
-
-Rules:
-- Preserve all still-relevant information from <previous_summary>.
-- Add only the new information from <new_conversation>.
-- Keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
-- Never paraphrase away exact technical details such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
-- Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
-- Do not invent facts.
-- If a section has no content, write `None.`
-
-Write a plain-text summary in exactly this markdown structure:
-## Goal
-## Constraints
-## Progress
-## Decisions
-## Next Steps
-## Critical Context
-"""
 
 
 class _CompactionProviderTimeoutError(Exception):
@@ -109,6 +76,10 @@ class _CompactionProviderTimeoutError(Exception):
     def __init__(self, original: TimeoutError) -> None:
         super().__init__(str(original))
         self.original = original
+
+
+class _CompactionProviderRequestTooLargeError(RuntimeError):
+    """Raised before sending a provider-visible compaction request that exceeds the budget."""
 
 
 def _consume_detached_compaction_request_result(
@@ -160,19 +131,6 @@ def _detach_cancelled_compaction_request(
             reason=reason,
         ),
     )
-
-
-@dataclass(frozen=True)
-class _ExcerptBlock:
-    open_tag: str
-    content: str
-    close_tag: str
-
-    def render(self, *, max_chars: int | None = None) -> str | None:
-        snippet = self.content if max_chars is None else _truncate_excerpt(self.content, max_chars)
-        if not snippet:
-            return None
-        return "\n".join([self.open_tag, _escape_xml_content(snippet), self.close_tag])
 
 
 @dataclass(frozen=True)
@@ -294,6 +252,7 @@ async def compact_scope_history(
     timing_scope: str | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    provider_request_builder: CompactionProviderRequestBuilder | None = None,
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = runs_for_scope(completed_top_level_runs(session), scope)
@@ -327,7 +286,11 @@ async def compact_scope_history(
         await _emit_compaction_hook(
             event_name=EVENT_COMPACTION_BEFORE,
             scope=scope,
-            messages=_messages_for_runs(included_runs, history_settings) if collect_compaction_hook_messages else (),
+            messages=(
+                build_persisted_run_chain(included_runs, history_settings=history_settings).messages
+                if collect_compaction_hook_messages
+                else ()
+            ),
             session_id=session.session_id,
             token_count_before=before_tokens,
             token_count_after=None,
@@ -355,6 +318,7 @@ async def compact_scope_history(
         collect_compaction_hook_messages=collect_compaction_hook_messages,
         before_persist_callback=emit_before_persist,
         timing_scope=timing_scope,
+        provider_request_builder=provider_request_builder,
     )
     if rewrite_result is None:
         cleared_state = _persist_cleared_force_state_if_needed(
@@ -448,6 +412,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     collect_compaction_hook_messages: bool,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
     timing_scope: str | None = None,
+    provider_request_builder: CompactionProviderRequestBuilder | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     total_compacted_run_count = 0
@@ -500,13 +465,13 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
         if not compactable_runs:
             break
 
-        summary_input, included_runs = _build_summary_input(
+        summary_request, included_runs = _build_summary_request(
             previous_summary=_current_summary_text(working_session),
             compacted_runs=compactable_runs,
             history_settings=history_settings,
             max_input_tokens=per_call_summary_input_budget,
         )
-        if not included_runs:
+        if summary_request is None or not included_runs:
             logger.warning(
                 "Compaction skipped because no run fit the single-pass summary budget",
                 session_id=session_id,
@@ -522,13 +487,15 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             model=summary_model,
             previous_summary=_current_summary_text(working_session),
             compactable_runs=compactable_runs,
-            initial_summary_input=summary_input,
+            initial_summary_request=summary_request,
             initial_included_runs=included_runs,
             summary_input_budget=per_call_summary_input_budget,
             session_id=session_id,
             scope=scope,
             history_settings=history_settings,
             timing_scope=timing_scope,
+            session=working_session,
+            provider_request_builder=provider_request_builder,
         )
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
@@ -544,7 +511,9 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
         total_compacted_run_count += len(included_runs)
         all_compacted_run_ids.update(compacted_run_ids)
         if collect_compaction_hook_messages:
-            compacted_messages.extend(_messages_for_runs(included_runs, history_settings))
+            compacted_messages.extend(
+                build_persisted_run_chain(included_runs, history_settings=history_settings).messages,
+            )
         if pending_selected_run_ids is not None:
             pending_selected_run_ids.difference_update(compacted_run_ids)
 
@@ -588,7 +557,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     if total_compacted_run_count == 0:
         return None
     for run in runs_for_scope(completed_top_level_runs(working_session), scope):
-        _strip_stale_anthropic_replay_fields(run.messages or [])
+        strip_stale_anthropic_replay_fields(run.messages or [])
     return _CompactionRewriteResult(
         summary_text=final_summary_text,
         compacted_run_count=total_compacted_run_count,
@@ -692,294 +661,6 @@ def _sync_remaining_runs_from_working(
     return synced_runs
 
 
-def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate system and current-user prompt tokens outside persisted replay."""
-    static_chars = len(agent.role or "")
-    instructions = agent.instructions
-    if isinstance(instructions, str):
-        static_chars += len(instructions)
-    elif isinstance(instructions, list):
-        for instruction in instructions:
-            static_chars += len(str(instruction))
-    static_chars += len(full_prompt)
-    return (static_chars // 4) + estimate_tool_definition_tokens(agent)
-
-
-def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate the non-history agent prompt using Agno's real system-message builder."""
-    static_tokens = estimate_text_tokens(full_prompt)
-    previous_tool_instructions = agent._tool_instructions
-    try:
-        session, run_context, prepared_tools = _prepare_agent_prompt_inputs_for_estimation(agent)
-        system_message = agent.get_system_message(
-            session=session,
-            run_context=run_context,
-            tools=prepared_tools or None,
-            add_session_state_to_context=False,
-        )
-    finally:
-        agent._tool_instructions = previous_tool_instructions
-    if system_message is not None and system_message.content is not None:
-        static_tokens += estimate_text_tokens(str(system_message.content))
-    return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
-
-
-def estimate_tool_definition_tokens(agent: Agent) -> int:
-    """Estimate the model-visible tool schema and tool instructions for one agent."""
-    prepared_tools, tool_instructions = _prepare_tools_for_estimation(agent.tools)
-    return _estimate_prepared_tool_definition_tokens(
-        prepared_tools,
-        tool_instructions=tool_instructions,
-    )
-
-
-def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
-    """Estimate the non-history team prompt using Agno's team system-message builder."""
-    static_tokens = estimate_text_tokens(full_prompt)
-    previous_tool_instructions = team._tool_instructions
-    try:
-        session, prepared_tools = _prepare_team_prompt_inputs_for_estimation(team)
-        system_message = team.get_system_message(
-            session=session,
-            tools=prepared_tools or None,
-            add_session_state_to_context=False,
-        )
-    finally:
-        team._tool_instructions = previous_tool_instructions
-    if system_message is not None and system_message.content is not None:
-        static_tokens += estimate_text_tokens(str(system_message.content))
-    return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
-
-
-def agent_tool_definition_payloads_for_logging(agent: Agent) -> list[dict[str, object]]:
-    """Return model-visible agent tool schemas using Agno's prompt-preparation path."""
-    previous_tool_instructions = agent._tool_instructions
-    try:
-        _session, _run_context, prepared_tools = _prepare_agent_prompt_inputs_for_estimation(agent)
-    finally:
-        agent._tool_instructions = previous_tool_instructions
-    return _prepared_tool_definition_payloads(prepared_tools)
-
-
-def team_tool_definition_payloads_for_logging(team: Team) -> list[dict[str, object]]:
-    """Return model-visible team tool schemas using Agno's prompt-preparation path."""
-    previous_tool_instructions = team._tool_instructions
-    try:
-        _session, prepared_tools = _prepare_team_prompt_inputs_for_estimation(team)
-    finally:
-        team._tool_instructions = previous_tool_instructions
-    return _prepared_tool_definition_payloads(prepared_tools)
-
-
-def _estimate_prepared_tool_definition_tokens(
-    prepared_tools: Sequence[Function | dict[str, object]],
-    *,
-    tool_instructions: Sequence[str] = (),
-) -> int:
-    tool_definitions = _prepared_tool_definition_payloads(prepared_tools)
-    tool_definition_tokens = len(stable_serialize(tool_definitions)) // 4 if tool_definitions else 0
-    instruction_tokens = sum(estimate_text_tokens(instruction) for instruction in tool_instructions)
-    return tool_definition_tokens + instruction_tokens
-
-
-def _prepare_tools_for_estimation(tools: object) -> tuple[list[Function | _ToolDefinition], list[str]]:
-    if not isinstance(tools, Sequence):
-        return [], []
-
-    prepared_tools: list[Function | _ToolDefinition] = []
-    tool_instructions: list[str] = []
-    seen_names: set[str] = set()
-    for tool in tools:
-        for prepared_tool in _prepare_tool_for_estimation(tool):
-            tool_name = _prepared_tool_name(prepared_tool)
-            if tool_name is None or tool_name in seen_names:
-                continue
-            seen_names.add(tool_name)
-            prepared_tools.append(prepared_tool)
-
-        if isinstance(tool, Toolkit) and tool.add_instructions and tool.instructions is not None:
-            tool_instructions.append(tool.instructions)
-        if isinstance(tool, Function) and tool.add_instructions and tool.instructions is not None:
-            tool_instructions.append(tool.instructions)
-    return prepared_tools, tool_instructions
-
-
-def _prepare_tool_for_estimation(tool: object) -> list[Function | _ToolDefinition]:
-    if isinstance(tool, Function):
-        return [_prepare_function_for_estimation(tool)]
-    if isinstance(tool, Toolkit):
-        return [_prepare_function_for_estimation(function) for function in _toolkit_functions(tool).values()]
-    if _is_tool_definition_dict(tool):
-        return [tool]
-    if callable(tool):
-        return [Function.from_callable(tool)]
-    return []
-
-
-def _toolkit_functions(toolkit: Toolkit) -> dict[str, Function]:
-    functions = dict(toolkit.functions)
-    if not functions:
-        for raw_tool in toolkit.tools:
-            if isinstance(raw_tool, Function):
-                functions[raw_tool.name] = raw_tool
-    for name, function in toolkit.async_functions.items():
-        functions.setdefault(name, function)
-    return functions
-
-
-def _prepare_function_for_estimation(function: Function) -> Function:
-    prepared_function = function.model_copy(deep=True)
-    if not prepared_function.skip_entrypoint_processing and prepared_function.entrypoint is not None:
-        effective_strict = False if prepared_function.strict is None else prepared_function.strict
-        prepared_function.process_entrypoint(strict=effective_strict)
-    return prepared_function
-
-
-def _prepared_tool_definition_payloads(
-    prepared_tools: Sequence[Function | _ToolDefinition],
-) -> list[dict[str, object]]:
-    payloads_by_name: dict[str, dict[str, object]] = {}
-    for tool in prepared_tools:
-        payload = _function_payload(tool) if isinstance(tool, Function) else _dict_tool_payload(tool)
-        tool_name = payload.get("name")
-        if isinstance(tool_name, str) and tool_name:
-            payloads_by_name[tool_name] = payload
-    return list(payloads_by_name.values())
-
-
-def _prepared_tool_name(tool: Function | _ToolDefinition) -> str | None:
-    if isinstance(tool, Function):
-        return tool.name
-    tool_name = tool.get("name")
-    if isinstance(tool_name, str) and tool_name:
-        return tool_name
-    return None
-
-
-def _function_payload(function: Function) -> dict[str, object]:
-    return {
-        "name": function.name,
-        "description": function.description or "",
-        "parameters": function.parameters or _default_function_parameters(),
-    }
-
-
-def _is_tool_definition_dict(tool: object) -> TypeGuard[_ToolDefinition]:
-    if not isinstance(tool, dict):
-        return False
-    candidate_tool = cast("_ToolDefinition", tool)
-    tool_name = candidate_tool.get("name")
-    return isinstance(tool_name, str) and bool(tool_name)
-
-
-def _dict_tool_payload(tool: _ToolDefinition) -> dict[str, object]:
-    parameters = tool.get("parameters")
-    return {
-        "name": str(tool["name"]),
-        "description": str(tool.get("description", "")),
-        "parameters": parameters if isinstance(parameters, dict) else _default_function_parameters(),
-    }
-
-
-def _default_function_parameters() -> dict[str, object]:
-    return {"type": "object", "properties": {}, "required": []}
-
-
-def _prepare_team_prompt_inputs_for_estimation(
-    team: Team,
-) -> tuple[TeamSession, list[Function | _ToolDefinition]]:
-    """Reuse Agno's own team tool-preparation path for prompt budgeting.
-
-    Agno exposes `Team.get_system_message()` publicly, but the exact prepared tool
-    payload and `_tool_instructions` state that feed that prompt are only built by
-    the internal `_determine_tools_for_model()` path. Using that single internal
-    entrypoint is less brittle than re-implementing several private team helpers in
-    MindRoom. This logic is verified against `agno==2.5.13`; if Agno changes those
-    internals, update this estimator to match the new team prompt builder.
-    """
-    budget_session_id = "history-budget"
-    session = TeamSession(session_id=budget_session_id, team_id=team.id)
-    run_response = TeamRunOutput(
-        run_id=budget_session_id,
-        team_id=team.id,
-        session_id=budget_session_id,
-        session_state={},
-    )
-    run_context = RunContext(
-        run_id=budget_session_id,
-        session_id=budget_session_id,
-        session_state={},
-    )
-    model = team.model
-    assert model is not None
-    prepared_tools = determine_team_tools_for_model(
-        team=team,
-        model=model,
-        run_response=run_response,
-        run_context=run_context,
-        team_run_context={},
-        session=session,
-        check_mcp_tools=False,
-    )
-    return session, [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)]
-
-
-def _prepare_agent_prompt_inputs_for_estimation(
-    agent: Agent,
-) -> tuple[AgentSession, RunContext, list[Function | _ToolDefinition]]:
-    """Reuse Agno's agent tool-preparation path for prompt budgeting.
-
-    Agno exposes `Agent.get_system_message()` publicly, but the prepared tool
-    payload and `_tool_instructions` that feed that prompt are only finalized by
-    the shared `agno.agent._tools.determine_tools_for_model()` path. Using that
-    single internal entrypoint keeps MindRoom aligned with Agno without
-    re-implementing several private agent helpers.
-    """
-    budget_session_id = "history-budget"
-    budget_user_id = "history-budget-user"
-    session = AgentSession(
-        session_id=budget_session_id,
-        agent_id=agent.id,
-        user_id=budget_user_id,
-    )
-    run_response = RunOutput(
-        run_id=budget_session_id,
-        agent_id=agent.id,
-        agent_name=agent.name,
-        session_id=budget_session_id,
-        user_id=budget_user_id,
-        session_state={},
-    )
-    run_context = RunContext(
-        run_id=budget_session_id,
-        session_id=budget_session_id,
-        user_id=budget_user_id,
-        session_state={},
-    )
-    model = agent.model
-    assert model is not None
-    processed_tools = agent.get_tools(
-        run_response=run_response,
-        run_context=run_context,
-        session=session,
-        user_id=budget_user_id,
-    )
-    prepared_tools = determine_tools_for_model(
-        agent=agent,
-        model=model,
-        processed_tools=processed_tools,
-        run_response=run_response,
-        run_context=run_context,
-        session=session,
-        async_mode=False,
-    )
-    return (
-        session,
-        run_context,
-        [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)],
-    )
-
-
 def resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
     """Resolve the soft replay trigger budget in tokens."""
     threshold_tokens = compaction_config.threshold_tokens
@@ -1030,23 +711,25 @@ def resolve_compaction_runtime_settings(
 async def _generate_compaction_summary_with_retry(
     *,
     model: Model,
+    session: AgentSession | TeamSession,
     previous_summary: str | None,
     compactable_runs: Sequence[RunOutput | TeamRunOutput],
-    initial_summary_input: str,
+    initial_summary_request: CompactionSummaryRequest,
     initial_included_runs: list[RunOutput | TeamRunOutput],
     summary_input_budget: int,
     session_id: str,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     timing_scope: str | None = None,
+    provider_request_builder: CompactionProviderRequestBuilder | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, retrying once with a smaller input when safe."""
-    summary_input = initial_summary_input
+    summary_request = initial_summary_request
     included_runs = initial_included_runs
     budget = summary_input_budget
     last_error: Exception | None = None
     for attempt in (1, 2):
-        estimated_input_tokens = estimate_text_tokens(summary_input)
+        estimated_input_tokens = summary_request.estimated_tokens
         started = asyncio.get_running_loop().time()
         logger.info(
             "Compaction summary chunk request",
@@ -1060,9 +743,35 @@ async def _generate_compaction_summary_with_retry(
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
         )
         try:
+            provider_request = await _build_compaction_provider_request(
+                summary_request=summary_request,
+                session=session,
+                provider_request_builder=provider_request_builder,
+            )
+            estimated_input_tokens = _estimate_compaction_provider_request_tokens(provider_request)
+            if estimated_input_tokens > budget:
+                adjusted_budget = _summary_request_budget_for_provider_overhead(
+                    summary_request=summary_request,
+                    provider_estimated_tokens=estimated_input_tokens,
+                    provider_budget=budget,
+                )
+                if attempt == 1 and 0 < adjusted_budget < summary_request.estimated_tokens:
+                    rebuilt_request, rebuilt_runs = _build_summary_request(
+                        previous_summary=previous_summary,
+                        compacted_runs=compactable_runs,
+                        history_settings=history_settings,
+                        max_input_tokens=adjusted_budget,
+                    )
+                    if rebuilt_request is not None and rebuilt_runs:
+                        summary_request = rebuilt_request
+                        included_runs = rebuilt_runs
+                        continue
+                _raise_provider_request_too_large(estimated_input_tokens, budget)
             summary = await _generate_compaction_summary(
                 model=model,
-                summary_input=summary_input,
+                messages=list(provider_request.messages),
+                tools=list(provider_request.tools),
+                tool_choice=provider_request.tool_choice,
                 timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
                 timing_scope=timing_scope,
             )
@@ -1084,14 +793,14 @@ async def _generate_compaction_summary_with_retry(
             last_error = exc
             retry_budget = max(1_000, budget // 2)
             if attempt == 1 and retry_budget < budget and _should_retry_smaller_summary_chunk(exc):
-                rebuilt_input, rebuilt_runs = _build_summary_input(
+                rebuilt_request, rebuilt_runs = _build_summary_request(
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
                     history_settings=history_settings,
                     max_input_tokens=retry_budget,
                 )
-                if rebuilt_runs:
-                    summary_input = rebuilt_input
+                if rebuilt_request is not None and rebuilt_runs:
+                    summary_request = rebuilt_request
                     included_runs = rebuilt_runs
                     budget = retry_budget
                     continue
@@ -1137,24 +846,105 @@ def _should_retry_smaller_summary_chunk(error: Exception) -> bool:
     return any(fragment in message for fragment in retry_fragments)
 
 
+async def _build_compaction_provider_request(
+    *,
+    summary_request: CompactionSummaryRequest,
+    session: AgentSession | TeamSession,
+    provider_request_builder: CompactionProviderRequestBuilder | None,
+) -> CompactionProviderRequest:
+    if provider_request_builder is None:
+        return CompactionProviderRequest(
+            messages=plain_compaction_summary_messages(summary_request.messages),
+        )
+    return await provider_request_builder(summary_request, session)
+
+
+def _estimate_compaction_provider_request_tokens(provider_request: CompactionProviderRequest) -> int:
+    tool_tokens = len(stable_serialize(list(provider_request.tools))) // 4 if provider_request.tools else 0
+    return estimate_history_messages_tokens(list(provider_request.messages)) + tool_tokens
+
+
+def _summary_request_budget_for_provider_overhead(
+    *,
+    summary_request: CompactionSummaryRequest,
+    provider_estimated_tokens: int,
+    provider_budget: int,
+) -> int:
+    provider_overhead_tokens = max(0, provider_estimated_tokens - summary_request.estimated_tokens)
+    return provider_budget - provider_overhead_tokens
+
+
+def _raise_provider_request_too_large(estimated_input_tokens: int, budget: int) -> None:
+    msg = (
+        "provider-visible compaction request is too large "
+        f"({estimated_input_tokens} estimated tokens > {budget} budget)"
+    )
+    raise _CompactionProviderRequestTooLargeError(msg)
+
+
+def _compaction_summary_request_model(
+    model: Model,
+    *,
+    tools: Sequence[dict] | None,
+    tool_choice: str | dict[str, object] | None,
+) -> Model:
+    if not isinstance(model, Claude) or not _claude_compaction_needs_tool_choice_none(
+        model,
+        tools=tools,
+        tool_choice=tool_choice,
+    ):
+        return model
+    request_model = copy(model)
+    request_params = dict(request_model.request_params or {})
+    request_params["tool_choice"] = {"type": "none"}
+    request_model.request_params = request_params
+    rebind_vertex_claude_prompt_cache_hook(request_model)
+    return request_model
+
+
+def _claude_compaction_needs_tool_choice_none(
+    model: Claude,
+    *,
+    tools: Sequence[dict] | None,
+    tool_choice: str | dict[str, object] | None,
+) -> bool:
+    return bool(model.skills) or (bool(tools) and _is_no_tool_choice(tool_choice))
+
+
+def _is_no_tool_choice(tool_choice: str | dict[str, object] | None) -> bool:
+    if tool_choice == "none":
+        return True
+    if isinstance(tool_choice, dict):
+        return tool_choice.get("type") == "none"
+    return False
+
+
 @timed("system_prompt_assembly.history_prepare.compaction.summary_model_request")
 async def _generate_compaction_summary(
     *,
     model: Model,
-    summary_input: str,
+    messages: Sequence[Message],
+    tools: Sequence[dict] | None = None,
+    tool_choice: str | dict[str, object] | None = None,
     timeout_seconds: float | None = None,
     timing_scope: str | None = None,
 ) -> SessionSummary:
     del timing_scope
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    request_messages = [message.model_copy(deep=True) for message in messages]
+    request_model = _compaction_summary_request_model(
+        model,
+        tools=tools,
+        tool_choice=tool_choice,
+    )
 
     async def _request_summary() -> ModelResponse:
         try:
-            return await model.aresponse(
-                messages=[
-                    Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
-                    Message(role="user", content=summary_input),
-                ],
+            request_tools: list[dict] | None = list(tools) if tools else None
+            return await request_model.aresponse(
+                messages=request_messages,
+                tools=cast("list[Function | dict] | None", request_tools),
+                tool_choice=tool_choice,
             )
         except TimeoutError as exc:
             raise _CompactionProviderTimeoutError(exc) from exc
@@ -1208,121 +998,22 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
     return normalized
 
 
-@timed("system_prompt_assembly.history_prepare.compaction.summary_input_build")
-def _build_summary_input(
+@timed("system_prompt_assembly.history_prepare.compaction.summary_request_build")
+def _build_summary_request(
     *,
     previous_summary: str | None,
     compacted_runs: Sequence[RunOutput | TeamRunOutput],
     max_input_tokens: int,
     history_settings: ResolvedHistorySettings | None = None,
-) -> tuple[str, list[RunOutput | TeamRunOutput]]:
+) -> tuple[CompactionSummaryRequest | None, list[RunOutput | TeamRunOutput]]:
+    """Build the chain-shaped compaction summary request for one chunk."""
     resolved_history_settings = history_settings or _default_compaction_history_settings()
-    summary_block = ""
-    if previous_summary is not None and previous_summary.strip():
-        escaped_summary = _escape_xml_content(previous_summary)
-        summary_block = f"<previous_summary>\n{escaped_summary}\n</previous_summary>"
-
-    remaining = max_input_tokens - estimate_text_tokens(summary_block) - _WRAPPER_OVERHEAD_TOKENS
-
-    if remaining <= 0:
-        return summary_block, []
-
-    included_runs: list[RunOutput | TeamRunOutput] = []
-    for run in compacted_runs:
-        run_tokens = _estimate_serialized_run_tokens(run, resolved_history_settings)
-        if run_tokens > remaining:
-            if not included_runs:
-                return _build_oversized_summary_input(
-                    summary_block=summary_block,
-                    compacted_runs=[run],
-                    history_settings=resolved_history_settings,
-                    max_input_tokens=max_input_tokens,
-                )
-            break
-        included_runs.append(run)
-        remaining -= run_tokens
-
-    if not included_runs:
-        return summary_block, []
-
-    serialized_runs = "\n\n".join(
-        _serialize_run(run, index, resolved_history_settings) for index, run in enumerate(included_runs)
+    return build_compaction_summary_request(
+        previous_summary=previous_summary,
+        compacted_runs=compacted_runs,
+        history_settings=resolved_history_settings,
+        max_input_tokens=max_input_tokens,
     )
-    return _compose_summary_input(summary_block, serialized_runs), included_runs
-
-
-def _build_oversized_summary_input(
-    *,
-    summary_block: str,
-    compacted_runs: Sequence[RunOutput | TeamRunOutput],
-    history_settings: ResolvedHistorySettings,
-    max_input_tokens: int,
-) -> tuple[str, list[RunOutput | TeamRunOutput]]:
-    if not compacted_runs:
-        return summary_block, []
-    first_run = compacted_runs[0]
-    oversized_excerpt = _serialize_oversized_run_excerpt(
-        first_run,
-        index=0,
-        history_settings=history_settings,
-        max_tokens=_remaining_excerpt_budget(max_input_tokens, summary_block),
-    )
-    if oversized_excerpt is None:
-        return summary_block, []
-    return _compose_summary_input(summary_block, oversized_excerpt), [first_run]
-
-
-def _serialize_oversized_run_excerpt(
-    run: RunOutput | TeamRunOutput,
-    *,
-    index: int,
-    history_settings: ResolvedHistorySettings,
-    max_tokens: int,
-) -> str | None:
-    if max_tokens <= 0:
-        return None
-
-    full_run = _serialize_run(run, index, history_settings)
-    if estimate_text_tokens(full_run) <= max_tokens:
-        return full_run
-
-    blocks = _excerpt_blocks(run, history_settings)
-    budget_chars = max_tokens * 4
-    while budget_chars > 0:
-        excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=budget_chars)
-        if estimate_text_tokens(excerpt) <= max_tokens:
-            return excerpt
-        budget_chars //= 2
-
-    minimal_excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=0)
-    if estimate_text_tokens(minimal_excerpt) <= max_tokens:
-        return minimal_excerpt
-    return None
-
-
-def _serialize_run_excerpt(
-    run: RunOutput | TeamRunOutput,
-    *,
-    index: int,
-    blocks: Sequence[_ExcerptBlock],
-    content_budget_chars: int,
-) -> str:
-    lines = [_run_open_tag(run, index), f"<note>{_OVERSIZED_RUN_NOTE}</note>"]
-    remaining_chars = content_budget_chars
-    for block in blocks:
-        if remaining_chars <= 0:
-            break
-        rendered = block.render(max_chars=remaining_chars)
-        if rendered is None:
-            continue
-        lines.append(rendered)
-        if len(block.content) <= remaining_chars:
-            remaining_chars -= len(block.content)
-        else:
-            break
-
-    lines.append("</run>")
-    return "\n".join(lines)
 
 
 def _default_compaction_history_settings() -> ResolvedHistorySettings:
@@ -1330,168 +1021,6 @@ def _default_compaction_history_settings() -> ResolvedHistorySettings:
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
     )
-
-
-def _compaction_replay_messages(
-    run: RunOutput | TeamRunOutput,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    skip_roles = set(_history_skip_roles(history_settings) or [])
-    messages = [deepcopy(message) for message in run.messages or [] if message.role not in skip_roles]
-    if history_settings.max_tool_calls_from_history is not None and messages:
-        filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
-    _strip_stale_anthropic_replay_fields(messages)
-    return messages
-
-
-def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> list[_ExcerptBlock]:
-    blocks: list[_ExcerptBlock] = []
-    if run.metadata:
-        blocks.append(
-            _ExcerptBlock("<run_metadata>", stable_serialize(_metadata_for_excerpt(run.metadata)), "</run_metadata>"),
-        )
-    for message in _compaction_replay_messages(run, history_settings):
-        content = _render_message_content(message)
-        if not content:
-            continue
-        blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
-    return blocks
-
-
-def _metadata_for_excerpt(metadata: dict[str, object]) -> dict[str, object]:
-    """Keep compact identity metadata for oversized excerpts without tool schema bulk."""
-    return {key: value for key, value in metadata.items() if key not in _EXCERPT_METADATA_OMIT_KEYS}
-
-
-def _truncate_excerpt(text: str, max_chars: int) -> str:
-    if max_chars <= 0:
-        return ""
-    if len(text) <= max_chars:
-        return text
-    if max_chars == 1:
-        return "…"
-    return f"{text[: max_chars - 1].rstrip()}…"
-
-
-def _remaining_excerpt_budget(max_input_tokens: int, summary_block: str) -> int:
-    return (
-        max_input_tokens
-        - estimate_text_tokens(summary_block)
-        - estimate_text_tokens(
-            "<new_conversation>\n\n</new_conversation>",
-        )
-    )
-
-
-def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
-    parts: list[str] = []
-    if summary_block:
-        parts.append(summary_block)
-    parts.append(f"<new_conversation>\n{serialized_runs}\n</new_conversation>")
-    return "\n\n".join(parts)
-
-
-def _estimate_serialized_run_tokens(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> int:
-    return estimate_text_tokens(_serialize_run(run, 0, history_settings))
-
-
-def _messages_for_runs(
-    runs: Sequence[RunOutput | TeamRunOutput],
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    messages: list[Message] = []
-    for run in runs:
-        messages.extend(_compaction_replay_messages(run, history_settings))
-    return messages
-
-
-def _serialize_run(run: RunOutput | TeamRunOutput, index: int, history_settings: ResolvedHistorySettings) -> str:
-    lines = [_run_open_tag(run, index)]
-    if run.metadata:
-        lines.extend(["<run_metadata>", _escape_xml_content(stable_serialize(run.metadata)), "</run_metadata>"])
-    for message in _compaction_replay_messages(run, history_settings):
-        lines.extend(_serialize_message(message))
-    lines.append("</run>")
-    return "\n".join(lines)
-
-
-def _serialize_message(message: Message) -> list[str]:
-    lines = [_message_open_tag(message), _escape_xml_content(_render_message_content(message)), "</message>"]
-    if message.tool_calls:
-        lines.extend(["<tool_calls>", _escape_xml_content(stable_serialize(message.tool_calls)), "</tool_calls>"])
-    for tag, media_value in _message_media_entries(message):
-        serialized = _serialize_media_payload(media_value)
-        if not serialized:
-            continue
-        lines.extend([f"<{tag}>", _escape_xml_content(serialized), f"</{tag}>"])
-    return lines
-
-
-def _run_open_tag(run: RunOutput | TeamRunOutput, index: int) -> str:
-    attrs = [f'index="{index}"']
-    if run.run_id:
-        attrs.append(f'run_id="{escape(str(run.run_id), quote=True)}"')
-    if run.status is not None:
-        attrs.append(f'status="{escape(str(run.status), quote=True)}"')
-    return f"<run {' '.join(attrs)}>"
-
-
-def _message_open_tag(message: Message) -> str:
-    attrs = [f'role="{escape(message.role, quote=True)}"']
-    if message.name:
-        attrs.append(f'name="{escape(message.name, quote=True)}"')
-    if message.tool_call_id:
-        attrs.append(f'tool_call_id="{escape(message.tool_call_id, quote=True)}"')
-    return f"<message {' '.join(attrs)}>"
-
-
-def _message_media_entries(message: Message) -> tuple[tuple[str, object | None], ...]:
-    return (
-        ("images", message.images),
-        ("audio", message.audio),
-        ("videos", message.videos),
-        ("files", message.files),
-        ("audio_output", message.audio_output),
-        ("image_output", message.image_output),
-        ("video_output", message.video_output),
-        ("file_output", message.file_output),
-    )
-
-
-def _serialize_media_payload(media_value: object | None) -> str:
-    if media_value is None:
-        return ""
-    return stable_serialize(_media_payload_snapshot(media_value))
-
-
-def _media_payload_snapshot(media_value: object) -> object:
-    if isinstance(media_value, BaseModel):
-        payload = cast("dict[str, object]", media_value.model_dump(exclude_none=True))
-        payload.pop("content", None)
-        return payload
-    if isinstance(media_value, Sequence) and not isinstance(media_value, (str, bytes, bytearray)):
-        return [_media_payload_snapshot(item) for item in media_value]
-    return media_value
-
-
-def _render_message_content(message: Message) -> str:
-    """Render one replayable string form of a message body."""
-    content = message.compressed_content if message.compressed_content is not None else message.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(stable_serialize(part) for part in content)
-    if content is None:
-        return ""
-    return stable_serialize(content)
-
-
-def _unescape_xml_content(text: str) -> str:
-    return text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
-
-
-def _escape_xml_content(text: str) -> str:
-    return escape(_unescape_xml_content(text), quote=False)
 
 
 def estimate_prompt_visible_history_tokens(
@@ -1502,7 +1031,7 @@ def estimate_prompt_visible_history_tokens(
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run."""
     summary_tokens = estimate_session_summary_tokens(_current_summary_text(session))
-    history_messages = _history_messages_for_session(
+    history_messages = history_messages_for_session(
         session=session,
         scope=scope,
         history_settings=history_settings,
@@ -1528,36 +1057,6 @@ def estimate_session_summary_tokens(summary_text: str | None) -> int:
     return estimate_text_tokens(wrapper)
 
 
-def estimate_history_messages_tokens(messages: list[Message]) -> int:
-    """Estimate the token count of materialized history messages."""
-    if not messages:
-        return 0
-    return sum(_estimated_message_chars(message) for message in messages) // 4
-
-
-def _strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
-    """Strip stale Anthropic thinking replay fields from completed turns."""
-    last_user_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].role == "user":
-            last_user_idx = i
-            break
-    if last_user_idx < 0:
-        return 0
-    modified = 0
-    for msg in messages[:last_user_idx]:
-        if msg.role != "assistant":
-            continue
-        pd = msg.provider_data
-        if not isinstance(pd, dict) or "signature" not in pd:
-            continue
-        msg.reasoning_content = None
-        msg.redacted_reasoning_content = None
-        del pd["signature"]
-        modified += 1
-    return modified
-
-
 def _select_runs_to_compact(
     *,
     visible_runs: list[RunOutput | TeamRunOutput],
@@ -1579,85 +1078,6 @@ def _select_runs_to_compact(
         history_settings=history_settings,
     )
     return visible_runs if current_tokens > available_history_budget else []
-
-
-def _history_messages_for_session(
-    *,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    session_messages = _session_history_messages(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-    )
-    history_messages = [deepcopy(message) for message in session_messages]
-    if history_settings.max_tool_calls_from_history is not None and history_messages:
-        filter_tool_calls(history_messages, history_settings.max_tool_calls_from_history)
-    _strip_stale_anthropic_replay_fields(history_messages)
-    return history_messages
-
-
-def _session_history_messages(
-    *,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    limit = history_settings.policy.limit
-    if scope.kind == "team":
-        return _team_session_history_messages(
-            session=cast("TeamSession", session),
-            scope_id=scope.scope_id,
-            history_settings=history_settings,
-            limit=limit,
-        )
-    return _agent_session_history_messages(
-        session=cast("AgentSession", session),
-        scope_id=scope.scope_id,
-        history_settings=history_settings,
-        limit=limit,
-    )
-
-
-def _agent_session_history_messages(
-    *,
-    session: AgentSession,
-    scope_id: str,
-    history_settings: ResolvedHistorySettings,
-    limit: int | None,
-) -> list[Message]:
-    skip_roles = _history_skip_roles(history_settings)
-    if history_settings.policy.mode == "runs":
-        return session.get_messages(agent_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
-    if history_settings.policy.mode == "messages":
-        return session.get_messages(agent_id=scope_id, limit=limit, skip_roles=skip_roles)
-    return session.get_messages(agent_id=scope_id, skip_roles=skip_roles)
-
-
-def _team_session_history_messages(
-    *,
-    session: TeamSession,
-    scope_id: str,
-    history_settings: ResolvedHistorySettings,
-    limit: int | None,
-) -> list[Message]:
-    skip_roles = _history_skip_roles(history_settings)
-    if history_settings.policy.mode == "runs":
-        return session.get_messages(team_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
-    if history_settings.policy.mode == "messages":
-        return session.get_messages(team_id=scope_id, limit=limit, skip_roles=skip_roles)
-    return session.get_messages(team_id=scope_id, skip_roles=skip_roles)
-
-
-def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str] | None:
-    """Return the effective Agno skip_roles filter for persisted history replay."""
-    if not history_settings.skip_history_system_role:
-        return None
-    if history_settings.system_message_role in _STANDARD_HISTORY_ROLES:
-        return None
-    return [history_settings.system_message_role]
 
 
 def completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
@@ -1690,12 +1110,6 @@ def _has_stable_run_id(run: RunOutput | TeamRunOutput) -> bool:
     return isinstance(run.run_id, str) and bool(run.run_id)
 
 
-def _estimated_message_chars(message: Message) -> int:
-    content_chars = len(_render_message_content(message))
-    tool_call_chars = len(stable_serialize(message.tool_calls)) if message.tool_calls else 0
-    return content_chars + tool_call_chars + _estimate_message_media_chars(message)
-
-
 def _remove_runs_by_id(
     runs: Sequence[RunOutput | TeamRunOutput],
     compacted_run_ids: set[str],
@@ -1726,51 +1140,9 @@ def _remove_runs_by_id(
     ]
 
 
-def _estimate_message_media_chars(message: Message) -> int:
-    """Estimate serialized character cost for a message's media payloads."""
-    media_chars = 0
-    for _tag, media_value in _message_media_entries(message):
-        if media_value is None:
-            continue
-        media_chars += len(stable_serialize(_media_payload_snapshot(media_value)))
-    return media_chars
-
-
 def _model_identifier(model: Model) -> str:
     return model.id or model.__class__.__name__
 
 
 def _iso_utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def compute_prompt_token_breakdown(
-    agent: Agent | None = None,
-    team: Team | None = None,
-    full_prompt: str | None = None,
-) -> dict[str, int]:
-    """Compute token breakdown for system prompt, tool defs, and current prompt."""
-    breakdown: dict[str, int] = {}
-
-    if agent is not None:
-        sys_chars = len(agent.role or "")
-        instructions = agent.instructions
-        if isinstance(instructions, str):
-            sys_chars += len(instructions)
-        elif isinstance(instructions, list):
-            for instruction in instructions:
-                sys_chars += len(str(instruction))
-        breakdown["role_instructions_tokens"] = sys_chars // 4
-
-    tool_tokens = 0
-    if agent is not None:
-        tool_tokens = estimate_tool_definition_tokens(agent)
-    elif team is not None:
-        prepared_tools, _tool_instructions = _prepare_tools_for_estimation(team.tools)
-        tool_tokens = _estimate_prepared_tool_definition_tokens(prepared_tools)
-    breakdown["tool_definition_tokens"] = tool_tokens
-
-    if full_prompt is not None:
-        breakdown["current_prompt_tokens"] = len(full_prompt) // 4
-
-    return breakdown

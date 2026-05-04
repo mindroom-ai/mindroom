@@ -40,8 +40,6 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     prepare_bound_team_run_context,
-    render_prepared_messages_text,
-    render_prepared_team_messages_text,
 )
 from mindroom.history import (
     ScopeSessionContext,
@@ -66,6 +64,10 @@ from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.prepared_conversation_chain import (
+    render_prepared_messages_text,
+    render_prepared_team_messages_text,
+)
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,

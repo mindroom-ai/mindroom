@@ -2,15 +2,46 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from defusedxml.ElementTree import fromstring
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
-from mindroom.execution_preparation import (
-    _build_unseen_context_messages,
-    _collect_history_messages,
+from mindroom.prepared_conversation_chain import (
     build_matrix_prompt_with_thread_history,
+    build_unseen_context_chain,
+    collect_history_messages,
 )
 from tests.conftest import make_visible_message
+
+if TYPE_CHECKING:
+    from collections.abc import Collection, Sequence
+
+    from agno.models.message import Message
+
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+
+
+def _build_unseen_context_messages(
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    seen_event_ids: set[str],
+    current_event_id: str,
+    active_event_ids: Collection[str],
+    response_sender_id: str | None,
+    current_sender_id: str | None = None,
+) -> tuple[tuple[Message, ...], list[str]]:
+    chain, unseen_event_ids = build_unseen_context_chain(
+        prompt,
+        thread_history,
+        seen_event_ids=seen_event_ids,
+        current_event_id=current_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
+        current_sender_id=current_sender_id,
+    )
+    return chain.messages, unseen_event_ids
 
 
 def test_collect_history_messages_keeps_visible_body_only() -> None:
@@ -23,7 +54,7 @@ def test_collect_history_messages_keeps_visible_body_only() -> None:
         ),
     ]
 
-    collected = _collect_history_messages(
+    collected = collect_history_messages(
         messages,
         max_messages=None,
         max_message_length=None,
@@ -37,7 +68,7 @@ def test_collect_history_messages_leaves_no_trace_messages_unchanged() -> None:
     """No-trace history collection should remain byte-identical to the prior output."""
     messages = [make_visible_message(sender="@alice:localhost", body="Earlier context")]
 
-    collected = _collect_history_messages(
+    collected = collect_history_messages(
         messages,
         max_messages=None,
         max_message_length=None,
@@ -56,7 +87,7 @@ def test_collect_history_messages_drops_tool_only_message() -> None:
         ),
     ]
 
-    collected = _collect_history_messages(
+    collected = collect_history_messages(
         messages,
         max_messages=None,
         max_message_length=None,
@@ -76,7 +107,7 @@ def test_collect_history_messages_truncates_visible_body() -> None:
         ),
     ]
 
-    collected = _collect_history_messages(
+    collected = collect_history_messages(
         messages,
         max_messages=None,
         max_message_length=20,

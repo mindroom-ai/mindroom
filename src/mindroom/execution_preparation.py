@@ -3,24 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from enum import Enum
 from typing import TYPE_CHECKING
-from xml.sax.saxutils import quoteattr as xml_quoteattr
-
-from agno.models.message import Message
 
 from mindroom import ai_runtime
-from mindroom.constants import (
-    COMPACTION_NOTICE_CONTENT_KEY,
-    ORIGINAL_SENDER_KEY,
-    STREAM_STATUS_CANCELLED,
-    STREAM_STATUS_COMPLETED,
-    STREAM_STATUS_ERROR,
-    STREAM_STATUS_INTERRUPTED,
-    STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
-    RuntimePaths,
-)
+from mindroom import prepared_conversation_chain as conversation_chain
 from mindroom.history import (
     PreparedHistoryState,
     PreparedScopeHistory,
@@ -36,17 +22,17 @@ from mindroom.history import (
     read_scope_seen_event_ids,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_visible_messages import replace_visible_message
-from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Sequence
 
     from agno.agent import Agent
+    from agno.models.message import Message
     from agno.team import Team
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.history import (
         CompactionDecision,
         CompactionLifecycle,
@@ -57,35 +43,6 @@ if TYPE_CHECKING:
     from mindroom.timing import DispatchPipelineTiming
 
 logger = get_logger(__name__)
-
-_DEFAULT_UNSEEN_MESSAGES_HEADER = "Messages since your last response:"
-_INTERRUPTED_PARTIAL_REPLY_HEADER = (
-    "Messages since your last response:\n"
-    "Your previous response was interrupted before completion. "
-    "The partial content below may be incomplete. Continue from where you left off if appropriate."
-)
-_IN_PROGRESS_PARTIAL_REPLY_HEADER = (
-    "Messages since your last response:\n"
-    "Your previous response is still being delivered. Do NOT repeat or redo that work. "
-    "The partial content is shown below for context only."
-)
-_MIXED_PARTIAL_REPLY_HEADER = (
-    "Messages since your last response:\n"
-    "Some partial content from your previous response is still being delivered, so do NOT repeat or redo that work. "
-    "Other partial content was interrupted before completion and may be incomplete. "
-    "Continue from where you left off if appropriate."
-)
-_PARTIAL_REPLY_SENDER_LABELS = {
-    "interrupted": "You (interrupted reply draft)",
-    "in_progress": "You (reply still streaming)",
-}
-
-
-class _PartialReplyKind(str, Enum):
-    """Classification for a self-authored partial reply preserved in prompt context."""
-
-    IN_PROGRESS = "in_progress"
-    INTERRUPTED = "interrupted"
 
 
 @dataclass(frozen=True)
@@ -105,7 +62,7 @@ class PreparedExecutionContext:
     @property
     def final_prompt(self) -> str:
         """Return the prompt-visible text derived from the canonical message input."""
-        return render_prepared_messages_text(self.messages)
+        return conversation_chain.render_prepared_messages_text(self.messages)
 
     @property
     def context_messages(self) -> tuple[Message, ...]:
@@ -138,485 +95,11 @@ class ThreadHistoryRenderLimits:
     missing_sender_label: str | None = None
 
 
-def _wrap_msg_body(sender: str, body: str) -> str:
-    """Render one Matrix message as a <msg from="..."><![CDATA[...]]></msg> tag."""
-    safe_body = body.replace("]]>", "]]]]><![CDATA[>")
-    return f"<msg from={xml_quoteattr(sender)}><![CDATA[{safe_body}]]></msg>"
-
-
-def _truncate_message_body(body: str, limit: int) -> str:
-    """Cap one rendered history body to the requested character limit."""
-    if len(body) <= limit:
-        return body
-    if limit <= 1:
-        return "…"
-    return f"{body[: limit - 1]}…"
-
-
-def _collect_history_messages(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    max_messages: int | None,
-    max_message_length: int | None,
-    missing_sender_label: str | None,
-) -> list[tuple[str, str]]:
-    messages = thread_history[-max_messages:] if max_messages is not None else thread_history
-    collected: list[tuple[str, str]] = []
-    for msg in messages:
-        body = msg.body
-        if not body:
-            continue
-        if max_message_length is not None:
-            body = _truncate_message_body(body, max_message_length)
-        sender = msg.sender
-        if not sender:
-            if missing_sender_label is None:
-                continue
-            sender = missing_sender_label
-        collected.append((sender, body))
-    return collected
-
-
-def _build_plain_prompt_with_history(
-    prompt: str,
-    history_messages: list[tuple[str, str]],
-    *,
-    header: str,
-    prompt_intro: str,
-) -> str:
-    if not history_messages:
-        return prompt
-    context = "\n".join(f"{sender}: {body}" for sender, body in history_messages)
-    return f"{header}\n{context}\n\n{prompt_intro}{prompt}"
-
-
-def _build_matrix_prompt_with_history(
-    prompt: str,
-    history_messages: list[tuple[str, str]],
-    *,
-    header: str,
-    prompt_intro: str,
-    current_sender: str | None,
-) -> str:
-    current_block = _wrap_msg_body(current_sender, prompt) if current_sender is not None else prompt
-    standalone_prompt = f"{prompt_intro}{current_block}" if current_sender is not None else prompt
-    if not history_messages:
-        return standalone_prompt
-    rendered_history = "\n".join(_wrap_msg_body(sender, body) for sender, body in history_messages)
-    return f"{header}\n<conversation>\n{rendered_history}\n</conversation>\n\n{prompt_intro}{current_block}"
-
-
-def build_prompt_with_thread_history(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    *,
-    header: str = "Previous conversation in this thread:",
-    prompt_intro: str = "Current message:\n",
-    max_messages: int | None = None,
-    max_message_length: int | None = None,
-    missing_sender_label: str | None = None,
-) -> str:
-    """Build a plain-text prompt with ``sender: body`` history lines."""
-    if not thread_history:
-        return prompt
-    history_messages = _collect_history_messages(
-        thread_history,
-        max_messages=max_messages,
-        max_message_length=max_message_length,
-        missing_sender_label=missing_sender_label,
-    )
-    return _build_plain_prompt_with_history(
-        prompt,
-        history_messages,
-        header=header,
-        prompt_intro=prompt_intro,
-    )
-
-
-def build_matrix_prompt_with_thread_history(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    *,
-    header: str = "Previous conversation in this thread:",
-    prompt_intro: str = "Current message:\n",
-    max_messages: int | None = None,
-    max_message_length: int | None = None,
-    missing_sender_label: str | None = None,
-    current_sender: str | None = None,
-) -> str:
-    """Build a Matrix prompt with structured XML-like message wrappers."""
-    history_messages = (
-        _collect_history_messages(
-            thread_history,
-            max_messages=max_messages,
-            max_message_length=max_message_length,
-            missing_sender_label=missing_sender_label,
-        )
-        if thread_history
-        else []
-    )
-    return _build_matrix_prompt_with_history(
-        prompt,
-        history_messages,
-        header=header,
-        prompt_intro=prompt_intro,
-        current_sender=current_sender,
-    )
-
-
-def _classify_partial_reply(
-    msg: ResolvedVisibleMessage,
-    *,
-    active_event_ids: Collection[str],
-) -> _PartialReplyKind | None:
-    """Classify a self-authored partial reply from persisted stream metadata first."""
-    status = msg.stream_status
-    if status == STREAM_STATUS_COMPLETED:
-        return None
-
-    partial_kind: _PartialReplyKind | None = None
-    if status in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED}:
-        partial_kind = _PartialReplyKind.INTERRUPTED
-    elif status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
-        event_id = msg.event_id
-        if isinstance(event_id, str):
-            return _PartialReplyKind.IN_PROGRESS if event_id in active_event_ids else _PartialReplyKind.INTERRUPTED
-        partial_kind = _PartialReplyKind.IN_PROGRESS
-    else:
-        body = msg.body
-        if is_interrupted_partial_reply(body):
-            partial_kind = _PartialReplyKind.INTERRUPTED
-
-    return partial_kind
-
-
-def _clean_partial_reply_body(body: str) -> str:
-    """Strip live status notes before the canonical interrupted replay marker is added."""
-    return clean_partial_reply_text(body)
-
-
-def _message_speaker_label(message: ResolvedVisibleMessage) -> str:
-    """Return the speaker label that should be shown for one visible Matrix message."""
-    original_sender = message.content.get(ORIGINAL_SENDER_KEY)
-    if isinstance(original_sender, str) and original_sender:
-        return original_sender
-    return message.sender
-
-
-def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
-    """Return whether an internal Matrix sender is relaying a user-authored message."""
-    original_sender = message.content.get(ORIGINAL_SENDER_KEY)
-    return isinstance(original_sender, str) and bool(original_sender)
-
-
-def _build_unseen_messages_header(partial_reply_kinds: set[_PartialReplyKind]) -> str:
-    """Choose the unseen-context guidance for the partial-reply mix present."""
-    if not partial_reply_kinds:
-        return _DEFAULT_UNSEEN_MESSAGES_HEADER
-    if partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}:
-        return _INTERRUPTED_PARTIAL_REPLY_HEADER
-    if partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}:
-        return _IN_PROGRESS_PARTIAL_REPLY_HEADER
-    return _MIXED_PARTIAL_REPLY_HEADER
-
-
-def _context_message_from_visible_message(
-    message: ResolvedVisibleMessage,
-    *,
-    response_sender_id: str | None,
-    missing_sender_label: str | None = None,
-) -> Message:
-    """Convert one visible Matrix message into a structured Agno message."""
-    if (
-        response_sender_id is not None
-        and message.sender == response_sender_id
-        and not _is_relayed_user_message(message)
-    ):
-        return Message(role="assistant", content=message.body)
-    speaker_label = _message_speaker_label(message)
-    if not speaker_label:
-        speaker_label = missing_sender_label
-    if speaker_label:
-        return Message(role="user", content=f"{speaker_label}: {message.body}")
-    return Message(role="user", content=message.body)
-
-
-def _context_messages_from_visible_messages(
-    messages: Sequence[ResolvedVisibleMessage],
-    *,
-    response_sender_id: str | None,
-    max_messages: int | None = None,
-    max_message_length: int | None = None,
-    missing_sender_label: str | None = None,
-) -> tuple[Message, ...]:
-    """Convert visible Matrix context into provider-native message objects."""
-    visible_messages = messages[-max_messages:] if max_messages is not None else messages
-    return tuple(
-        _context_message_from_visible_message(
-            message,
-            response_sender_id=response_sender_id,
-            missing_sender_label=missing_sender_label,
-        )
-        for message in visible_messages
-        if message.body and (max_message_length is None or len(message.body) < max_message_length)
-    )
-
-
-def _messages_with_capped_context(
-    prompt: str,
-    *,
-    context_messages: Sequence[Message],
-    current_sender_id: str | None,
-    static_token_budget: int,
-    estimate_static_tokens_fn: Callable[[str], int],
-    render_messages_text_fn: Callable[[Sequence[Message]], str],
-) -> tuple[Message, ...]:
-    """Return the newest context-message suffix that fits the total static token budget."""
-    selected_context: list[Message] = []
-    current_only_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
-    current_only_tokens = estimate_static_tokens_fn(render_messages_text_fn(current_only_messages))
-    if current_only_tokens > static_token_budget:
-        return current_only_messages
-
-    for context_message in reversed(context_messages):
-        candidate_context = [context_message, *selected_context]
-        candidate_messages = _messages_with_current_prompt(
-            prompt,
-            context_messages=candidate_context,
-            current_sender_id=current_sender_id,
-        )
-        if estimate_static_tokens_fn(render_messages_text_fn(candidate_messages)) > static_token_budget:
-            break
-        selected_context = candidate_context
-    return _messages_with_current_prompt(
-        prompt,
-        context_messages=selected_context,
-        current_sender_id=current_sender_id,
-    )
-
-
-def _messages_with_current_prompt(
-    prompt: str,
-    *,
-    context_messages: Sequence[Message] = (),
-    current_sender_id: str | None = None,
-) -> tuple[Message, ...]:
-    """Return canonical live request messages with the current user turn last."""
-    messages = [message.model_copy(deep=True) for message in context_messages]
-    current_prompt = (
-        _build_matrix_prompt_with_history(
-            prompt,
-            [],
-            header="Previous conversation in this thread:",
-            prompt_intro="Current message:\n",
-            current_sender=current_sender_id,
-        )
-        if current_sender_id is not None
-        else prompt
-    )
-    messages.append(Message(role="user", content=current_prompt))
-    return tuple(messages)
-
-
-def render_prepared_messages_text(messages: Sequence[Message]) -> str:
-    """Render canonical request messages to text for logs and rough token estimates."""
-    return "\n\n".join(str(message.content) for message in messages if message.content)
-
-
-def render_prepared_team_messages_text(messages: Sequence[Message]) -> str:
-    """Render prepared team messages into the exact string form passed to Agno teams."""
-    rendered_chunks: list[str] = []
-    for message in messages:
-        if not message.content:
-            continue
-        content = str(message.content)
-        rendered_chunks.append(f"assistant: {content}" if message.role == "assistant" else content)
-    return "\n\n".join(rendered_chunks)
-
-
-def _build_unseen_context_messages(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    seen_event_ids: set[str],
-    current_event_id: str,
-    active_event_ids: Collection[str],
-    response_sender_id: str | None,
-    current_sender_id: str | None = None,
-) -> tuple[tuple[Message, ...], list[str]]:
-    """Return canonical request messages for unseen thread context plus the current turn."""
-    unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
-        thread_history,
-        sender_id=response_sender_id,
-        seen_event_ids=seen_event_ids,
-        current_event_id=current_event_id,
-        active_event_ids=active_event_ids,
-    )
-    context_messages = _context_messages_from_visible_messages(
-        unseen_messages,
-        response_sender_id=response_sender_id,
-    )
-    if partial_reply_kinds:
-        context_messages = (
-            Message(role="user", content=_build_unseen_messages_header(partial_reply_kinds)),
-            *context_messages,
-        )
-    return (
-        _messages_with_current_prompt(
-            prompt,
-            context_messages=context_messages,
-            current_sender_id=current_sender_id,
-        ),
-        _get_unseen_event_ids_for_metadata(
-            unseen_messages,
-            in_progress_event_ids=in_progress_event_ids,
-        ),
-    )
-
-
-def _build_thread_history_messages(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    *,
-    response_sender_id: str | None,
-    current_sender_id: str | None = None,
-    max_messages: int | None = None,
-    max_message_length: int | None = None,
-    missing_sender_label: str | None = None,
-    static_token_budget: int | None = None,
-    estimate_static_tokens_fn: Callable[[str], int] | None = None,
-    render_messages_text_fn: Callable[[Sequence[Message]], str] | None = None,
-) -> tuple[Message, ...]:
-    """Return canonical request messages for fallback full-thread replay."""
-    if not thread_history:
-        return _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
-    context_messages = _context_messages_from_visible_messages(
-        thread_history,
-        response_sender_id=response_sender_id,
-        max_messages=max_messages,
-        max_message_length=max_message_length,
-        missing_sender_label=missing_sender_label,
-    )
-    if (
-        static_token_budget is not None
-        and estimate_static_tokens_fn is not None
-        and render_messages_text_fn is not None
-    ):
-        return _messages_with_capped_context(
-            prompt,
-            context_messages=context_messages,
-            current_sender_id=current_sender_id,
-            static_token_budget=static_token_budget,
-            estimate_static_tokens_fn=estimate_static_tokens_fn,
-            render_messages_text_fn=render_messages_text_fn,
-        )
-    return _messages_with_current_prompt(
-        prompt,
-        context_messages=context_messages,
-        current_sender_id=current_sender_id,
-    )
-
-
 def _fallback_static_token_budget(*, context_window: int | None, reserve_tokens: int) -> int | None:
     """Return the total static-token budget available to Matrix-thread fallback prompts."""
     if context_window is None or context_window <= 0:
         return None
     return max(0, context_window - normalize_compaction_budget_tokens(reserve_tokens, context_window))
-
-
-def _thread_history_before_current_event(
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    current_event_id: str | None,
-) -> Sequence[ResolvedVisibleMessage] | None:
-    """Return full-context fallback history up to, but not including, the current event."""
-    if not thread_history or current_event_id is None:
-        return thread_history
-    preceding_messages: list[ResolvedVisibleMessage] = []
-    for msg in thread_history:
-        if msg.event_id == current_event_id:
-            return tuple(preceding_messages)
-        preceding_messages.append(msg)
-    return tuple(preceding_messages)
-
-
-def _sanitize_thread_history_for_replay(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    response_sender_id: str | None,
-    active_event_ids: Collection[str],
-) -> tuple[ResolvedVisibleMessage, ...]:
-    """Apply unseen-context sanitization before fallback full-thread replay."""
-    sanitized, _, _ = _get_unseen_messages_for_sender(
-        thread_history,
-        sender_id=response_sender_id,
-        seen_event_ids=set(),
-        current_event_id=None,
-        active_event_ids=active_event_ids,
-    )
-    return tuple(sanitized)
-
-
-def _get_unseen_event_ids_for_metadata(
-    unseen_messages: list[ResolvedVisibleMessage],
-    *,
-    in_progress_event_ids: set[str],
-) -> list[str]:
-    """Return unseen event IDs that should be persisted as consumed by this run."""
-    event_ids: list[str] = []
-    for msg in unseen_messages:
-        event_id = msg.event_id
-        if event_id in in_progress_event_ids:
-            continue
-        event_ids.append(event_id)
-    return event_ids
-
-
-def _get_unseen_messages_for_sender(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    sender_id: str | None,
-    seen_event_ids: set[str],
-    current_event_id: str | None,
-    active_event_ids: Collection[str],
-) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
-    """Filter thread_history to unseen messages for one Matrix sender."""
-    unseen: list[ResolvedVisibleMessage] = []
-    partial_reply_kinds: set[_PartialReplyKind] = set()
-    in_progress_event_ids: set[str] = set()
-    for msg in thread_history:
-        event_id = msg.event_id
-        sender = msg.sender
-        content = msg.content
-        if event_id and event_id in seen_event_ids:
-            continue
-        if current_event_id and event_id == current_event_id:
-            continue
-        if isinstance(content, dict) and COMPACTION_NOTICE_CONTENT_KEY in content:
-            continue
-        if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
-            partial_kind = _classify_partial_reply(
-                msg,
-                active_event_ids=active_event_ids,
-            )
-            if partial_kind is _PartialReplyKind.INTERRUPTED:
-                continue
-            if partial_kind is not None:
-                cleaned_body = _clean_partial_reply_body(msg.body)
-                if not cleaned_body:
-                    continue
-                partial_reply_kinds.add(partial_kind)
-                if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
-                    in_progress_event_ids.add(event_id)
-                unseen.append(
-                    replace_visible_message(
-                        msg,
-                        sender=_PARTIAL_REPLY_SENDER_LABELS.get(partial_kind.value, "You (partial reply)"),
-                        body=cleaned_body,
-                    ),
-                )
-                continue
-        unseen.append(msg)
-    return unseen, partial_reply_kinds, in_progress_event_ids
 
 
 def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]:
@@ -663,14 +146,14 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     del timing_scope
     seen_event_ids = _scope_seen_event_ids(scope_context)
-    fallback_thread_history = _thread_history_before_current_event(thread_history, reply_to_event_id)
+    fallback_thread_history = conversation_chain.thread_history_before_current_event(thread_history, reply_to_event_id)
     if fallback_thread_history is not None:
-        fallback_thread_history = _sanitize_thread_history_for_replay(
+        fallback_thread_history = conversation_chain.sanitize_thread_history_for_replay(
             fallback_thread_history,
             response_sender_id=response_sender_id,
             active_event_ids=active_event_ids,
         )
-    replay_fallback_messages = _build_thread_history_messages(
+    replay_fallback_chain = conversation_chain.build_thread_history_chain(
         prompt,
         fallback_thread_history,
         response_sender_id=response_sender_id,
@@ -685,9 +168,13 @@ async def _prepare_execution_context_common(
         render_messages_text_fn=render_messages_text_fn,
     )
 
-    provisional_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
+    provisional_chain = conversation_chain.build_current_prompt_chain(
+        prompt,
+        current_sender_id=current_sender_id,
+        render_messages_text_fn=render_messages_text_fn,
+    )
     if reply_to_event_id and thread_history:
-        provisional_messages, _ = _build_unseen_context_messages(
+        provisional_chain, _ = conversation_chain.build_unseen_context_chain(
             prompt,
             thread_history,
             seen_event_ids=seen_event_ids,
@@ -695,13 +182,18 @@ async def _prepare_execution_context_common(
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
+            render_messages_text_fn=render_messages_text_fn,
         )
 
-    prepared_scope_history = await prepare_scope_history_fn(render_messages_text_fn(provisional_messages))
+    prepared_scope_history = await prepare_scope_history_fn(provisional_chain.rendered_text)
 
-    final_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
+    final_chain = conversation_chain.build_current_prompt_chain(
+        prompt,
+        current_sender_id=current_sender_id,
+        render_messages_text_fn=render_messages_text_fn,
+    )
     if reply_to_event_id and thread_history:
-        final_messages, unseen_event_ids = _build_unseen_context_messages(
+        final_chain, unseen_event_ids = conversation_chain.build_unseen_context_chain(
             prompt,
             thread_history,
             seen_event_ids=_scope_seen_event_ids(scope_context),
@@ -709,11 +201,12 @@ async def _prepare_execution_context_common(
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
+            render_messages_text_fn=render_messages_text_fn,
         )
     else:
         unseen_event_ids = []
 
-    final_static_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
+    final_static_tokens = estimate_static_tokens_fn(final_chain.rendered_text)
     prepared_history = _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
         config=config,
@@ -722,9 +215,9 @@ async def _prepare_execution_context_common(
     )
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_start")
-    if replay_fallback_messages is not None and not prepared_history.replays_persisted_history and thread_history:
-        final_messages = replay_fallback_messages
-        fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
+    if not prepared_history.replays_persisted_history and thread_history:
+        final_chain = replay_fallback_chain
+        fallback_context_tokens = estimate_static_tokens_fn(final_chain.rendered_text)
         if prepared_history.replay_plan is not None:
             fallback_context_tokens += prepared_history.replay_plan.estimated_tokens
         prepared_history = replace(
@@ -736,7 +229,7 @@ async def _prepare_execution_context_common(
         pipeline_timing.mark("prompt_assembly_ready")
 
     return PreparedExecutionContext(
-        messages=final_messages,
+        messages=final_chain.messages,
         replay_plan=prepared_history.replay_plan,
         estimated_context_tokens=prepared_history.estimated_context_tokens,
         unseen_event_ids=unseen_event_ids,
@@ -796,6 +289,7 @@ async def prepare_agent_execution_context(
             timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
+            active_summary_model=agent.model,
         )
 
     def _estimate_agent_static_tokens(
@@ -817,7 +311,7 @@ async def prepare_agent_execution_context(
         config=config,
         prepare_scope_history_fn=_prepare_agent_scope_history,
         estimate_static_tokens_fn=_estimate_agent_static_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
+        render_messages_text_fn=conversation_chain.render_prepared_messages_text,
         thread_history_render_limits=None,
         fallback_static_token_budget=_fallback_static_token_budget(
             context_window=runtime_model.context_window,
@@ -888,7 +382,7 @@ async def prepare_bound_team_execution_context(
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
         estimate_static_tokens_fn=_estimate_team_static_tokens,
-        render_messages_text_fn=render_prepared_team_messages_text,
+        render_messages_text_fn=conversation_chain.render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,
         fallback_static_token_budget=_fallback_static_token_budget(
             context_window=active_context_window,

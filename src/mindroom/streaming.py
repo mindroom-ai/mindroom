@@ -32,6 +32,15 @@ from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     classify_cancel_source,
 )
+from mindroom.partial_reply_text import (
+    CANCELLED_RESPONSE_NOTE,
+    INTERRUPTED_RESPONSE_NOTE,
+    PROGRESS_PLACEHOLDER,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    clean_partial_reply_text,
+    format_stream_error_note,
+    is_interrupted_partial_reply,
+)
 from mindroom.streaming_delivery import (
     StreamInputChunk,
     _consume_stream_with_progress_supervision,
@@ -66,16 +75,10 @@ __all__ = [
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "cancel_failure_reason",
+    "clean_partial_reply_text",
+    "is_interrupted_partial_reply",
 ]
 
-_PROGRESS_PLACEHOLDER = "Thinking..."
-PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
-_CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
-CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
-_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
-INTERRUPTED_RESPONSE_NOTE = _INTERRUPTED_RESPONSE_NOTE
-_RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
-_STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 
 
@@ -142,60 +145,12 @@ def _complete_capture_completions(capture_completions: tuple[asyncio.Future[None
             capture_completion.set_result(None)
 
 
-def _format_stream_error_note(error: Exception) -> str:
-    """Return a concise user-facing note for stream-time exceptions."""
-    normalized_error = " ".join(str(error).split())
-    if not normalized_error:
-        return f"{_STREAM_ERROR_RESPONSE_NOTE}. Please retry.]**"
-    if len(normalized_error) > 220:
-        normalized_error = f"{normalized_error[:219]}…"
-    return f"{_STREAM_ERROR_RESPONSE_NOTE}: {normalized_error}]**"
-
-
-def is_interrupted_partial_reply(text: object) -> bool:
-    """Return True when text carries a terminal interrupted partial-reply marker."""
-    if not isinstance(text, str):
-        return False
-    trimmed_text = text.rstrip()
-    return trimmed_text.endswith(
-        (
-            _CANCELLED_RESPONSE_NOTE,
-            _INTERRUPTED_RESPONSE_NOTE,
-            _RESTART_INTERRUPTED_RESPONSE_NOTE,
-            " [cancelled]",
-            " [error]",
-        ),
-    ) or (_STREAM_ERROR_RESPONSE_NOTE in trimmed_text)
-
-
-def clean_partial_reply_text(text: str) -> str:
-    """Strip partial-reply status notes from persisted text."""
-    cleaned = text.rstrip()
-
-    for marker in (
-        " [cancelled]",
-        " [error]",
-        _CANCELLED_RESPONSE_NOTE,
-        _INTERRUPTED_RESPONSE_NOTE,
-        _RESTART_INTERRUPTED_RESPONSE_NOTE,
-    ):
-        if cleaned.endswith(marker):
-            cleaned = cleaned[: -len(marker)].rstrip()
-
-    if _STREAM_ERROR_RESPONSE_NOTE in cleaned:
-        cleaned = cleaned.split(_STREAM_ERROR_RESPONSE_NOTE, 1)[0].rstrip()
-
-    if cleaned == _PROGRESS_PLACEHOLDER or not cleaned or not any(char.isalnum() for char in cleaned):
-        return ""
-    return cleaned
-
-
 def build_restart_interrupted_body(text: str) -> str:
     """Return restart-note text for a stale in-progress message body."""
     stripped_text = text.rstrip()
-    if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
-        return _RESTART_INTERRUPTED_RESPONSE_NOTE
-    return f"{stripped_text}\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}"
+    if not stripped_text or stripped_text == PROGRESS_PLACEHOLDER:
+        return RESTART_INTERRUPTED_RESPONSE_NOTE
+    return f"{stripped_text}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
 
 
 @dataclass(frozen=True)
@@ -224,12 +179,12 @@ def build_cancelled_response_update(
     if cancel_source == "sync_restart":
         return build_restart_interrupted_body(text), STREAM_STATUS_ERROR
 
-    note = _CANCELLED_RESPONSE_NOTE if cancel_source == "user_stop" else _INTERRUPTED_RESPONSE_NOTE
+    note = CANCELLED_RESPONSE_NOTE if cancel_source == "user_stop" else INTERRUPTED_RESPONSE_NOTE
     # Generic interruptions keep their distinct visible note, but reuse an
     # existing terminal wire status so older clients do not misclassify them.
     stream_status = STREAM_STATUS_CANCELLED if cancel_source == "user_stop" else STREAM_STATUS_ERROR
     stripped_text = text.rstrip()
-    if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
+    if not stripped_text or stripped_text == PROGRESS_PLACEHOLDER:
         return note, stream_status
     return f"{stripped_text}\n\n{note}", stream_status
 
@@ -489,7 +444,7 @@ class StreamingResponse:
                 resolved_cancel_source = "user_stop"
         if error is not None:
             stripped_text = self.accumulated_text.rstrip()
-            error_note = _format_stream_error_note(error)
+            error_note = format_stream_error_note(error)
             self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
             return STREAM_STATUS_ERROR
         if resolved_cancel_source is not None:
@@ -581,7 +536,7 @@ class StreamingResponse:
                 failure_reason=cancellation_failure_reason,
             )
         if not text_to_send.strip():
-            text_to_send = _PROGRESS_PLACEHOLDER
+            text_to_send = PROGRESS_PLACEHOLDER
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
         attempted_rendered_body = (
             response.formatted_text
@@ -600,7 +555,7 @@ class StreamingResponse:
                 failure_reason=cancellation_failure_reason,
             )
         attempted_visible_body_state = (
-            "placeholder_only" if attempted_rendered_body == _PROGRESS_PLACEHOLDER else "visible_body"
+            "placeholder_only" if attempted_rendered_body == PROGRESS_PLACEHOLDER else "visible_body"
         )
         try:
             retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED
@@ -808,7 +763,7 @@ class StreamingResponse:
         assert self.target is not None
         effective_thread_id = self.target.resolved_thread_id
 
-        text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
+        text_to_send = self.accumulated_text if self.accumulated_text.strip() else PROGRESS_PLACEHOLDER
 
         # Format the text (handles interactive questions if present)
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
@@ -850,7 +805,7 @@ class StreamingResponse:
                 placeholder_progress_sent=not self.accumulated_text.strip(),
                 rendered_body=canonical_visible_body,
                 visible_body_state=(
-                    "placeholder_only" if canonical_visible_body == _PROGRESS_PLACEHOLDER else "visible_body"
+                    "placeholder_only" if canonical_visible_body == PROGRESS_PLACEHOLDER else "visible_body"
                 ),
                 interactive_metadata=response.interactive_metadata,
             ),
@@ -877,7 +832,7 @@ class StreamingResponse:
                 self._last_committed_visible_body_state,
             )
         if self.event_id is not None and self.placeholder_progress_sent:
-            return _PROGRESS_PLACEHOLDER, "placeholder_only"
+            return PROGRESS_PLACEHOLDER, "placeholder_only"
         return None, "none"
 
     def restore_last_delivered_state(self) -> None:

@@ -172,3 +172,16 @@ def install_vertex_claude_prompt_cache_hook(model: object) -> None:
     model_dict["ainvoke"] = _ainvoke_with_prompt_cache
     model_dict["invoke_stream"] = _invoke_stream_with_prompt_cache
     model_dict["ainvoke_stream"] = _ainvoke_stream_with_prompt_cache
+
+
+def rebind_vertex_claude_prompt_cache_hook(model: object) -> None:
+    """Reinstall the instance hook after copying a hooked Vertex Claude model."""
+    if not isinstance(model, VertexAIClaude):
+        return
+    model_dict = vars(model)
+    if model_dict.get(_VERTEX_CLAUDE_PROMPT_CACHE_HOOK_ATTR) is not True:
+        return
+    for method_name in ("invoke", "ainvoke", "invoke_stream", "ainvoke_stream"):
+        model_dict.pop(method_name, None)
+    model_dict.pop(_VERTEX_CLAUDE_PROMPT_CACHE_HOOK_ATTR, None)
+    install_vertex_claude_prompt_cache_hook(model)

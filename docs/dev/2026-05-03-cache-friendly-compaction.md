@@ -1,139 +1,87 @@
-# Cache-Friendly Compaction Idea
+# Cache-Friendly Compaction
 
-This note records a follow-up idea discussed on May 3, 2026.
+This note records the prepared conversation-chain architecture implemented on May 3, 2026.
 
-It is not part of the current history compaction PR.
+The goal is to make destructive compaction reuse the same conversation-chain construction as normal reply preparation.
 
 ## Core Idea
 
-Compaction should be cheap when the provider prompt cache is still warm.
+Compaction should be cheap when the provider prompt cache is still warm and the compaction model is the active reply model.
 
-The compaction request should reuse the same stable prefix as the normal agent reply request.
+With the default `compaction.model: null`, the compaction request is prepared through the same live Agent or Team request assembly used by normal replies.
 
-Here, stable prefix means the full normal message chain.
+That keeps the provider-visible system prompt, session summary, selected persisted history, and tool schemas aligned with the normal reply request prefix.
 
-That includes the system prompt, tool descriptions, and all user, assistant, and tool messages in the conversation.
+Warm-cache compaction preserves that prefix and appends one final user instruction asking the model to update the durable summary.
 
-The compaction request should then append one small final instruction asking the model to compact the conversation.
+The important point is that compaction and normal reply preparation now share one owner for message materialization.
 
-The important point is that the cache is used during compaction.
+An explicit `compaction.model` remains supported as a configurable summary-model override, but a different model or provider should not be expected to reuse the active reply prompt cache.
 
 This is not about reusing a cached prefix after compaction.
 
-## Desired Prompt Shape
+## Implemented Shape
 
-When the cache is warm, the compaction request should look like the normal reply request plus one extra final message.
+The shared chain code lives in `src/mindroom/prepared_conversation_chain.py`.
 
-The final message should ask for a durable summary of the conversation above.
+It owns Matrix visible-message conversion, unseen-context preparation, Matrix fallback replay preparation, persisted-run replay materialization, replay token estimates, media snapshots, stale Anthropic replay-field stripping, and compaction summary transforms.
 
-The system prompt, tools, and previous messages should remain in the same order and same shape as the normal request.
+`src/mindroom/execution_preparation.py` still owns request-scoped orchestration, history policy application, compaction lifecycle wiring, and the `PreparedExecutionContext` returned to callers.
 
-That makes most of the compaction request identical to a request the model provider recently saw.
+Execution preparation calls the prepared-chain module directly instead of re-exporting compatibility helpers.
 
-If the provider cache is still warm, most of the compaction input can be cache-read.
+`src/mindroom/history/compaction.py` still owns durable session mutation, chunk selection, lifecycle metadata, model calls, retries, hook emission, and progress persistence.
+`src/mindroom/history/agno_forked_request.py` owns the pure Agno-specific forked-request adapter and has no MindRoom imports.
+`src/mindroom/history/compaction_provider_request.py` adapts MindRoom compaction summary requests and token budgeting to that Agno adapter.
 
-## Simplicity Goal
+It now builds summary requests through the prepared-chain module and, when the active model is used, through Agno's live Agent or Team request builder instead of materializing replay messages independently.
 
-The implementation should avoid a special compaction-only history construction path if possible.
+## Warm-Cache Transform
 
-The normal prompt preparation path should prepare the full message chain first.
+Warm-cache compaction appends one summary instruction to the prepared persisted-run chain.
 
-Compaction should then be a small final transform over that prepared chain.
+The preceding messages are copied without changing their role order or content shape.
 
-This should make the code easier to reason about than maintaining a separate compaction serializer.
+When the active model is used, Agno receives a synthetic session containing only the selected chain so its normal request builder can place the same system prompt, summary context, tool schemas, and history prefix before the final summary instruction.
 
-This may also reduce code if it replaces custom compaction serialization with the normal message preparation path.
+The final instruction tells the model not to summarize static instructions or tool definitions and not to call tools.
 
-## Cache Warmth
+Tool schemas are sent as provider schemas, not executable `Function` objects, with `tool_choice: none` when schemas are present.
 
-There should be an option for how long we expect the provider cache to remain warm.
+The transform validates that tool-call and tool-result adjacency remains intact.
 
-If compaction happens inside that window, MindRoom can send the full normal chain and rely on prompt caching.
+The runtime compaction path uses this warm-cache transform for summary chunk requests.
 
-If compaction happens outside that window, MindRoom can still start from the full prepared chain and strip it down at the end.
+## Boundary Decisions
 
-This keeps construction simple because the normal preparation path still runs first.
+Prepared-chain construction is intentionally pure and does not write durable history.
 
-## Cold Cache Shape
+Durable compaction state remains in `history/compaction.py` and `history/storage.py`.
 
-When the cache is probably cold, the final transform can remove prompt parts that do not need summarization.
+Matrix delivery, lifecycle notices, model loading, and tool execution stay outside the prepared-chain module.
 
-That can include the system prompt, tool descriptions, and static initial setup messages.
+The new module is the source of truth for how visible Matrix context and persisted Agno runs become provider-message chains.
 
-Those removed parts can be replaced with a short note saying that static agent instructions and tool definitions were omitted.
+This removes the duplicated execution-preparation and compaction ownership that made previous review rounds hard to reason about.
 
-The note should also say that those omitted parts do not need to be summarized.
+## Preserved Behavior
 
-The remaining content should preserve the conversation and tool activity that matters for future state.
+Destructive compaction semantics are unchanged.
 
-Tool-call and tool-result messages must not be separated in a way that makes the remaining history invalid or confusing.
+Manual compaction semantics are unchanged.
 
-## Current MindRoom Behavior
+Matrix seen-event metadata propagation is unchanged.
 
-Current MindRoom compaction does not use this shape.
+Response event ids, prepared-history diagnostics, and compaction lifecycle metadata are unchanged.
 
-It uses a separate compaction prompt and serializes compacted runs into `<previous_summary>` and `<new_conversation>` blocks.
+The legacy XML summary-input helper was removed, so compaction has one serialization path for provider-visible history.
 
-That behavior is useful for correctness, but it does not preserve the normal request prefix for provider cache reuse.
+## Test Coverage
 
-Relevant current code is in `src/mindroom/history/compaction.py`.
+Unit tests cover prepared-chain materialization from persisted replay.
 
-## What We Know About Codex
+Unit tests assert that warm-cache compaction preserves the prepared-chain prefix before the final summary instruction.
 
-The current OpenAI Codex client uses a special `/responses/compact` endpoint.
+Unit tests assert that `compact_scope_history` sends the chain-shaped summary request to the summary model.
 
-The client sends current input, instructions, tools, and conversation or session headers to that endpoint.
-
-The client source we inspected does not visibly construct a hand-rolled normal prompt plus compact instruction request.
-
-The server may be doing a cache-aware compaction operation internally.
-
-The exact server-side prompt caching behavior is not proven by the client source.
-
-OpenAI describes this compact endpoint in the Codex agent loop article.
-
-## What We Know About PiMono
-
-The PiMono coding agent appears to use a separate compaction prompt.
-
-It serializes the conversation into a wrapper such as `<conversation>...</conversation>`.
-
-That means it does not preserve the normal request prefix in the way described here.
-
-This looks similar in shape to MindRoom's current standalone compaction prompt.
-
-## What We Know About py-pimono
-
-The py-pimono code we inspected did not appear to have a compaction path.
-
-It does replay session messages for normal model calls.
-
-It also uses a prompt cache key for normal Codex requests.
-
-That does not answer the compaction-specific question because no compaction path was found.
-
-## Restrictions
-
-Do not implement this in the current PR.
-
-Do not add a second complex compaction construction path if the normal prompt preparation path can be reused.
-
-Do not optimize for post-compaction prefix reuse when the actual goal is cheap compaction itself.
-
-Do not summarize the system prompt or tool descriptions.
-
-Do not strip system prompts, tool descriptions, or static setup messages before normal prompt preparation.
-
-Prepare the normal chain first, then apply the cache-warm or cache-cold compaction transform at the end.
-
-## Follow-Up Research
-
-Figure out how Claude Code handles compaction.
-
-Figure out how OpenCode handles compaction.
-
-Compare both specifically on whether their compaction request preserves the normal request prefix.
-
-Compare both specifically on whether they rely on prompt caching during compaction.
-
-Compare both specifically on whether they use a special provider endpoint or a normal model call.
+The relevant targeted checks are `uv run pytest tests/test_agno_history.py -k compaction -q`, `uv run pytest tests/test_execution_preparation.py -q`, `uv run pytest tests/test_partial_reply_context.py -q`, and `uv run tach check --dependencies --interfaces`.

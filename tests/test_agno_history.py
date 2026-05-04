@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,9 +17,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
+from agno.media import Image
+from agno.models.anthropic.claude import Claude as AnthropicClaude
 from agno.models.base import Model
 from agno.models.message import Message
 from agno.models.response import ModelResponse
+from agno.models.vertexai.claude import Claude as VertexClaude
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -48,26 +52,27 @@ from mindroom.constants import (
 )
 from mindroom.execution_preparation import (
     PreparedExecutionContext,
-    build_matrix_prompt_with_thread_history,
     prepare_agent_execution_context,
     prepare_bound_team_execution_context,
     prepare_bound_team_run_context,
 )
 from mindroom.history import PreparedHistoryState, prepare_history_for_run
 from mindroom.history.compaction import (
-    _build_summary_input,
+    _compaction_summary_request_model,
     _emit_compaction_hook,
     _generate_compaction_summary,
+    _generate_compaction_summary_with_retry,
     _persist_compaction_progress,
     _rewrite_working_session_for_compaction,
-    _strip_stale_anthropic_replay_fields,
     compact_scope_history,
     effective_summary_input_budget_tokens,
-    estimate_agent_static_tokens,
-    estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
-    estimate_static_tokens,
+)
+from mindroom.history.compaction_provider_request import (
+    CompactionProviderRequest,
+    build_agent_compaction_provider_request,
+    estimate_agent_static_tokens,
     estimate_tool_definition_tokens,
 )
 from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
@@ -111,13 +116,71 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.memory import MemoryPromptParts
+from mindroom.prepared_conversation_chain import (
+    CompactionSummaryRequest,
+    PreparedConversationChain,
+    build_compaction_summary_request,
+    build_matrix_prompt_with_thread_history,
+    build_persisted_run_chain,
+    build_warm_cache_compaction_summary_request,
+    estimate_history_messages_tokens,
+    strip_stale_anthropic_replay_fields,
+)
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 from tests.conftest import bind_runtime_paths, make_conversation_cache_mock, make_event_cache_mock, make_visible_message
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
+
+
+def test_agno_forked_request_module_has_no_mindroom_imports() -> None:
+    module_path = Path("src/mindroom/history/agno_forked_request.py")
+    tree = ast.parse(module_path.read_text())
+    imports = [alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names]
+    from_imports = [
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
+    ]
+    assert not any(name == "mindroom" or name.startswith("mindroom.") for name in imports + from_imports)
+
+
+def _build_test_summary_request(
+    *,
+    previous_summary: str | None,
+    compacted_runs: Sequence[RunOutput | TeamRunOutput],
+    max_input_tokens: int,
+    history_settings: ResolvedHistorySettings | None = None,
+) -> tuple[CompactionSummaryRequest | None, list[RunOutput | TeamRunOutput]]:
+    return build_compaction_summary_request(
+        previous_summary=previous_summary,
+        compacted_runs=compacted_runs,
+        history_settings=history_settings
+        or ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        max_input_tokens=max_input_tokens,
+    )
+
+
+def _included_summary_run_count(
+    previous_summary: str | None,
+    compacted_runs: Sequence[RunOutput | TeamRunOutput],
+    budget: int,
+    *,
+    history_settings: ResolvedHistorySettings | None = None,
+) -> int:
+    return len(
+        _build_test_summary_request(
+            previous_summary=previous_summary,
+            compacted_runs=compacted_runs,
+            history_settings=history_settings,
+            max_input_tokens=budget,
+        )[1],
+    )
+
+
+def _summary_messages(content: str = "Current prompt") -> list[Message]:
+    return [Message(role="user", content=content)]
 
 
 def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:
@@ -161,17 +224,25 @@ class RecordingModel(Model):
     """Model that records the final prompt message list."""
 
     seen_messages: list[Message] = field(default_factory=list)
+    seen_tools: list[Any] | None = None
+    seen_tool_choice: Any | None = None
 
     def invoke(self, *_args: object, **kwargs: object) -> ModelResponse:
         messages = kwargs.get("messages")
         if isinstance(messages, list):
             self.seen_messages = list(messages)
+        tools = kwargs.get("tools")
+        self.seen_tools = list(tools) if isinstance(tools, list) else None
+        self.seen_tool_choice = kwargs.get("tool_choice")
         return ModelResponse(content="ok")
 
     async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
         messages = kwargs.get("messages")
         if isinstance(messages, list):
             self.seen_messages = list(messages)
+        tools = kwargs.get("tools")
+        self.seen_tools = list(tools) if isinstance(tools, list) else None
+        self.seen_tool_choice = kwargs.get("tool_choice")
         return ModelResponse(content="ok")
 
     def invoke_stream(self, *_args: object, **_kwargs: object):
@@ -451,7 +522,7 @@ def _forced_compaction_context(
     return config, runtime_paths, storage, scope, runtime_context
 
 
-def test_estimate_static_tokens_includes_tool_definitions() -> None:
+def test_estimate_agent_static_tokens_includes_tool_definitions() -> None:
     def search_docs(query: str, limit: int = 5) -> str:
         """Search the engineering docs for a matching answer."""
         return f"{query}:{limit}"
@@ -499,8 +570,12 @@ def test_estimate_static_tokens_includes_tool_definitions() -> None:
         + estimate_text_tokens("Always cite the relevant document section when using search_docs.")
     )
     assert estimate_tool_definition_tokens(baseline_agent) == 0
-    assert estimate_static_tokens(agent_with_tools, "Current prompt") == (
-        estimate_static_tokens(baseline_agent, "Current prompt") + tool_tokens
+    assert estimate_agent_static_tokens(agent_with_tools, "Current prompt") > estimate_agent_static_tokens(
+        baseline_agent,
+        "Current prompt",
+    )
+    assert estimate_agent_static_tokens(agent_with_tools, "Current prompt") >= (
+        estimate_agent_static_tokens(baseline_agent, "Current prompt") + tool_tokens
     )
 
 
@@ -542,7 +617,7 @@ def test_estimate_agent_static_tokens_uses_real_system_message_builder() -> None
 
     expected_tokens = estimate_text_tokens("Current prompt") + estimate_text_tokens(str(system_message.content))
     assert estimate_agent_static_tokens(agent, "Current prompt") == expected_tokens
-    assert estimate_agent_static_tokens(agent, "Current prompt") > estimate_static_tokens(agent, "Current prompt")
+    assert estimate_agent_static_tokens(agent, "Current prompt") > estimate_text_tokens("Current prompt")
 
 
 def test_estimate_tool_definition_tokens_processes_functions_with_custom_parameters() -> None:
@@ -686,8 +761,12 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
 async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True),
+        compaction=CompactionOverrideConfig(enabled=True, model="summary"),
         context_window=64_000,
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=64_000),
+            "summary": ModelConfig(provider="openai", id="summary-model", context_window=64_000),
+        },
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
@@ -755,8 +834,12 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
     """Foreground compaction should make the visible lifecycle notice before the summary call blocks."""
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True),
+        compaction=CompactionOverrideConfig(enabled=True, model="summary"),
         context_window=64_000,
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=64_000),
+            "summary": ModelConfig(provider="openai", id="summary-model", context_window=64_000),
+        },
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
@@ -814,8 +897,12 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
     """Required compaction should surface model-load failure in the lifecycle and continue."""
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True),
+        compaction=CompactionOverrideConfig(enabled=True, model="summary"),
         context_window=64_000,
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=64_000),
+            "summary": ModelConfig(provider="openai", id="summary-model", context_window=64_000),
+        },
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
@@ -864,8 +951,12 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_ca
     """Cancellation should not leave the visible compaction notice stuck as running."""
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True),
+        compaction=CompactionOverrideConfig(enabled=True, model="summary"),
         context_window=64_000,
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=64_000),
+            "summary": ModelConfig(provider="openai", id="summary-model", context_window=64_000),
+        },
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
@@ -972,7 +1063,7 @@ async def test_compaction_call_timeout_raises_runtime_error() -> None:
     ):
         await _generate_compaction_summary(
             model=_SlowSummaryModel(id="summary-model", provider="fake"),
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         )
 
 
@@ -1006,7 +1097,7 @@ async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_
     ):
         await _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         )
 
     assert asyncio.get_running_loop().time() - start < 0.04
@@ -1045,7 +1136,7 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
     ):
         await _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         )
 
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
@@ -1065,8 +1156,309 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
     with pytest.raises(TimeoutError, match="provider timeout"):
         await _generate_compaction_summary(
             model=_ProviderTimeoutModel(id="summary-model", provider="fake"),
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         )
+
+
+def _tool_payload() -> dict[str, object]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "search_docs",
+            "description": "Search docs.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Search query."}},
+                "required": ["query"],
+            },
+        },
+    }
+
+
+def _closure_references_object(function: object, target: object) -> bool:
+    stack = [function]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+        if current is target:
+            return True
+        if inspect.ismethod(current) and current.__self__ is target:
+            return True
+        closure = getattr(current, "__closure__", None)
+        if closure is None:
+            continue
+        for cell in closure:
+            value = cell.cell_contents
+            if value is target:
+                return True
+            if inspect.ismethod(value) or inspect.isfunction(value):
+                stack.append(value)
+    return False
+
+
+def test_compaction_summary_anthropic_model_forwards_tool_choice_none_without_mutating_model() -> None:
+    tool_payload = _tool_payload()
+    model = AnthropicClaude(id="claude-test", api_key="test-key")
+
+    request_model = _compaction_summary_request_model(
+        model,
+        tools=[tool_payload],
+        tool_choice="none",
+    )
+
+    assert request_model is not model
+    assert model.request_params is None
+    kwargs = request_model._prepare_request_kwargs("", tools=[tool_payload], messages=[])
+    assert kwargs["tool_choice"] == {"type": "none"}
+    assert "tools" in kwargs
+
+
+def test_compaction_summary_anthropic_model_disables_native_skills_without_regular_tools() -> None:
+    model = AnthropicClaude(
+        id="claude-test",
+        api_key="test-key",
+        skills=[{"type": "anthropic", "skill_id": "pptx", "version": "latest"}],
+    )
+
+    request_model = _compaction_summary_request_model(
+        model,
+        tools=None,
+        tool_choice=None,
+    )
+
+    assert request_model is not model
+    assert model.request_params is None
+    kwargs = request_model._prepare_request_kwargs("", tools=None, messages=[])
+    assert kwargs["tool_choice"] == {"type": "none"}
+    assert kwargs["tools"] == [{"type": "code_execution_20250825", "name": "code_execution"}]
+
+
+def test_compaction_summary_vertex_claude_copy_rebinds_prompt_cache_hook() -> None:
+    tool_payload = _tool_payload()
+    model = VertexClaude(id="claude-test", project_id="test-project", region="us-central1")
+    install_vertex_claude_prompt_cache_hook(model)
+
+    request_model = _compaction_summary_request_model(
+        model,
+        tools=[tool_payload],
+        tool_choice="none",
+    )
+
+    assert request_model is not model
+    assert request_model.request_params == {"tool_choice": {"type": "none"}}
+    assert _closure_references_object(request_model.ainvoke, request_model)
+    assert not _closure_references_object(request_model.ainvoke, model)
+
+
+@pytest.mark.asyncio
+async def test_agent_compaction_provider_request_uses_previous_summary_from_system_context_once() -> None:
+    agent = _agent()
+    agent.add_session_summary_to_context = True
+    agent.role = "Engineer"
+    session = _session(
+        "session-1",
+        summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
+    )
+    chain = PreparedConversationChain(
+        messages=(Message(role="user", content="New work"), Message(role="assistant", content="New result")),
+        rendered_text="New work\nNew result",
+        source="persisted_runs",
+        source_run_ids=("run-1",),
+        estimated_tokens=10,
+    )
+    summary_request = build_warm_cache_compaction_summary_request(
+        chain,
+        previous_summary="Existing durable summary",
+    )
+
+    provider_request = await build_agent_compaction_provider_request(summary_request, session, agent=agent)
+
+    assert "Existing durable summary" in str(provider_request.messages[0].content)
+    assert "Existing durable summary" not in str(provider_request.messages[-1].content)
+    assert "Already included in the system context" in str(provider_request.messages[-1].content)
+
+
+@pytest.mark.asyncio
+async def test_agent_compaction_provider_request_keeps_previous_summary_with_custom_system_message() -> None:
+    agent = _agent()
+    agent.add_session_summary_to_context = True
+    agent.system_message = "Custom system prompt."
+    session = _session(
+        "session-1",
+        summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
+    )
+    chain = PreparedConversationChain(
+        messages=(Message(role="user", content="New work"), Message(role="assistant", content="New result")),
+        rendered_text="New work\nNew result",
+        source="persisted_runs",
+        source_run_ids=("run-1",),
+        estimated_tokens=10,
+    )
+    summary_request = build_warm_cache_compaction_summary_request(
+        chain,
+        previous_summary="Existing durable summary",
+    )
+
+    provider_request = await build_agent_compaction_provider_request(summary_request, session, agent=agent)
+
+    assert str(provider_request.messages[0].content) == "Custom system prompt."
+    assert "Existing durable summary" not in str(provider_request.messages[0].content)
+    assert "Existing durable summary" in str(provider_request.messages[-1].content)
+    assert "Already included in the system context" not in str(provider_request.messages[-1].content)
+
+
+def test_compaction_summary_request_converts_media_tool_call_group_to_plain_messages() -> None:
+    tool_payload = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "render_chart", "arguments": "{}"},
+    }
+    request, included_runs = build_compaction_summary_request(
+        previous_summary=None,
+        compacted_runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="Render the chart."),
+                    Message(role="assistant", content=None, tool_calls=[tool_payload]),
+                    Message(
+                        role="tool",
+                        content="Chart rendered.",
+                        tool_call_id="call-1",
+                        images=[
+                            Image(
+                                id="chart-image",
+                                content=b"chart-bytes-that-should-not-be-replayed",
+                                format="png",
+                                mime_type="image/png",
+                            ),
+                        ],
+                    ),
+                    Message(role="assistant", content="The chart is ready."),
+                ],
+            ),
+        ],
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+        max_input_tokens=4_000,
+    )
+
+    assert request is not None
+    assert included_runs
+    assert [message.role for message in request.chain.messages] == ["user", "assistant", "user", "assistant"]
+    assert all(not message.tool_calls for message in request.chain.messages)
+    assert all(message.tool_call_id is None for message in request.chain.messages)
+    assert "Tool calls:" in str(request.chain.messages[1].content)
+    assert "Chart rendered." in str(request.chain.messages[2].content)
+    assert "images:" in str(request.chain.messages[2].content)
+    assert "chart-bytes-that-should-not-be-replayed" not in str(request.chain.messages[2].content)
+
+
+@pytest.mark.asyncio
+async def test_compaction_summary_rejects_provider_request_that_exceeds_budget() -> None:
+    class _NoCallSummaryModel(FakeModel):
+        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            raise AssertionError
+
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+    )
+    run = _completed_run("run-1")
+    summary_request, included_runs = build_compaction_summary_request(
+        previous_summary=None,
+        compacted_runs=[run],
+        history_settings=history_settings,
+        max_input_tokens=1_000,
+    )
+    assert summary_request is not None
+    assert included_runs
+
+    async def oversized_provider_request(
+        request: CompactionSummaryRequest,
+        _session: AgentSession | TeamSession,
+    ) -> CompactionProviderRequest:
+        return CompactionProviderRequest(
+            messages=(Message(role="system", content="static prompt " * 1_000), *request.messages),
+        )
+
+    with pytest.raises(RuntimeError, match="provider-visible compaction request is too large"):
+        await _generate_compaction_summary_with_retry(
+            model=_NoCallSummaryModel(id="summary-model", provider="fake"),
+            session=_session("session-1", runs=[run]),
+            previous_summary=None,
+            compactable_runs=[run],
+            initial_summary_request=summary_request,
+            initial_included_runs=included_runs,
+            summary_input_budget=1_000,
+            session_id="session-1",
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            history_settings=history_settings,
+            provider_request_builder=oversized_provider_request,
+        )
+
+
+@pytest.mark.asyncio
+async def test_compaction_summary_rebuilds_chunk_for_provider_request_overhead() -> None:
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+    )
+    first_run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="user", content="first user " + "u" * 600),
+            Message(role="assistant", content="first answer " + "a" * 600),
+        ],
+    )
+    second_run = _completed_run(
+        "run-2",
+        messages=[
+            Message(role="user", content="second user " + "v" * 600),
+            Message(role="assistant", content="second answer " + "b" * 600),
+        ],
+    )
+    summary_request, included_runs = build_compaction_summary_request(
+        previous_summary=None,
+        compacted_runs=[first_run, second_run],
+        history_settings=history_settings,
+        max_input_tokens=1_300,
+    )
+    assert summary_request is not None
+    assert included_runs == [first_run, second_run]
+
+    async def provider_request_with_static_overhead(
+        request: CompactionSummaryRequest,
+        _session: AgentSession | TeamSession,
+    ) -> CompactionProviderRequest:
+        return CompactionProviderRequest(
+            messages=(Message(role="system", content="static prompt " * 160), *request.messages),
+        )
+
+    model = RecordingModel(id="summary-model", provider="fake")
+    chunk = await _generate_compaction_summary_with_retry(
+        model=model,
+        session=_session("session-1", runs=[first_run, second_run]),
+        previous_summary=None,
+        compactable_runs=[first_run, second_run],
+        initial_summary_request=summary_request,
+        initial_included_runs=included_runs,
+        summary_input_budget=1_300,
+        session_id="session-1",
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=history_settings,
+        provider_request_builder=provider_request_with_static_overhead,
+    )
+
+    assert chunk.included_runs == [first_run]
+    assert any("first user" in str(message.content) for message in model.seen_messages)
+    assert not any("second user" in str(message.content) for message in model.seen_messages)
 
 
 def test_effective_summary_input_budget_caps_per_chunk() -> None:
@@ -1094,10 +1486,10 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
             ),
         ],
     )
-    summary_inputs: list[str] = []
+    summary_inputs: list[list[Message]] = []
 
-    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
-        summary_inputs.append(summary_input)
+    async def fake_summary(*, messages: list[Message], **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(messages)
         if len(summary_inputs) == 1:
             msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS}s"
             raise RuntimeError(msg)
@@ -1133,7 +1525,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
 
     assert rewrite_result is not None
     assert len(summary_inputs) == 2
-    assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
+    assert estimate_history_messages_tokens(summary_inputs[1]) < estimate_history_messages_tokens(summary_inputs[0])
 
 
 @pytest.mark.asyncio
@@ -1159,7 +1551,7 @@ async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelle
     summary_task = asyncio.create_task(
         _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         ),
     )
 
@@ -1200,7 +1592,7 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
     summary_task = asyncio.create_task(
         _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         ),
     )
 
@@ -1240,7 +1632,7 @@ async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_
     summary_task = asyncio.create_task(
         _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         ),
     )
 
@@ -1288,7 +1680,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
     ):
         await _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         )
 
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
@@ -1312,8 +1704,12 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
 
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True),
+        compaction=CompactionOverrideConfig(enabled=True, model="summary"),
         context_window=64_000,
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=64_000),
+            "summary": ModelConfig(provider="openai", id="summary-model", context_window=64_000),
+        },
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
@@ -1509,7 +1905,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         budget
         for budget in range(1, 5_000)
         if len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=None,
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
@@ -1517,7 +1913,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         )
         == 1
         and len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary="merged summary",
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
@@ -1667,7 +2063,7 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
         patch(
-            "mindroom.history.compaction._messages_for_runs",
+            "mindroom.history.compaction.build_persisted_run_chain",
             side_effect=AssertionError("compaction messages should not be collected without hooks"),
         ),
     ):
@@ -2133,24 +2529,11 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     first_summary_text = "first pass summary"
     second_summary_text = "final summary"
 
-    def _included_run_count(
-        previous_summary: str | None,
-        compacted_runs: list[RunOutput | TeamRunOutput],
-        budget: int,
-    ) -> int:
-        return len(
-            _build_summary_input(
-                previous_summary=previous_summary,
-                compacted_runs=compacted_runs,
-                max_input_tokens=budget,
-            )[1],
-        )
-
     summary_input_budget = next(
         budget
         for budget in range(1, 10_000)
-        if _included_run_count(None, visible_runs, budget) == 2
-        and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
+        if _included_summary_run_count(None, visible_runs, budget) == 2
+        and _included_summary_run_count(first_summary_text, visible_runs[2:], budget) == 1
     )
     after_first_session = _session(
         "session-1",
@@ -2275,24 +2658,11 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     first_summary_text = "first pass summary"
     second_summary_text = "second pass summary"
 
-    def _included_run_count(
-        previous_summary: str | None,
-        compacted_runs: list[RunOutput | TeamRunOutput],
-        budget: int,
-    ) -> int:
-        return len(
-            _build_summary_input(
-                previous_summary=previous_summary,
-                compacted_runs=compacted_runs,
-                max_input_tokens=budget,
-            )[1],
-        )
-
     summary_input_budget = next(
         budget
         for budget in range(1, 10_000)
-        if _included_run_count(None, visible_runs, budget) == 2
-        and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
+        if _included_summary_run_count(None, visible_runs, budget) == 2
+        and _included_summary_run_count(first_summary_text, visible_runs[2:], budget) == 1
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
@@ -2402,7 +2772,7 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
         budget
         for budget in range(1, 10_000)
         if len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=None,
                 compacted_runs=visible_runs,
                 history_settings=history_settings,
@@ -2411,7 +2781,7 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
         )
         == 1
         and len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=first_summary_text,
                 compacted_runs=visible_runs[1:],
                 history_settings=history_settings,
@@ -2541,24 +2911,11 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
 
-    def _included_run_count(
-        previous_summary: str | None,
-        compacted_runs: list[RunOutput | TeamRunOutput],
-        budget: int,
-    ) -> int:
-        return len(
-            _build_summary_input(
-                previous_summary=previous_summary,
-                compacted_runs=compacted_runs,
-                max_input_tokens=budget,
-            )[1],
-        )
-
     summary_input_budget = next(
         budget
         for budget in range(1, 10_000)
-        if _included_run_count(None, visible_runs, budget) == 2
-        and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
+        if _included_summary_run_count(None, visible_runs, budget) == 2
+        and _included_summary_run_count(first_summary_text, visible_runs[2:], budget) == 1
     )
     after_first_session = _session(
         "session-1",
@@ -3094,7 +3451,7 @@ async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_un
     assert len(mock_warning.call_args_list) == 1
 
 
-def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
+def test_compaction_summary_request_advances_past_oversized_oldest_run() -> None:
     big_run = _completed_run(
         "run-big",
         messages=[
@@ -3104,18 +3461,113 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
     )
     small_run = _completed_run("run-small")
 
-    summary_input, included_runs = _build_summary_input(
+    request, included_runs = _build_test_summary_request(
         previous_summary=None,
         compacted_runs=[big_run, small_run],
-        max_input_tokens=220,
+        max_input_tokens=420,
     )
 
+    assert request is not None
     assert [run.run_id for run in included_runs] == ["run-big"]
-    assert "Run truncated to fit compaction budget." in summary_input
-    assert 'run_id="run-big"' in summary_input
+    assert request.chain.source_run_ids == ("run-big",)
+    assert request.chain.messages[0].content == "Run truncated to fit compaction budget."
+    assert request.estimated_tokens <= 420
 
 
-def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema() -> None:
+def test_compaction_summary_request_skips_oversized_run_when_only_truncation_note_fits() -> None:
+    run = _completed_run(
+        "run-too-large",
+        messages=[
+            Message(role="user", content="u" * 1_000),
+            Message(role="assistant", content="a" * 1_000),
+        ],
+    )
+
+    request, included_runs = _build_test_summary_request(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=205,
+    )
+
+    assert request is None
+    assert included_runs == []
+
+
+def test_compaction_summary_request_stays_within_budget_after_summary_instruction() -> None:
+    run = _completed_run(
+        "run-near-limit",
+        messages=[
+            Message(role="user", content="x" * 6_800),
+        ],
+    )
+
+    request, included_runs = _build_test_summary_request(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=1_900,
+    )
+
+    assert request is not None
+    assert included_runs == [run]
+    assert request.estimated_tokens <= 1_900
+
+
+def test_compaction_summary_request_oversized_tool_call_run_uses_plain_budgeted_excerpt() -> None:
+    run = _completed_run(
+        "run-tool",
+        messages=[
+            Message(role="user", content="Use the tool."),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": "x" * 4_000},
+                    },
+                ],
+            ),
+            Message(role="tool", content="tool result", tool_call_id="call-1"),
+        ],
+    )
+
+    request, included_runs = _build_test_summary_request(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=700,
+    )
+
+    assert request is not None
+    assert included_runs == [run]
+    assert request.estimated_tokens <= 700
+    assert all(message.role != "tool" for message in request.chain.messages)
+    assert all(not message.tool_calls for message in request.chain.messages)
+    assert all(message.tool_call_id is None for message in request.chain.messages)
+
+
+def test_warm_cache_compaction_request_rejects_dangling_tool_calls_before_summary_instruction() -> None:
+    chain = PreparedConversationChain(
+        messages=(
+            Message(
+                role="assistant",
+                content="Calling a tool",
+                tool_calls=[
+                    {"id": "call-1", "type": "function", "function": {"name": "shell", "arguments": "{}"}},
+                ],
+            ),
+        ),
+        rendered_text="Calling a tool",
+        source="persisted_runs",
+        source_run_ids=("run-tool",),
+        estimated_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="tool result adjacency"):
+        build_warm_cache_compaction_summary_request(chain, previous_summary=None)
+
+
+def test_compaction_summary_request_oversized_run_preserves_messages_before_tool_schema() -> None:
     root_request = "Look into how the automatic memory flush in mindroom is supposed to work."
     run = _completed_run(
         "run-big-metadata",
@@ -3130,31 +3582,33 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
         "tools_schema": [{"name": f"tool_{index}", "description": "x" * 2000} for index in range(30)],
     }
 
-    summary_input, included_runs = _build_summary_input(
+    request, included_runs = _build_test_summary_request(
         previous_summary=None,
         compacted_runs=[run],
-        max_input_tokens=280,
+        max_input_tokens=360,
     )
 
+    assert request is not None
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
-    assert root_request in summary_input
-    assert "tools_schema" not in summary_input
+    assert root_request in request.rendered_text
+    assert "tools_schema" not in request.rendered_text
+    assert request.estimated_tokens <= 360
 
 
-def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -> None:
+def test_compaction_summary_request_skips_when_previous_summary_cannot_be_preserved() -> None:
     run = _completed_run("run-1")
 
-    summary_input, included_runs = _build_summary_input(
+    request, included_runs = _build_test_summary_request(
         previous_summary="existing durable summary " * 50,
         compacted_runs=[run],
         max_input_tokens=50,
     )
 
+    assert request is None
     assert included_runs == []
-    assert "<previous_summary>" in summary_input
 
 
-def test_build_summary_input_excludes_persisted_system_prompt() -> None:
+def test_compaction_summary_request_excludes_persisted_system_prompt() -> None:
     run = _completed_run(
         "run-1",
         messages=[
@@ -3164,19 +3618,20 @@ def test_build_summary_input_excludes_persisted_system_prompt() -> None:
         ],
     )
 
-    summary_input, included_runs = _build_summary_input(
+    request, included_runs = _build_test_summary_request(
         previous_summary=None,
         compacted_runs=[run],
         max_input_tokens=1_000,
     )
 
+    assert request is not None
     assert included_runs == [run]
-    assert "Persisted system prompt" not in summary_input
-    assert "user request" in summary_input
-    assert "assistant answer" in summary_input
+    assert "Persisted system prompt" not in request.rendered_text
+    assert "user request" in request.rendered_text
+    assert "assistant answer" in request.rendered_text
 
 
-def test_build_summary_input_honors_tool_call_history_limit() -> None:
+def test_compaction_summary_request_honors_tool_call_history_limit() -> None:
     run = _completed_run(
         "run-1",
         messages=[
@@ -3196,7 +3651,7 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
         ],
     )
 
-    summary_input, included_runs = _build_summary_input(
+    request, included_runs = _build_test_summary_request(
         previous_summary=None,
         compacted_runs=[run],
         history_settings=ResolvedHistorySettings(
@@ -3206,11 +3661,416 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
         max_input_tokens=1_000,
     )
 
+    assert request is not None
     assert included_runs == [run]
-    assert "call-1" not in summary_input
-    assert "first result" not in summary_input
-    assert "call-2" in summary_input
-    assert "second result" in summary_input
+    assert [message.content for message in request.chain.messages] == [
+        "use tools",
+        "first tool",
+        "second tool",
+        "second result",
+    ]
+    assert not request.chain.messages[1].tool_calls
+    assert request.chain.messages[2].tool_calls
+    assert request.chain.messages[2].tool_calls[0]["id"] == "call-2"
+    assert request.chain.messages[3].tool_call_id == "call-2"
+
+
+def test_warm_cache_compaction_request_preserves_prepared_chain_prefix() -> None:
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="user", content="Investigate the cache behavior."),
+            Message(role="assistant", content="The cache key is thread scoped."),
+        ],
+    )
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+    )
+
+    chain = build_persisted_run_chain([run], history_settings=history_settings)
+    request = build_warm_cache_compaction_summary_request(
+        chain,
+        previous_summary="Prior summary",
+    )
+
+    assert request.messages[:-1] == chain.messages
+    assert request.messages[-1].role == "user"
+    assert "Prior summary" in str(request.messages[-1].content)
+    assert "Do not summarize static instructions or tool definitions." in str(request.messages[-1].content)
+    assert request.included_run_ids == ("run-1",)
+
+
+def test_warm_cache_compaction_request_preserves_prepared_anthropic_prefix_fields() -> None:
+    chain = build_persisted_run_chain(
+        [
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(
+                        role="user",
+                        content="Question",
+                    ),
+                    Message(
+                        role="assistant",
+                        content="Answer",
+                        provider_data={"signature": "sig-1", "keep": "yes"},
+                        reasoning_content="thinking",
+                        redacted_reasoning_content="redacted",
+                    ),
+                ],
+            ),
+        ],
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+    )
+
+    request = build_warm_cache_compaction_summary_request(chain, previous_summary=None)
+    assistant = request.messages[1]
+
+    assert request.messages[:-1] == request.chain.messages
+    assert assistant.provider_data == {"signature": "sig-1", "keep": "yes"}
+    assert assistant.reasoning_content == "thinking"
+    assert assistant.redacted_reasoning_content == "redacted"
+
+
+def test_build_persisted_run_chain_strips_stale_anthropic_fields_across_runs() -> None:
+    chain = build_persisted_run_chain(
+        [
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="First question"),
+                    Message(
+                        role="assistant",
+                        content="First answer",
+                        provider_data={"signature": "stale-signature", "keep": "old"},
+                        reasoning_content="old thinking",
+                        redacted_reasoning_content="old redacted",
+                    ),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="Second question"),
+                    Message(
+                        role="assistant",
+                        content="Second answer",
+                        provider_data={"signature": "current-signature", "keep": "new"},
+                        reasoning_content="new thinking",
+                        redacted_reasoning_content="new redacted",
+                    ),
+                ],
+            ),
+        ],
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+    )
+
+    first_assistant = chain.messages[1]
+    second_assistant = chain.messages[3]
+    assert first_assistant.provider_data == {"keep": "old"}
+    assert first_assistant.reasoning_content is None
+    assert first_assistant.redacted_reasoning_content is None
+    assert second_assistant.provider_data == {"signature": "current-signature", "keep": "new"}
+    assert second_assistant.reasoning_content == "new thinking"
+    assert second_assistant.redacted_reasoning_content == "new redacted"
+
+
+def test_build_persisted_run_chain_replaces_media_payloads_with_metadata_snapshots() -> None:
+    chain = build_persisted_run_chain(
+        [
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(
+                        role="user",
+                        content="Please inspect this image.",
+                        images=[
+                            Image(
+                                id="image-1",
+                                content=b"raw-image-bytes-that-should-not-be-replayed",
+                                format="png",
+                                mime_type="image/png",
+                            ),
+                        ],
+                    ),
+                    Message(role="assistant", content="I inspected it."),
+                ],
+            ),
+        ],
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+    )
+
+    replay_message = chain.messages[0]
+    assert replay_message.images is None
+    assert "Please inspect this image." in str(replay_message.content)
+    assert "images:" in str(replay_message.content)
+    assert "raw-image-bytes-that-should-not-be-replayed" not in str(replay_message.content)
+
+
+@pytest.mark.asyncio
+async def test_agent_compaction_provider_request_does_not_mutate_live_replay_settings_during_await() -> None:
+    agent = _agent()
+    agent.add_history_to_context = False
+    agent.num_history_runs = 2
+    agent.num_history_messages = 3
+    agent.max_tool_calls_from_history = 1
+    session = _session("session-1")
+    chain = PreparedConversationChain(
+        messages=(Message(role="user", content="Past message"),),
+        rendered_text="Past message",
+        source="persisted_runs",
+        source_run_ids=("run-1",),
+        estimated_tokens=10,
+    )
+    summary_request = build_warm_cache_compaction_summary_request(chain, previous_summary=None)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def observed_aget_tools(**_kwargs: object) -> list[object]:
+        started.set()
+        await release.wait()
+        return []
+
+    agent.aget_tools = observed_aget_tools  # type: ignore[method-assign]
+    request_task = asyncio.create_task(
+        build_agent_compaction_provider_request(summary_request, session, agent=agent),
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert agent.add_history_to_context is False
+        assert agent.num_history_runs == 2
+        assert agent.num_history_messages == 3
+        assert agent.max_tool_calls_from_history == 1
+    finally:
+        release.set()
+        await request_task
+
+
+@pytest.mark.asyncio
+async def test_compact_scope_history_sends_prepared_chain_summary_request(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="First question"),
+                    Message(role="assistant", content="First answer"),
+                ],
+            ),
+        ],
+        summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
+    )
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    observed_messages: list[Message] = []
+
+    async def fake_generate_compaction_summary(*, messages: list[Message], **_kwargs: object) -> SessionSummary:
+        observed_messages[:] = messages
+        return SessionSummary(summary="Merged summary", updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction._generate_compaction_summary",
+        new=fake_generate_compaction_summary,
+    ):
+        await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=scope,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            available_history_budget=1,
+            summary_input_budget=4_000,
+            compaction_context_window=16_000,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            active_context_window=16_000,
+            replay_window_tokens=16_000,
+            threshold_tokens=1,
+            reserve_tokens=0,
+        )
+
+    assert [message.content for message in observed_messages[:-1]] == ["First question", "First answer"]
+    assert "Existing durable summary" in str(observed_messages[-1].content)
+    assert "Return only the summary text." in str(observed_messages[-1].content)
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_default_compaction_model_reuses_live_agent_request_prefix(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="First question"),
+                    Message(role="assistant", content="First answer"),
+                ],
+            ),
+        ],
+        summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
+    )
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    def search_docs(query: str) -> str:
+        """Search docs."""
+        return query
+
+    recording_model = RecordingModel(id="recording-model", provider="fake")
+    live_agent = _agent(model=recording_model, db=storage, num_history_runs=10)
+    live_agent.role = "Engineer"
+    live_agent.instructions = ["Use project terminology exactly."]
+    live_agent.tools = [Function.from_callable(search_docs)]
+    live_agent.add_session_summary_to_context = True
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=recording_model):
+        await prepare_history_for_run(
+            agent=live_agent,
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            active_model_name="default",
+            active_context_window=64_000,
+        )
+
+    assert recording_model.seen_messages[0].role == "system"
+    assert "Engineer" in str(recording_model.seen_messages[0].content)
+    assert "Existing durable summary" in str(recording_model.seen_messages[0].content)
+    assert [message.content for message in recording_model.seen_messages[1:3]] == ["First question", "First answer"]
+    assert "Return only the summary text." in str(recording_model.seen_messages[-1].content)
+    assert recording_model.seen_tools is not None
+    assert any(
+        isinstance(tool, dict)
+        and tool.get("type") == "function"
+        and isinstance(tool.get("function"), dict)
+        and tool["function"].get("name") == "search_docs"
+        for tool in recording_model.seen_tools
+    )
+    assert recording_model.seen_tool_choice == "none"
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_explicit_different_compaction_model_keeps_chain_only_request(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, model="summary"),
+        context_window=64_000,
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=64_000),
+            "summary": ModelConfig(provider="openai", id="summary-model", context_window=64_000),
+        },
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="First question"),
+                    Message(
+                        role="assistant",
+                        content="I will search docs.",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "search_docs", "arguments": '{"query":"cache"}'},
+                            },
+                        ],
+                    ),
+                    Message(role="tool", content="Tool result text", tool_call_id="call-1"),
+                    Message(role="assistant", content="First answer"),
+                ],
+            ),
+        ],
+        summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
+    )
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    def search_docs(query: str) -> str:
+        """Search docs."""
+        return query
+
+    active_model = RecordingModel(id="active-model", provider="fake")
+    summary_model = RecordingModel(id="summary-model", provider="fake")
+    live_agent = _agent(model=active_model, db=storage, num_history_runs=10)
+    live_agent.role = "Engineer"
+    live_agent.instructions = ["Use project terminology exactly."]
+    live_agent.tools = [Function.from_callable(search_docs)]
+    live_agent.add_session_summary_to_context = True
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=summary_model):
+        await prepare_history_for_run(
+            agent=live_agent,
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            active_model_name="default",
+            active_context_window=64_000,
+        )
+
+    assert [message.role for message in summary_model.seen_messages[:-1]] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert [message.content for message in summary_model.seen_messages[:-1]] == [
+        "First question",
+        'I will search docs.\nTool calls: [{"function":{"arguments":"{\\"query\\":\\"cache\\"}","name":"search_docs"},"id":"call-1","type":"function"}]',
+        "Tool result for call-1:\nTool result text",
+        "First answer",
+    ]
+    assert summary_model.seen_messages[0].role == "user"
+    assert all(not message.tool_calls for message in summary_model.seen_messages)
+    assert all(message.tool_call_id is None for message in summary_model.seen_messages)
+    assert "Return only the summary text." in str(summary_model.seen_messages[-1].content)
+    assert not summary_model.seen_tools
 
 
 def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:
@@ -3339,7 +4199,7 @@ def test_estimate_session_summary_tokens_empty() -> None:
     assert estimate_session_summary_tokens("   ") == 0
 
 
-def test_private_strip_stale_anthropic_replay_fields_returns_zero_without_user_messages() -> None:
+def test_strip_stale_anthropic_replay_fields_returns_zero_without_user_messages() -> None:
     assistant = Message(
         role="assistant",
         content="assistant",
@@ -3348,13 +4208,13 @@ def test_private_strip_stale_anthropic_replay_fields_returns_zero_without_user_m
         redacted_reasoning_content="redacted",
     )
 
-    assert _strip_stale_anthropic_replay_fields([assistant]) == 0
+    assert strip_stale_anthropic_replay_fields([assistant]) == 0
     assert assistant.provider_data == {"signature": "sig-1", "keep": "yes"}
     assert assistant.reasoning_content == "thinking"
     assert assistant.redacted_reasoning_content == "redacted"
 
 
-def test_private_strip_stale_anthropic_replay_fields_preserves_single_turn_after_last_user() -> None:
+def test_strip_stale_anthropic_replay_fields_preserves_single_turn_after_last_user() -> None:
     assistant = Message(
         role="assistant",
         content="assistant",
@@ -3367,13 +4227,13 @@ def test_private_strip_stale_anthropic_replay_fields_preserves_single_turn_after
         assistant,
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
     assert assistant.provider_data == {"signature": "sig-1"}
     assert assistant.reasoning_content == "thinking"
     assert assistant.redacted_reasoning_content == "redacted"
 
 
-def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_preserves_current_turn() -> None:
+def test_strip_stale_anthropic_replay_fields_strips_old_assistants_and_preserves_current_turn() -> None:
     old_assistant = Message(
         role="assistant",
         content="old assistant",
@@ -3395,7 +4255,7 @@ def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_p
         current_assistant,
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 1
+    assert strip_stale_anthropic_replay_fields(messages) == 1
     assert old_assistant.provider_data == {"keep": "yes"}
     assert old_assistant.reasoning_content is None
     assert old_assistant.redacted_reasoning_content is None
@@ -3404,7 +4264,7 @@ def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_p
     assert current_assistant.redacted_reasoning_content == "current redacted"
 
 
-def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_last_user() -> None:
+def test_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_last_user() -> None:
     tool_assistant = Message(
         role="assistant",
         content="tool call",
@@ -3429,7 +4289,7 @@ def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_
         final_assistant,
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
     assert tool_assistant.provider_data == {"signature": "sig-tool"}
     assert tool_assistant.reasoning_content == "thinking"
     assert tool_assistant.redacted_reasoning_content == "redacted"
@@ -3438,7 +4298,7 @@ def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_
     assert final_assistant.redacted_reasoning_content == "more redacted"
 
 
-def test_private_strip_stale_anthropic_replay_fields_ignores_reasoning_without_signature() -> None:
+def test_strip_stale_anthropic_replay_fields_ignores_reasoning_without_signature() -> None:
     assistant = Message(
         role="assistant",
         content="assistant",
@@ -3452,7 +4312,7 @@ def test_private_strip_stale_anthropic_replay_fields_ignores_reasoning_without_s
         Message(role="user", content="current user"),
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
     assert assistant.provider_data == {"keep": "yes"}
     assert assistant.reasoning_content == "thinking"
     assert assistant.redacted_reasoning_content == "redacted"
@@ -3504,14 +4364,14 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
         budget
         for budget in range(1, 10_000)
         if len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=None,
                 compacted_runs=list(working_session.runs or []),
                 max_input_tokens=budget,
             )[1],
         )
         == 1
-        and _build_summary_input(
+        and _build_test_summary_request(
             previous_summary=summary_text,
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
@@ -3656,14 +4516,14 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
         budget
         for budget in range(1, 10_000)
         if len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=None,
                 compacted_runs=list(session.runs or []),
                 max_input_tokens=budget,
             )[1],
         )
         == 1
-        and _build_summary_input(
+        and _build_test_summary_request(
             previous_summary=summary_text,
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
@@ -3743,7 +4603,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         budget
         for budget in range(1, 5_000)
         if len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=None,
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
@@ -3751,7 +4611,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         )
         == 1
         and len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary="merged summary",
                 compacted_runs=[second_run],
                 max_input_tokens=budget,

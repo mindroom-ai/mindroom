@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from agno.db.base import SessionType
@@ -26,11 +27,16 @@ from mindroom.agent_storage import (
 from mindroom.history.compaction import (
     compact_scope_history,
     completed_top_level_runs,
-    estimate_agent_static_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
-    estimate_team_static_tokens,
     runs_for_scope,
+)
+from mindroom.history.compaction_provider_request import (
+    CompactionProviderRequestBuilder,
+    build_agent_compaction_provider_request,
+    build_team_compaction_provider_request,
+    estimate_agent_static_tokens,
+    estimate_team_static_tokens,
 )
 from mindroom.history.policy import (
     classify_compaction_decision,
@@ -356,6 +362,8 @@ async def prepare_scope_history(  # noqa: C901
     timing_scope: str | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    active_summary_model: Model | None = None,
+    provider_request_builder: CompactionProviderRequestBuilder | None = None,
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning."""
     resolved_inputs = _resolve_preparation_inputs(
@@ -372,6 +380,9 @@ async def prepare_scope_history(  # noqa: C901
         execution_plan=execution_plan,
     )
     resolved_scope = scope or resolve_history_scope(agent)
+    active_provider_request_builder = provider_request_builder
+    if active_provider_request_builder is None and active_summary_model is agent.model:
+        active_provider_request_builder = partial(build_agent_compaction_provider_request, agent=agent)
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
             scope=resolved_scope,
@@ -455,6 +466,8 @@ async def prepare_scope_history(  # noqa: C901
             runtime_paths=runtime_paths,
             timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
+            active_summary_model=active_summary_model,
+            provider_request_builder=active_provider_request_builder,
         )
         outcome = compaction_result.outcome
         compaction_reply_outcome = compaction_result.reply_outcome
@@ -498,6 +511,8 @@ async def _run_scope_compaction_with_lifecycle(
     runtime_paths: RuntimePaths,
     timing_scope: str | None,
     compaction_lifecycle: CompactionLifecycle | None,
+    active_summary_model: Model | None,
+    provider_request_builder: CompactionProviderRequestBuilder | None,
 ) -> _ScopeCompactionLifecycleResult:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -529,6 +544,8 @@ async def _run_scope_compaction_with_lifecycle(
             timing_scope=timing_scope,
             lifecycle_notice_event_id=notice_event_id,
             progress_callback=_compaction_progress_callback(visible_compaction_lifecycle, compaction_start),
+            active_summary_model=active_summary_model,
+            provider_request_builder=provider_request_builder,
         )
     except asyncio.CancelledError as error:
         duration_ms = _elapsed_ms(compaction_start)
@@ -625,14 +642,23 @@ async def _run_scope_compaction(
     timing_scope: str | None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    active_summary_model: Model | None = None,
+    provider_request_builder: CompactionProviderRequestBuilder | None = None,
 ) -> CompactionOutcome | None:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
-    summary_model = _load_compaction_model(
-        config,
-        runtime_paths,
-        execution_plan.compaction_model_name,
+    use_active_summary_model = (
+        active_summary_model is not None and execution_plan.compaction_model_name == resolved_inputs.active_model_name
     )
+    if use_active_summary_model:
+        summary_model = active_summary_model
+    else:
+        summary_model = _load_compaction_model(
+            config,
+            runtime_paths,
+            execution_plan.compaction_model_name,
+        )
+    assert summary_model is not None
     _next_state, outcome = await compact_scope_history(
         storage=storage,
         session=session,
@@ -651,6 +677,7 @@ async def _run_scope_compaction(
         timing_scope=timing_scope,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
+        provider_request_builder=provider_request_builder if use_active_summary_model else None,
     )
     return outcome
 
@@ -841,6 +868,7 @@ async def prepare_history_for_run(
             execution_plan=execution_plan,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
+            active_summary_model=agent.model,
         )
     else:
         with open_scope_session_context(
@@ -871,6 +899,7 @@ async def prepare_history_for_run(
                 execution_plan=execution_plan,
                 compaction_lifecycle=compaction_lifecycle,
                 pipeline_timing=pipeline_timing,
+                active_summary_model=agent.model,
             )
     return finalize_history_preparation(
         prepared_scope_history=prepared_scope_history,
@@ -961,6 +990,10 @@ async def prepare_bound_scope_history(
         execution_plan=resolved_inputs.execution_plan,
         compaction_lifecycle=compaction_lifecycle,
         pipeline_timing=pipeline_timing,
+        active_summary_model=team.model if team is not None else None,
+        provider_request_builder=(
+            partial(build_team_compaction_provider_request, team=team) if team is not None else None
+        ),
     )
 
 
