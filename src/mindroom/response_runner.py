@@ -53,6 +53,7 @@ from mindroom.streaming import (
     StreamingDeliveryError,
     StreamingResponse,
     clean_partial_reply_text,
+    is_expected_streaming_delivery_policy_error,
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
@@ -177,6 +178,39 @@ def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
     except ValueError:
         return False
     return "matrix_message" in tool_names
+
+
+def _log_streaming_delivery_error(
+    logger: structlog.stdlib.BoundLogger,
+    *,
+    response_label: Literal["Bot", "Team"],
+    error: StreamingDeliveryError,
+) -> None:
+    """Log expected Matrix policy delivery failures without traceback rendering."""
+    stream_transport_outcome = error.transport_outcome
+    if stream_transport_outcome.terminal_status == "cancelled":
+        log_cancelled_response_source(
+            logger,
+            cancel_source=cancel_source_from_failure_reason(stream_transport_outcome.failure_reason),
+            message_id=error.event_id,
+            restart_message=f"{response_label} streaming response interrupted by sync restart",
+            user_stop_message=f"{response_label} streaming response cancelled by user",
+            interrupted_message=f"{response_label} streaming response interrupted — traceback for diagnosis",
+            exc_info=(type(error.error), error.error, error.error.__traceback__),
+        )
+        return
+    if is_expected_streaming_delivery_policy_error(error):
+        logger.warning(
+            f"{response_label} streaming response rejected by Matrix delivery policy",
+            message_id=error.event_id,
+            exception_type=error.error.__class__.__name__,
+            error=str(error.error),
+        )
+        return
+    unexpected_message = (
+        "Error in streaming response" if response_label == "Bot" else "Error in team streaming response"
+    )
+    logger.exception(unexpected_message, error=str(error.error))
 
 
 def _append_matrix_prompt_context(
@@ -887,7 +921,7 @@ class ResponseRunner:
             ),
         )
 
-    async def generate_team_response_helper_locked(  # noqa: C901, PLR0912, PLR0915
+    async def generate_team_response_helper_locked(  # noqa: C901, PLR0915
         self,
         team_request: _TeamResponseRequest,
         *,
@@ -1294,19 +1328,7 @@ class ResponseRunner:
             if tracked_event_id is None:
                 tracked_event_id = run_message_id
         except StreamingDeliveryError as error:
-            stream_transport_outcome = error.transport_outcome
-            if stream_transport_outcome.terminal_status == "cancelled":
-                log_cancelled_response_source(
-                    self.deps.logger,
-                    cancel_source=cancel_source_from_failure_reason(stream_transport_outcome.failure_reason),
-                    message_id=error.event_id,
-                    restart_message="Team streaming response interrupted by sync restart",
-                    user_stop_message="Team streaming response cancelled by user",
-                    interrupted_message="Team streaming response interrupted — traceback for diagnosis",
-                    exc_info=(type(error.error), error.error, error.error.__traceback__),
-                )
-            else:
-                self.deps.logger.exception("Error in team streaming response", error=str(error.error))
+            _log_streaming_delivery_error(self.deps.logger, response_label="Team", error=error)
             if error.event_id:
                 tracked_event_id = error.event_id
             if self._record_stream_delivery_error(
@@ -1969,19 +1991,7 @@ class ResponseRunner:
             finally:
                 await lifecycle.emit_session_started(session_started_watch)
         except StreamingDeliveryError as error:
-            stream_transport_outcome = error.transport_outcome
-            if stream_transport_outcome.terminal_status == "cancelled":
-                log_cancelled_response_source(
-                    self.deps.logger,
-                    cancel_source=cancel_source_from_failure_reason(stream_transport_outcome.failure_reason),
-                    message_id=error.event_id,
-                    restart_message="Bot streaming response interrupted by sync restart",
-                    user_stop_message="Bot streaming response cancelled by user",
-                    interrupted_message="Bot streaming response interrupted — traceback for diagnosis",
-                    exc_info=(type(error.error), error.error, error.error.__traceback__),
-                )
-            else:
-                self.deps.logger.exception("Error in streaming response", error=str(error.error))
+            _log_streaming_delivery_error(self.deps.logger, response_label="Bot", error=error)
             tool_trace[:] = error.tool_trace
             if self._record_stream_delivery_error(
                 recorder=turn_recorder,
