@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import traceback
+import weakref
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -46,6 +47,9 @@ _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS = 2.0
 STARTUP_RETRY_INITIAL_DELAY_SECONDS = 2.0
 STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
+_UNRESPONSIVE_MATRIX_SYNC_TASKS: weakref.WeakKeyDictionary[asyncio.Task[Any], asyncio.Task[Any]] = (
+    weakref.WeakKeyDictionary()
+)
 _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 _MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS = 10.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
@@ -194,19 +198,43 @@ async def _hold_supervisor_until_sync_task_finishes(
     sync_task: asyncio.Task[Any],
 ) -> None:
     """Keep the supervisor alive while an unresponsive sync task still exists."""
+    supervisor_task = asyncio.current_task()
+    if supervisor_task is not None:
+        _UNRESPONSIVE_MATRIX_SYNC_TASKS[supervisor_task] = sync_task
     logger.error(
         "Matrix sync supervisor is waiting for unresponsive sync task",
         agent_name=bot.agent_name,
         sync_task_name=sync_task.get_name(),
         sync_task_stack=_format_task_stack(sync_task),
     )
-    while not sync_task.done():
+    try:
         try:
             await asyncio.shield(sync_task)
         except asyncio.CancelledError:
-            if sync_task.done():
-                return
             request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+            raise
+    finally:
+        if sync_task.done() and supervisor_task is not None:
+            _UNRESPONSIVE_MATRIX_SYNC_TASKS.pop(supervisor_task, None)
+
+
+def _track_unresponsive_matrix_sync_task(
+    entity_name: str,
+    sync_tasks: dict[str, asyncio.Task],
+    supervisor_task: asyncio.Task[Any],
+) -> bool:
+    """Replace a cancelled supervisor with its still-running Matrix sync task."""
+    unresponsive_sync_task = _UNRESPONSIVE_MATRIX_SYNC_TASKS.pop(supervisor_task, None)
+    if unresponsive_sync_task is None or unresponsive_sync_task.done():
+        return False
+    sync_tasks[entity_name] = unresponsive_sync_task
+    logger.error(
+        "Matrix sync task remains tracked after supervisor cancellation",
+        entity_name=entity_name,
+        sync_task_name=unresponsive_sync_task.get_name(),
+        sync_task_stack=_format_task_stack(unresponsive_sync_task),
+    )
+    return True
 
 
 @dataclass(slots=True)
@@ -502,8 +530,30 @@ async def cancel_sync_task(
     cancel_msg: str | None = None,
 ) -> None:
     """Cancel and remove a sync task for an entity."""
-    task = sync_tasks.pop(entity_name, None)
-    await cancel_task(task, cancel_msg=cancel_msg)
+    task = sync_tasks.get(entity_name)
+    if task is None:
+        return
+    request_task_cancel(task, cancel_msg=cancel_msg)
+    done, _ = await asyncio.wait({task}, timeout=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS)
+    if task not in done:
+        if _track_unresponsive_matrix_sync_task(entity_name, sync_tasks, task):
+            return
+        logger.error(
+            "Matrix sync supervisor cancellation timed out",
+            entity_name=entity_name,
+            cancel_timeout_seconds=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS,
+            sync_task_name=task.get_name(),
+            sync_task_stack=_format_task_stack(task),
+        )
+        return
+    tracked_unresponsive_sync = False
+    try:
+        with suppress(asyncio.CancelledError):
+            await task
+    finally:
+        tracked_unresponsive_sync = _track_unresponsive_matrix_sync_task(entity_name, sync_tasks, task)
+        if not tracked_unresponsive_sync and sync_tasks.get(entity_name) is task:
+            sync_tasks.pop(entity_name, None)
 
 
 async def stop_entities(

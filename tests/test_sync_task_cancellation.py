@@ -117,6 +117,43 @@ async def test_cancel_sync_task_missing_entity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_sync_task_keeps_wedged_task_tracked_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sync task that ignores cancellation should stay tracked after timeout."""
+    release_sync_task = asyncio.Event()
+
+    async def ignore_cancellation() -> None:
+        while True:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                assert task is not None
+                task.uncancel()
+                if release_sync_task.is_set():
+                    raise
+
+    task = asyncio.create_task(ignore_cancellation(), name="sync_wedged_agent")
+    await asyncio.sleep(0)
+    sync_tasks = {"wedged_agent": task}
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    try:
+        await asyncio.wait_for(
+            cancel_sync_task("wedged_agent", sync_tasks, cancel_msg=SYNC_RESTART_CANCEL_MSG),
+            timeout=0.2,
+        )
+        assert sync_tasks["wedged_agent"] is task
+        assert not task.done()
+    finally:
+        release_sync_task.set()
+        task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pytest.MonkeyPatch) -> None:
     """Watchdog should cancel and restart a sync loop that stops making progress."""
     bot = _FakeBot()
@@ -292,6 +329,16 @@ async def test_sync_forever_with_restart_stays_attached_after_sync_cancel_timeou
             await asyncio.wait_for(asyncio.shield(supervisor_task), timeout=0.2)
         assert bot.sync_calls == 1
         assert len(sync_tasks) == 1
+        assert not sync_tasks[0].done()
+        tracked_supervisors = {"wedged_agent": supervisor_task}
+        await asyncio.wait_for(
+            cancel_sync_task("wedged_agent", tracked_supervisors, cancel_msg=SYNC_RESTART_CANCEL_MSG),
+            timeout=0.2,
+        )
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait_for(supervisor_task, timeout=0.2)
+        assert supervisor_task.done()
+        assert tracked_supervisors["wedged_agent"] is sync_tasks[0]
         assert not sync_tasks[0].done()
     finally:
         release_sync_task.set()
