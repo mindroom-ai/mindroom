@@ -375,6 +375,13 @@ To debug MindRoom internals without enabling debug logs from every dependency, k
 LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
 ```
 
+Matrix crypto decrypt warnings from `nio.crypto` are quieted by default because missing Megolm sessions can produce bursts of diagnostically useful but high-volume logs.
+To inspect those warnings while debugging encryption state, explicitly restore that logger:
+
+```
+LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="nio.crypto:WARNING" mindroom run
+```
+
 ### Custom storage path
 
 ```
