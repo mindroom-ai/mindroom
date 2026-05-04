@@ -723,7 +723,11 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
 
     assert dispatch is not None
     assert dispatch.context is trusted_context
-    bot._conversation_resolver.extract_trusted_router_relay_context.assert_awaited_once_with(room, event)
+    bot._conversation_resolver.extract_trusted_router_relay_context.assert_awaited_once_with(
+        room,
+        event,
+        payload_metadata=None,
+    )
     bot._conversation_resolver.extract_dispatch_context.assert_not_called()
 
 
@@ -788,6 +792,7 @@ async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_r
     bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(
         room,
         event,
+        payload_metadata=None,
     )
     bot._conversation_resolver.extract_trusted_router_relay_context.assert_not_called()
 
