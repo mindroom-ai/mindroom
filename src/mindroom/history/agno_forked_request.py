@@ -18,9 +18,9 @@ side effects, but it would also bypass Agno's normal request assembly.
 
 This module is the intentionally narrow adapter for that missing Agno primitive.
 It builds a synthetic in-memory Agno session containing only the caller-provided
-prefix, temporarily forces Agno to replay that prefix, asks Agno's private
-message/tool builders for the provider-visible request, then returns inert
-message copies and provider tool schemas.
+prefix, copies the Agent or Team runtime object, configures replay on that copy,
+asks Agno's private message/tool builders for the provider-visible request, then
+returns inert message copies and provider tool schemas.
 Executable ``Function`` objects are not passed to the summary model; when tool
 schemas are present the request also sets ``tool_choice="none"``.
 
@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, TypeGuard, cast
 
@@ -79,8 +79,9 @@ async def build_agent_provider_request_from_prefix(
     synthetic_run_id: str,
 ) -> AgnoProviderRequest:
     """Build an agent request from copied history plus one final user message."""
+    request_agent = _request_agent(agent)
     compaction_session = _agent_synthetic_session(
-        agent=agent,
+        agent=request_agent,
         source_session=source_session,
         prefix_messages=prefix_messages,
         synthetic_run_id=synthetic_run_id,
@@ -90,8 +91,8 @@ async def build_agent_provider_request_from_prefix(
     user_id = compaction_session.user_id
     run_response = RunOutput(
         run_id=run_id,
-        agent_id=agent.id,
-        agent_name=agent.name,
+        agent_id=request_agent.id,
+        agent_name=request_agent.name,
         session_id=compaction_session.session_id,
         user_id=user_id,
         input=RunInput(input_content=final_user_message),
@@ -103,36 +104,35 @@ async def build_agent_provider_request_from_prefix(
         user_id=user_id,
         session_state={},
     )
-    with _temporary_replay_settings(agent):
-        model = agent.model
-        assert model is not None
-        processed_tools = await agent.aget_tools(
-            run_response=run_response,
-            run_context=run_context,
-            session=compaction_session,
-            user_id=user_id,
-        )
-        prepared_tools = determine_tools_for_model(
-            agent=agent,
-            model=model,
-            processed_tools=processed_tools,
-            run_response=run_response,
-            run_context=run_context,
-            session=compaction_session,
-            async_mode=True,
-        )
-        run_messages = await aget_run_messages(
-            agent,
-            run_response=run_response,
-            run_context=run_context,
-            input=final_user_message,
-            session=compaction_session,
-            user_id=user_id,
-            add_history_to_context=True,
-            add_dependencies_to_context=False,
-            add_session_state_to_context=False,
-            tools=prepared_tools,
-        )
+    model = request_agent.model
+    assert model is not None
+    processed_tools = await request_agent.aget_tools(
+        run_response=run_response,
+        run_context=run_context,
+        session=compaction_session,
+        user_id=user_id,
+    )
+    prepared_tools = determine_tools_for_model(
+        agent=request_agent,
+        model=model,
+        processed_tools=processed_tools,
+        run_response=run_response,
+        run_context=run_context,
+        session=compaction_session,
+        async_mode=True,
+    )
+    run_messages = await aget_run_messages(
+        request_agent,
+        run_response=run_response,
+        run_context=run_context,
+        input=final_user_message,
+        session=compaction_session,
+        user_id=user_id,
+        add_history_to_context=True,
+        add_dependencies_to_context=False,
+        add_session_state_to_context=False,
+        tools=prepared_tools,
+    )
     return _provider_request(run_messages.messages, prepared_tools)
 
 
@@ -145,8 +145,9 @@ async def build_team_provider_request_from_prefix(
     synthetic_run_id: str,
 ) -> AgnoProviderRequest:
     """Build a team request from copied history plus one final user message."""
+    request_team = _request_team(team)
     compaction_session = _team_synthetic_session(
-        team=team,
+        team=request_team,
         source_session=source_session,
         prefix_messages=prefix_messages,
         synthetic_run_id=synthetic_run_id,
@@ -156,8 +157,8 @@ async def build_team_provider_request_from_prefix(
     user_id = compaction_session.user_id
     run_response = TeamRunOutput(
         run_id=run_id,
-        team_id=team.id,
-        team_name=team.name,
+        team_id=request_team.id,
+        team_name=request_team.name,
         session_id=compaction_session.session_id,
         user_id=user_id,
         input=TeamRunInput(input_content=final_user_message),
@@ -169,36 +170,35 @@ async def build_team_provider_request_from_prefix(
         user_id=user_id,
         session_state={},
     )
-    with _temporary_replay_settings(team):
-        model = team.model
-        assert model is not None
-        prepared_tools = determine_team_tools_for_model(
-            team=team,
-            model=model,
-            run_response=run_response,
-            run_context=run_context,
-            team_run_context={},
-            session=compaction_session,
-            user_id=user_id,
-            async_mode=True,
-            input_message=final_user_message,
-            add_history_to_context=True,
-            add_dependencies_to_context=False,
-            add_session_state_to_context=False,
-            check_mcp_tools=False,
-        )
-        run_messages = await aget_team_run_messages(
-            team,
-            run_response=run_response,
-            run_context=run_context,
-            session=compaction_session,
-            user_id=user_id,
-            input_message=final_user_message,
-            add_history_to_context=True,
-            add_dependencies_to_context=False,
-            add_session_state_to_context=False,
-            tools=prepared_tools,
-        )
+    model = request_team.model
+    assert model is not None
+    prepared_tools = determine_team_tools_for_model(
+        team=request_team,
+        model=model,
+        run_response=run_response,
+        run_context=run_context,
+        team_run_context={},
+        session=compaction_session,
+        user_id=user_id,
+        async_mode=True,
+        input_message=final_user_message,
+        add_history_to_context=True,
+        add_dependencies_to_context=False,
+        add_session_state_to_context=False,
+        check_mcp_tools=False,
+    )
+    run_messages = await aget_team_run_messages(
+        request_team,
+        run_response=run_response,
+        run_context=run_context,
+        session=compaction_session,
+        user_id=user_id,
+        input_message=final_user_message,
+        add_history_to_context=True,
+        add_dependencies_to_context=False,
+        add_session_state_to_context=False,
+        tools=prepared_tools,
+    )
     return _provider_request(run_messages.messages, prepared_tools)
 
 
@@ -282,23 +282,25 @@ def _team_synthetic_session(
     )
 
 
-@contextmanager
-def _temporary_replay_settings(entity: Agent | Team) -> Iterator[None]:
-    add_history_to_context = entity.add_history_to_context
-    num_history_runs = entity.num_history_runs
-    num_history_messages = entity.num_history_messages
-    max_tool_calls_from_history = entity.max_tool_calls_from_history
+def _request_agent(agent: Agent) -> Agent:
+    request_agent = copy(agent)
+    _configure_replay_settings(request_agent)
+    request_agent._tool_instructions = deepcopy(agent._tool_instructions)
+    return request_agent
+
+
+def _request_team(team: Team) -> Team:
+    request_team = copy(team)
+    _configure_replay_settings(request_team)
+    request_team._tool_instructions = deepcopy(team._tool_instructions)
+    return request_team
+
+
+def _configure_replay_settings(entity: Agent | Team) -> None:
     entity.add_history_to_context = True
     entity.num_history_runs = None
     entity.num_history_messages = None
     entity.max_tool_calls_from_history = None
-    try:
-        yield
-    finally:
-        entity.add_history_to_context = add_history_to_context
-        entity.num_history_runs = num_history_runs
-        entity.num_history_messages = num_history_messages
-        entity.max_tool_calls_from_history = max_tool_calls_from_history
 
 
 @contextmanager
