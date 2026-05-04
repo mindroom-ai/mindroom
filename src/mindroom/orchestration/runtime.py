@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import traceback
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -46,6 +47,7 @@ STARTUP_RETRY_INITIAL_DELAY_SECONDS = 2.0
 STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
 _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
+_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS = 10.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
 
 __all__ = [
@@ -151,6 +153,34 @@ class MatrixSyncStalledError(RuntimeError):
     """Raised when the watchdog detects a stalled Matrix sync loop."""
 
 
+def _format_task_stack(task: asyncio.Task[Any]) -> tuple[str, ...]:
+    """Return a compact formatted stack for one asyncio task."""
+    return tuple("".join(traceback.format_stack(frame, limit=8)).rstrip() for frame in task.get_stack(limit=8))
+
+
+async def _cancel_stalled_sync_task(
+    bot: AgentBot | TeamBot,
+    sync_task: asyncio.Task[Any],
+) -> None:
+    """Request sync-task cancellation without letting the watchdog hang forever."""
+    request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    done, _ = await asyncio.wait({sync_task}, timeout=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS)
+    if sync_task in done:
+        with suppress(asyncio.CancelledError):
+            await sync_task
+        return
+
+    logger.error(
+        "Matrix sync watchdog cancellation timed out",
+        agent_name=bot.agent_name,
+        cancel_timeout_seconds=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS,
+        sync_task_name=sync_task.get_name(),
+        sync_task_done=sync_task.done(),
+        sync_task_cancelled=sync_task.cancelled(),
+        sync_task_stack=_format_task_stack(sync_task),
+    )
+
+
 @dataclass(slots=True)
 class _SyncIteration:
     """Own the lifecycle of one sync task and its watchdog."""
@@ -201,9 +231,7 @@ class _SyncIteration:
                 )
 
             watchdog_cancelled_sync.set()
-            request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
-            with suppress(asyncio.CancelledError):
-                await sync_task
+            await _cancel_stalled_sync_task(bot, sync_task)
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
             raise MatrixSyncStalledError(msg)
 

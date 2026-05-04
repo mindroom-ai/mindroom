@@ -202,6 +202,57 @@ async def test_sync_forever_with_restart_retries_on_sync_restart_cancel(
 
 
 @pytest.mark.asyncio
+async def test_watchdog_times_out_sync_restart_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wedged sync task should not block the watchdog restart path forever."""
+    bot = _FakeBot()
+    bot.agent_name = "wedged_agent"
+    bot._last_sync_monotonic = time.monotonic()
+    watchdog_cancelled_sync = asyncio.Event()
+    log_calls: list[tuple[str, dict[str, object]]] = []
+    release_sync_task = asyncio.Event()
+
+    async def ignore_cancellation() -> None:
+        while True:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                await release_sync_task.wait()
+                raise
+
+    def capture_error(message: str, **kwargs: object) -> None:
+        log_calls.append((message, kwargs))
+
+    sync_task = asyncio.create_task(ignore_cancellation(), name="matrix_sync_wedged_agent")
+
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(runtime_helpers.logger, "error", capture_error)
+
+    with pytest.raises(MatrixSyncStalledError, match="wedged_agent"):
+        await asyncio.wait_for(
+            _SyncIteration._watch(bot, sync_task, watchdog_cancelled_sync),
+            timeout=0.2,
+        )
+
+    assert watchdog_cancelled_sync.is_set()
+    assert not sync_task.done()
+    timeout_log = next(
+        kwargs for message, kwargs in log_calls if message == "Matrix sync watchdog cancellation timed out"
+    )
+    assert timeout_log["agent_name"] == "wedged_agent"
+    assert timeout_log["sync_task_name"] == "matrix_sync_wedged_agent"
+    assert timeout_log["sync_task_done"] is False
+    assert timeout_log["sync_task_stack"]
+
+    release_sync_task.set()
+    with suppress(asyncio.CancelledError):
+        await sync_task
+
+
+@pytest.mark.asyncio
 async def test_sync_iteration_wait_does_not_block_on_unrelated_sync_cancellation() -> None:
     """Direct sync-task cancellation should surface immediately without waiting for the watchdog."""
     bot = _FakeBot()
