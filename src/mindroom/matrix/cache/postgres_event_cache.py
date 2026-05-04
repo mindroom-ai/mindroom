@@ -393,6 +393,19 @@ class _PostgresEventCacheRuntime:
             diagnostics["cache_postgres_unavailable_reason"] = self._unavailable_reason
         return diagnostics
 
+    async def _rollback_best_effort(self, db: psycopg.AsyncConnection, *, operation: str) -> None:
+        """Roll back the shared connection without masking the original failure."""
+        try:
+            await db.rollback()
+        except Exception as exc:
+            logger.debug(
+                "Ignoring Postgres event cache rollback failure",
+                namespace=self._namespace,
+                operation=operation,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
     async def initialize(self) -> None:
         """Open the PostgreSQL database and create the cache schema."""
         async with self._db_lock:
@@ -591,10 +604,14 @@ class _PostgresEventCacheRuntime:
             await self.initialize()
         async with self._db_lock, self.acquire_room_lock(room_id, operation=operation):
             db = self.require_db()
-            await db.execute(
-                "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-                (self._namespace, room_id),
-            )
+            try:
+                await db.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                    (self._namespace, room_id),
+                )
+            except BaseException:
+                await self._rollback_best_effort(db, operation=operation)
+                raise
             yield db
 
     def require_db(self) -> psycopg.AsyncConnection:
@@ -730,7 +747,7 @@ class PostgresEventCache:
                         flushed_pending = await self._flush_pending_invalidations(db, room_id)
                         result = await callback(db)
                         await db.commit()
-                    except Exception:
+                    except BaseException:
                         await self._rollback_best_effort(db, operation=operation)
                         raise
             except EventCacheBackendUnavailableError as exc:
