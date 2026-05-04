@@ -109,6 +109,7 @@ from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_f
 from mindroom.memory import MemoryPromptParts
 from mindroom.prepared_conversation_chain import (
     CompactionSummaryRequest,
+    PreparedConversationChain,
     build_cold_cache_compaction_summary_request,
     build_compaction_summary_request,
     build_matrix_prompt_with_thread_history,
@@ -3111,13 +3112,107 @@ def test_compaction_summary_request_advances_past_oversized_oldest_run() -> None
     request, included_runs = _build_test_summary_request(
         previous_summary=None,
         compacted_runs=[big_run, small_run],
-        max_input_tokens=220,
+        max_input_tokens=420,
     )
 
     assert request is not None
     assert [run.run_id for run in included_runs] == ["run-big"]
     assert request.chain.source_run_ids == ("run-big",)
     assert request.chain.messages[0].content == "Run truncated to fit compaction budget."
+    assert request.estimated_tokens <= 420
+
+
+def test_compaction_summary_request_skips_oversized_run_when_only_truncation_note_fits() -> None:
+    run = _completed_run(
+        "run-too-large",
+        messages=[
+            Message(role="user", content="u" * 1_000),
+            Message(role="assistant", content="a" * 1_000),
+        ],
+    )
+
+    request, included_runs = _build_test_summary_request(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=205,
+    )
+
+    assert request is None
+    assert included_runs == []
+
+
+def test_compaction_summary_request_stays_within_budget_after_summary_instruction() -> None:
+    run = _completed_run(
+        "run-near-limit",
+        messages=[
+            Message(role="user", content="x" * 6_800),
+        ],
+    )
+
+    request, included_runs = _build_test_summary_request(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=1_900,
+    )
+
+    assert request is not None
+    assert included_runs == [run]
+    assert request.estimated_tokens <= 1_900
+
+
+def test_compaction_summary_request_oversized_tool_call_run_uses_plain_budgeted_excerpt() -> None:
+    run = _completed_run(
+        "run-tool",
+        messages=[
+            Message(role="user", content="Use the tool."),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": "x" * 4_000},
+                    },
+                ],
+            ),
+            Message(role="tool", content="tool result", tool_call_id="call-1"),
+        ],
+    )
+
+    request, included_runs = _build_test_summary_request(
+        previous_summary=None,
+        compacted_runs=[run],
+        max_input_tokens=700,
+    )
+
+    assert request is not None
+    assert included_runs == [run]
+    assert request.estimated_tokens <= 700
+    assert all(message.role != "tool" for message in request.chain.messages)
+    assert all(not message.tool_calls for message in request.chain.messages)
+    assert all(message.tool_call_id is None for message in request.chain.messages)
+
+
+def test_warm_cache_compaction_request_rejects_dangling_tool_calls_before_summary_instruction() -> None:
+    chain = PreparedConversationChain(
+        messages=(
+            Message(
+                role="assistant",
+                content="Calling a tool",
+                tool_calls=[
+                    {"id": "call-1", "type": "function", "function": {"name": "shell", "arguments": "{}"}},
+                ],
+            ),
+        ),
+        rendered_text="Calling a tool",
+        source="persisted_runs",
+        source_run_ids=("run-tool",),
+        estimated_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="tool result adjacency"):
+        build_warm_cache_compaction_summary_request(chain, previous_summary=None)
 
 
 def test_compaction_summary_request_oversized_run_preserves_messages_before_tool_schema() -> None:
@@ -3138,13 +3233,14 @@ def test_compaction_summary_request_oversized_run_preserves_messages_before_tool
     request, included_runs = _build_test_summary_request(
         previous_summary=None,
         compacted_runs=[run],
-        max_input_tokens=280,
+        max_input_tokens=360,
     )
 
     assert request is not None
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
     assert root_request in request.rendered_text
     assert "tools_schema" not in request.rendered_text
+    assert request.estimated_tokens <= 360
 
 
 def test_compaction_summary_request_skips_when_previous_summary_cannot_be_preserved() -> None:
