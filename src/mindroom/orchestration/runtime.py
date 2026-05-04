@@ -153,6 +153,10 @@ class MatrixSyncStalledError(RuntimeError):
     """Raised when the watchdog detects a stalled Matrix sync loop."""
 
 
+class MatrixSyncCancellationTimeoutError(RuntimeError):
+    """Raised when a Matrix sync task refuses to finish after cancellation."""
+
+
 def _format_task_stack(task: asyncio.Task[Any]) -> tuple[str, ...]:
     """Return a compact formatted stack for one asyncio task."""
     return tuple("".join(traceback.format_stack(frame, limit=8)).rstrip() for frame in task.get_stack(limit=8))
@@ -193,6 +197,28 @@ async def _cancel_sync_task_with_timeout(
         sync_task_cancelled=sync_task.cancelled(),
         sync_task_stack=_format_task_stack(sync_task),
     )
+    msg = f"Matrix sync task for {bot.agent_name} did not stop after cancellation"
+    raise MatrixSyncCancellationTimeoutError(msg)
+
+
+async def _hold_supervisor_until_sync_task_finishes(
+    bot: AgentBot | TeamBot,
+    sync_task: asyncio.Task[Any],
+) -> None:
+    """Keep the supervisor alive while an unresponsive sync task still exists."""
+    logger.error(
+        "Matrix sync supervisor is waiting for unresponsive sync task",
+        agent_name=bot.agent_name,
+        sync_task_name=sync_task.get_name(),
+        sync_task_stack=_format_task_stack(sync_task),
+    )
+    while not sync_task.done():
+        try:
+            await asyncio.shield(sync_task)
+        except asyncio.CancelledError:
+            if sync_task.done():
+                return
+            request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
 
 
 @dataclass(slots=True)
@@ -314,7 +340,7 @@ class _SyncIteration:
                     )
                     continue
                 await task
-            except (asyncio.CancelledError, MatrixSyncStalledError):
+            except (asyncio.CancelledError, MatrixSyncCancellationTimeoutError, MatrixSyncStalledError):
                 pass
             except Exception:
                 logger.warning("Suppressed error during sync iteration cleanup", exc_info=True)
@@ -521,6 +547,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
     retry_count = 0
     while bot.running and (max_retries < 0 or retry_count < max_retries):
         iteration: _SyncIteration | None = None
+        prepared_for_sync_shutdown = False
         try:
             logger.info("starting_sync_loop", agent=bot.agent_name)
             iteration = _SyncIteration.start(bot)
@@ -531,6 +558,13 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             # Task cancellation is part of normal shutdown.
             logger.info("sync_task_cancelled", agent=bot.agent_name)
             break
+        except MatrixSyncCancellationTimeoutError:
+            logger.exception("sync_loop_cancellation_timed_out", agent=bot.agent_name)
+            if iteration is not None and iteration.sync_task is not None:
+                await bot.prepare_for_sync_shutdown()
+                prepared_for_sync_shutdown = True
+                await _hold_supervisor_until_sync_task_finishes(bot, iteration.sync_task)
+            break
         except MatrixSyncStalledError:
             retry_count += 1
             logger.warning("restarting_stalled_sync_loop", agent=bot.agent_name, retry_count=retry_count)
@@ -539,7 +573,8 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             logger.exception("sync_loop_failed", agent=bot.agent_name, retry_count=retry_count)
         finally:
             if iteration is not None:
-                await bot.prepare_for_sync_shutdown()
+                if not prepared_for_sync_shutdown:
+                    await bot.prepare_for_sync_shutdown()
                 await iteration.cancel()
 
         if not bot.running or (max_retries >= 0 and retry_count >= max_retries):

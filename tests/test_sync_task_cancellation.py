@@ -18,6 +18,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.runtime import (
     EntityStartResults,
+    MatrixSyncCancellationTimeoutError,
     MatrixSyncStalledError,
     _SyncIteration,
     cancel_sync_task,
@@ -231,7 +232,7 @@ async def test_watchdog_times_out_sync_restart_cancellation(
     monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS", 0.01, raising=False)
     monkeypatch.setattr(runtime_helpers.logger, "error", capture_error)
 
-    with pytest.raises(MatrixSyncStalledError, match="wedged_agent"):
+    with pytest.raises(MatrixSyncCancellationTimeoutError, match="wedged_agent"):
         await asyncio.wait_for(
             _SyncIteration._watch(bot, sync_task, watchdog_cancelled_sync),
             timeout=0.2,
@@ -253,19 +254,20 @@ async def test_watchdog_times_out_sync_restart_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_sync_forever_with_restart_does_not_hang_after_sync_cancel_timeout(
+async def test_sync_forever_with_restart_stays_attached_after_sync_cancel_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cancellation timeout in the watchdog should not hang supervisor cleanup."""
+    """A cancellation timeout must not orphan the still-running sync task."""
     bot = _FakeBot()
     bot.agent_name = "wedged_agent"
     cancellation_seen = asyncio.Event()
     release_sync_task = asyncio.Event()
-    sync_task: asyncio.Task[None] | None = None
+    sync_tasks: list[asyncio.Task[None]] = []
 
     async def ignore_cancellation_until_released() -> None:
-        nonlocal sync_task
-        sync_task = asyncio.current_task()
+        task = asyncio.current_task()
+        assert task is not None
+        sync_tasks.append(task)
         bot.sync_calls += 1
         while True:
             try:
@@ -283,17 +285,24 @@ async def test_sync_forever_with_restart_does_not_hang_after_sync_cancel_timeout
     monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS", 0.01, raising=False)
     monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
 
-    supervisor_task = asyncio.create_task(sync_forever_with_restart(bot, max_retries=1))
+    supervisor_task = asyncio.create_task(sync_forever_with_restart(bot, max_retries=2))
     try:
         await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
-        await asyncio.sleep(0.05)
-        assert supervisor_task.done()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(supervisor_task), timeout=0.2)
+        assert bot.sync_calls == 1
+        assert len(sync_tasks) == 1
+        assert not sync_tasks[0].done()
     finally:
         release_sync_task.set()
-        if sync_task is not None and not sync_task.done():
-            sync_task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+        for sync_task in sync_tasks:
+            if not sync_task.done():
+                sync_task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
         with suppress(asyncio.CancelledError):
             await supervisor_task
+        for sync_task in sync_tasks:
+            with suppress(asyncio.CancelledError):
+                await sync_task
 
 
 @pytest.mark.asyncio
