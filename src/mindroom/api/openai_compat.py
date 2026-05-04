@@ -49,7 +49,6 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_team_messages_text,
-    scrub_bound_team_scope_context,
 )
 from mindroom.history import (
     ScopeSessionContext,
@@ -1471,11 +1470,6 @@ async def prepare_materialized_team_execution(
     matrix_run_metadata: dict[str, object] | None = None,
 ) -> _PreparedOpenAIMaterializedTeamExecution:
     """Prepare one team run using only public execution-preparation interfaces."""
-    scrub_bound_team_scope_context(
-        scope_context=scope_context,
-        team=team,
-        entity_name=configured_team_name or team.id,
-    )
     prepared_execution = await prepare_bound_team_run_context(
         scope_context=scope_context,
         agents=agents,

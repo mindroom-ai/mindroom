@@ -403,7 +403,7 @@ async def test_team_response_retry_scrubs_queued_notice_before_second_attempt() 
         patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.prepare_bound_team_run_context",
+            "mindroom.execution_preparation.prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -746,7 +746,7 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
         patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.teams.prepare_bound_team_run_context",
+            "mindroom.execution_preparation.prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):

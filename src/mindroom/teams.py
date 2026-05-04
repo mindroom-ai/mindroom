@@ -1602,10 +1602,6 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             team_name=configured_team_name,
         ) as opened_scope_context:
             scope_context = opened_scope_context
-            ai_runtime.scrub_queued_notice_session_context(
-                scope_context=scope_context,
-                entity_name=configured_team_name or team_name,
-            )
             team = build_materialized_team_instance(
                 requested_agent_names=team_members.requested_agent_names,
                 agents=agents,
@@ -2009,10 +2005,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             team_name=configured_team_name,
         ) as opened_scope_context:
             scope_context = opened_scope_context
-            ai_runtime.scrub_queued_notice_session_context(
-                scope_context=scope_context,
-                entity_name=team_label,
-            )
             team = build_materialized_team_instance(
                 requested_agent_names=team_members.requested_agent_names,
                 agents=team_members.agents,

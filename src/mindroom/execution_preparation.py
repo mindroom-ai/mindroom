@@ -902,7 +902,7 @@ async def prepare_bound_team_execution_context(
     )
 
 
-def scrub_bound_team_scope_context(
+def _scrub_bound_team_scope_context(
     *,
     scope_context: ScopeSessionContext | None,
     team: Team,
@@ -937,7 +937,7 @@ async def prepare_bound_team_run_context(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedExecutionContext:
     """Prepare a team run with queued-notice scrubbing and replay application."""
-    scrub_bound_team_scope_context(
+    _scrub_bound_team_scope_context(
         scope_context=scope_context,
         team=team,
         entity_name=entity_name,

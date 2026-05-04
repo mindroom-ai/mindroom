@@ -183,11 +183,9 @@ def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
 
 def _stale_private_session_entry(
     config: Config,
-    runtime_paths: RuntimePaths,
     agent_name: str,
     entry: _FlushSessionEntry,
 ) -> bool:
-    _ = runtime_paths
     agent_config = config.agents.get(agent_name)
     worker_key = entry.get("worker_key")
     execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
@@ -613,7 +611,7 @@ class MemoryAutoFlushWorker:
                 key
                 for key, entry in sessions.items()
                 if isinstance(entry.get("agent_name"), str)
-                and _stale_private_session_entry(config, self.runtime_paths, entry["agent_name"], entry)
+                and _stale_private_session_entry(config, entry["agent_name"], entry)
             ]
             for key in stale_private_entry_keys:
                 del sessions[key]
