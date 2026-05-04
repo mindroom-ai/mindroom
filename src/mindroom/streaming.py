@@ -38,15 +38,9 @@ from mindroom.partial_reply_text import (
     PROGRESS_PLACEHOLDER,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     STREAM_ERROR_RESPONSE_NOTE_PREFIX,
-)
-from mindroom.partial_reply_text import (
-    clean_partial_reply_text as _clean_partial_reply_text,
-)
-from mindroom.partial_reply_text import (
-    format_stream_error_note as _format_stream_error_note,
-)
-from mindroom.partial_reply_text import (
-    is_interrupted_partial_reply as _is_interrupted_partial_reply,
+    clean_partial_reply_text,
+    format_stream_error_note,
+    is_interrupted_partial_reply,
 )
 from mindroom.streaming_delivery import (
     StreamInputChunk,
@@ -82,6 +76,8 @@ __all__ = [
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "cancel_failure_reason",
+    "clean_partial_reply_text",
+    "is_interrupted_partial_reply",
 ]
 
 _PROGRESS_PLACEHOLDER = PROGRESS_PLACEHOLDER
@@ -89,8 +85,6 @@ _CANCELLED_RESPONSE_NOTE = CANCELLED_RESPONSE_NOTE
 _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 _RESTART_INTERRUPTED_RESPONSE_NOTE = RESTART_INTERRUPTED_RESPONSE_NOTE
 _STREAM_ERROR_RESPONSE_NOTE = STREAM_ERROR_RESPONSE_NOTE_PREFIX
-clean_partial_reply_text = _clean_partial_reply_text
-is_interrupted_partial_reply = _is_interrupted_partial_reply
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 
 
@@ -456,7 +450,7 @@ class StreamingResponse:
                 resolved_cancel_source = "user_stop"
         if error is not None:
             stripped_text = self.accumulated_text.rstrip()
-            error_note = _format_stream_error_note(error)
+            error_note = format_stream_error_note(error)
             self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
             return STREAM_STATUS_ERROR
         if resolved_cancel_source is not None:
