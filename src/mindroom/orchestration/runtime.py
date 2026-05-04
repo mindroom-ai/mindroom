@@ -162,18 +162,6 @@ def _format_task_stack(task: asyncio.Task[Any]) -> tuple[str, ...]:
     return tuple("".join(traceback.format_stack(frame, limit=8)).rstrip() for frame in task.get_stack(limit=8))
 
 
-async def _cancel_stalled_sync_task(
-    bot: AgentBot | TeamBot,
-    sync_task: asyncio.Task[Any],
-) -> None:
-    """Request sync-task cancellation without letting the watchdog hang forever."""
-    await _cancel_sync_task_with_timeout(
-        bot,
-        sync_task,
-        timeout_log_message="Matrix sync watchdog cancellation timed out",
-    )
-
-
 async def _cancel_sync_task_with_timeout(
     bot: AgentBot | TeamBot,
     sync_task: asyncio.Task[Any],
@@ -271,7 +259,11 @@ class _SyncIteration:
                 )
 
             watchdog_cancelled_sync.set()
-            await _cancel_stalled_sync_task(bot, sync_task)
+            await _cancel_sync_task_with_timeout(
+                bot,
+                sync_task,
+                timeout_log_message="Matrix sync watchdog cancellation timed out",
+            )
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
             raise MatrixSyncStalledError(msg)
 
@@ -563,6 +555,8 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             if iteration is not None and iteration.sync_task is not None:
                 await bot.prepare_for_sync_shutdown()
                 prepared_for_sync_shutdown = True
+                # Keep the orchestrator-owned supervisor alive so a replacement
+                # sync loop cannot start while the old one is still running.
                 await _hold_supervisor_until_sync_task_finishes(bot, iteration.sync_task)
             break
         except MatrixSyncStalledError:
