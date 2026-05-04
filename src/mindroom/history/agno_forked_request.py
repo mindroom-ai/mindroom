@@ -1,11 +1,11 @@
-"""Agno-specific provider-request preparation for history compaction.
+"""Build forked Agno provider requests without running a full Agno turn.
 
-MindRoom treats warm-cache compaction as a hidden normal turn: send the same
-provider-visible prefix a reply would have used, then append one final user
-message that asks for an updated durable summary.
-That shape matters because provider prompt caches key off the real request
-prefix, including system messages, prior conversation messages, model settings,
-and tool schemas.
+Some callers need the exact provider-visible request that Agno would assemble
+for an Agent or Team, but against a copied message prefix and without creating a
+real Agno run.
+This is especially useful for prompt-cache-sensitive internal turns: the caller
+can preserve the same system prompt, session summary placement, message format,
+model settings, and tool schemas, then append its own final user message.
 
 Agno does not currently expose a public "fork this session and build the exact
 provider request without running it" primitive.
@@ -13,33 +13,30 @@ Calling ``agent.arun()`` or ``team.arun()`` against a temporary copied session
 would look simpler, but it would run the full agent lifecycle: persistence,
 hooks, memory/learning side effects, metrics, metadata writes, and potentially
 real tool calls.
-Calling ``model.aresponse()`` directly with only persisted history would avoid
-those side effects, but it would drop the normal Agno-assembled system prompt,
-session summary placement, and tool schemas, defeating the prompt-cache goal.
+Calling ``model.aresponse()`` directly with copied messages would avoid those
+side effects, but it would also bypass Agno's normal request assembly.
 
-This module is the intentionally narrow adapter for that missing Agno forked
-request primitive.
-It builds a synthetic in-memory Agno session containing only the compaction
+This module is the intentionally narrow adapter for that missing Agno primitive.
+It builds a synthetic in-memory Agno session containing only the caller-provided
 prefix, temporarily forces Agno to replay that prefix, asks Agno's private
-message/tool builders for the provider-visible request, then returns only inert
+message/tool builders for the provider-visible request, then returns inert
 message copies and provider tool schemas.
 Executable ``Function`` objects are not passed to the summary model; when tool
 schemas are present the request also sets ``tool_choice="none"``.
 
 Keep private Agno imports and synthetic-session tricks contained here.
-The durable compaction module should only see ``CompactionProviderRequest`` and
-builder callables, and if Agno grows a public forked-request API this module is
-the place to replace.
+This module deliberately has no ``mindroom.*`` imports; callers adapt their
+domain objects into plain Agno sessions and messages before calling it.
+If Agno grows a public forked-request API, this module is the place to replace.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, TypeGuard, cast
-from uuid import uuid4
 
 from agno.agent._messages import aget_run_messages
 from agno.agent._tools import determine_tools_for_model
@@ -54,49 +51,42 @@ from agno.team._tools import _determine_tools_for_model as determine_team_tools_
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom.prepared_conversation_chain import CompactionSummaryRequest
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
-
 if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.models.message import Message
     from agno.team import Team
 
 
-type _ToolDefinition = dict[str, object]
-type _PreparedTool = Function | _ToolDefinition
-type CompactionProviderRequestBuilder = Callable[
-    [CompactionSummaryRequest, AgentSession | TeamSession],
-    Awaitable["CompactionProviderRequest"],
-]
+type ToolDefinition = dict[str, object]
+type PreparedTool = Function | ToolDefinition
 
 
 @dataclass(frozen=True)
-class CompactionProviderRequest:
-    """Provider-visible request payload for one compaction summary call."""
+class AgnoProviderRequest:
+    """Provider-visible request payload assembled by Agno."""
 
     messages: tuple[Message, ...]
-    tools: tuple[_ToolDefinition, ...] = ()
+    tools: tuple[ToolDefinition, ...] = ()
     tool_choice: str | dict[str, object] | None = None
 
 
-async def build_agent_compaction_provider_request(
-    summary_request: CompactionSummaryRequest,
-    session: AgentSession | TeamSession,
+async def build_agent_provider_request_from_prefix(
     *,
     agent: Agent,
-) -> CompactionProviderRequest:
-    """Build compaction as a normal agent request prefix plus one summary user turn."""
-    if not isinstance(session, AgentSession):
-        msg = "agent compaction request builder requires an AgentSession"
-        raise TypeError(msg)
-    compaction_session = _agent_compaction_session(
+    source_session: AgentSession,
+    prefix_messages: Sequence[Message],
+    final_user_message: Message,
+    synthetic_run_id: str,
+) -> AgnoProviderRequest:
+    """Build an agent request from copied history plus one final user message."""
+    compaction_session = _agent_synthetic_session(
         agent=agent,
-        source_session=session,
-        summary_request=summary_request,
+        source_session=source_session,
+        prefix_messages=prefix_messages,
+        synthetic_run_id=synthetic_run_id,
     )
-    final_user_message = summary_request.messages[-1].model_copy(deep=True)
-    run_id = f"compaction-summary-{uuid4()}"
+    final_user_message = final_user_message.model_copy(deep=True)
+    run_id = synthetic_run_id
     user_id = compaction_session.user_id
     run_response = RunOutput(
         run_id=run_id,
@@ -146,23 +136,23 @@ async def build_agent_compaction_provider_request(
     return _provider_request(run_messages.messages, prepared_tools)
 
 
-async def build_team_compaction_provider_request(
-    summary_request: CompactionSummaryRequest,
-    session: AgentSession | TeamSession,
+async def build_team_provider_request_from_prefix(
     *,
     team: Team,
-) -> CompactionProviderRequest:
-    """Build compaction as a normal team request prefix plus one summary user turn."""
-    if not isinstance(session, TeamSession):
-        msg = "team compaction request builder requires a TeamSession"
-        raise TypeError(msg)
-    compaction_session = _team_compaction_session(
+    source_session: TeamSession,
+    prefix_messages: Sequence[Message],
+    final_user_message: Message,
+    synthetic_run_id: str,
+) -> AgnoProviderRequest:
+    """Build a team request from copied history plus one final user message."""
+    compaction_session = _team_synthetic_session(
         team=team,
-        source_session=session,
-        summary_request=summary_request,
+        source_session=source_session,
+        prefix_messages=prefix_messages,
+        synthetic_run_id=synthetic_run_id,
     )
-    final_user_message = summary_request.messages[-1].model_copy(deep=True)
-    run_id = f"compaction-summary-{uuid4()}"
+    final_user_message = final_user_message.model_copy(deep=True)
+    run_id = synthetic_run_id
     user_id = compaction_session.user_id
     run_response = TeamRunOutput(
         run_id=run_id,
@@ -212,126 +202,42 @@ async def build_team_compaction_provider_request(
     return _provider_request(run_messages.messages, prepared_tools)
 
 
-def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate system and current-user prompt tokens outside persisted replay."""
-    static_chars = len(agent.role or "")
-    instructions = agent.instructions
-    if isinstance(instructions, str):
-        static_chars += len(instructions)
-    elif isinstance(instructions, list):
-        for instruction in instructions:
-            static_chars += len(str(instruction))
-    static_chars += len(full_prompt)
-    return (static_chars // 4) + estimate_tool_definition_tokens(agent)
-
-
-def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate the non-history agent prompt using Agno's real system-message builder."""
-    static_tokens = estimate_text_tokens(full_prompt)
-    with _temporary_tool_instructions(agent):
-        session, run_context, prepared_tools = _prepare_agent_prompt_inputs_for_estimation(agent)
-        system_message = agent.get_system_message(
-            session=session,
-            run_context=run_context,
-            tools=prepared_tools or None,
-            add_session_state_to_context=False,
-        )
-    if system_message is not None and system_message.content is not None:
-        static_tokens += estimate_text_tokens(str(system_message.content))
-    return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
-
-
-def estimate_tool_definition_tokens(agent: Agent) -> int:
-    """Estimate the model-visible tool schema and tool instructions for one agent."""
-    prepared_tools, tool_instructions = _prepare_tools_for_estimation(agent.tools)
-    return _estimate_prepared_tool_definition_tokens(
-        prepared_tools,
-        tool_instructions=tool_instructions,
-    )
-
-
-def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
-    """Estimate the non-history team prompt using Agno's team system-message builder."""
-    static_tokens = estimate_text_tokens(full_prompt)
-    with _temporary_tool_instructions(team):
-        session, prepared_tools = _prepare_team_prompt_inputs_for_estimation(team)
-        system_message = team.get_system_message(
-            session=session,
-            tools=prepared_tools or None,
-            add_session_state_to_context=False,
-        )
-    if system_message is not None and system_message.content is not None:
-        static_tokens += estimate_text_tokens(str(system_message.content))
-    return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
-
-
 def agent_tool_definition_payloads_for_logging(agent: Agent) -> list[dict[str, object]]:
     """Return model-visible agent tool schemas using Agno's prompt-preparation path."""
-    with _temporary_tool_instructions(agent):
-        _session, _run_context, prepared_tools = _prepare_agent_prompt_inputs_for_estimation(agent)
-    return _prepared_tool_definition_payloads(prepared_tools)
+    with preserve_tool_instructions(agent):
+        _session, _run_context, prepared_tools = prepare_agent_prompt_inputs_for_estimation(agent)
+    return prepared_tool_definition_payloads(prepared_tools)
 
 
 def team_tool_definition_payloads_for_logging(team: Team) -> list[dict[str, object]]:
     """Return model-visible team tool schemas using Agno's prompt-preparation path."""
-    with _temporary_tool_instructions(team):
-        _session, prepared_tools = _prepare_team_prompt_inputs_for_estimation(team)
-    return _prepared_tool_definition_payloads(prepared_tools)
-
-
-def compute_prompt_token_breakdown(
-    agent: Agent | None = None,
-    team: Team | None = None,
-    full_prompt: str | None = None,
-) -> dict[str, int]:
-    """Compute token breakdown for system prompt, tool defs, and current prompt."""
-    breakdown: dict[str, int] = {}
-
-    if agent is not None:
-        sys_chars = len(agent.role or "")
-        instructions = agent.instructions
-        if isinstance(instructions, str):
-            sys_chars += len(instructions)
-        elif isinstance(instructions, list):
-            for instruction in instructions:
-                sys_chars += len(str(instruction))
-        breakdown["role_instructions_tokens"] = sys_chars // 4
-
-    tool_tokens = 0
-    if agent is not None:
-        tool_tokens = estimate_tool_definition_tokens(agent)
-    elif team is not None:
-        prepared_tools, _tool_instructions = _prepare_tools_for_estimation(team.tools)
-        tool_tokens = _estimate_prepared_tool_definition_tokens(prepared_tools)
-    breakdown["tool_definition_tokens"] = tool_tokens
-
-    if full_prompt is not None:
-        breakdown["current_prompt_tokens"] = len(full_prompt) // 4
-
-    return breakdown
+    with preserve_tool_instructions(team):
+        _session, prepared_tools = prepare_team_prompt_inputs_for_estimation(team)
+    return prepared_tool_definition_payloads(prepared_tools)
 
 
 def _provider_request(
     messages: Sequence[Message],
     prepared_tools: Sequence[object],
-) -> CompactionProviderRequest:
+) -> AgnoProviderRequest:
     tool_schemas = _provider_tool_schemas(prepared_tools)
-    return CompactionProviderRequest(
+    return AgnoProviderRequest(
         messages=tuple(message.model_copy(deep=True) for message in messages),
         tools=tuple(_provider_tool_definition_payloads(tool_schemas)),
         tool_choice="none" if tool_schemas else None,
     )
 
 
-def _provider_tool_schemas(prepared_tools: Sequence[object]) -> list[_PreparedTool]:
+def _provider_tool_schemas(prepared_tools: Sequence[object]) -> list[PreparedTool]:
     return [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)]
 
 
-def _agent_compaction_session(
+def _agent_synthetic_session(
     *,
     agent: Agent,
     source_session: AgentSession,
-    summary_request: CompactionSummaryRequest,
+    prefix_messages: Sequence[Message],
+    synthetic_run_id: str,
 ) -> AgentSession:
     return replace(
         source_session,
@@ -341,21 +247,22 @@ def _agent_compaction_session(
         agent_data=deepcopy(source_session.agent_data),
         runs=[
             RunOutput(
-                run_id=_synthetic_compaction_run_id(summary_request),
+                run_id=synthetic_run_id,
                 agent_id=agent.id,
                 status=RunStatus.completed,
-                messages=[message.model_copy(deep=True) for message in summary_request.chain.messages],
+                messages=[message.model_copy(deep=True) for message in prefix_messages],
             ),
         ],
         summary=deepcopy(source_session.summary),
     )
 
 
-def _team_compaction_session(
+def _team_synthetic_session(
     *,
     team: Team,
     source_session: TeamSession,
-    summary_request: CompactionSummaryRequest,
+    prefix_messages: Sequence[Message],
+    synthetic_run_id: str,
 ) -> TeamSession:
     return replace(
         source_session,
@@ -365,20 +272,14 @@ def _team_compaction_session(
         metadata=deepcopy(source_session.metadata),
         runs=[
             TeamRunOutput(
-                run_id=_synthetic_compaction_run_id(summary_request),
+                run_id=synthetic_run_id,
                 team_id=team.id,
                 status=RunStatus.completed,
-                messages=[message.model_copy(deep=True) for message in summary_request.chain.messages],
+                messages=[message.model_copy(deep=True) for message in prefix_messages],
             ),
         ],
         summary=deepcopy(source_session.summary),
     )
-
-
-def _synthetic_compaction_run_id(summary_request: CompactionSummaryRequest) -> str:
-    if summary_request.included_run_ids:
-        return "+".join(summary_request.included_run_ids)
-    return "compaction-summary-prefix"
 
 
 @contextmanager
@@ -401,7 +302,8 @@ def _temporary_replay_settings(entity: Agent | Team) -> Iterator[None]:
 
 
 @contextmanager
-def _temporary_tool_instructions(entity: Agent | Team) -> Iterator[None]:
+def preserve_tool_instructions(entity: Agent | Team) -> Iterator[None]:
+    """Restore Agno's mutable tool-instruction cache after request assembly."""
     previous_tool_instructions = entity._tool_instructions
     try:
         yield
@@ -409,22 +311,12 @@ def _temporary_tool_instructions(entity: Agent | Team) -> Iterator[None]:
         entity._tool_instructions = previous_tool_instructions
 
 
-def _estimate_prepared_tool_definition_tokens(
-    prepared_tools: Sequence[_PreparedTool],
-    *,
-    tool_instructions: Sequence[str] = (),
-) -> int:
-    tool_definitions = _prepared_tool_definition_payloads(prepared_tools)
-    tool_definition_tokens = len(stable_serialize(tool_definitions)) // 4 if tool_definitions else 0
-    instruction_tokens = sum(estimate_text_tokens(instruction) for instruction in tool_instructions)
-    return tool_definition_tokens + instruction_tokens
-
-
-def _prepare_tools_for_estimation(tools: object) -> tuple[list[_PreparedTool], list[str]]:
+def prepare_tools_for_estimation(tools: object) -> tuple[list[PreparedTool], list[str]]:
+    """Prepare configured Agno tools without requiring a live run."""
     if not isinstance(tools, Sequence):
         return [], []
 
-    prepared_tools: list[_PreparedTool] = []
+    prepared_tools: list[PreparedTool] = []
     tool_instructions: list[str] = []
     seen_names: set[str] = set()
     for tool in tools:
@@ -442,7 +334,7 @@ def _prepare_tools_for_estimation(tools: object) -> tuple[list[_PreparedTool], l
     return prepared_tools, tool_instructions
 
 
-def _prepare_tool_for_estimation(tool: object) -> list[_PreparedTool]:
+def _prepare_tool_for_estimation(tool: object) -> list[PreparedTool]:
     if isinstance(tool, Function):
         return [_prepare_function_for_estimation(tool)]
     if isinstance(tool, Toolkit):
@@ -473,9 +365,10 @@ def _prepare_function_for_estimation(function: Function) -> Function:
     return prepared_function
 
 
-def _prepared_tool_definition_payloads(
-    prepared_tools: Sequence[_PreparedTool],
+def prepared_tool_definition_payloads(
+    prepared_tools: Sequence[PreparedTool],
 ) -> list[dict[str, object]]:
+    """Return stable function-style payloads for prepared Agno tools."""
     payloads_by_name: dict[str, dict[str, object]] = {}
     for tool in prepared_tools:
         payload = _function_payload(tool) if isinstance(tool, Function) else _dict_tool_payload(tool)
@@ -486,7 +379,7 @@ def _prepared_tool_definition_payloads(
 
 
 def _provider_tool_definition_payloads(
-    prepared_tools: Sequence[_PreparedTool],
+    prepared_tools: Sequence[PreparedTool],
 ) -> list[dict[str, object]]:
     payloads_by_name: dict[str, dict[str, object]] = {}
     for tool in prepared_tools:
@@ -514,7 +407,7 @@ def _provider_payload_name(payload: dict[str, object]) -> str | None:
     return None
 
 
-def _prepared_tool_name(tool: _PreparedTool) -> str | None:
+def _prepared_tool_name(tool: PreparedTool) -> str | None:
     if isinstance(tool, Function):
         return tool.name
     tool_name = tool.get("name")
@@ -531,15 +424,15 @@ def _function_payload(function: Function) -> dict[str, object]:
     }
 
 
-def _is_tool_definition_dict(tool: object) -> TypeGuard[_ToolDefinition]:
+def _is_tool_definition_dict(tool: object) -> TypeGuard[ToolDefinition]:
     if not isinstance(tool, dict):
         return False
-    candidate_tool = cast("_ToolDefinition", tool)
+    candidate_tool = cast("ToolDefinition", tool)
     tool_name = candidate_tool.get("name")
     return isinstance(tool_name, str) and bool(tool_name)
 
 
-def _dict_tool_payload(tool: _ToolDefinition) -> dict[str, object]:
+def _dict_tool_payload(tool: ToolDefinition) -> dict[str, object]:
     parameters = tool.get("parameters")
     return {
         "name": str(tool["name"]),
@@ -552,16 +445,16 @@ def _default_function_parameters() -> dict[str, object]:
     return {"type": "object", "properties": {}, "required": []}
 
 
-def _prepare_team_prompt_inputs_for_estimation(
+def prepare_team_prompt_inputs_for_estimation(
     team: Team,
-) -> tuple[TeamSession, list[_PreparedTool]]:
+) -> tuple[TeamSession, list[PreparedTool]]:
     """Reuse Agno's own team tool-preparation path for prompt budgeting.
 
     Agno exposes `Team.get_system_message()` publicly, but the exact prepared tool
     payload and `_tool_instructions` state that feed that prompt are only built by
     the internal `_determine_tools_for_model()` path. Using that single internal
-    entrypoint is less brittle than re-implementing several private team helpers in
-    MindRoom. This logic is verified against `agno==2.5.13`; if Agno changes those
+    entrypoint is less brittle than re-implementing several private team helpers.
+    This logic is verified against `agno==2.5.13`; if Agno changes those
     internals, update this estimator to match the new team prompt builder.
     """
     budget_session_id = "history-budget"
@@ -591,16 +484,16 @@ def _prepare_team_prompt_inputs_for_estimation(
     return session, _provider_tool_schemas(prepared_tools)
 
 
-def _prepare_agent_prompt_inputs_for_estimation(
+def prepare_agent_prompt_inputs_for_estimation(
     agent: Agent,
-) -> tuple[AgentSession, RunContext, list[_PreparedTool]]:
+) -> tuple[AgentSession, RunContext, list[PreparedTool]]:
     """Reuse Agno's agent tool-preparation path for prompt budgeting.
 
     Agno exposes `Agent.get_system_message()` publicly, but the prepared tool
     payload and `_tool_instructions` that feed that prompt are only finalized by
     the shared `agno.agent._tools.determine_tools_for_model()` path. Using that
-    single internal entrypoint keeps MindRoom aligned with Agno without
-    re-implementing several private agent helpers.
+    single internal entrypoint avoids re-implementing several private agent
+    helpers.
     """
     budget_session_id = "history-budget"
     budget_user_id = "history-budget-user"

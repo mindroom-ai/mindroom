@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import sys
@@ -53,11 +54,6 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
 )
 from mindroom.history import PreparedHistoryState, prepare_history_for_run
-from mindroom.history.agno_compaction_request import (
-    estimate_agent_static_tokens,
-    estimate_static_tokens,
-    estimate_tool_definition_tokens,
-)
 from mindroom.history.compaction import (
     _emit_compaction_hook,
     _generate_compaction_summary,
@@ -67,6 +63,11 @@ from mindroom.history.compaction import (
     effective_summary_input_budget_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
+)
+from mindroom.history.compaction_provider_request import (
+    estimate_agent_static_tokens,
+    estimate_static_tokens,
+    estimate_tool_definition_tokens,
 )
 from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
 from mindroom.history.runtime import (
@@ -126,6 +127,16 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.conftest import bind_runtime_paths, make_conversation_cache_mock, make_event_cache_mock, make_visible_message
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
+
+
+def test_agno_forked_request_module_has_no_mindroom_imports() -> None:
+    module_path = Path("src/mindroom/history/agno_forked_request.py")
+    tree = ast.parse(module_path.read_text())
+    imports = [alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names]
+    from_imports = [
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
+    ]
+    assert not any(name == "mindroom" or name.startswith("mindroom.") for name in imports + from_imports)
 
 
 def _build_test_summary_request(

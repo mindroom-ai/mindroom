@@ -31,7 +31,8 @@ It owns Matrix visible-message conversion, unseen-context preparation, Matrix fa
 Execution preparation calls the prepared-chain module directly instead of re-exporting compatibility helpers.
 
 `src/mindroom/history/compaction.py` still owns durable session mutation, chunk selection, lifecycle metadata, model calls, retries, hook emission, and progress persistence.
-`src/mindroom/history/agno_compaction_request.py` owns the Agno-specific adapter that asks Agno to prepare compaction as a normal Agent or Team request without running a full Agent or Team turn.
+`src/mindroom/history/agno_forked_request.py` owns the pure Agno-specific forked-request adapter and has no MindRoom imports.
+`src/mindroom/history/compaction_provider_request.py` adapts MindRoom compaction summary requests and token budgeting to that Agno adapter.
 
 It now builds summary requests through the prepared-chain module and, when the active model is used, through Agno's live Agent or Team request builder instead of materializing replay messages independently.
 

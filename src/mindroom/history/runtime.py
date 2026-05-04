@@ -24,19 +24,19 @@ from mindroom.agent_storage import (
     get_agent_session,
     get_team_session,
 )
-from mindroom.history.agno_compaction_request import (
-    CompactionProviderRequestBuilder,
-    build_agent_compaction_provider_request,
-    build_team_compaction_provider_request,
-    estimate_agent_static_tokens,
-    estimate_team_static_tokens,
-)
 from mindroom.history.compaction import (
     compact_scope_history,
     completed_top_level_runs,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
     runs_for_scope,
+)
+from mindroom.history.compaction_provider_request import (
+    CompactionProviderRequestBuilder,
+    build_agent_compaction_provider_request,
+    build_team_compaction_provider_request,
+    estimate_agent_static_tokens,
+    estimate_team_static_tokens,
 )
 from mindroom.history.policy import (
     classify_compaction_decision,

@@ -19,7 +19,7 @@ from agno.session.team import TeamSession
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
-from mindroom.history.agno_compaction_request import CompactionProviderRequest, CompactionProviderRequestBuilder
+from mindroom.history.compaction_provider_request import CompactionProviderRequest, CompactionProviderRequestBuilder
 from mindroom.history.storage import (
     metadata_with_merged_seen_event_ids,
     read_scope_state,

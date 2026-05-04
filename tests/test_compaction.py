@@ -21,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.execution_preparation import PreparedExecutionContext
-from mindroom.history.agno_compaction_request import (
+from mindroom.history.compaction_provider_request import (
     compute_prompt_token_breakdown,
     estimate_static_tokens,
     estimate_tool_definition_tokens,

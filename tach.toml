@@ -643,9 +643,9 @@ depends_on = []
 [[modules]]
 path = "mindroom.history"
 depends_on = [
+    "mindroom.history.compaction_provider_request",
     "mindroom.history.compaction",
     "mindroom.history.policy",
-    "mindroom.history.agno_compaction_request",
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.types",
@@ -656,7 +656,7 @@ path = "mindroom.history.compaction"
 depends_on = [
     "mindroom.cancellation",
     "mindroom.constants",
-    "mindroom.history.agno_compaction_request",
+    "mindroom.history.compaction_provider_request",
     "mindroom.history.storage",
     "mindroom.history.types",
     "mindroom.hooks",
@@ -677,8 +677,13 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.history.agno_compaction_request"
+path = "mindroom.history.agno_forked_request"
+depends_on = []
+
+[[modules]]
+path = "mindroom.history.compaction_provider_request"
 depends_on = [
+    "mindroom.history.agno_forked_request",
     "mindroom.prepared_conversation_chain",
     "mindroom.token_budget",
 ]
@@ -722,8 +727,8 @@ path = "mindroom.history.runtime"
 depends_on = [
     "mindroom.agent_storage",
     "mindroom.history.compaction",
+    "mindroom.history.compaction_provider_request",
     "mindroom.history.policy",
-    "mindroom.history.agno_compaction_request",
     "mindroom.history.storage",
     "mindroom.history.types",
     "mindroom.logging_config",
