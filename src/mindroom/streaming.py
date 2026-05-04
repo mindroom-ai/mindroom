@@ -32,6 +32,22 @@ from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     classify_cancel_source,
 )
+from mindroom.partial_reply_text import (
+    CANCELLED_RESPONSE_NOTE,
+    INTERRUPTED_RESPONSE_NOTE,
+    PROGRESS_PLACEHOLDER,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    STREAM_ERROR_RESPONSE_NOTE_PREFIX,
+)
+from mindroom.partial_reply_text import (
+    clean_partial_reply_text as _clean_partial_reply_text,
+)
+from mindroom.partial_reply_text import (
+    format_stream_error_note as _format_stream_error_note,
+)
+from mindroom.partial_reply_text import (
+    is_interrupted_partial_reply as _is_interrupted_partial_reply,
+)
 from mindroom.streaming_delivery import (
     StreamInputChunk,
     _consume_stream_with_progress_supervision,
@@ -68,14 +84,13 @@ __all__ = [
     "cancel_failure_reason",
 ]
 
-_PROGRESS_PLACEHOLDER = "Thinking..."
-PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
-_CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
-CANCELLED_RESPONSE_NOTE = _CANCELLED_RESPONSE_NOTE
-_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
-INTERRUPTED_RESPONSE_NOTE = _INTERRUPTED_RESPONSE_NOTE
-_RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
-_STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
+_PROGRESS_PLACEHOLDER = PROGRESS_PLACEHOLDER
+_CANCELLED_RESPONSE_NOTE = CANCELLED_RESPONSE_NOTE
+_INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
+_RESTART_INTERRUPTED_RESPONSE_NOTE = RESTART_INTERRUPTED_RESPONSE_NOTE
+_STREAM_ERROR_RESPONSE_NOTE = STREAM_ERROR_RESPONSE_NOTE_PREFIX
+clean_partial_reply_text = _clean_partial_reply_text
+is_interrupted_partial_reply = _is_interrupted_partial_reply
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 
 
@@ -140,54 +155,6 @@ def _complete_capture_completions(capture_completions: tuple[asyncio.Future[None
     for capture_completion in capture_completions:
         if not capture_completion.done():
             capture_completion.set_result(None)
-
-
-def _format_stream_error_note(error: Exception) -> str:
-    """Return a concise user-facing note for stream-time exceptions."""
-    normalized_error = " ".join(str(error).split())
-    if not normalized_error:
-        return f"{_STREAM_ERROR_RESPONSE_NOTE}. Please retry.]**"
-    if len(normalized_error) > 220:
-        normalized_error = f"{normalized_error[:219]}…"
-    return f"{_STREAM_ERROR_RESPONSE_NOTE}: {normalized_error}]**"
-
-
-def is_interrupted_partial_reply(text: object) -> bool:
-    """Return True when text carries a terminal interrupted partial-reply marker."""
-    if not isinstance(text, str):
-        return False
-    trimmed_text = text.rstrip()
-    return trimmed_text.endswith(
-        (
-            _CANCELLED_RESPONSE_NOTE,
-            _INTERRUPTED_RESPONSE_NOTE,
-            _RESTART_INTERRUPTED_RESPONSE_NOTE,
-            " [cancelled]",
-            " [error]",
-        ),
-    ) or (_STREAM_ERROR_RESPONSE_NOTE in trimmed_text)
-
-
-def clean_partial_reply_text(text: str) -> str:
-    """Strip partial-reply status notes from persisted text."""
-    cleaned = text.rstrip()
-
-    for marker in (
-        " [cancelled]",
-        " [error]",
-        _CANCELLED_RESPONSE_NOTE,
-        _INTERRUPTED_RESPONSE_NOTE,
-        _RESTART_INTERRUPTED_RESPONSE_NOTE,
-    ):
-        if cleaned.endswith(marker):
-            cleaned = cleaned[: -len(marker)].rstrip()
-
-    if _STREAM_ERROR_RESPONSE_NOTE in cleaned:
-        cleaned = cleaned.split(_STREAM_ERROR_RESPONSE_NOTE, 1)[0].rstrip()
-
-    if cleaned == _PROGRESS_PLACEHOLDER or not cleaned or not any(char.isalnum() for char in cleaned):
-        return ""
-    return cleaned
 
 
 def build_restart_interrupted_body(text: str) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 from itertools import count
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -21,15 +22,6 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.execution_preparation import (
-    _build_unseen_context_messages,
-    _classify_partial_reply,
-    _clean_partial_reply_body,
-    _get_unseen_event_ids_for_metadata,
-    _get_unseen_messages_for_sender,
-    _PartialReplyKind,
-    _sanitize_thread_history_for_replay,
-)
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
@@ -38,6 +30,25 @@ from mindroom.history.interrupted_replay import (
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.client_visible_messages import _stream_status_from_content
+from mindroom.partial_reply_text import clean_partial_reply_text as _clean_partial_reply_body
+from mindroom.prepared_conversation_chain import (
+    PartialReplyKind as _PartialReplyKind,
+)
+from mindroom.prepared_conversation_chain import (
+    build_unseen_context_chain,
+)
+from mindroom.prepared_conversation_chain import (
+    classify_partial_reply as _classify_partial_reply,
+)
+from mindroom.prepared_conversation_chain import (
+    get_unseen_event_ids_for_metadata as _get_unseen_event_ids_for_metadata,
+)
+from mindroom.prepared_conversation_chain import (
+    get_unseen_messages_for_sender as _get_unseen_messages_for_sender,
+)
+from mindroom.prepared_conversation_chain import (
+    sanitize_thread_history_for_replay as _sanitize_thread_history_for_replay,
+)
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
@@ -53,7 +64,34 @@ from tests.conftest import (
     test_runtime_paths,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Collection, Sequence
+
+    from agno.models.message import Message
+
 _VISIBLE_MESSAGE_IDS = count(1)
+
+
+def _build_unseen_context_messages(
+    prompt: str,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    seen_event_ids: set[str],
+    current_event_id: str,
+    active_event_ids: Collection[str],
+    response_sender_id: str | None,
+    current_sender_id: str | None = None,
+) -> tuple[tuple[Message, ...], list[str]]:
+    chain, unseen_event_ids = build_unseen_context_chain(
+        prompt,
+        thread_history,
+        seen_event_ids=seen_event_ids,
+        current_event_id=current_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
+        current_sender_id=current_sender_id,
+    )
+    return chain.messages, unseen_event_ids
 
 
 def _make_config() -> Config:

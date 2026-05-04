@@ -24,6 +24,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.matrix.client_visible_messages import replace_visible_message
+from mindroom.partial_reply_text import clean_partial_reply_text, is_interrupted_partial_reply
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 
 if TYPE_CHECKING:
@@ -65,11 +66,6 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "interrupted": "You (interrupted reply draft)",
     "in_progress": "You (reply still streaming)",
 }
-_PROGRESS_PLACEHOLDER = "Thinking..."
-_CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
-_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
-_RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
-_STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
 _COLD_CACHE_STATIC_OMISSION_NOTE = (
@@ -891,44 +887,6 @@ def media_payload_snapshot(media_value: object) -> object:
     if isinstance(media_value, Sequence) and not isinstance(media_value, (str, bytes, bytearray)):
         return [media_payload_snapshot(item) for item in media_value]
     return media_value
-
-
-def is_interrupted_partial_reply(text: object) -> bool:
-    """Return True when text carries a terminal interrupted partial-reply marker."""
-    if not isinstance(text, str):
-        return False
-    trimmed_text = text.rstrip()
-    return trimmed_text.endswith(
-        (
-            _CANCELLED_RESPONSE_NOTE,
-            _INTERRUPTED_RESPONSE_NOTE,
-            _RESTART_INTERRUPTED_RESPONSE_NOTE,
-            " [cancelled]",
-            " [error]",
-        ),
-    ) or (_STREAM_ERROR_RESPONSE_NOTE in trimmed_text)
-
-
-def clean_partial_reply_text(text: str) -> str:
-    """Strip partial-reply status notes from persisted text."""
-    cleaned = text.rstrip()
-
-    for marker in (
-        " [cancelled]",
-        " [error]",
-        _CANCELLED_RESPONSE_NOTE,
-        _INTERRUPTED_RESPONSE_NOTE,
-        _RESTART_INTERRUPTED_RESPONSE_NOTE,
-    ):
-        if cleaned.endswith(marker):
-            cleaned = cleaned[: -len(marker)].rstrip()
-
-    if _STREAM_ERROR_RESPONSE_NOTE in cleaned:
-        cleaned = cleaned.split(_STREAM_ERROR_RESPONSE_NOTE, 1)[0].rstrip()
-
-    if cleaned == _PROGRESS_PLACEHOLDER or not cleaned or not any(char.isalnum() for char in cleaned):
-        return ""
-    return cleaned
 
 
 def _summary_request_from_chain(

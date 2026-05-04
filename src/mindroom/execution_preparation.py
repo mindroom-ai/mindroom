@@ -44,8 +44,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_PartialReplyKind = conversation_chain.PartialReplyKind
-
 
 @dataclass(frozen=True)
 class PreparedExecutionContext:
@@ -64,7 +62,7 @@ class PreparedExecutionContext:
     @property
     def final_prompt(self) -> str:
         """Return the prompt-visible text derived from the canonical message input."""
-        return render_prepared_messages_text(self.messages)
+        return conversation_chain.render_prepared_messages_text(self.messages)
 
     @property
     def context_messages(self) -> tuple[Message, ...]:
@@ -97,214 +95,11 @@ class ThreadHistoryRenderLimits:
     missing_sender_label: str | None = None
 
 
-def _collect_history_messages(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    max_messages: int | None,
-    max_message_length: int | None,
-    missing_sender_label: str | None,
-) -> list[tuple[str, str]]:
-    return conversation_chain.collect_history_messages(
-        thread_history,
-        max_messages=max_messages,
-        max_message_length=max_message_length,
-        missing_sender_label=missing_sender_label,
-    )
-
-
-def build_prompt_with_thread_history(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    *,
-    header: str = "Previous conversation in this thread:",
-    prompt_intro: str = "Current message:\n",
-    max_messages: int | None = None,
-    max_message_length: int | None = None,
-    missing_sender_label: str | None = None,
-) -> str:
-    """Build a plain-text prompt with ``sender: body`` history lines."""
-    return conversation_chain.build_prompt_with_thread_history(
-        prompt,
-        thread_history,
-        header=header,
-        prompt_intro=prompt_intro,
-        max_messages=max_messages,
-        max_message_length=max_message_length,
-        missing_sender_label=missing_sender_label,
-    )
-
-
-def build_matrix_prompt_with_thread_history(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    *,
-    header: str = "Previous conversation in this thread:",
-    prompt_intro: str = "Current message:\n",
-    max_messages: int | None = None,
-    max_message_length: int | None = None,
-    missing_sender_label: str | None = None,
-    current_sender: str | None = None,
-) -> str:
-    """Build a Matrix prompt with structured XML-like message wrappers."""
-    return conversation_chain.build_matrix_prompt_with_thread_history(
-        prompt,
-        thread_history,
-        header=header,
-        prompt_intro=prompt_intro,
-        max_messages=max_messages,
-        max_message_length=max_message_length,
-        missing_sender_label=missing_sender_label,
-        current_sender=current_sender,
-    )
-
-
-def _classify_partial_reply(
-    msg: ResolvedVisibleMessage,
-    *,
-    active_event_ids: Collection[str],
-) -> _PartialReplyKind | None:
-    """Classify a self-authored partial reply from persisted stream metadata first."""
-    return conversation_chain.classify_partial_reply(msg, active_event_ids=active_event_ids)
-
-
-def _clean_partial_reply_body(body: str) -> str:
-    """Strip live status notes before the canonical interrupted replay marker is added."""
-    return conversation_chain.clean_partial_reply_text(body)
-
-
-def _messages_with_current_prompt(
-    prompt: str,
-    *,
-    context_messages: Sequence[Message] = (),
-    current_sender_id: str | None = None,
-) -> tuple[Message, ...]:
-    """Return canonical live request messages with the current user turn last."""
-    return conversation_chain.messages_with_current_prompt(
-        prompt,
-        context_messages=context_messages,
-        current_sender_id=current_sender_id,
-    )
-
-
-def render_prepared_messages_text(messages: Sequence[Message]) -> str:
-    """Render canonical request messages to text for logs and rough token estimates."""
-    return conversation_chain.render_prepared_messages_text(messages)
-
-
-def render_prepared_team_messages_text(messages: Sequence[Message]) -> str:
-    """Render prepared team messages into the exact string form passed to Agno teams."""
-    return conversation_chain.render_prepared_team_messages_text(messages)
-
-
-def _build_unseen_context_messages(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    seen_event_ids: set[str],
-    current_event_id: str,
-    active_event_ids: Collection[str],
-    response_sender_id: str | None,
-    current_sender_id: str | None = None,
-) -> tuple[tuple[Message, ...], list[str]]:
-    """Return canonical request messages for unseen thread context plus the current turn."""
-    chain, unseen_event_ids = conversation_chain.build_unseen_context_chain(
-        prompt,
-        thread_history,
-        seen_event_ids=seen_event_ids,
-        current_event_id=current_event_id,
-        active_event_ids=active_event_ids,
-        response_sender_id=response_sender_id,
-        current_sender_id=current_sender_id,
-    )
-    return chain.messages, unseen_event_ids
-
-
-def _build_thread_history_messages(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    *,
-    response_sender_id: str | None,
-    current_sender_id: str | None = None,
-    max_messages: int | None = None,
-    max_message_length: int | None = None,
-    missing_sender_label: str | None = None,
-    static_token_budget: int | None = None,
-    estimate_static_tokens_fn: Callable[[str], int] | None = None,
-    render_messages_text_fn: Callable[[Sequence[Message]], str] | None = None,
-) -> tuple[Message, ...]:
-    """Return canonical request messages for fallback full-thread replay."""
-    chain = conversation_chain.build_thread_history_chain(
-        prompt,
-        thread_history,
-        response_sender_id=response_sender_id,
-        current_sender_id=current_sender_id,
-        max_messages=max_messages,
-        max_message_length=max_message_length,
-        missing_sender_label=missing_sender_label,
-        static_token_budget=static_token_budget,
-        estimate_static_tokens_fn=estimate_static_tokens_fn,
-        render_messages_text_fn=render_messages_text_fn or render_prepared_messages_text,
-    )
-    return chain.messages
-
-
 def _fallback_static_token_budget(*, context_window: int | None, reserve_tokens: int) -> int | None:
     """Return the total static-token budget available to Matrix-thread fallback prompts."""
     if context_window is None or context_window <= 0:
         return None
     return max(0, context_window - normalize_compaction_budget_tokens(reserve_tokens, context_window))
-
-
-def _thread_history_before_current_event(
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    current_event_id: str | None,
-) -> Sequence[ResolvedVisibleMessage] | None:
-    """Return full-context fallback history up to, but not including, the current event."""
-    return conversation_chain.thread_history_before_current_event(thread_history, current_event_id)
-
-
-def _sanitize_thread_history_for_replay(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    response_sender_id: str | None,
-    active_event_ids: Collection[str],
-) -> tuple[ResolvedVisibleMessage, ...]:
-    """Apply unseen-context sanitization before fallback full-thread replay."""
-    return conversation_chain.sanitize_thread_history_for_replay(
-        thread_history,
-        response_sender_id=response_sender_id,
-        active_event_ids=active_event_ids,
-    )
-
-
-def _get_unseen_event_ids_for_metadata(
-    unseen_messages: list[ResolvedVisibleMessage],
-    *,
-    in_progress_event_ids: set[str],
-) -> list[str]:
-    """Return unseen event IDs that should be persisted as consumed by this run."""
-    return conversation_chain.get_unseen_event_ids_for_metadata(
-        unseen_messages,
-        in_progress_event_ids=in_progress_event_ids,
-    )
-
-
-def _get_unseen_messages_for_sender(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    sender_id: str | None,
-    seen_event_ids: set[str],
-    current_event_id: str | None,
-    active_event_ids: Collection[str],
-) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
-    """Filter thread_history to unseen messages for one Matrix sender."""
-    return conversation_chain.get_unseen_messages_for_sender(
-        thread_history,
-        sender_id=sender_id,
-        seen_event_ids=seen_event_ids,
-        current_event_id=current_event_id,
-        active_event_ids=active_event_ids,
-    )
 
 
 def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]:
@@ -351,9 +146,9 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     del timing_scope
     seen_event_ids = _scope_seen_event_ids(scope_context)
-    fallback_thread_history = _thread_history_before_current_event(thread_history, reply_to_event_id)
+    fallback_thread_history = conversation_chain.thread_history_before_current_event(thread_history, reply_to_event_id)
     if fallback_thread_history is not None:
-        fallback_thread_history = _sanitize_thread_history_for_replay(
+        fallback_thread_history = conversation_chain.sanitize_thread_history_for_replay(
             fallback_thread_history,
             response_sender_id=response_sender_id,
             active_event_ids=active_event_ids,
@@ -515,7 +310,7 @@ async def prepare_agent_execution_context(
         config=config,
         prepare_scope_history_fn=_prepare_agent_scope_history,
         estimate_static_tokens_fn=_estimate_agent_static_tokens,
-        render_messages_text_fn=render_prepared_messages_text,
+        render_messages_text_fn=conversation_chain.render_prepared_messages_text,
         thread_history_render_limits=None,
         fallback_static_token_budget=_fallback_static_token_budget(
             context_window=runtime_model.context_window,
@@ -586,7 +381,7 @@ async def prepare_bound_team_execution_context(
         config=config,
         prepare_scope_history_fn=_prepare_team_scope_history,
         estimate_static_tokens_fn=_estimate_team_static_tokens,
-        render_messages_text_fn=render_prepared_team_messages_text,
+        render_messages_text_fn=conversation_chain.render_prepared_team_messages_text,
         thread_history_render_limits=thread_history_render_limits,
         fallback_static_token_budget=_fallback_static_token_budget(
             context_window=active_context_window,

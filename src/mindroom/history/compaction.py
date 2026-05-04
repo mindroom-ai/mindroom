@@ -8,13 +8,11 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
-from html import escape
 from typing import TYPE_CHECKING, TypeGuard, cast
 from uuid import uuid4
 
 from agno.agent._tools import determine_tools_for_model
 from agno.db.base import SessionType
-from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -49,27 +47,10 @@ from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.prepared_conversation_chain import (
     CompactionSummaryRequest,
     build_compaction_summary_request,
-)
-from mindroom.prepared_conversation_chain import (
-    compaction_replay_messages as prepared_compaction_replay_messages,
-)
-from mindroom.prepared_conversation_chain import (
-    estimate_history_messages_tokens as estimate_prepared_history_messages_tokens,
-)
-from mindroom.prepared_conversation_chain import (
-    history_messages_for_session as prepared_history_messages_for_session,
-)
-from mindroom.prepared_conversation_chain import (
-    media_payload_snapshot as prepared_media_payload_snapshot,
-)
-from mindroom.prepared_conversation_chain import (
-    message_media_entries as prepared_message_media_entries,
-)
-from mindroom.prepared_conversation_chain import (
-    render_message_content as prepared_render_message_content,
-)
-from mindroom.prepared_conversation_chain import (
-    strip_stale_anthropic_replay_fields as prepared_strip_stale_anthropic_replay_fields,
+    build_persisted_run_chain,
+    estimate_history_messages_tokens,
+    history_messages_for_session,
+    strip_stale_anthropic_replay_fields,
 )
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
@@ -79,6 +60,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.models.base import Model
+    from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.team import Team
 
@@ -86,43 +68,8 @@ if TYPE_CHECKING:
     from mindroom.config.models import CompactionConfig
 logger = get_logger(__name__)
 
-_WRAPPER_OVERHEAD_TOKENS = 200
-_OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
-_EXCERPT_METADATA_OMIT_KEYS = frozenset(
-    {
-        "model_params",
-        "tools_schema",
-    },
-)
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 type _ToolDefinition = dict[str, object]
-_COMPACTION_SUMMARY_PROMPT = """\
-You are updating a durable conversation handoff summary for a future model call.
-
-You will receive:
-1. An optional <previous_summary> block that already contains everything summarized before this compaction.
-2. A <new_conversation> block containing only the runs that became old enough to compact in this pass.
-
-Your job is to produce one merged handoff summary as plain text.
-Return only the summary text.
-
-Rules:
-- Preserve all still-relevant information from <previous_summary>.
-- Add only the new information from <new_conversation>.
-- Keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
-- Never paraphrase away exact technical details such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
-- Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
-- Do not invent facts.
-- If a section has no content, write `None.`
-
-Write a plain-text summary in exactly this markdown structure:
-## Goal
-## Constraints
-## Progress
-## Decisions
-## Next Steps
-## Critical Context
-"""
 
 
 class _CompactionProviderTimeoutError(Exception):
@@ -182,19 +129,6 @@ def _detach_cancelled_compaction_request(
             reason=reason,
         ),
     )
-
-
-@dataclass(frozen=True)
-class _ExcerptBlock:
-    open_tag: str
-    content: str
-    close_tag: str
-
-    def render(self, *, max_chars: int | None = None) -> str | None:
-        snippet = self.content if max_chars is None else _truncate_excerpt(self.content, max_chars)
-        if not snippet:
-            return None
-        return "\n".join([self.open_tag, _escape_xml_content(snippet), self.close_tag])
 
 
 @dataclass(frozen=True)
@@ -349,7 +283,11 @@ async def compact_scope_history(
         await _emit_compaction_hook(
             event_name=EVENT_COMPACTION_BEFORE,
             scope=scope,
-            messages=_messages_for_runs(included_runs, history_settings) if collect_compaction_hook_messages else (),
+            messages=(
+                build_persisted_run_chain(included_runs, history_settings=history_settings).messages
+                if collect_compaction_hook_messages
+                else ()
+            ),
             session_id=session.session_id,
             token_count_before=before_tokens,
             token_count_after=None,
@@ -566,7 +504,9 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
         total_compacted_run_count += len(included_runs)
         all_compacted_run_ids.update(compacted_run_ids)
         if collect_compaction_hook_messages:
-            compacted_messages.extend(_messages_for_runs(included_runs, history_settings))
+            compacted_messages.extend(
+                build_persisted_run_chain(included_runs, history_settings=history_settings).messages,
+            )
         if pending_selected_run_ids is not None:
             pending_selected_run_ids.difference_update(compacted_run_ids)
 
@@ -610,7 +550,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     if total_compacted_run_count == 0:
         return None
     for run in runs_for_scope(completed_top_level_runs(working_session), scope):
-        _strip_stale_anthropic_replay_fields(run.messages or [])
+        strip_stale_anthropic_replay_fields(run.messages or [])
     return _CompactionRewriteResult(
         summary_text=final_summary_text,
         compacted_run_count=total_compacted_run_count,
@@ -1085,7 +1025,6 @@ async def _generate_compaction_summary_with_retry(
             summary = await _generate_compaction_summary(
                 model=model,
                 messages=list(summary_request.messages),
-                summary_input=summary_request.rendered_text,
                 timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
                 timing_scope=timing_scope,
             )
@@ -1164,23 +1103,13 @@ def _should_retry_smaller_summary_chunk(error: Exception) -> bool:
 async def _generate_compaction_summary(
     *,
     model: Model,
-    summary_input: str | None = None,
-    messages: Sequence[Message] | None = None,
+    messages: Sequence[Message],
     timeout_seconds: float | None = None,
     timing_scope: str | None = None,
 ) -> SessionSummary:
     del timing_scope
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    if messages is None:
-        if summary_input is None:
-            msg = "compaction summary request requires messages or summary_input"
-            raise ValueError(msg)
-        request_messages = [
-            Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
-            Message(role="user", content=summary_input),
-        ]
-    else:
-        request_messages = [message.model_copy(deep=True) for message in messages]
+    request_messages = [message.model_copy(deep=True) for message in messages]
 
     async def _request_summary() -> ModelResponse:
         try:
@@ -1239,7 +1168,7 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
     return normalized
 
 
-@timed("system_prompt_assembly.history_prepare.compaction.summary_input_build")
+@timed("system_prompt_assembly.history_prepare.compaction.summary_request_build")
 def _build_summary_request(
     *,
     previous_summary: str | None,
@@ -1257,263 +1186,11 @@ def _build_summary_request(
     )
 
 
-@timed("system_prompt_assembly.history_prepare.compaction.summary_input_build_legacy")
-def _build_summary_input(
-    *,
-    previous_summary: str | None,
-    compacted_runs: Sequence[RunOutput | TeamRunOutput],
-    max_input_tokens: int,
-    history_settings: ResolvedHistorySettings | None = None,
-) -> tuple[str, list[RunOutput | TeamRunOutput]]:
-    resolved_history_settings = history_settings or _default_compaction_history_settings()
-    summary_block = ""
-    if previous_summary is not None and previous_summary.strip():
-        escaped_summary = _escape_xml_content(previous_summary)
-        summary_block = f"<previous_summary>\n{escaped_summary}\n</previous_summary>"
-
-    remaining = max_input_tokens - estimate_text_tokens(summary_block) - _WRAPPER_OVERHEAD_TOKENS
-
-    if remaining <= 0:
-        return summary_block, []
-
-    included_runs: list[RunOutput | TeamRunOutput] = []
-    for run in compacted_runs:
-        run_tokens = _estimate_serialized_run_tokens(run, resolved_history_settings)
-        if run_tokens > remaining:
-            if not included_runs:
-                return _build_oversized_summary_input(
-                    summary_block=summary_block,
-                    compacted_runs=[run],
-                    history_settings=resolved_history_settings,
-                    max_input_tokens=max_input_tokens,
-                )
-            break
-        included_runs.append(run)
-        remaining -= run_tokens
-
-    if not included_runs:
-        return summary_block, []
-
-    serialized_runs = "\n\n".join(
-        _serialize_run(run, index, resolved_history_settings) for index, run in enumerate(included_runs)
-    )
-    return _compose_summary_input(summary_block, serialized_runs), included_runs
-
-
-def _build_oversized_summary_input(
-    *,
-    summary_block: str,
-    compacted_runs: Sequence[RunOutput | TeamRunOutput],
-    history_settings: ResolvedHistorySettings,
-    max_input_tokens: int,
-) -> tuple[str, list[RunOutput | TeamRunOutput]]:
-    if not compacted_runs:
-        return summary_block, []
-    first_run = compacted_runs[0]
-    oversized_excerpt = _serialize_oversized_run_excerpt(
-        first_run,
-        index=0,
-        history_settings=history_settings,
-        max_tokens=_remaining_excerpt_budget(max_input_tokens, summary_block),
-    )
-    if oversized_excerpt is None:
-        return summary_block, []
-    return _compose_summary_input(summary_block, oversized_excerpt), [first_run]
-
-
-def _serialize_oversized_run_excerpt(
-    run: RunOutput | TeamRunOutput,
-    *,
-    index: int,
-    history_settings: ResolvedHistorySettings,
-    max_tokens: int,
-) -> str | None:
-    if max_tokens <= 0:
-        return None
-
-    full_run = _serialize_run(run, index, history_settings)
-    if estimate_text_tokens(full_run) <= max_tokens:
-        return full_run
-
-    blocks = _excerpt_blocks(run, history_settings)
-    budget_chars = max_tokens * 4
-    while budget_chars > 0:
-        excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=budget_chars)
-        if estimate_text_tokens(excerpt) <= max_tokens:
-            return excerpt
-        budget_chars //= 2
-
-    minimal_excerpt = _serialize_run_excerpt(run, index=index, blocks=blocks, content_budget_chars=0)
-    if estimate_text_tokens(minimal_excerpt) <= max_tokens:
-        return minimal_excerpt
-    return None
-
-
-def _serialize_run_excerpt(
-    run: RunOutput | TeamRunOutput,
-    *,
-    index: int,
-    blocks: Sequence[_ExcerptBlock],
-    content_budget_chars: int,
-) -> str:
-    lines = [_run_open_tag(run, index), f"<note>{_OVERSIZED_RUN_NOTE}</note>"]
-    remaining_chars = content_budget_chars
-    for block in blocks:
-        if remaining_chars <= 0:
-            break
-        rendered = block.render(max_chars=remaining_chars)
-        if rendered is None:
-            continue
-        lines.append(rendered)
-        if len(block.content) <= remaining_chars:
-            remaining_chars -= len(block.content)
-        else:
-            break
-
-    lines.append("</run>")
-    return "\n".join(lines)
-
-
 def _default_compaction_history_settings() -> ResolvedHistorySettings:
     return ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
     )
-
-
-def _compaction_replay_messages(
-    run: RunOutput | TeamRunOutput,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    return prepared_compaction_replay_messages(run, history_settings)
-
-
-def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> list[_ExcerptBlock]:
-    blocks: list[_ExcerptBlock] = []
-    if run.metadata:
-        blocks.append(
-            _ExcerptBlock("<run_metadata>", stable_serialize(_metadata_for_excerpt(run.metadata)), "</run_metadata>"),
-        )
-    for message in _compaction_replay_messages(run, history_settings):
-        content = _render_message_content(message)
-        if not content:
-            continue
-        blocks.append(_ExcerptBlock(_message_open_tag(message), content, "</message>"))
-    return blocks
-
-
-def _metadata_for_excerpt(metadata: dict[str, object]) -> dict[str, object]:
-    """Keep compact identity metadata for oversized excerpts without tool schema bulk."""
-    return {key: value for key, value in metadata.items() if key not in _EXCERPT_METADATA_OMIT_KEYS}
-
-
-def _truncate_excerpt(text: str, max_chars: int) -> str:
-    if max_chars <= 0:
-        return ""
-    if len(text) <= max_chars:
-        return text
-    if max_chars == 1:
-        return "…"
-    return f"{text[: max_chars - 1].rstrip()}…"
-
-
-def _remaining_excerpt_budget(max_input_tokens: int, summary_block: str) -> int:
-    return (
-        max_input_tokens
-        - estimate_text_tokens(summary_block)
-        - estimate_text_tokens(
-            "<new_conversation>\n\n</new_conversation>",
-        )
-    )
-
-
-def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
-    parts: list[str] = []
-    if summary_block:
-        parts.append(summary_block)
-    parts.append(f"<new_conversation>\n{serialized_runs}\n</new_conversation>")
-    return "\n\n".join(parts)
-
-
-def _estimate_serialized_run_tokens(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> int:
-    return estimate_text_tokens(_serialize_run(run, 0, history_settings))
-
-
-def _messages_for_runs(
-    runs: Sequence[RunOutput | TeamRunOutput],
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    messages: list[Message] = []
-    for run in runs:
-        messages.extend(_compaction_replay_messages(run, history_settings))
-    return messages
-
-
-def _serialize_run(run: RunOutput | TeamRunOutput, index: int, history_settings: ResolvedHistorySettings) -> str:
-    lines = [_run_open_tag(run, index)]
-    if run.metadata:
-        lines.extend(["<run_metadata>", _escape_xml_content(stable_serialize(run.metadata)), "</run_metadata>"])
-    for message in _compaction_replay_messages(run, history_settings):
-        lines.extend(_serialize_message(message))
-    lines.append("</run>")
-    return "\n".join(lines)
-
-
-def _serialize_message(message: Message) -> list[str]:
-    lines = [_message_open_tag(message), _escape_xml_content(_render_message_content(message)), "</message>"]
-    if message.tool_calls:
-        lines.extend(["<tool_calls>", _escape_xml_content(stable_serialize(message.tool_calls)), "</tool_calls>"])
-    for tag, media_value in _message_media_entries(message):
-        serialized = _serialize_media_payload(media_value)
-        if not serialized:
-            continue
-        lines.extend([f"<{tag}>", _escape_xml_content(serialized), f"</{tag}>"])
-    return lines
-
-
-def _run_open_tag(run: RunOutput | TeamRunOutput, index: int) -> str:
-    attrs = [f'index="{index}"']
-    if run.run_id:
-        attrs.append(f'run_id="{escape(str(run.run_id), quote=True)}"')
-    if run.status is not None:
-        attrs.append(f'status="{escape(str(run.status), quote=True)}"')
-    return f"<run {' '.join(attrs)}>"
-
-
-def _message_open_tag(message: Message) -> str:
-    attrs = [f'role="{escape(message.role, quote=True)}"']
-    if message.name:
-        attrs.append(f'name="{escape(message.name, quote=True)}"')
-    if message.tool_call_id:
-        attrs.append(f'tool_call_id="{escape(message.tool_call_id, quote=True)}"')
-    return f"<message {' '.join(attrs)}>"
-
-
-def _message_media_entries(message: Message) -> tuple[tuple[str, object | None], ...]:
-    return prepared_message_media_entries(message)
-
-
-def _serialize_media_payload(media_value: object | None) -> str:
-    if media_value is None:
-        return ""
-    return stable_serialize(_media_payload_snapshot(media_value))
-
-
-def _media_payload_snapshot(media_value: object) -> object:
-    return prepared_media_payload_snapshot(media_value)
-
-
-def _render_message_content(message: Message) -> str:
-    """Render one replayable string form of a message body."""
-    return prepared_render_message_content(message)
-
-
-def _unescape_xml_content(text: str) -> str:
-    return text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
-
-
-def _escape_xml_content(text: str) -> str:
-    return escape(_unescape_xml_content(text), quote=False)
 
 
 def estimate_prompt_visible_history_tokens(
@@ -1524,7 +1201,7 @@ def estimate_prompt_visible_history_tokens(
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run."""
     summary_tokens = estimate_session_summary_tokens(_current_summary_text(session))
-    history_messages = _history_messages_for_session(
+    history_messages = history_messages_for_session(
         session=session,
         scope=scope,
         history_settings=history_settings,
@@ -1550,16 +1227,6 @@ def estimate_session_summary_tokens(summary_text: str | None) -> int:
     return estimate_text_tokens(wrapper)
 
 
-def estimate_history_messages_tokens(messages: list[Message]) -> int:
-    """Estimate the token count of materialized history messages."""
-    return estimate_prepared_history_messages_tokens(messages)
-
-
-def _strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
-    """Strip stale Anthropic thinking replay fields from completed turns."""
-    return prepared_strip_stale_anthropic_replay_fields(messages)
-
-
 def _select_runs_to_compact(
     *,
     visible_runs: list[RunOutput | TeamRunOutput],
@@ -1581,19 +1248,6 @@ def _select_runs_to_compact(
         history_settings=history_settings,
     )
     return visible_runs if current_tokens > available_history_budget else []
-
-
-def _history_messages_for_session(
-    *,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    return prepared_history_messages_for_session(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-    )
 
 
 def completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:

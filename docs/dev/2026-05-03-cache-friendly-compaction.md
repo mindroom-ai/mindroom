@@ -26,7 +26,7 @@ It owns Matrix visible-message conversion, unseen-context preparation, Matrix fa
 
 `src/mindroom/execution_preparation.py` still owns request-scoped orchestration, history policy application, compaction lifecycle wiring, and the `PreparedExecutionContext` returned to callers.
 
-The execution-preparation helper names that tests and callers already used now delegate to the prepared-chain module.
+Execution preparation calls the prepared-chain module directly instead of re-exporting compatibility helpers.
 
 `src/mindroom/history/compaction.py` still owns durable session mutation, chunk selection, lifecycle metadata, model calls, retries, hook emission, and progress persistence.
 
@@ -78,7 +78,7 @@ Matrix seen-event metadata propagation is unchanged.
 
 Response event ids, prepared-history diagnostics, and compaction lifecycle metadata are unchanged.
 
-The legacy XML summary-input helper remains for compatibility with existing tests and callers that still inspect that exact rendering.
+The legacy XML summary-input helper was removed, so compaction has one serialization path for provider-visible history.
 
 ## Test Coverage
 

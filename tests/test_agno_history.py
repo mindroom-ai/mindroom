@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,23 +48,19 @@ from mindroom.constants import (
 )
 from mindroom.execution_preparation import (
     PreparedExecutionContext,
-    build_matrix_prompt_with_thread_history,
     prepare_agent_execution_context,
     prepare_bound_team_execution_context,
     prepare_bound_team_run_context,
 )
 from mindroom.history import PreparedHistoryState, prepare_history_for_run
 from mindroom.history.compaction import (
-    _build_summary_input,
     _emit_compaction_hook,
     _generate_compaction_summary,
     _persist_compaction_progress,
     _rewrite_working_session_for_compaction,
-    _strip_stale_anthropic_replay_fields,
     compact_scope_history,
     effective_summary_input_budget_tokens,
     estimate_agent_static_tokens,
-    estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
     estimate_static_tokens,
@@ -112,9 +108,14 @@ from mindroom.hooks import (
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.memory import MemoryPromptParts
 from mindroom.prepared_conversation_chain import (
+    CompactionSummaryRequest,
     build_cold_cache_compaction_summary_request,
+    build_compaction_summary_request,
+    build_matrix_prompt_with_thread_history,
     build_persisted_run_chain,
     build_warm_cache_compaction_summary_request,
+    estimate_history_messages_tokens,
+    strip_stale_anthropic_replay_fields,
 )
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
@@ -123,6 +124,43 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.conftest import bind_runtime_paths, make_conversation_cache_mock, make_event_cache_mock, make_visible_message
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
+
+
+def _build_test_summary_request(
+    *,
+    previous_summary: str | None,
+    compacted_runs: Sequence[RunOutput | TeamRunOutput],
+    max_input_tokens: int,
+    history_settings: ResolvedHistorySettings | None = None,
+) -> tuple[CompactionSummaryRequest | None, list[RunOutput | TeamRunOutput]]:
+    return build_compaction_summary_request(
+        previous_summary=previous_summary,
+        compacted_runs=compacted_runs,
+        history_settings=history_settings
+        or ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None),
+        max_input_tokens=max_input_tokens,
+    )
+
+
+def _included_summary_run_count(
+    previous_summary: str | None,
+    compacted_runs: Sequence[RunOutput | TeamRunOutput],
+    budget: int,
+    *,
+    history_settings: ResolvedHistorySettings | None = None,
+) -> int:
+    return len(
+        _build_test_summary_request(
+            previous_summary=previous_summary,
+            compacted_runs=compacted_runs,
+            history_settings=history_settings,
+            max_input_tokens=budget,
+        )[1],
+    )
+
+
+def _summary_messages(content: str = "Current prompt") -> list[Message]:
+    return [Message(role="user", content=content)]
 
 
 def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:
@@ -977,7 +1015,7 @@ async def test_compaction_call_timeout_raises_runtime_error() -> None:
     ):
         await _generate_compaction_summary(
             model=_SlowSummaryModel(id="summary-model", provider="fake"),
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         )
 
 
@@ -1011,7 +1049,7 @@ async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_
     ):
         await _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         )
 
     assert asyncio.get_running_loop().time() - start < 0.04
@@ -1050,7 +1088,7 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
     ):
         await _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         )
 
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
@@ -1070,7 +1108,7 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
     with pytest.raises(TimeoutError, match="provider timeout"):
         await _generate_compaction_summary(
             model=_ProviderTimeoutModel(id="summary-model", provider="fake"),
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         )
 
 
@@ -1099,10 +1137,10 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
             ),
         ],
     )
-    summary_inputs: list[str] = []
+    summary_inputs: list[list[Message]] = []
 
-    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
-        summary_inputs.append(summary_input)
+    async def fake_summary(*, messages: list[Message], **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(messages)
         if len(summary_inputs) == 1:
             msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS}s"
             raise RuntimeError(msg)
@@ -1138,7 +1176,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
 
     assert rewrite_result is not None
     assert len(summary_inputs) == 2
-    assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
+    assert estimate_history_messages_tokens(summary_inputs[1]) < estimate_history_messages_tokens(summary_inputs[0])
 
 
 @pytest.mark.asyncio
@@ -1164,7 +1202,7 @@ async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelle
     summary_task = asyncio.create_task(
         _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         ),
     )
 
@@ -1205,7 +1243,7 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
     summary_task = asyncio.create_task(
         _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         ),
     )
 
@@ -1245,7 +1283,7 @@ async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_
     summary_task = asyncio.create_task(
         _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         ),
     )
 
@@ -1293,7 +1331,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
     ):
         await _generate_compaction_summary(
             model=model,
-            summary_input="Current prompt",
+            messages=_summary_messages(),
         )
 
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
@@ -1514,7 +1552,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         budget
         for budget in range(1, 5_000)
         if len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=None,
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
@@ -1522,7 +1560,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         )
         == 1
         and len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary="merged summary",
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
@@ -1672,7 +1710,7 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
         patch(
-            "mindroom.history.compaction._messages_for_runs",
+            "mindroom.history.compaction.build_persisted_run_chain",
             side_effect=AssertionError("compaction messages should not be collected without hooks"),
         ),
     ):
@@ -2138,24 +2176,11 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     first_summary_text = "first pass summary"
     second_summary_text = "final summary"
 
-    def _included_run_count(
-        previous_summary: str | None,
-        compacted_runs: list[RunOutput | TeamRunOutput],
-        budget: int,
-    ) -> int:
-        return len(
-            _build_summary_input(
-                previous_summary=previous_summary,
-                compacted_runs=compacted_runs,
-                max_input_tokens=budget,
-            )[1],
-        )
-
     summary_input_budget = next(
         budget
         for budget in range(1, 10_000)
-        if _included_run_count(None, visible_runs, budget) == 2
-        and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
+        if _included_summary_run_count(None, visible_runs, budget) == 2
+        and _included_summary_run_count(first_summary_text, visible_runs[2:], budget) == 1
     )
     after_first_session = _session(
         "session-1",
@@ -2280,24 +2305,11 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     first_summary_text = "first pass summary"
     second_summary_text = "second pass summary"
 
-    def _included_run_count(
-        previous_summary: str | None,
-        compacted_runs: list[RunOutput | TeamRunOutput],
-        budget: int,
-    ) -> int:
-        return len(
-            _build_summary_input(
-                previous_summary=previous_summary,
-                compacted_runs=compacted_runs,
-                max_input_tokens=budget,
-            )[1],
-        )
-
     summary_input_budget = next(
         budget
         for budget in range(1, 10_000)
-        if _included_run_count(None, visible_runs, budget) == 2
-        and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
+        if _included_summary_run_count(None, visible_runs, budget) == 2
+        and _included_summary_run_count(first_summary_text, visible_runs[2:], budget) == 1
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
@@ -2407,7 +2419,7 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
         budget
         for budget in range(1, 10_000)
         if len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=None,
                 compacted_runs=visible_runs,
                 history_settings=history_settings,
@@ -2416,7 +2428,7 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
         )
         == 1
         and len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=first_summary_text,
                 compacted_runs=visible_runs[1:],
                 history_settings=history_settings,
@@ -2546,24 +2558,11 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     visible_runs = list(session.runs or [])
     first_summary_text = "first pass summary"
 
-    def _included_run_count(
-        previous_summary: str | None,
-        compacted_runs: list[RunOutput | TeamRunOutput],
-        budget: int,
-    ) -> int:
-        return len(
-            _build_summary_input(
-                previous_summary=previous_summary,
-                compacted_runs=compacted_runs,
-                max_input_tokens=budget,
-            )[1],
-        )
-
     summary_input_budget = next(
         budget
         for budget in range(1, 10_000)
-        if _included_run_count(None, visible_runs, budget) == 2
-        and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
+        if _included_summary_run_count(None, visible_runs, budget) == 2
+        and _included_summary_run_count(first_summary_text, visible_runs[2:], budget) == 1
     )
     after_first_session = _session(
         "session-1",
@@ -3099,7 +3098,7 @@ async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_un
     assert len(mock_warning.call_args_list) == 1
 
 
-def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
+def test_compaction_summary_request_advances_past_oversized_oldest_run() -> None:
     big_run = _completed_run(
         "run-big",
         messages=[
@@ -3109,18 +3108,19 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
     )
     small_run = _completed_run("run-small")
 
-    summary_input, included_runs = _build_summary_input(
+    request, included_runs = _build_test_summary_request(
         previous_summary=None,
         compacted_runs=[big_run, small_run],
         max_input_tokens=220,
     )
 
+    assert request is not None
     assert [run.run_id for run in included_runs] == ["run-big"]
-    assert "Run truncated to fit compaction budget." in summary_input
-    assert 'run_id="run-big"' in summary_input
+    assert request.chain.source_run_ids == ("run-big",)
+    assert request.chain.messages[0].content == "Run truncated to fit compaction budget."
 
 
-def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema() -> None:
+def test_compaction_summary_request_oversized_run_preserves_messages_before_tool_schema() -> None:
     root_request = "Look into how the automatic memory flush in mindroom is supposed to work."
     run = _completed_run(
         "run-big-metadata",
@@ -3135,31 +3135,32 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
         "tools_schema": [{"name": f"tool_{index}", "description": "x" * 2000} for index in range(30)],
     }
 
-    summary_input, included_runs = _build_summary_input(
+    request, included_runs = _build_test_summary_request(
         previous_summary=None,
         compacted_runs=[run],
         max_input_tokens=280,
     )
 
+    assert request is not None
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
-    assert root_request in summary_input
-    assert "tools_schema" not in summary_input
+    assert root_request in request.rendered_text
+    assert "tools_schema" not in request.rendered_text
 
 
-def test_build_summary_input_skips_when_previous_summary_cannot_be_preserved() -> None:
+def test_compaction_summary_request_skips_when_previous_summary_cannot_be_preserved() -> None:
     run = _completed_run("run-1")
 
-    summary_input, included_runs = _build_summary_input(
+    request, included_runs = _build_test_summary_request(
         previous_summary="existing durable summary " * 50,
         compacted_runs=[run],
         max_input_tokens=50,
     )
 
+    assert request is None
     assert included_runs == []
-    assert "<previous_summary>" in summary_input
 
 
-def test_build_summary_input_excludes_persisted_system_prompt() -> None:
+def test_compaction_summary_request_excludes_persisted_system_prompt() -> None:
     run = _completed_run(
         "run-1",
         messages=[
@@ -3169,19 +3170,20 @@ def test_build_summary_input_excludes_persisted_system_prompt() -> None:
         ],
     )
 
-    summary_input, included_runs = _build_summary_input(
+    request, included_runs = _build_test_summary_request(
         previous_summary=None,
         compacted_runs=[run],
         max_input_tokens=1_000,
     )
 
+    assert request is not None
     assert included_runs == [run]
-    assert "Persisted system prompt" not in summary_input
-    assert "user request" in summary_input
-    assert "assistant answer" in summary_input
+    assert "Persisted system prompt" not in request.rendered_text
+    assert "user request" in request.rendered_text
+    assert "assistant answer" in request.rendered_text
 
 
-def test_build_summary_input_honors_tool_call_history_limit() -> None:
+def test_compaction_summary_request_honors_tool_call_history_limit() -> None:
     run = _completed_run(
         "run-1",
         messages=[
@@ -3201,7 +3203,7 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
         ],
     )
 
-    summary_input, included_runs = _build_summary_input(
+    request, included_runs = _build_test_summary_request(
         previous_summary=None,
         compacted_runs=[run],
         history_settings=ResolvedHistorySettings(
@@ -3211,11 +3213,18 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
         max_input_tokens=1_000,
     )
 
+    assert request is not None
     assert included_runs == [run]
-    assert "call-1" not in summary_input
-    assert "first result" not in summary_input
-    assert "call-2" in summary_input
-    assert "second result" in summary_input
+    assert [message.content for message in request.chain.messages] == [
+        "use tools",
+        "first tool",
+        "second tool",
+        "second result",
+    ]
+    assert not request.chain.messages[1].tool_calls
+    assert request.chain.messages[2].tool_calls
+    assert request.chain.messages[2].tool_calls[0]["id"] == "call-2"
+    assert request.chain.messages[3].tool_call_id == "call-2"
 
 
 def test_warm_cache_compaction_request_preserves_prepared_chain_prefix() -> None:
@@ -3471,7 +3480,7 @@ def test_estimate_session_summary_tokens_empty() -> None:
     assert estimate_session_summary_tokens("   ") == 0
 
 
-def test_private_strip_stale_anthropic_replay_fields_returns_zero_without_user_messages() -> None:
+def test_strip_stale_anthropic_replay_fields_returns_zero_without_user_messages() -> None:
     assistant = Message(
         role="assistant",
         content="assistant",
@@ -3480,13 +3489,13 @@ def test_private_strip_stale_anthropic_replay_fields_returns_zero_without_user_m
         redacted_reasoning_content="redacted",
     )
 
-    assert _strip_stale_anthropic_replay_fields([assistant]) == 0
+    assert strip_stale_anthropic_replay_fields([assistant]) == 0
     assert assistant.provider_data == {"signature": "sig-1", "keep": "yes"}
     assert assistant.reasoning_content == "thinking"
     assert assistant.redacted_reasoning_content == "redacted"
 
 
-def test_private_strip_stale_anthropic_replay_fields_preserves_single_turn_after_last_user() -> None:
+def test_strip_stale_anthropic_replay_fields_preserves_single_turn_after_last_user() -> None:
     assistant = Message(
         role="assistant",
         content="assistant",
@@ -3499,13 +3508,13 @@ def test_private_strip_stale_anthropic_replay_fields_preserves_single_turn_after
         assistant,
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
     assert assistant.provider_data == {"signature": "sig-1"}
     assert assistant.reasoning_content == "thinking"
     assert assistant.redacted_reasoning_content == "redacted"
 
 
-def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_preserves_current_turn() -> None:
+def test_strip_stale_anthropic_replay_fields_strips_old_assistants_and_preserves_current_turn() -> None:
     old_assistant = Message(
         role="assistant",
         content="old assistant",
@@ -3527,7 +3536,7 @@ def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_p
         current_assistant,
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 1
+    assert strip_stale_anthropic_replay_fields(messages) == 1
     assert old_assistant.provider_data == {"keep": "yes"}
     assert old_assistant.reasoning_content is None
     assert old_assistant.redacted_reasoning_content is None
@@ -3536,7 +3545,7 @@ def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_p
     assert current_assistant.redacted_reasoning_content == "current redacted"
 
 
-def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_last_user() -> None:
+def test_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_last_user() -> None:
     tool_assistant = Message(
         role="assistant",
         content="tool call",
@@ -3561,7 +3570,7 @@ def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_
         final_assistant,
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
     assert tool_assistant.provider_data == {"signature": "sig-tool"}
     assert tool_assistant.reasoning_content == "thinking"
     assert tool_assistant.redacted_reasoning_content == "redacted"
@@ -3570,7 +3579,7 @@ def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_
     assert final_assistant.redacted_reasoning_content == "more redacted"
 
 
-def test_private_strip_stale_anthropic_replay_fields_ignores_reasoning_without_signature() -> None:
+def test_strip_stale_anthropic_replay_fields_ignores_reasoning_without_signature() -> None:
     assistant = Message(
         role="assistant",
         content="assistant",
@@ -3584,7 +3593,7 @@ def test_private_strip_stale_anthropic_replay_fields_ignores_reasoning_without_s
         Message(role="user", content="current user"),
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
     assert assistant.provider_data == {"keep": "yes"}
     assert assistant.reasoning_content == "thinking"
     assert assistant.redacted_reasoning_content == "redacted"
@@ -3636,14 +3645,14 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
         budget
         for budget in range(1, 10_000)
         if len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=None,
                 compacted_runs=list(working_session.runs or []),
                 max_input_tokens=budget,
             )[1],
         )
         == 1
-        and _build_summary_input(
+        and _build_test_summary_request(
             previous_summary=summary_text,
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
@@ -3788,14 +3797,14 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
         budget
         for budget in range(1, 10_000)
         if len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=None,
                 compacted_runs=list(session.runs or []),
                 max_input_tokens=budget,
             )[1],
         )
         == 1
-        and _build_summary_input(
+        and _build_test_summary_request(
             previous_summary=summary_text,
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
@@ -3875,7 +3884,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         budget
         for budget in range(1, 5_000)
         if len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary=None,
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
@@ -3883,7 +3892,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         )
         == 1
         and len(
-            _build_summary_input(
+            _build_test_summary_request(
                 previous_summary="merged summary",
                 compacted_runs=[second_run],
                 max_input_tokens=budget,

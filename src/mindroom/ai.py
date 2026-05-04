@@ -39,7 +39,7 @@ from mindroom.constants import (
     RuntimePaths,
 )
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
+from mindroom.execution_preparation import prepare_agent_execution_context
 from mindroom.history import (
     CompactionOutcome,
     HistoryScope,
@@ -69,6 +69,7 @@ from mindroom.media_fallback import should_retry_without_inline_media
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.prepared_conversation_chain import render_prepared_messages_text
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
 from mindroom.tool_system.events import (
     complete_pending_tool_block,

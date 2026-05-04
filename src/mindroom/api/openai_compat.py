@@ -46,10 +46,7 @@ from mindroom.ai import (
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.execution_preparation import (
-    prepare_bound_team_run_context,
-    render_prepared_team_messages_text,
-)
+from mindroom.execution_preparation import prepare_bound_team_run_context
 from mindroom.history import (
     ScopeSessionContext,
     close_team_runtime_state_dbs,
@@ -66,6 +63,7 @@ from mindroom.llm_request_logging import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.prepared_conversation_chain import render_prepared_team_messages_text
 from mindroom.routing import suggest_agent
 from mindroom.teams import (
     TeamMode,
