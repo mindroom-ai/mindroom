@@ -25,8 +25,6 @@ from agno.session.team import TeamSession
 from agno.team._tools import _determine_tools_for_model as determine_team_tools_for_model
 from agno.tools import Toolkit
 from agno.tools.function import Function
-from agno.utils.message import filter_tool_calls
-from pydantic import BaseModel
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
@@ -48,6 +46,31 @@ from mindroom.history.types import (
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.prepared_conversation_chain import (
+    CompactionSummaryRequest,
+    build_compaction_summary_request,
+)
+from mindroom.prepared_conversation_chain import (
+    compaction_replay_messages as prepared_compaction_replay_messages,
+)
+from mindroom.prepared_conversation_chain import (
+    estimate_history_messages_tokens as estimate_prepared_history_messages_tokens,
+)
+from mindroom.prepared_conversation_chain import (
+    history_messages_for_session as prepared_history_messages_for_session,
+)
+from mindroom.prepared_conversation_chain import (
+    media_payload_snapshot as prepared_media_payload_snapshot,
+)
+from mindroom.prepared_conversation_chain import (
+    message_media_entries as prepared_message_media_entries,
+)
+from mindroom.prepared_conversation_chain import (
+    render_message_content as prepared_render_message_content,
+)
+from mindroom.prepared_conversation_chain import (
+    strip_stale_anthropic_replay_fields as prepared_strip_stale_anthropic_replay_fields,
+)
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
@@ -71,7 +94,6 @@ _EXCERPT_METADATA_OMIT_KEYS = frozenset(
         "tools_schema",
     },
 )
-_STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 type _ToolDefinition = dict[str, object]
 _COMPACTION_SUMMARY_PROMPT = """\
@@ -500,13 +522,13 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
         if not compactable_runs:
             break
 
-        summary_input, included_runs = _build_summary_input(
+        summary_request, included_runs = _build_summary_request(
             previous_summary=_current_summary_text(working_session),
             compacted_runs=compactable_runs,
             history_settings=history_settings,
             max_input_tokens=per_call_summary_input_budget,
         )
-        if not included_runs:
+        if summary_request is None or not included_runs:
             logger.warning(
                 "Compaction skipped because no run fit the single-pass summary budget",
                 session_id=session_id,
@@ -522,7 +544,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             model=summary_model,
             previous_summary=_current_summary_text(working_session),
             compactable_runs=compactable_runs,
-            initial_summary_input=summary_input,
+            initial_summary_request=summary_request,
             initial_included_runs=included_runs,
             summary_input_budget=per_call_summary_input_budget,
             session_id=session_id,
@@ -1032,7 +1054,7 @@ async def _generate_compaction_summary_with_retry(
     model: Model,
     previous_summary: str | None,
     compactable_runs: Sequence[RunOutput | TeamRunOutput],
-    initial_summary_input: str,
+    initial_summary_request: CompactionSummaryRequest,
     initial_included_runs: list[RunOutput | TeamRunOutput],
     summary_input_budget: int,
     session_id: str,
@@ -1041,12 +1063,12 @@ async def _generate_compaction_summary_with_retry(
     timing_scope: str | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, retrying once with a smaller input when safe."""
-    summary_input = initial_summary_input
+    summary_request = initial_summary_request
     included_runs = initial_included_runs
     budget = summary_input_budget
     last_error: Exception | None = None
     for attempt in (1, 2):
-        estimated_input_tokens = estimate_text_tokens(summary_input)
+        estimated_input_tokens = summary_request.estimated_tokens
         started = asyncio.get_running_loop().time()
         logger.info(
             "Compaction summary chunk request",
@@ -1062,7 +1084,8 @@ async def _generate_compaction_summary_with_retry(
         try:
             summary = await _generate_compaction_summary(
                 model=model,
-                summary_input=summary_input,
+                messages=list(summary_request.messages),
+                summary_input=summary_request.rendered_text,
                 timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
                 timing_scope=timing_scope,
             )
@@ -1084,14 +1107,14 @@ async def _generate_compaction_summary_with_retry(
             last_error = exc
             retry_budget = max(1_000, budget // 2)
             if attempt == 1 and retry_budget < budget and _should_retry_smaller_summary_chunk(exc):
-                rebuilt_input, rebuilt_runs = _build_summary_input(
+                rebuilt_request, rebuilt_runs = _build_summary_request(
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
                     history_settings=history_settings,
                     max_input_tokens=retry_budget,
                 )
-                if rebuilt_runs:
-                    summary_input = rebuilt_input
+                if rebuilt_request is not None and rebuilt_runs:
+                    summary_request = rebuilt_request
                     included_runs = rebuilt_runs
                     budget = retry_budget
                     continue
@@ -1141,20 +1164,28 @@ def _should_retry_smaller_summary_chunk(error: Exception) -> bool:
 async def _generate_compaction_summary(
     *,
     model: Model,
-    summary_input: str,
+    summary_input: str | None = None,
+    messages: Sequence[Message] | None = None,
     timeout_seconds: float | None = None,
     timing_scope: str | None = None,
 ) -> SessionSummary:
     del timing_scope
     resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    if messages is None:
+        if summary_input is None:
+            msg = "compaction summary request requires messages or summary_input"
+            raise ValueError(msg)
+        request_messages = [
+            Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
+            Message(role="user", content=summary_input),
+        ]
+    else:
+        request_messages = [message.model_copy(deep=True) for message in messages]
 
     async def _request_summary() -> ModelResponse:
         try:
             return await model.aresponse(
-                messages=[
-                    Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
-                    Message(role="user", content=summary_input),
-                ],
+                messages=request_messages,
             )
         except TimeoutError as exc:
             raise _CompactionProviderTimeoutError(exc) from exc
@@ -1209,6 +1240,24 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.summary_input_build")
+def _build_summary_request(
+    *,
+    previous_summary: str | None,
+    compacted_runs: Sequence[RunOutput | TeamRunOutput],
+    max_input_tokens: int,
+    history_settings: ResolvedHistorySettings | None = None,
+) -> tuple[CompactionSummaryRequest | None, list[RunOutput | TeamRunOutput]]:
+    """Build the chain-shaped compaction summary request for one chunk."""
+    resolved_history_settings = history_settings or _default_compaction_history_settings()
+    return build_compaction_summary_request(
+        previous_summary=previous_summary,
+        compacted_runs=compacted_runs,
+        history_settings=resolved_history_settings,
+        max_input_tokens=max_input_tokens,
+    )
+
+
+@timed("system_prompt_assembly.history_prepare.compaction.summary_input_build_legacy")
 def _build_summary_input(
     *,
     previous_summary: str | None,
@@ -1336,12 +1385,7 @@ def _compaction_replay_messages(
     run: RunOutput | TeamRunOutput,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    skip_roles = set(_history_skip_roles(history_settings) or [])
-    messages = [deepcopy(message) for message in run.messages or [] if message.role not in skip_roles]
-    if history_settings.max_tool_calls_from_history is not None and messages:
-        filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
-    _strip_stale_anthropic_replay_fields(messages)
-    return messages
+    return prepared_compaction_replay_messages(run, history_settings)
 
 
 def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> list[_ExcerptBlock]:
@@ -1446,16 +1490,7 @@ def _message_open_tag(message: Message) -> str:
 
 
 def _message_media_entries(message: Message) -> tuple[tuple[str, object | None], ...]:
-    return (
-        ("images", message.images),
-        ("audio", message.audio),
-        ("videos", message.videos),
-        ("files", message.files),
-        ("audio_output", message.audio_output),
-        ("image_output", message.image_output),
-        ("video_output", message.video_output),
-        ("file_output", message.file_output),
-    )
+    return prepared_message_media_entries(message)
 
 
 def _serialize_media_payload(media_value: object | None) -> str:
@@ -1465,25 +1500,12 @@ def _serialize_media_payload(media_value: object | None) -> str:
 
 
 def _media_payload_snapshot(media_value: object) -> object:
-    if isinstance(media_value, BaseModel):
-        payload = cast("dict[str, object]", media_value.model_dump(exclude_none=True))
-        payload.pop("content", None)
-        return payload
-    if isinstance(media_value, Sequence) and not isinstance(media_value, (str, bytes, bytearray)):
-        return [_media_payload_snapshot(item) for item in media_value]
-    return media_value
+    return prepared_media_payload_snapshot(media_value)
 
 
 def _render_message_content(message: Message) -> str:
     """Render one replayable string form of a message body."""
-    content = message.compressed_content if message.compressed_content is not None else message.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(stable_serialize(part) for part in content)
-    if content is None:
-        return ""
-    return stable_serialize(content)
+    return prepared_render_message_content(message)
 
 
 def _unescape_xml_content(text: str) -> str:
@@ -1530,32 +1552,12 @@ def estimate_session_summary_tokens(summary_text: str | None) -> int:
 
 def estimate_history_messages_tokens(messages: list[Message]) -> int:
     """Estimate the token count of materialized history messages."""
-    if not messages:
-        return 0
-    return sum(_estimated_message_chars(message) for message in messages) // 4
+    return estimate_prepared_history_messages_tokens(messages)
 
 
 def _strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
     """Strip stale Anthropic thinking replay fields from completed turns."""
-    last_user_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].role == "user":
-            last_user_idx = i
-            break
-    if last_user_idx < 0:
-        return 0
-    modified = 0
-    for msg in messages[:last_user_idx]:
-        if msg.role != "assistant":
-            continue
-        pd = msg.provider_data
-        if not isinstance(pd, dict) or "signature" not in pd:
-            continue
-        msg.reasoning_content = None
-        msg.redacted_reasoning_content = None
-        del pd["signature"]
-        modified += 1
-    return modified
+    return prepared_strip_stale_anthropic_replay_fields(messages)
 
 
 def _select_runs_to_compact(
@@ -1587,77 +1589,11 @@ def _history_messages_for_session(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    session_messages = _session_history_messages(
+    return prepared_history_messages_for_session(
         session=session,
         scope=scope,
         history_settings=history_settings,
     )
-    history_messages = [deepcopy(message) for message in session_messages]
-    if history_settings.max_tool_calls_from_history is not None and history_messages:
-        filter_tool_calls(history_messages, history_settings.max_tool_calls_from_history)
-    _strip_stale_anthropic_replay_fields(history_messages)
-    return history_messages
-
-
-def _session_history_messages(
-    *,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    limit = history_settings.policy.limit
-    if scope.kind == "team":
-        return _team_session_history_messages(
-            session=cast("TeamSession", session),
-            scope_id=scope.scope_id,
-            history_settings=history_settings,
-            limit=limit,
-        )
-    return _agent_session_history_messages(
-        session=cast("AgentSession", session),
-        scope_id=scope.scope_id,
-        history_settings=history_settings,
-        limit=limit,
-    )
-
-
-def _agent_session_history_messages(
-    *,
-    session: AgentSession,
-    scope_id: str,
-    history_settings: ResolvedHistorySettings,
-    limit: int | None,
-) -> list[Message]:
-    skip_roles = _history_skip_roles(history_settings)
-    if history_settings.policy.mode == "runs":
-        return session.get_messages(agent_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
-    if history_settings.policy.mode == "messages":
-        return session.get_messages(agent_id=scope_id, limit=limit, skip_roles=skip_roles)
-    return session.get_messages(agent_id=scope_id, skip_roles=skip_roles)
-
-
-def _team_session_history_messages(
-    *,
-    session: TeamSession,
-    scope_id: str,
-    history_settings: ResolvedHistorySettings,
-    limit: int | None,
-) -> list[Message]:
-    skip_roles = _history_skip_roles(history_settings)
-    if history_settings.policy.mode == "runs":
-        return session.get_messages(team_id=scope_id, last_n_runs=limit, skip_roles=skip_roles)
-    if history_settings.policy.mode == "messages":
-        return session.get_messages(team_id=scope_id, limit=limit, skip_roles=skip_roles)
-    return session.get_messages(team_id=scope_id, skip_roles=skip_roles)
-
-
-def _history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str] | None:
-    """Return the effective Agno skip_roles filter for persisted history replay."""
-    if not history_settings.skip_history_system_role:
-        return None
-    if history_settings.system_message_role in _STANDARD_HISTORY_ROLES:
-        return None
-    return [history_settings.system_message_role]
 
 
 def completed_top_level_runs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
@@ -1690,12 +1626,6 @@ def _has_stable_run_id(run: RunOutput | TeamRunOutput) -> bool:
     return isinstance(run.run_id, str) and bool(run.run_id)
 
 
-def _estimated_message_chars(message: Message) -> int:
-    content_chars = len(_render_message_content(message))
-    tool_call_chars = len(stable_serialize(message.tool_calls)) if message.tool_calls else 0
-    return content_chars + tool_call_chars + _estimate_message_media_chars(message)
-
-
 def _remove_runs_by_id(
     runs: Sequence[RunOutput | TeamRunOutput],
     compacted_run_ids: set[str],
@@ -1724,16 +1654,6 @@ def _remove_runs_by_id(
             or (isinstance(run.parent_run_id, str) and run.parent_run_id in remove_ids)
         )
     ]
-
-
-def _estimate_message_media_chars(message: Message) -> int:
-    """Estimate serialized character cost for a message's media payloads."""
-    media_chars = 0
-    for _tag, media_value in _message_media_entries(message):
-        if media_value is None:
-            continue
-        media_chars += len(stable_serialize(_media_payload_snapshot(media_value)))
-    return media_chars
 
 
 def _model_identifier(model: Model) -> str:

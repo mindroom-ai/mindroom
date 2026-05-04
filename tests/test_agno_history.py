@@ -111,6 +111,11 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
 from mindroom.memory import MemoryPromptParts
+from mindroom.prepared_conversation_chain import (
+    build_cold_cache_compaction_summary_request,
+    build_persisted_run_chain,
+    build_warm_cache_compaction_summary_request,
+)
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
@@ -3211,6 +3216,133 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "first result" not in summary_input
     assert "call-2" in summary_input
     assert "second result" in summary_input
+
+
+def test_warm_cache_compaction_request_preserves_prepared_chain_prefix() -> None:
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="user", content="Investigate the cache behavior."),
+            Message(role="assistant", content="The cache key is thread scoped."),
+        ],
+    )
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+    )
+
+    chain = build_persisted_run_chain([run], history_settings=history_settings)
+    request = build_warm_cache_compaction_summary_request(
+        chain,
+        previous_summary="Prior summary",
+    )
+
+    assert request.messages[:-1] == chain.messages
+    assert request.messages[-1].role == "user"
+    assert "Prior summary" in str(request.messages[-1].content)
+    assert "Do not summarize static instructions or tool definitions." in str(request.messages[-1].content)
+    assert request.included_run_ids == ("run-1",)
+
+
+def test_cold_cache_compaction_request_strips_static_messages_without_splitting_tool_results() -> None:
+    chain = build_persisted_run_chain(
+        [
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="system", content="static setup"),
+                    Message(role="user", content="Run a command"),
+                    Message(
+                        role="assistant",
+                        content="Using a tool",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "shell", "arguments": "{}"},
+                            },
+                        ],
+                    ),
+                    Message(role="tool", content="command output", tool_call_id="call-1"),
+                    Message(role="assistant", content="Done"),
+                ],
+            ),
+        ],
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+            skip_history_system_role=False,
+        ),
+    )
+
+    request = build_cold_cache_compaction_summary_request(chain, previous_summary=None)
+    roles = [message.role for message in request.messages]
+    contents = [str(message.content) for message in request.messages]
+
+    assert roles[:4] == ["user", "user", "assistant", "tool"]
+    assert "static setup" not in contents
+    assert "Static agent instructions and tool definitions were omitted" in contents[0]
+    assert request.messages[2].tool_calls
+    assert request.messages[3].tool_call_id == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_compact_scope_history_sends_prepared_chain_summary_request(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="First question"),
+                    Message(role="assistant", content="First answer"),
+                ],
+            ),
+        ],
+        summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
+    )
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    observed_messages: list[Message] = []
+
+    async def fake_generate_compaction_summary(*, messages: list[Message], **_kwargs: object) -> SessionSummary:
+        observed_messages[:] = messages
+        return SessionSummary(summary="Merged summary", updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction._generate_compaction_summary",
+        new=fake_generate_compaction_summary,
+    ):
+        await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=scope,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            available_history_budget=1,
+            summary_input_budget=4_000,
+            compaction_context_window=16_000,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            summary_model_name="summary-model",
+            active_context_window=16_000,
+            replay_window_tokens=16_000,
+            threshold_tokens=1,
+            reserve_tokens=0,
+        )
+
+    assert [message.content for message in observed_messages[:-1]] == ["First question", "First answer"]
+    assert "Existing durable summary" in str(observed_messages[-1].content)
+    assert "Return only the summary text." in str(observed_messages[-1].content)
 
 
 def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:
