@@ -289,11 +289,8 @@ class TurnStore:
             return None
         raw_source_event_ids = metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
         raw_prompt_map = metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)
-        response_event_id = (
-            metadata.get("matrix_response_event_id")
-            if isinstance(metadata.get("matrix_response_event_id"), str)
-            else None
-        )
+        raw_response_event_id = metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+        response_event_id = raw_response_event_id if isinstance(raw_response_event_id, str) else None
         handled_turn = HandledTurnState.create(
             raw_source_event_ids if isinstance(raw_source_event_ids, list) else [anchor_event_id],
             response_event_id=response_event_id,

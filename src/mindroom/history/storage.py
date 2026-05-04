@@ -10,10 +10,17 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
+from mindroom.constants import (
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    MINDROOM_COMPACTION_METADATA_KEY,
+    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.history.types import HistoryScope, HistoryScopeState
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from agno.db.base import BaseDb, SessionType
 
 _COMPACTION_METADATA_VERSION = 2
@@ -249,15 +256,30 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
             continue
         if _scope_for_run(run) != scope:
             continue
-        metadata = run.metadata
-        if not isinstance(metadata, dict):
-            continue
-        raw_seen_ids = metadata.get("matrix_seen_event_ids")
-        if isinstance(raw_seen_ids, list):
-            seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
-        response_event_id = metadata.get("matrix_response_event_id")
-        if isinstance(response_event_id, str) and response_event_id:
-            seen_event_ids.add(response_event_id)
+        seen_event_ids.update(run_seen_event_ids(run))
+    return seen_event_ids
+
+
+def seen_event_ids_for_runs(runs: Iterable[RunOutput | TeamRunOutput]) -> set[str]:
+    """Return Matrix event ids already represented by run metadata."""
+    seen_event_ids: set[str] = set()
+    for run in runs:
+        seen_event_ids.update(run_seen_event_ids(run))
+    return seen_event_ids
+
+
+def run_seen_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
+    """Return Matrix event ids already represented by one run."""
+    metadata = run.metadata
+    if not isinstance(metadata, dict):
+        return set()
+    seen_event_ids: set[str] = set()
+    raw_seen_ids = metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
+    if isinstance(raw_seen_ids, list):
+        seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
+    response_event_id = metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+    if isinstance(response_event_id, str) and response_event_id:
+        seen_event_ids.add(response_event_id)
     return seen_event_ids
 
 

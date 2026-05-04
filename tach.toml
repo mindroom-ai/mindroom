@@ -1484,6 +1484,7 @@ depends_on = [
 path = "mindroom.conversation_state_writer"
 depends_on = [
     "mindroom.agent_storage",
+    "mindroom.constants",
     "mindroom.history",
     "mindroom.runtime_protocols",
 ]

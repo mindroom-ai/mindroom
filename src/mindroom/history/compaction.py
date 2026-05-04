@@ -33,6 +33,7 @@ from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
 from mindroom.history.storage import (
     metadata_with_merged_seen_event_ids,
     read_scope_state,
+    seen_event_ids_for_runs,
     update_scope_seen_event_ids,
     write_scope_state,
 )
@@ -535,7 +536,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             await before_persist_callback(included_runs)
         final_summary_text = generated_summary.summary
         compacted_run_ids = {run.run_id for run in included_runs if isinstance(run.run_id, str) and run.run_id}
-        compacted_seen_event_ids = _seen_event_ids_for_runs(included_runs)
+        compacted_seen_event_ids = sorted(seen_event_ids_for_runs(included_runs))
         working_session.summary = SessionSummary(summary=generated_summary.summary, updated_at=datetime.now(UTC))
         if compacted_seen_event_ids:
             update_scope_seen_event_ids(working_session, scope, compacted_seen_event_ids)
@@ -1392,21 +1393,6 @@ def _compose_summary_input(summary_block: str, serialized_runs: str) -> str:
 
 def _estimate_serialized_run_tokens(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> int:
     return estimate_text_tokens(_serialize_run(run, 0, history_settings))
-
-
-def _seen_event_ids_for_runs(runs: Sequence[RunOutput | TeamRunOutput]) -> list[str]:
-    seen_event_ids: set[str] = set()
-    for run in runs:
-        metadata = run.metadata
-        if not isinstance(metadata, dict):
-            continue
-        raw_seen_ids = metadata.get("matrix_seen_event_ids")
-        if isinstance(raw_seen_ids, list):
-            seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
-        response_event_id = metadata.get("matrix_response_event_id")
-        if isinstance(response_event_id, str) and response_event_id:
-            seen_event_ids.add(response_event_id)
-    return sorted(seen_event_ids)
 
 
 def _messages_for_runs(
