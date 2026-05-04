@@ -53,6 +53,11 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
 )
 from mindroom.history import PreparedHistoryState, prepare_history_for_run
+from mindroom.history.agno_compaction_request import (
+    estimate_agent_static_tokens,
+    estimate_static_tokens,
+    estimate_tool_definition_tokens,
+)
 from mindroom.history.compaction import (
     _emit_compaction_hook,
     _generate_compaction_summary,
@@ -64,11 +69,6 @@ from mindroom.history.compaction import (
     estimate_session_summary_tokens,
 )
 from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
-from mindroom.history.provider_request import (
-    estimate_agent_static_tokens,
-    estimate_static_tokens,
-    estimate_tool_definition_tokens,
-)
 from mindroom.history.runtime import (
     apply_replay_plan,
     estimate_preparation_static_tokens_for_team,

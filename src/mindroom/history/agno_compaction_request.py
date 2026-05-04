@@ -1,4 +1,36 @@
-"""Agno provider-request preparation for history compaction."""
+"""Agno-specific provider-request preparation for history compaction.
+
+MindRoom treats warm-cache compaction as a hidden normal turn: send the same
+provider-visible prefix a reply would have used, then append one final user
+message that asks for an updated durable summary.
+That shape matters because provider prompt caches key off the real request
+prefix, including system messages, prior conversation messages, model settings,
+and tool schemas.
+
+Agno does not currently expose a public "fork this session and build the exact
+provider request without running it" primitive.
+Calling ``agent.arun()`` or ``team.arun()`` against a temporary copied session
+would look simpler, but it would run the full agent lifecycle: persistence,
+hooks, memory/learning side effects, metrics, metadata writes, and potentially
+real tool calls.
+Calling ``model.aresponse()`` directly with only persisted history would avoid
+those side effects, but it would drop the normal Agno-assembled system prompt,
+session summary placement, and tool schemas, defeating the prompt-cache goal.
+
+This module is the intentionally narrow adapter for that missing Agno forked
+request primitive.
+It builds a synthetic in-memory Agno session containing only the compaction
+prefix, temporarily forces Agno to replay that prefix, asks Agno's private
+message/tool builders for the provider-visible request, then returns only inert
+message copies and provider tool schemas.
+Executable ``Function`` objects are not passed to the summary model; when tool
+schemas are present the request also sets ``tool_choice="none"``.
+
+Keep private Agno imports and synthetic-session tricks contained here.
+The durable compaction module should only see ``CompactionProviderRequest`` and
+builder callables, and if Agno grows a public forked-request API this module is
+the place to replace.
+"""
 
 from __future__ import annotations
 
