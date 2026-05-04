@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
 
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_drive import google_drive_oauth_provider
@@ -26,7 +27,7 @@ _MODEL_FUNCTION_NAME_ALIASES = {
 }
 
 
-class GoogleDriveTools(ScopedOAuthClientMixin, AgnoGoogleDriveTools):
+class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleDriveTools):
     """Google Drive toolkit that reads OAuth tokens from MindRoom's credential scopes."""
 
     _oauth_provider = google_drive_oauth_provider()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -9,9 +11,11 @@ import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.custom_tools import google_service
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -19,6 +23,12 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+class ValidCredentials:
+    """Minimal valid credential object for constructor tests."""
+
+    valid = True
 
 
 @pytest.fixture
@@ -73,6 +83,64 @@ def test_google_wrappers_allow_isolating_worker_scopes(
     )
 
     assert isinstance(tool, tool_class)
+
+
+@pytest.mark.parametrize("tool_class", [GmailTools, GoogleCalendarTools, GoogleDriveTools, GoogleSheetsTools])
+def test_google_service_cache_is_isolated_per_thread(
+    tool_class: type[Any],
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Google API clients should not share httplib2-backed service objects across threads."""
+    tool = tool_class(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+        creds=ValidCredentials(),
+    )
+    barrier = threading.Barrier(2)
+
+    def set_and_read_thread_service() -> bool:
+        thread_service = object()
+        tool.service = thread_service
+        barrier.wait(timeout=5)
+        return tool.service is thread_service
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: set_and_read_thread_service(), range(2)))
+
+    assert results == [True, True]
+
+
+def test_google_service_state_first_access_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent first access must not replace another thread's service state."""
+
+    class Tool(ThreadLocalGoogleServiceMixin):
+        pass
+
+    class RaceLocal:
+        service: Any | None = None
+
+    tool = Tool()
+    creation_barrier = threading.Barrier(2)
+    read_barrier = threading.Barrier(2)
+
+    def race_local_factory() -> RaceLocal:
+        creation_barrier.wait(timeout=5)
+        return RaceLocal()
+
+    monkeypatch.setattr(google_service.threading, "local", race_local_factory)
+
+    def set_and_read_thread_service() -> bool:
+        thread_service = object()
+        tool.service = thread_service
+        read_barrier.wait(timeout=5)
+        return tool.service is thread_service
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: set_and_read_thread_service(), range(2)))
+
+    assert results == [True, True]
 
 
 @pytest.mark.parametrize(
