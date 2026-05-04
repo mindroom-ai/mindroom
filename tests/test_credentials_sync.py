@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from mindroom import constants as constants_mod
+from mindroom import credentials_sync as credentials_sync_mod
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, CredentialsManager
 from mindroom.credentials_sync import (
     _ENV_TO_SERVICE_MAP,
@@ -176,7 +177,10 @@ class TestCredentialsSync:
             runtime_paths=constants_mod.resolve_runtime_paths(
                 config_path=config_path,
                 storage_path=tmp_path,
-                process_env=dict(os.environ),
+                process_env={
+                    "OAUTH_CLIENT_ID": "client-id",
+                    "OAUTH_CLIENT_SECRET": "client-secret",
+                },
             ),
         )
 
@@ -324,6 +328,146 @@ class TestCredentialsSync:
 
         cm = CredentialsManager(base_path=temp_credentials_dir)
         assert cm.load_credentials("google_oauth_client") is None
+
+    def test_malformed_declared_credential_seed_json_does_not_block_builtin_sync(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Malformed seed JSON should not prevent normal provider env syncing."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-key")
+        monkeypatch.setenv("MINDROOM_CREDENTIAL_SEEDS_JSON", "{")
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.get_api_key("openai") == "sk-test-openai-key"
+
+    def test_malformed_declared_credential_seed_file_does_not_block_builtin_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Malformed file-backed seed JSON should not prevent normal provider env syncing."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        credentials_dir = tmp_path / "credentials"
+        credentials_dir.mkdir()
+        seed_file = config_dir / "credential-seeds.json"
+        seed_file.write_text("{", encoding="utf-8")
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        (config_dir / ".env").write_text(
+            f"MINDROOM_CREDENTIAL_SEEDS_FILE=credential-seeds.json\n{SHARED_CREDENTIALS_PATH_ENV}={credentials_dir}\n",
+            encoding="utf-8",
+        )
+
+        sync_env_to_credentials(
+            runtime_paths=constants_mod.resolve_runtime_paths(
+                config_path=config_path,
+                storage_path=tmp_path,
+                process_env={"OPENAI_API_KEY": "sk-test-openai-key"},
+            ),
+        )
+
+        cm = CredentialsManager(base_path=credentials_dir)
+        assert cm.get_api_key("openai") == "sk-test-openai-key"
+
+    def test_declared_credential_seed_env_names_stay_out_of_runtime_env_views(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Credential seed declaration env vars must not leak to worker/runtime views."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        seed_file = tmp_path / "credential-seeds.json"
+        seed_file.write_text(_credential_seed_json(), encoding="utf-8")
+        seed_json = json.dumps(
+            {
+                "service": "example_oauth_client",
+                "credentials": {"client_secret": {"value": "literal-secret"}},
+            },
+        )
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path,
+            process_env={
+                "MINDROOM_CREDENTIAL_SEEDS_JSON": seed_json,
+                "MINDROOM_CREDENTIAL_SEEDS_FILE": str(seed_file),
+            },
+        )
+
+        public_runtime = constants_mod.serialize_public_runtime_paths(runtime_paths)
+        isolated_runtime = constants_mod.isolated_runtime_paths(runtime_paths)
+        runtime_envs = [
+            public_runtime["process_env"],
+            public_runtime["env_file_values"],
+            isolated_runtime.process_env,
+            isolated_runtime.env_file_values,
+            constants_mod.execution_runtime_env_values(runtime_paths),
+            constants_mod.sandbox_execution_runtime_env_values(runtime_paths),
+        ]
+
+        for runtime_env in runtime_envs:
+            assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in runtime_env
+            assert "MINDROOM_CREDENTIAL_SEEDS_FILE" not in runtime_env
+
+    def test_declared_credential_seed_logs_file_source(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """File-backed seed sync should identify the file env var as its source."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        credentials_dir = tmp_path / "credentials"
+        credentials_dir.mkdir()
+        seed_file = config_dir / "credential-seeds.json"
+        seed_file.write_text(_credential_seed_json(), encoding="utf-8")
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        (config_dir / ".env").write_text(
+            f"MINDROOM_CREDENTIAL_SEEDS_FILE=credential-seeds.json\n{SHARED_CREDENTIALS_PATH_ENV}={credentials_dir}\n",
+            encoding="utf-8",
+        )
+        calls: list[dict[str, object]] = []
+
+        def fake_sync_service_credentials(**kwargs: object) -> bool:
+            calls.append(kwargs)
+            return True
+
+        monkeypatch.setattr(credentials_sync_mod, "_sync_service_credentials", fake_sync_service_credentials)
+
+        sync_env_to_credentials(
+            runtime_paths=constants_mod.resolve_runtime_paths(
+                config_path=config_path,
+                storage_path=tmp_path,
+                process_env={
+                    "OAUTH_CLIENT_ID": "client-id",
+                    "OAUTH_CLIENT_SECRET": "client-secret",
+                },
+            ),
+        )
+
+        assert calls == [
+            {
+                "service": "google_oauth_client",
+                "credentials": {"client_id": "client-id", "client_secret": "client-secret"},
+                "runtime_paths": constants_mod.resolve_runtime_paths(
+                    config_path=config_path,
+                    storage_path=tmp_path,
+                    process_env={
+                        "OAUTH_CLIENT_ID": "client-id",
+                        "OAUTH_CLIENT_SECRET": "client-secret",
+                    },
+                ),
+                "env_var": "MINDROOM_CREDENTIAL_SEEDS_FILE",
+            },
+        ]
 
     def test_sync_env_does_not_overwrite_ui_credentials(
         self,

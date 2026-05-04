@@ -15,10 +15,17 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
+from mindroom.constants import (
+    CREDENTIAL_SEEDS_FILE_ENV,
+    CREDENTIAL_SEEDS_JSON_ENV,
+    PROVIDER_ENV_KEYS,
+    RuntimePaths,
+    runtime_env_path,
+)
 from mindroom.credentials import get_runtime_shared_credentials_manager, validate_service_name
 from mindroom.logging_config import get_logger
 
@@ -26,8 +33,12 @@ logger = get_logger(__name__)
 
 # Reverse view: env-var → provider (derived from the canonical mapping).
 _ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
-_CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
-_CREDENTIAL_SEEDS_FILE_ENV = "MINDROOM_CREDENTIAL_SEEDS_FILE"
+
+
+@dataclass(frozen=True)
+class _CredentialSeedDeclaration:
+    source_env_var: str
+    seed: Mapping[str, Any]
 
 
 def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
@@ -125,9 +136,9 @@ def _resolve_seed_file_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
 def _coerce_seed_entries(raw_value: object, *, source: str) -> list[Mapping[str, Any]]:
     """Return validated raw seed entries from a decoded JSON value."""
     if isinstance(raw_value, Mapping) and "seeds" in raw_value:
-        raw_value = raw_value["seeds"]
+        raw_value = cast("Mapping[str, Any]", raw_value)["seeds"]
     elif isinstance(raw_value, Mapping):
-        raw_value = [raw_value]
+        raw_value = [cast("Mapping[str, Any]", raw_value)]
     if not isinstance(raw_value, list):
         msg = f"{source} must contain a credential seed object, a list, or an object with a 'seeds' list"
         raise TypeError(msg)
@@ -137,30 +148,57 @@ def _coerce_seed_entries(raw_value: object, *, source: str) -> list[Mapping[str,
         if not isinstance(item, Mapping):
             msg = f"{source} credential seed at index {index} must be an object"
             raise TypeError(msg)
-        entries.append(item)
+        entries.append(cast("Mapping[str, Any]", item))
     return entries
 
 
-def _load_declared_credential_seeds(runtime_paths: RuntimePaths) -> list[Mapping[str, Any]]:
+def _decode_seed_entries(
+    raw_json: str,
+    *,
+    source_env_var: str,
+    source_path: Path | None = None,
+) -> list[Mapping[str, Any]]:
+    try:
+        raw_value = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        log_context = {"env_var": source_env_var, "error": str(exc)}
+        if source_path is not None:
+            log_context["path"] = str(source_path)
+        logger.warning("credential_seed_declaration_json_invalid", **log_context)
+        return []
+    return _coerce_seed_entries(raw_value, source=source_env_var)
+
+
+def _load_declared_credential_seeds(runtime_paths: RuntimePaths) -> list[_CredentialSeedDeclaration]:
     """Load explicit credential seed declarations from runtime env or file."""
-    seed_entries: list[Mapping[str, Any]] = []
+    seed_entries: list[_CredentialSeedDeclaration] = []
 
-    seed_file = runtime_env_path(runtime_paths, _CREDENTIAL_SEEDS_FILE_ENV)
+    seed_file = runtime_env_path(runtime_paths, CREDENTIAL_SEEDS_FILE_ENV)
     if seed_file is not None:
-        seed_entries.extend(
-            _coerce_seed_entries(
-                json.loads(seed_file.read_text(encoding="utf-8")),
-                source=_CREDENTIAL_SEEDS_FILE_ENV,
-            ),
-        )
+        try:
+            raw_file_json = seed_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning(
+                "credential_seed_declaration_file_unreadable",
+                env_var=CREDENTIAL_SEEDS_FILE_ENV,
+                path=str(seed_file),
+                error=str(exc),
+            )
+        else:
+            seed_entries.extend(
+                _CredentialSeedDeclaration(source_env_var=CREDENTIAL_SEEDS_FILE_ENV, seed=entry)
+                for entry in _decode_seed_entries(
+                    raw_file_json,
+                    source_env_var=CREDENTIAL_SEEDS_FILE_ENV,
+                    source_path=seed_file,
+                )
+            )
 
-    raw_json = runtime_paths.env_value(_CREDENTIAL_SEEDS_JSON_ENV)
+    raw_json = runtime_paths.env_value(CREDENTIAL_SEEDS_JSON_ENV)
     if raw_json:
         seed_entries.extend(
-            _coerce_seed_entries(
-                json.loads(raw_json),
-                source=_CREDENTIAL_SEEDS_JSON_ENV,
-            ),
+            _CredentialSeedDeclaration(source_env_var=CREDENTIAL_SEEDS_JSON_ENV, seed=entry)
+            for entry in _decode_seed_entries(raw_json, source_env_var=CREDENTIAL_SEEDS_JSON_ENV)
         )
 
     return seed_entries
@@ -173,17 +211,18 @@ def _resolve_seed_value(value_spec: object, runtime_paths: RuntimePaths) -> obje
     if not isinstance(value_spec, Mapping):
         msg = "Credential seed field values must be literals or objects with env, file, or value"
         raise TypeError(msg)
+    value_mapping = cast("Mapping[str, Any]", value_spec)
 
-    env_name = value_spec.get("env")
+    env_name = value_mapping.get("env")
     if isinstance(env_name, str) and env_name.strip():
         return get_secret_from_env(env_name.strip(), runtime_paths=runtime_paths)
 
-    file_path = value_spec.get("file")
+    file_path = value_mapping.get("file")
     if isinstance(file_path, str) and file_path.strip():
         return _read_text_file(_resolve_seed_file_path(file_path.strip(), runtime_paths))
 
-    if "value" in value_spec:
-        return value_spec["value"]
+    if "value" in value_mapping:
+        return value_mapping["value"]
 
     msg = "Credential seed field object must include env, file, or value"
     raise ValueError(msg)
@@ -226,7 +265,8 @@ def _resolve_seed_credentials(
 def _sync_declared_credential_seeds(runtime_paths: RuntimePaths) -> int:
     """Seed/update explicitly declared credential services."""
     synced_count = 0
-    for seed in _load_declared_credential_seeds(runtime_paths):
+    for declaration in _load_declared_credential_seeds(runtime_paths):
+        seed = declaration.seed
         raw_service = seed.get("service")
         if not isinstance(raw_service, str):
             msg = "Credential seed must include a string service name"
@@ -239,7 +279,7 @@ def _sync_declared_credential_seeds(runtime_paths: RuntimePaths) -> int:
             service=service,
             credentials=credentials,
             runtime_paths=runtime_paths,
-            env_var=_CREDENTIAL_SEEDS_JSON_ENV if runtime_paths.env_value(_CREDENTIAL_SEEDS_JSON_ENV) else None,
+            env_var=declaration.source_env_var,
         ):
             synced_count += 1
     return synced_count
