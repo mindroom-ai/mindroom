@@ -3,29 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, TypeGuard, cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from agno.agent._tools import determine_tools_for_model
 from agno.db.base import SessionType
-from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
-from agno.team._tools import _determine_tools_for_model as determine_team_tools_for_model
-from agno.tools import Toolkit
-from agno.tools.function import Function
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+from mindroom.history.provider_request import CompactionProviderRequest, CompactionProviderRequestBuilder
 from mindroom.history.storage import (
     metadata_with_merged_seen_event_ids,
     read_scope_state,
@@ -53,23 +47,24 @@ from mindroom.prepared_conversation_chain import (
     strip_stale_anthropic_replay_fields,
 )
 from mindroom.timing import timed
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
-    from agno.agent import Agent
+    from collections.abc import Awaitable, Callable, Sequence
+
     from agno.db.base import BaseDb
     from agno.models.base import Model
     from agno.models.message import Message
     from agno.models.response import ModelResponse
-    from agno.team import Team
+    from agno.session.agent import AgentSession
+    from agno.tools.function import Function
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
-type _ToolDefinition = dict[str, object]
 
 
 class _CompactionProviderTimeoutError(Exception):
@@ -250,6 +245,7 @@ async def compact_scope_history(
     timing_scope: str | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    provider_request_builder: CompactionProviderRequestBuilder | None = None,
 ) -> tuple[HistoryScopeState, CompactionOutcome | None]:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = runs_for_scope(completed_top_level_runs(session), scope)
@@ -315,6 +311,7 @@ async def compact_scope_history(
         collect_compaction_hook_messages=collect_compaction_hook_messages,
         before_persist_callback=emit_before_persist,
         timing_scope=timing_scope,
+        provider_request_builder=provider_request_builder,
     )
     if rewrite_result is None:
         cleared_state = _persist_cleared_force_state_if_needed(
@@ -408,6 +405,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     collect_compaction_hook_messages: bool,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
     timing_scope: str | None = None,
+    provider_request_builder: CompactionProviderRequestBuilder | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     total_compacted_run_count = 0
@@ -489,6 +487,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             scope=scope,
             history_settings=history_settings,
             timing_scope=timing_scope,
+            session=working_session,
+            provider_request_builder=provider_request_builder,
         )
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
@@ -654,294 +654,6 @@ def _sync_remaining_runs_from_working(
     return synced_runs
 
 
-def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate system and current-user prompt tokens outside persisted replay."""
-    static_chars = len(agent.role or "")
-    instructions = agent.instructions
-    if isinstance(instructions, str):
-        static_chars += len(instructions)
-    elif isinstance(instructions, list):
-        for instruction in instructions:
-            static_chars += len(str(instruction))
-    static_chars += len(full_prompt)
-    return (static_chars // 4) + estimate_tool_definition_tokens(agent)
-
-
-def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate the non-history agent prompt using Agno's real system-message builder."""
-    static_tokens = estimate_text_tokens(full_prompt)
-    previous_tool_instructions = agent._tool_instructions
-    try:
-        session, run_context, prepared_tools = _prepare_agent_prompt_inputs_for_estimation(agent)
-        system_message = agent.get_system_message(
-            session=session,
-            run_context=run_context,
-            tools=prepared_tools or None,
-            add_session_state_to_context=False,
-        )
-    finally:
-        agent._tool_instructions = previous_tool_instructions
-    if system_message is not None and system_message.content is not None:
-        static_tokens += estimate_text_tokens(str(system_message.content))
-    return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
-
-
-def estimate_tool_definition_tokens(agent: Agent) -> int:
-    """Estimate the model-visible tool schema and tool instructions for one agent."""
-    prepared_tools, tool_instructions = _prepare_tools_for_estimation(agent.tools)
-    return _estimate_prepared_tool_definition_tokens(
-        prepared_tools,
-        tool_instructions=tool_instructions,
-    )
-
-
-def estimate_team_static_tokens(team: Team, full_prompt: str) -> int:
-    """Estimate the non-history team prompt using Agno's team system-message builder."""
-    static_tokens = estimate_text_tokens(full_prompt)
-    previous_tool_instructions = team._tool_instructions
-    try:
-        session, prepared_tools = _prepare_team_prompt_inputs_for_estimation(team)
-        system_message = team.get_system_message(
-            session=session,
-            tools=prepared_tools or None,
-            add_session_state_to_context=False,
-        )
-    finally:
-        team._tool_instructions = previous_tool_instructions
-    if system_message is not None and system_message.content is not None:
-        static_tokens += estimate_text_tokens(str(system_message.content))
-    return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
-
-
-def agent_tool_definition_payloads_for_logging(agent: Agent) -> list[dict[str, object]]:
-    """Return model-visible agent tool schemas using Agno's prompt-preparation path."""
-    previous_tool_instructions = agent._tool_instructions
-    try:
-        _session, _run_context, prepared_tools = _prepare_agent_prompt_inputs_for_estimation(agent)
-    finally:
-        agent._tool_instructions = previous_tool_instructions
-    return _prepared_tool_definition_payloads(prepared_tools)
-
-
-def team_tool_definition_payloads_for_logging(team: Team) -> list[dict[str, object]]:
-    """Return model-visible team tool schemas using Agno's prompt-preparation path."""
-    previous_tool_instructions = team._tool_instructions
-    try:
-        _session, prepared_tools = _prepare_team_prompt_inputs_for_estimation(team)
-    finally:
-        team._tool_instructions = previous_tool_instructions
-    return _prepared_tool_definition_payloads(prepared_tools)
-
-
-def _estimate_prepared_tool_definition_tokens(
-    prepared_tools: Sequence[Function | dict[str, object]],
-    *,
-    tool_instructions: Sequence[str] = (),
-) -> int:
-    tool_definitions = _prepared_tool_definition_payloads(prepared_tools)
-    tool_definition_tokens = len(stable_serialize(tool_definitions)) // 4 if tool_definitions else 0
-    instruction_tokens = sum(estimate_text_tokens(instruction) for instruction in tool_instructions)
-    return tool_definition_tokens + instruction_tokens
-
-
-def _prepare_tools_for_estimation(tools: object) -> tuple[list[Function | _ToolDefinition], list[str]]:
-    if not isinstance(tools, Sequence):
-        return [], []
-
-    prepared_tools: list[Function | _ToolDefinition] = []
-    tool_instructions: list[str] = []
-    seen_names: set[str] = set()
-    for tool in tools:
-        for prepared_tool in _prepare_tool_for_estimation(tool):
-            tool_name = _prepared_tool_name(prepared_tool)
-            if tool_name is None or tool_name in seen_names:
-                continue
-            seen_names.add(tool_name)
-            prepared_tools.append(prepared_tool)
-
-        if isinstance(tool, Toolkit) and tool.add_instructions and tool.instructions is not None:
-            tool_instructions.append(tool.instructions)
-        if isinstance(tool, Function) and tool.add_instructions and tool.instructions is not None:
-            tool_instructions.append(tool.instructions)
-    return prepared_tools, tool_instructions
-
-
-def _prepare_tool_for_estimation(tool: object) -> list[Function | _ToolDefinition]:
-    if isinstance(tool, Function):
-        return [_prepare_function_for_estimation(tool)]
-    if isinstance(tool, Toolkit):
-        return [_prepare_function_for_estimation(function) for function in _toolkit_functions(tool).values()]
-    if _is_tool_definition_dict(tool):
-        return [tool]
-    if callable(tool):
-        return [Function.from_callable(tool)]
-    return []
-
-
-def _toolkit_functions(toolkit: Toolkit) -> dict[str, Function]:
-    functions = dict(toolkit.functions)
-    if not functions:
-        for raw_tool in toolkit.tools:
-            if isinstance(raw_tool, Function):
-                functions[raw_tool.name] = raw_tool
-    for name, function in toolkit.async_functions.items():
-        functions.setdefault(name, function)
-    return functions
-
-
-def _prepare_function_for_estimation(function: Function) -> Function:
-    prepared_function = function.model_copy(deep=True)
-    if not prepared_function.skip_entrypoint_processing and prepared_function.entrypoint is not None:
-        effective_strict = False if prepared_function.strict is None else prepared_function.strict
-        prepared_function.process_entrypoint(strict=effective_strict)
-    return prepared_function
-
-
-def _prepared_tool_definition_payloads(
-    prepared_tools: Sequence[Function | _ToolDefinition],
-) -> list[dict[str, object]]:
-    payloads_by_name: dict[str, dict[str, object]] = {}
-    for tool in prepared_tools:
-        payload = _function_payload(tool) if isinstance(tool, Function) else _dict_tool_payload(tool)
-        tool_name = payload.get("name")
-        if isinstance(tool_name, str) and tool_name:
-            payloads_by_name[tool_name] = payload
-    return list(payloads_by_name.values())
-
-
-def _prepared_tool_name(tool: Function | _ToolDefinition) -> str | None:
-    if isinstance(tool, Function):
-        return tool.name
-    tool_name = tool.get("name")
-    if isinstance(tool_name, str) and tool_name:
-        return tool_name
-    return None
-
-
-def _function_payload(function: Function) -> dict[str, object]:
-    return {
-        "name": function.name,
-        "description": function.description or "",
-        "parameters": function.parameters or _default_function_parameters(),
-    }
-
-
-def _is_tool_definition_dict(tool: object) -> TypeGuard[_ToolDefinition]:
-    if not isinstance(tool, dict):
-        return False
-    candidate_tool = cast("_ToolDefinition", tool)
-    tool_name = candidate_tool.get("name")
-    return isinstance(tool_name, str) and bool(tool_name)
-
-
-def _dict_tool_payload(tool: _ToolDefinition) -> dict[str, object]:
-    parameters = tool.get("parameters")
-    return {
-        "name": str(tool["name"]),
-        "description": str(tool.get("description", "")),
-        "parameters": parameters if isinstance(parameters, dict) else _default_function_parameters(),
-    }
-
-
-def _default_function_parameters() -> dict[str, object]:
-    return {"type": "object", "properties": {}, "required": []}
-
-
-def _prepare_team_prompt_inputs_for_estimation(
-    team: Team,
-) -> tuple[TeamSession, list[Function | _ToolDefinition]]:
-    """Reuse Agno's own team tool-preparation path for prompt budgeting.
-
-    Agno exposes `Team.get_system_message()` publicly, but the exact prepared tool
-    payload and `_tool_instructions` state that feed that prompt are only built by
-    the internal `_determine_tools_for_model()` path. Using that single internal
-    entrypoint is less brittle than re-implementing several private team helpers in
-    MindRoom. This logic is verified against `agno==2.5.13`; if Agno changes those
-    internals, update this estimator to match the new team prompt builder.
-    """
-    budget_session_id = "history-budget"
-    session = TeamSession(session_id=budget_session_id, team_id=team.id)
-    run_response = TeamRunOutput(
-        run_id=budget_session_id,
-        team_id=team.id,
-        session_id=budget_session_id,
-        session_state={},
-    )
-    run_context = RunContext(
-        run_id=budget_session_id,
-        session_id=budget_session_id,
-        session_state={},
-    )
-    model = team.model
-    assert model is not None
-    prepared_tools = determine_team_tools_for_model(
-        team=team,
-        model=model,
-        run_response=run_response,
-        run_context=run_context,
-        team_run_context={},
-        session=session,
-        check_mcp_tools=False,
-    )
-    return session, [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)]
-
-
-def _prepare_agent_prompt_inputs_for_estimation(
-    agent: Agent,
-) -> tuple[AgentSession, RunContext, list[Function | _ToolDefinition]]:
-    """Reuse Agno's agent tool-preparation path for prompt budgeting.
-
-    Agno exposes `Agent.get_system_message()` publicly, but the prepared tool
-    payload and `_tool_instructions` that feed that prompt are only finalized by
-    the shared `agno.agent._tools.determine_tools_for_model()` path. Using that
-    single internal entrypoint keeps MindRoom aligned with Agno without
-    re-implementing several private agent helpers.
-    """
-    budget_session_id = "history-budget"
-    budget_user_id = "history-budget-user"
-    session = AgentSession(
-        session_id=budget_session_id,
-        agent_id=agent.id,
-        user_id=budget_user_id,
-    )
-    run_response = RunOutput(
-        run_id=budget_session_id,
-        agent_id=agent.id,
-        agent_name=agent.name,
-        session_id=budget_session_id,
-        user_id=budget_user_id,
-        session_state={},
-    )
-    run_context = RunContext(
-        run_id=budget_session_id,
-        session_id=budget_session_id,
-        user_id=budget_user_id,
-        session_state={},
-    )
-    model = agent.model
-    assert model is not None
-    processed_tools = agent.get_tools(
-        run_response=run_response,
-        run_context=run_context,
-        session=session,
-        user_id=budget_user_id,
-    )
-    prepared_tools = determine_tools_for_model(
-        agent=agent,
-        model=model,
-        processed_tools=processed_tools,
-        run_response=run_response,
-        run_context=run_context,
-        session=session,
-        async_mode=False,
-    )
-    return (
-        session,
-        run_context,
-        [tool for tool in prepared_tools if isinstance(tool, Function) or _is_tool_definition_dict(tool)],
-    )
-
-
 def resolve_effective_compaction_threshold(compaction_config: CompactionConfig, context_window: int) -> int:
     """Resolve the soft replay trigger budget in tokens."""
     threshold_tokens = compaction_config.threshold_tokens
@@ -992,6 +704,7 @@ def resolve_compaction_runtime_settings(
 async def _generate_compaction_summary_with_retry(
     *,
     model: Model,
+    session: AgentSession | TeamSession,
     previous_summary: str | None,
     compactable_runs: Sequence[RunOutput | TeamRunOutput],
     initial_summary_request: CompactionSummaryRequest,
@@ -1001,6 +714,7 @@ async def _generate_compaction_summary_with_retry(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     timing_scope: str | None = None,
+    provider_request_builder: CompactionProviderRequestBuilder | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, retrying once with a smaller input when safe."""
     summary_request = initial_summary_request
@@ -1022,9 +736,16 @@ async def _generate_compaction_summary_with_retry(
             timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
         )
         try:
+            provider_request = await _build_compaction_provider_request(
+                summary_request=summary_request,
+                session=session,
+                provider_request_builder=provider_request_builder,
+            )
             summary = await _generate_compaction_summary(
                 model=model,
-                messages=list(summary_request.messages),
+                messages=list(provider_request.messages),
+                tools=list(provider_request.tools),
+                tool_choice=provider_request.tool_choice,
                 timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
                 timing_scope=timing_scope,
             )
@@ -1099,11 +820,26 @@ def _should_retry_smaller_summary_chunk(error: Exception) -> bool:
     return any(fragment in message for fragment in retry_fragments)
 
 
+async def _build_compaction_provider_request(
+    *,
+    summary_request: CompactionSummaryRequest,
+    session: AgentSession | TeamSession,
+    provider_request_builder: CompactionProviderRequestBuilder | None,
+) -> CompactionProviderRequest:
+    if provider_request_builder is None:
+        return CompactionProviderRequest(
+            messages=tuple(message.model_copy(deep=True) for message in summary_request.messages),
+        )
+    return await provider_request_builder(summary_request, session)
+
+
 @timed("system_prompt_assembly.history_prepare.compaction.summary_model_request")
 async def _generate_compaction_summary(
     *,
     model: Model,
     messages: Sequence[Message],
+    tools: Sequence[dict] | None = None,
+    tool_choice: str | dict[str, object] | None = None,
     timeout_seconds: float | None = None,
     timing_scope: str | None = None,
 ) -> SessionSummary:
@@ -1113,8 +849,11 @@ async def _generate_compaction_summary(
 
     async def _request_summary() -> ModelResponse:
         try:
+            request_tools: list[dict] | None = list(tools) if tools else None
             return await model.aresponse(
                 messages=request_messages,
+                tools=cast("list[Function | dict] | None", request_tools),
+                tool_choice=tool_choice,
             )
         except TimeoutError as exc:
             raise _CompactionProviderTimeoutError(exc) from exc
@@ -1316,35 +1055,3 @@ def _model_identifier(model: Model) -> str:
 
 def _iso_utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def compute_prompt_token_breakdown(
-    agent: Agent | None = None,
-    team: Team | None = None,
-    full_prompt: str | None = None,
-) -> dict[str, int]:
-    """Compute token breakdown for system prompt, tool defs, and current prompt."""
-    breakdown: dict[str, int] = {}
-
-    if agent is not None:
-        sys_chars = len(agent.role or "")
-        instructions = agent.instructions
-        if isinstance(instructions, str):
-            sys_chars += len(instructions)
-        elif isinstance(instructions, list):
-            for instruction in instructions:
-                sys_chars += len(str(instruction))
-        breakdown["role_instructions_tokens"] = sys_chars // 4
-
-    tool_tokens = 0
-    if agent is not None:
-        tool_tokens = estimate_tool_definition_tokens(agent)
-    elif team is not None:
-        prepared_tools, _tool_instructions = _prepare_tools_for_estimation(team.tools)
-        tool_tokens = _estimate_prepared_tool_definition_tokens(prepared_tools)
-    breakdown["tool_definition_tokens"] = tool_tokens
-
-    if full_prompt is not None:
-        breakdown["current_prompt_tokens"] = len(full_prompt) // 4
-
-    return breakdown

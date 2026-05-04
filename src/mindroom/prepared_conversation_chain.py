@@ -83,6 +83,7 @@ Rules:
 - Preserve all still-relevant information from the previous durable summary.
 - Add only the new information from the conversation messages above.
 - Do not summarize static instructions or tool definitions.
+- Do not call tools.
 - Keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
 - Never paraphrase away exact technical details such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
 - Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.

@@ -6,15 +6,17 @@ The goal is to make destructive compaction reuse the same conversation-chain con
 
 ## Core Idea
 
-Compaction should be cheap when the provider prompt cache is still warm.
+Compaction should be cheap when the provider prompt cache is still warm and the compaction model is the active reply model.
 
-The compaction request now starts from the prepared conversation chain instead of a separate compaction-only serializer.
+With the default `compaction.model: null`, the compaction request is prepared through the same live Agent or Team request assembly used by normal replies.
 
-Warm-cache compaction preserves the chain prefix and appends one final user instruction asking the model to update the durable summary.
+That keeps the provider-visible system prompt, session summary, selected persisted history, and tool schemas aligned with the normal reply request prefix.
 
-That means the user, assistant, and tool messages selected for compaction keep the same provider-message shape used by persisted replay.
+Warm-cache compaction preserves that prefix and appends one final user instruction asking the model to update the durable summary.
 
 The important point is that compaction and normal reply preparation now share one owner for message materialization.
+
+An explicit `compaction.model` remains supported as a configurable summary-model override, but a different model or provider should not be expected to reuse the active reply prompt cache.
 
 This is not about reusing a cached prefix after compaction.
 
@@ -29,8 +31,9 @@ It owns Matrix visible-message conversion, unseen-context preparation, Matrix fa
 Execution preparation calls the prepared-chain module directly instead of re-exporting compatibility helpers.
 
 `src/mindroom/history/compaction.py` still owns durable session mutation, chunk selection, lifecycle metadata, model calls, retries, hook emission, and progress persistence.
+`src/mindroom/history/provider_request.py` owns the small adapter that asks Agno to prepare compaction as a normal Agent or Team request.
 
-It now builds summary requests through the prepared-chain module instead of materializing replay messages independently.
+It now builds summary requests through the prepared-chain module and, when the active model is used, through Agno's live Agent or Team request builder instead of materializing replay messages independently.
 
 ## Warm-Cache Transform
 
@@ -38,7 +41,11 @@ Warm-cache compaction appends one summary instruction to the prepared persisted-
 
 The preceding messages are copied without changing their role order or content shape.
 
-The final instruction tells the model not to summarize static instructions or tool definitions.
+When the active model is used, Agno receives a synthetic session containing only the selected chain so its normal request builder can place the same system prompt, summary context, tool schemas, and history prefix before the final summary instruction.
+
+The final instruction tells the model not to summarize static instructions or tool definitions and not to call tools.
+
+Tool schemas are sent as provider schemas, not executable `Function` objects, with `tool_choice: none` when schemas are present.
 
 The transform validates that tool-call and tool-result adjacency remains intact.
 

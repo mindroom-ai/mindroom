@@ -289,6 +289,7 @@ async def prepare_agent_execution_context(
             timing_scope=timing_scope,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
+            active_summary_model=agent.model,
         )
 
     def _estimate_agent_static_tokens(

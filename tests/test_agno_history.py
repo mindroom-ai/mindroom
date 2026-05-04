@@ -60,13 +60,15 @@ from mindroom.history.compaction import (
     _rewrite_working_session_for_compaction,
     compact_scope_history,
     effective_summary_input_budget_tokens,
-    estimate_agent_static_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
+)
+from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
+from mindroom.history.provider_request import (
+    estimate_agent_static_tokens,
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
-from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
 from mindroom.history.runtime import (
     apply_replay_plan,
     estimate_preparation_static_tokens_for_team,
@@ -204,17 +206,25 @@ class RecordingModel(Model):
     """Model that records the final prompt message list."""
 
     seen_messages: list[Message] = field(default_factory=list)
+    seen_tools: list[Any] | None = None
+    seen_tool_choice: Any | None = None
 
     def invoke(self, *_args: object, **kwargs: object) -> ModelResponse:
         messages = kwargs.get("messages")
         if isinstance(messages, list):
             self.seen_messages = list(messages)
+        tools = kwargs.get("tools")
+        self.seen_tools = list(tools) if isinstance(tools, list) else None
+        self.seen_tool_choice = kwargs.get("tool_choice")
         return ModelResponse(content="ok")
 
     async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
         messages = kwargs.get("messages")
         if isinstance(messages, list):
             self.seen_messages = list(messages)
+        tools = kwargs.get("tools")
+        self.seen_tools = list(tools) if isinstance(tools, list) else None
+        self.seen_tool_choice = kwargs.get("tool_choice")
         return ModelResponse(content="ok")
 
     def invoke_stream(self, *_args: object, **_kwargs: object):
@@ -3440,6 +3450,139 @@ async def test_compact_scope_history_sends_prepared_chain_summary_request(tmp_pa
     assert [message.content for message in observed_messages[:-1]] == ["First question", "First answer"]
     assert "Existing durable summary" in str(observed_messages[-1].content)
     assert "Return only the summary text." in str(observed_messages[-1].content)
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_default_compaction_model_reuses_live_agent_request_prefix(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="First question"),
+                    Message(role="assistant", content="First answer"),
+                ],
+            ),
+        ],
+        summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
+    )
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    def search_docs(query: str) -> str:
+        """Search docs."""
+        return query
+
+    recording_model = RecordingModel(id="recording-model", provider="fake")
+    live_agent = _agent(model=recording_model, db=storage, num_history_runs=10)
+    live_agent.role = "Engineer"
+    live_agent.instructions = ["Use project terminology exactly."]
+    live_agent.tools = [Function.from_callable(search_docs)]
+    live_agent.add_session_summary_to_context = True
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=recording_model):
+        await prepare_history_for_run(
+            agent=live_agent,
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            active_model_name="default",
+            active_context_window=64_000,
+        )
+
+    assert recording_model.seen_messages[0].role == "system"
+    assert "Engineer" in str(recording_model.seen_messages[0].content)
+    assert "Existing durable summary" in str(recording_model.seen_messages[0].content)
+    assert [message.content for message in recording_model.seen_messages[1:3]] == ["First question", "First answer"]
+    assert "Return only the summary text." in str(recording_model.seen_messages[-1].content)
+    assert recording_model.seen_tools is not None
+    assert any(
+        isinstance(tool, dict)
+        and tool.get("type") == "function"
+        and isinstance(tool.get("function"), dict)
+        and tool["function"].get("name") == "search_docs"
+        for tool in recording_model.seen_tools
+    )
+    assert recording_model.seen_tool_choice == "none"
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_explicit_different_compaction_model_keeps_chain_only_request(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, model="summary"),
+        context_window=64_000,
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=64_000),
+            "summary": ModelConfig(provider="openai", id="summary-model", context_window=64_000),
+        },
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="First question"),
+                    Message(role="assistant", content="First answer"),
+                ],
+            ),
+        ],
+        summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
+    )
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    def search_docs(query: str) -> str:
+        """Search docs."""
+        return query
+
+    active_model = RecordingModel(id="active-model", provider="fake")
+    summary_model = RecordingModel(id="summary-model", provider="fake")
+    live_agent = _agent(model=active_model, db=storage, num_history_runs=10)
+    live_agent.role = "Engineer"
+    live_agent.instructions = ["Use project terminology exactly."]
+    live_agent.tools = [Function.from_callable(search_docs)]
+    live_agent.add_session_summary_to_context = True
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=summary_model):
+        await prepare_history_for_run(
+            agent=live_agent,
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            active_model_name="default",
+            active_context_window=64_000,
+        )
+
+    assert [message.content for message in summary_model.seen_messages[:-1]] == ["First question", "First answer"]
+    assert summary_model.seen_messages[0].role == "user"
+    assert "Return only the summary text." in str(summary_model.seen_messages[-1].content)
+    assert not summary_model.seen_tools
 
 
 def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selection() -> None:
