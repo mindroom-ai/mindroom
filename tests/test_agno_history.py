@@ -58,6 +58,7 @@ from mindroom.history.compaction import (
     _build_summary_input,
     _emit_compaction_hook,
     _generate_compaction_summary,
+    _persist_compaction_progress,
     _rewrite_working_session_for_compaction,
     _strip_stale_anthropic_replay_fields,
     compact_scope_history,
@@ -5662,6 +5663,29 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> Non
 
     assert read_scope_seen_event_ids(session, agent_scope) == {"agent-event"}
     assert read_scope_seen_event_ids(session, team_scope) == {"team-event", "preserved-team-event"}
+
+
+def test_compaction_progress_preserves_newer_seen_event_ids(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    persisted_session = _session("session-1")
+    working_session = _session("session-1")
+    latest_session = _session("session-1")
+    update_scope_seen_event_ids(working_session, scope, ["compacted-event"])
+    update_scope_seen_event_ids(latest_session, scope, ["newer-event"])
+    storage.upsert_session(latest_session)
+
+    _persist_compaction_progress(
+        storage=storage,
+        persisted_session=persisted_session,
+        working_session=working_session,
+        compacted_run_ids=set(),
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert read_scope_seen_event_ids(persisted, scope) == {"compacted-event", "newer-event"}
 
 
 @pytest.mark.asyncio

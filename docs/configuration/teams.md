@@ -104,12 +104,13 @@ When a named team sets these fields, the team scope uses the team-owned policy i
 
 Team-scoped compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model`.
 When the active team model has a known `context_window`, MindRoom always computes a final replay plan for the shared team scope and reduces or disables persisted replay for the run when needed.
-Destructive compaction is enabled by default through `defaults.compaction`, but automatic destructive compaction runs only when raw history exceeds the hard replay budget for the next reply.
+Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
-Use `enabled: false` to disable destructive compaction for a team.
+Use `enabled: false` to disable automatic pre-reply compaction for a team.
 Replay safety always uses the active team model window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
+Manual `compact_context` remains available when a compaction model and context window are configured.
 Compaction uses an in-room lifecycle notice that is edited in place.
 
 Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.

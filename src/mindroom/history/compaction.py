@@ -30,7 +30,12 @@ from pydantic import BaseModel
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
-from mindroom.history.storage import read_scope_state, update_scope_seen_event_ids, write_scope_state
+from mindroom.history.storage import (
+    metadata_with_merged_seen_event_ids,
+    read_scope_state,
+    update_scope_seen_event_ids,
+    write_scope_state,
+)
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionOutcome,
@@ -654,7 +659,11 @@ def _persist_compaction_progress(
     latest_session = storage.get_session(session_id=persisted_session.session_id, session_type=session_type)
     target_session = latest_session if isinstance(latest_session, type(persisted_session)) else persisted_session
     target_session.summary = working_session.summary
-    target_session.metadata = deep_merge_metadata(target_session.metadata, working_session.metadata)
+    target_session.metadata = metadata_with_merged_seen_event_ids(
+        deep_merge_metadata(target_session.metadata, working_session.metadata),
+        target_session.metadata,
+        working_session.metadata,
+    )
     target_session.runs = _remove_runs_by_id(target_session.runs or [], compacted_run_ids)
     if sync_remaining_runs:
         target_session.runs = _sync_remaining_runs_from_working(

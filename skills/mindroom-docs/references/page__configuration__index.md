@@ -274,7 +274,7 @@ defaults:
   compress_tool_results: false     # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
   # Required compaction is enabled by default.
   # Soft thresholds do not compact by themselves while history still fits.
-  # Set enabled: false to disable destructive compaction globally.
+  # Set enabled: false to disable automatic pre-reply compaction globally.
   compaction:
     enabled: true
     threshold_percent: 0.8

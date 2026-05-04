@@ -117,7 +117,7 @@ agents:
 
     # Required compaction is enabled by default.
     # Soft thresholds do not compact by themselves while history still fits.
-    # Set enabled: false to disable destructive compaction for this agent.
+    # Set enabled: false to disable automatic pre-reply compaction for this agent.
     compaction:
       enabled: true
       threshold_percent: 0.8
@@ -177,14 +177,15 @@ Approval-gated tools only work there while the router is already joined.
 MindRoom compacts in one visible lifecycle.
 Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model`.
 When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed.
-Destructive compaction is enabled by default through `defaults.compaction`, but automatic destructive compaction runs only when raw history exceeds the hard replay budget for the next reply.
+Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
-Use `reserve_tokens` to leave hard-budget headroom, use `model` to choose the summary model, or set `enabled: false` to disable destructive compaction for this agent.
+Use `reserve_tokens` to leave hard-budget headroom, use `model` to choose the summary model, or set `enabled: false` to disable automatic pre-reply compaction for this agent.
 Replay safety always uses the active runtime model window.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
 If the current reply needs required compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
+Manual `compact_context` remains available when a compaction model and context window are configured.
 MindRoom does not run a separate background post-response compaction path.
 It always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
 That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.

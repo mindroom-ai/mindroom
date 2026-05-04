@@ -136,13 +136,14 @@ Treat Codex prompt caching as best-effort rather than guaranteed.
 When `context_window` is set, MindRoom uses it to budget persisted replay and required destructive compaction.
 MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
 That replay-fit step reduces or disables persisted replay for the current run when needed.
-Destructive compaction is enabled by default through `defaults.compaction`.
-Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compaction` override to disable destructive compaction.
-Automatic destructive compaction runs only when history exceeds the hard replay budget for the next reply.
+Automatic destructive compaction is enabled by default through `defaults.compaction`.
+Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compaction` override to disable automatic pre-reply compaction.
+It runs only when history exceeds the hard replay budget for the next reply.
 Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget that appears in planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
 Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
+Manual `compact_context` remains available when a compaction model and context window are configured.
 It still uses the active runtime window for the final replay-fit step, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.

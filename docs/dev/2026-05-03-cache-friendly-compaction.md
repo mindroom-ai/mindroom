@@ -137,4 +137,3 @@ Compare both specifically on whether their compaction request preserves the norm
 Compare both specifically on whether they rely on prompt caching during compaction.
 
 Compare both specifically on whether they use a special provider endpoint or a normal model call.
-

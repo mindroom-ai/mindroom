@@ -218,7 +218,7 @@ class CompactionOverrideConfig(BaseModel):
 
     enabled: bool | None = Field(
         default=None,
-        description="Whether to allow destructive compaction for this history scope",
+        description="Whether to allow automatic pre-reply destructive compaction for this history scope",
     )
     threshold_tokens: int | None = Field(
         default=None,
@@ -254,7 +254,10 @@ class CompactionOverrideConfig(BaseModel):
 class CompactionConfig(BaseModel):
     """Concrete destructive compaction configuration."""
 
-    enabled: bool = Field(default=True, description="Whether to allow destructive compaction for this history scope")
+    enabled: bool = Field(
+        default=True,
+        description="Whether to allow automatic pre-reply destructive compaction for this history scope",
+    )
     threshold_tokens: int | None = Field(
         default=None,
         ge=1,
@@ -313,7 +316,7 @@ class DefaultsConfig(BaseModel):
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
     compaction: CompactionConfig | None = Field(
         default_factory=CompactionConfig,
-        description="Default automatic compaction policy (set to null or enabled=false to disable)",
+        description="Default destructive compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)",
     )
     num_history_runs: int | None = Field(
         default=None,

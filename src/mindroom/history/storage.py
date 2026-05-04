@@ -282,6 +282,22 @@ def update_scope_seen_event_ids(
     return True
 
 
+def metadata_with_merged_seen_event_ids(
+    merged_metadata: dict[str, Any] | None,
+    *metadata_sources: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return metadata with Matrix seen-event IDs unioned from all sources."""
+    seen_event_states: dict[str, set[str]] = {}
+    for metadata in metadata_sources:
+        seen_event_states = _merge_scope_seen_event_states(
+            seen_event_states,
+            _read_scope_seen_event_states_from_metadata(metadata),
+        )
+    if not seen_event_states:
+        return merged_metadata
+    return _metadata_with_scope_seen_event_states(merged_metadata, seen_event_states)
+
+
 def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
     compacted_at = raw_state.get("last_compacted_at")
     summary_model = raw_state.get("last_summary_model")
@@ -322,15 +338,15 @@ def _read_preserved_scope_seen_event_ids(session: AgentSession | TeamSession, sc
 
 
 def _read_scope_seen_event_states(session: AgentSession | TeamSession) -> dict[str, set[str]]:
-    metadata = session.metadata
+    return _read_scope_seen_event_states_from_metadata(session.metadata)
+
+
+def _read_scope_seen_event_states_from_metadata(metadata: dict[str, Any] | None) -> dict[str, set[str]]:
     if not isinstance(metadata, dict):
         return {}
 
-    raw_value = metadata.get(MINDROOM_MATRIX_HISTORY_METADATA_KEY)
-    if not isinstance(raw_value, dict):
-        return {}
-
-    if raw_value.get("version") != _MATRIX_HISTORY_METADATA_VERSION:
+    raw_value = _valid_matrix_history_metadata(metadata)
+    if raw_value is None:
         return {}
 
     raw_states = raw_value.get("states")
@@ -349,18 +365,63 @@ def _read_scope_seen_event_states(session: AgentSession | TeamSession) -> dict[s
 
 
 def _write_scope_seen_event_states(session: AgentSession | TeamSession, states: dict[str, set[str]]) -> None:
-    session_metadata = dict(session.metadata or {})
+    session.metadata = _metadata_with_scope_seen_event_states(session.metadata, states) or {}
+
+
+def _metadata_with_scope_seen_event_states(
+    metadata: dict[str, Any] | None,
+    states: dict[str, set[str]],
+) -> dict[str, Any] | None:
+    session_metadata = dict(metadata or {})
     serialized_states = {
-        scope_key: {"seen_event_ids": sorted(event_ids)} for scope_key, event_ids in sorted(states.items()) if event_ids
+        scope_key: _state_with_seen_event_ids(session_metadata, scope_key, event_ids)
+        for scope_key, event_ids in sorted(states.items())
+        if event_ids
     }
     if serialized_states:
-        session_metadata[MINDROOM_MATRIX_HISTORY_METADATA_KEY] = {
-            "version": _MATRIX_HISTORY_METADATA_VERSION,
-            "states": serialized_states,
-        }
+        raw_value = _valid_matrix_history_metadata(session_metadata)
+        matrix_history = dict(raw_value) if raw_value is not None else {}
+        raw_states = matrix_history.get("states")
+        next_states = dict(raw_states) if isinstance(raw_states, dict) else {}
+        next_states.update(serialized_states)
+        matrix_history["version"] = _MATRIX_HISTORY_METADATA_VERSION
+        matrix_history["states"] = next_states
+        session_metadata[MINDROOM_MATRIX_HISTORY_METADATA_KEY] = matrix_history
     else:
         session_metadata.pop(MINDROOM_MATRIX_HISTORY_METADATA_KEY, None)
-    session.metadata = session_metadata
+    return session_metadata
+
+
+def _state_with_seen_event_ids(
+    metadata: dict[str, Any],
+    scope_key: str,
+    event_ids: set[str],
+) -> dict[str, Any]:
+    raw_value = _valid_matrix_history_metadata(metadata)
+    raw_states = raw_value.get("states") if raw_value is not None else None
+    raw_state = raw_states.get(scope_key) if isinstance(raw_states, dict) else None
+    state = dict(raw_state) if isinstance(raw_state, dict) else {}
+    state["seen_event_ids"] = sorted(event_ids)
+    return state
+
+
+def _valid_matrix_history_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    raw_value = metadata.get(MINDROOM_MATRIX_HISTORY_METADATA_KEY)
+    if not isinstance(raw_value, dict):
+        return None
+    if raw_value.get("version") != _MATRIX_HISTORY_METADATA_VERSION:
+        return None
+    return raw_value
+
+
+def _merge_scope_seen_event_states(
+    base_states: dict[str, set[str]],
+    extra_states: dict[str, set[str]],
+) -> dict[str, set[str]]:
+    merged = {scope_key: set(event_ids) for scope_key, event_ids in base_states.items()}
+    for scope_key, event_ids in extra_states.items():
+        merged.setdefault(scope_key, set()).update(event_ids)
+    return merged
 
 
 def _scope_for_run(run: RunOutput | TeamRunOutput) -> HistoryScope | None:
