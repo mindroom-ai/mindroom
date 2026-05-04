@@ -43,6 +43,32 @@ T = TypeVar("T")
 logger = get_logger(__name__)
 
 
+async def _close_sqlite_connection_best_effort(db: aiosqlite.Connection, *, operation: str) -> None:
+    """Close one SQLite connection without masking the original failure."""
+    try:
+        await db.close()
+    except Exception as exc:
+        logger.debug(
+            "Ignoring error while closing SQLite event cache connection",
+            operation=operation,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
+async def _rollback_sqlite_connection_best_effort(db: aiosqlite.Connection, *, operation: str) -> None:
+    """Roll back one SQLite connection without masking the original failure."""
+    try:
+        await db.rollback()
+    except Exception as exc:
+        logger.debug(
+            "Ignoring SQLite event cache rollback failure",
+            operation=operation,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
 async def initialize_event_cache_db(db_path: Path) -> aiosqlite.Connection:
     """Open the SQLite database and ensure the event-cache schema exists."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,8 +79,8 @@ async def initialize_event_cache_db(db_path: Path) -> aiosqlite.Connection:
         await reset_stale_cache_if_needed(db, db_path=db_path)
         await create_event_cache_schema(db)
         await db.commit()
-    except Exception:
-        await db.close()
+    except BaseException:
+        await _close_sqlite_connection_best_effort(db, operation="initialize")
         raise
     return db
 
@@ -440,8 +466,8 @@ class SqliteEventCache:
             try:
                 result = await writer(db)
                 await db.commit()
-            except Exception:
-                await db.rollback()
+            except BaseException:
+                await _rollback_sqlite_connection_best_effort(db, operation=operation)
                 raise
         return result
 

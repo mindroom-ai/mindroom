@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, Mock
@@ -13,12 +15,13 @@ import pytest
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache import postgres_event_cache_threads
+from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cache
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
     PostgresEventCache,
     PostgresEventCacheRuntime,
     _is_transient_postgres_failure,
+    initialize_postgres_event_cache_db,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
@@ -33,6 +36,7 @@ from mindroom.runtime_support import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.matrix.cache import ConversationEventCache
@@ -238,6 +242,77 @@ def test_build_event_cache_defaults_to_sqlite(tmp_path: Path) -> None:
     assert cache.db_path == tmp_path / "mindroom_data" / "event_cache.db"
 
 
+@pytest.mark.asyncio
+async def test_sqlite_event_cache_write_operation_rolls_back_cancelled_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation inside a SQLite cache write must not leave the shared connection in a transaction."""
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    cancel_reason = "stop requested"
+    db = SimpleNamespace(
+        commit=AsyncMock(),
+        rollback=AsyncMock(side_effect=RuntimeError("rollback failed")),
+    )
+
+    @asynccontextmanager
+    async def acquire_db_operation(room_id: str, *, operation: str) -> AsyncIterator[object]:
+        assert room_id == "!room:example.test"
+        assert operation == "cancelled_writer"
+        yield db
+
+    monkeypatch.setattr(
+        cache,
+        "_runtime",
+        SimpleNamespace(
+            is_disabled=False,
+            acquire_db_operation=acquire_db_operation,
+        ),
+    )
+
+    async def cancelled_writer(_db: object) -> None:
+        raise asyncio.CancelledError(cancel_reason)
+
+    with pytest.raises(asyncio.CancelledError, match=cancel_reason):
+        await cache._write_operation(
+            "!room:example.test",
+            operation="cancelled_writer",
+            disabled_result=None,
+            writer=cancelled_writer,
+        )
+
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_event_cache_initialize_closes_db_after_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during SQLite cache initialization must close the half-initialized connection."""
+    cancel_reason = "init cancelled"
+    db = SimpleNamespace(
+        close=AsyncMock(side_effect=RuntimeError("close failed")),
+        execute=AsyncMock(),
+    )
+
+    async def connect(_db_path: Path) -> object:
+        return db
+
+    async def reset_stale_cache_if_needed(_db: object, *, db_path: Path) -> None:
+        _ = db_path
+        raise asyncio.CancelledError(cancel_reason)
+
+    monkeypatch.setattr(sqlite_event_cache.aiosqlite, "connect", connect)
+    monkeypatch.setattr(sqlite_event_cache, "reset_stale_cache_if_needed", reset_stale_cache_if_needed)
+
+    with pytest.raises(asyncio.CancelledError, match=cancel_reason):
+        await sqlite_event_cache.initialize_event_cache_db(tmp_path / "event_cache.db")
+
+    db.close.assert_awaited_once()
+
+
 def test_build_event_cache_uses_postgres_when_configured(tmp_path: Path) -> None:
     """The runtime factory should construct the Postgres cache backend only when requested."""
     runtime_paths = _runtime_paths(
@@ -252,6 +327,101 @@ def test_build_event_cache_uses_postgres_when_configured(tmp_path: Path) -> None
     assert isinstance(cache, PostgresEventCache)
     assert cache.database_url == "postgresql://cache:test@localhost/mindroom"
     assert cache.namespace == "tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_postgres_event_cache_initialize_attempts_cleanup_without_masking_cancelled_schema_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during Postgres startup schema creation must not leak an open transaction."""
+    cancel_reason = "startup cancelled"
+    db = SimpleNamespace(
+        commit=AsyncMock(),
+        rollback=AsyncMock(side_effect=RuntimeError("rollback failed")),
+        close=AsyncMock(side_effect=RuntimeError("close failed")),
+    )
+
+    async def connect(_database_url: str) -> object:
+        return db
+
+    async def create_schema(_db: object) -> None:
+        raise asyncio.CancelledError(cancel_reason)
+
+    monkeypatch.setattr("mindroom.matrix.cache.postgres_event_cache.psycopg.AsyncConnection.connect", connect)
+    monkeypatch.setattr("mindroom.matrix.cache.postgres_event_cache.create_postgres_event_cache_schema", create_schema)
+
+    with pytest.raises(asyncio.CancelledError, match=cancel_reason):
+        await initialize_postgres_event_cache_db(
+            "postgresql://cache:test@localhost/mindroom",
+            namespace="tenant-a",
+        )
+
+    db.rollback.assert_awaited_once()
+    db.close.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation inside a Postgres cache operation must not leave the shared connection in a transaction."""
+    cache = PostgresEventCache(database_url="postgresql://cache:test@localhost/mindroom", namespace="tenant-a")
+    cancel_reason = "stop requested"
+    db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    @asynccontextmanager
+    async def acquire_db_operation(room_id: str, *, operation: str) -> AsyncIterator[object]:
+        assert room_id == "!room:example.test"
+        assert operation == "cancelled_callback"
+        yield db
+
+    monkeypatch.setattr(
+        cache,
+        "_runtime",
+        SimpleNamespace(
+            is_disabled=False,
+            namespace="tenant-a",
+            acquire_db_operation=acquire_db_operation,
+        ),
+    )
+    monkeypatch.setattr(cache, "_flush_pending_invalidations", AsyncMock(return_value=()))
+
+    async def cancelled_callback(_db: object) -> None:
+        raise asyncio.CancelledError(cancel_reason)
+
+    with pytest.raises(asyncio.CancelledError, match=cancel_reason):
+        await cache._operation(
+            "!room:example.test",
+            operation="cancelled_callback",
+            disabled_result=None,
+            callback=cancelled_callback,
+        )
+
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_postgres_runtime_rolls_back_cancelled_advisory_lock() -> None:
+    """Cancellation while acquiring the advisory lock must rollback the implicit transaction."""
+    cancel_reason = "lock wait cancelled"
+    runtime = PostgresEventCacheRuntime(
+        "postgresql://cache:test@localhost/mindroom",
+        namespace="tenant-a",
+    )
+    db = SimpleNamespace(
+        closed=False,
+        execute=AsyncMock(side_effect=asyncio.CancelledError(cancel_reason)),
+        rollback=AsyncMock(),
+    )
+    runtime._db = db
+
+    with pytest.raises(asyncio.CancelledError, match=cancel_reason):
+        async with runtime.acquire_db_operation("!room:example.test", operation="advisory_lock"):
+            pytest.fail("acquire_db_operation should not yield when advisory lock acquisition is cancelled")
+
+    db.rollback.assert_awaited_once()
 
 
 def test_build_event_cache_auto_installs_postgres_extra_before_import(

@@ -94,16 +94,58 @@ def _cache_backend_unavailable(operation: str, exc: BaseException) -> EventCache
     return EventCacheBackendUnavailableError(f"Postgres event cache unavailable during {operation}: {detail}")
 
 
-async def initialize_postgres_event_cache_db(database_url: str) -> psycopg.AsyncConnection:
+async def _rollback_postgres_connection_best_effort(
+    db: psycopg.AsyncConnection,
+    *,
+    namespace: str,
+    operation: str,
+) -> None:
+    """Roll back one shared connection without masking the original failure."""
+    try:
+        await db.rollback()
+    except Exception as exc:
+        logger.debug(
+            "Ignoring Postgres event cache rollback failure",
+            namespace=namespace,
+            operation=operation,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
+async def _close_postgres_connection_best_effort(
+    db: psycopg.AsyncConnection,
+    *,
+    namespace: str,
+    operation: str,
+) -> None:
+    """Close one shared connection without masking the original failure."""
+    try:
+        await db.close()
+    except Exception as exc:
+        logger.debug(
+            "Ignoring error while closing Postgres event cache connection",
+            namespace=namespace,
+            operation=operation,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
+async def initialize_postgres_event_cache_db(
+    database_url: str,
+    *,
+    namespace: str,
+) -> psycopg.AsyncConnection:
     """Open the PostgreSQL database and ensure the event-cache schema exists."""
     db = await psycopg.AsyncConnection.connect(database_url)
     try:
         await create_postgres_event_cache_schema(db)
         await validate_postgres_event_cache_schema(db)
         await db.commit()
-    except Exception:
-        await db.rollback()
-        await db.close()
+    except BaseException:
+        await _rollback_postgres_connection_best_effort(db, namespace=namespace, operation="initialize")
+        await _close_postgres_connection_best_effort(db, namespace=namespace, operation="initialize")
         raise
     return db
 
@@ -404,7 +446,7 @@ class _PostgresEventCacheRuntime:
             had_previous_connection = self._db is not None
             await self._close_db_locked(operation="initialize")
             try:
-                self._db = await initialize_postgres_event_cache_db(self._database_url)
+                self._db = await initialize_postgres_event_cache_db(self._database_url, namespace=self._namespace)
             except Exception as exc:
                 if _is_transient_postgres_failure(exc):
                     self._transient_failure_count += 1
@@ -521,15 +563,7 @@ class _PostgresEventCacheRuntime:
         self._db = None
         if db is None:
             return
-        try:
-            await db.close()
-        except Exception as exc:
-            logger.debug(
-                "Ignoring error while closing Postgres event cache connection",
-                namespace=self._namespace,
-                operation=operation,
-                error=str(exc),
-            )
+        await _close_postgres_connection_best_effort(db, namespace=self._namespace, operation=operation)
 
     def connection_is_closed(self, db: psycopg.AsyncConnection) -> bool:
         """Return whether psycopg considers one connection closed."""
@@ -591,10 +625,14 @@ class _PostgresEventCacheRuntime:
             await self.initialize()
         async with self._db_lock, self.acquire_room_lock(room_id, operation=operation):
             db = self.require_db()
-            await db.execute(
-                "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-                (self._namespace, room_id),
-            )
+            try:
+                await db.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                    (self._namespace, room_id),
+                )
+            except BaseException:
+                await _rollback_postgres_connection_best_effort(db, namespace=self._namespace, operation=operation)
+                raise
             yield db
 
     def require_db(self) -> psycopg.AsyncConnection:
@@ -730,8 +768,12 @@ class PostgresEventCache:
                         flushed_pending = await self._flush_pending_invalidations(db, room_id)
                         result = await callback(db)
                         await db.commit()
-                    except Exception:
-                        await self._rollback_best_effort(db, operation=operation)
+                    except BaseException:
+                        await _rollback_postgres_connection_best_effort(
+                            db,
+                            namespace=self._runtime.namespace,
+                            operation=operation,
+                        )
                         raise
             except EventCacheBackendUnavailableError as exc:
                 transient_error = exc
@@ -750,18 +792,6 @@ class PostgresEventCache:
                 self._forget_flushed_pending_invalidations(room_id, flushed_pending)
                 return result
         raise _cache_backend_unavailable(operation, transient_error or RuntimeError("operation did not run"))
-
-    async def _rollback_best_effort(self, db: psycopg.AsyncConnection, *, operation: str) -> None:
-        try:
-            await db.rollback()
-        except Exception as exc:
-            logger.debug(
-                "Ignoring Postgres event cache rollback failure",
-                namespace=self._runtime.namespace,
-                operation=operation,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
 
     async def _flush_pending_invalidations(
         self,
