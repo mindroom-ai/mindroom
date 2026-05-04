@@ -1217,6 +1217,26 @@ def test_compaction_summary_anthropic_model_forwards_tool_choice_none_without_mu
     assert "tools" in kwargs
 
 
+def test_compaction_summary_anthropic_model_disables_native_skills_without_regular_tools() -> None:
+    model = AnthropicClaude(
+        id="claude-test",
+        api_key="test-key",
+        skills=[{"type": "anthropic", "skill_id": "pptx", "version": "latest"}],
+    )
+
+    request_model = _compaction_summary_request_model(
+        model,
+        tools=None,
+        tool_choice=None,
+    )
+
+    assert request_model is not model
+    assert model.request_params is None
+    kwargs = request_model._prepare_request_kwargs("", tools=None, messages=[])
+    assert kwargs["tool_choice"] == {"type": "none"}
+    assert kwargs["tools"] == [{"type": "code_execution_20250825", "name": "code_execution"}]
+
+
 def test_compaction_summary_vertex_claude_copy_rebinds_prompt_cache_hook() -> None:
     tool_payload = _tool_payload()
     model = VertexClaude(id="claude-test", project_id="test-project", region="us-central1")
@@ -1260,6 +1280,35 @@ async def test_agent_compaction_provider_request_uses_previous_summary_from_syst
     assert "Existing durable summary" in str(provider_request.messages[0].content)
     assert "Existing durable summary" not in str(provider_request.messages[-1].content)
     assert "Already included in the system context" in str(provider_request.messages[-1].content)
+
+
+@pytest.mark.asyncio
+async def test_agent_compaction_provider_request_keeps_previous_summary_with_custom_system_message() -> None:
+    agent = _agent()
+    agent.add_session_summary_to_context = True
+    agent.system_message = "Custom system prompt."
+    session = _session(
+        "session-1",
+        summary=SessionSummary(summary="Existing durable summary", updated_at=datetime.now(UTC)),
+    )
+    chain = PreparedConversationChain(
+        messages=(Message(role="user", content="New work"), Message(role="assistant", content="New result")),
+        rendered_text="New work\nNew result",
+        source="persisted_runs",
+        source_run_ids=("run-1",),
+        estimated_tokens=10,
+    )
+    summary_request = build_warm_cache_compaction_summary_request(
+        chain,
+        previous_summary="Existing durable summary",
+    )
+
+    provider_request = await build_agent_compaction_provider_request(summary_request, session, agent=agent)
+
+    assert str(provider_request.messages[0].content) == "Custom system prompt."
+    assert "Existing durable summary" not in str(provider_request.messages[0].content)
+    assert "Existing durable summary" in str(provider_request.messages[-1].content)
+    assert "Already included in the system context" not in str(provider_request.messages[-1].content)
 
 
 def test_compaction_summary_request_converts_media_tool_call_group_to_plain_messages() -> None:

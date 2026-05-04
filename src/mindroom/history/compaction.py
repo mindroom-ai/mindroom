@@ -888,7 +888,11 @@ def _compaction_summary_request_model(
     tools: Sequence[dict] | None,
     tool_choice: str | dict[str, object] | None,
 ) -> Model:
-    if not tools or not _is_no_tool_choice(tool_choice) or not isinstance(model, Claude):
+    if not isinstance(model, Claude) or not _claude_compaction_needs_tool_choice_none(
+        model,
+        tools=tools,
+        tool_choice=tool_choice,
+    ):
         return model
     request_model = copy(model)
     request_params = dict(request_model.request_params or {})
@@ -896,6 +900,15 @@ def _compaction_summary_request_model(
     request_model.request_params = request_params
     rebind_vertex_claude_prompt_cache_hook(request_model)
     return request_model
+
+
+def _claude_compaction_needs_tool_choice_none(
+    model: Claude,
+    *,
+    tools: Sequence[dict] | None,
+    tool_choice: str | dict[str, object] | None,
+) -> bool:
+    return bool(model.skills) or (bool(tools) and _is_no_tool_choice(tool_choice))
 
 
 def _is_no_tool_choice(tool_choice: str | dict[str, object] | None) -> bool:

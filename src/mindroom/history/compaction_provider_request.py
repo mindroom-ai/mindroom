@@ -67,8 +67,7 @@ async def build_agent_compaction_provider_request(
         prefix_messages=summary_request.chain.messages,
         final_user_message=_final_summary_message(
             summary_request,
-            session=session,
-            add_session_summary_to_context=bool(agent.add_session_summary_to_context),
+            previous_summary_in_context=_agent_includes_session_summary(agent, session),
         ),
         synthetic_run_id=_synthetic_compaction_run_id(summary_request),
     )
@@ -90,8 +89,7 @@ async def build_team_compaction_provider_request(
         prefix_messages=summary_request.chain.messages,
         final_user_message=_final_summary_message(
             summary_request,
-            session=session,
-            add_session_summary_to_context=bool(team.add_session_summary_to_context),
+            previous_summary_in_context=_team_includes_session_summary(team, session),
         ),
         synthetic_run_id=_synthetic_compaction_run_id(summary_request),
     )
@@ -100,15 +98,33 @@ async def build_team_compaction_provider_request(
 def _final_summary_message(
     summary_request: CompactionSummaryRequest,
     *,
-    session: AgentSession | TeamSession,
-    add_session_summary_to_context: bool,
+    previous_summary_in_context: bool,
 ) -> Message:
-    if add_session_summary_to_context and session.summary is not None:
+    if previous_summary_in_context:
         return Message(
             role="user",
             content=compaction_summary_instruction(None, previous_summary_in_context=True),
         )
     return summary_request.messages[-1]
+
+
+def _agent_includes_session_summary(agent: Agent, session: AgentSession) -> bool:
+    return (
+        _session_has_summary_text(session)
+        and bool(agent.add_session_summary_to_context)
+        and agent.system_message is None
+        and agent.build_context
+    )
+
+
+def _team_includes_session_summary(team: Team, session: TeamSession) -> bool:
+    return (
+        _session_has_summary_text(session) and bool(team.add_session_summary_to_context) and team.system_message is None
+    )
+
+
+def _session_has_summary_text(session: AgentSession | TeamSession) -> bool:
+    return session.summary is not None and bool(session.summary.summary.strip())
 
 
 def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
