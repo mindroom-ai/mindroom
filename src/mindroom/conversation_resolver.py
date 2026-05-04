@@ -364,7 +364,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
-        caller_label: str = "unknown",
+        caller_label: str,
     ) -> str | None:
         """Resolve canonical thread membership for one event."""
         return await resolve_event_thread_id(
@@ -397,7 +397,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
-        caller_label: str = "unknown",
+        caller_label: str,
     ) -> ThreadMembershipAccess:
         """Return the shared thread-membership accessors for this resolver."""
         return thread_messages_thread_membership_access(
@@ -419,7 +419,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
-        caller_label: str = "unknown",
+        caller_label: str,
     ) -> ThreadReadResult:
         """Resolve one thread read through the shared cache entrypoint."""
         return await self.deps.conversation_cache.get_thread_messages(
@@ -475,7 +475,7 @@ class ConversationResolver:
         *,
         full_history: bool,
         dispatch_safe: bool,
-        caller_label: str = "unknown",
+        caller_label: str,
     ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage], bool]:
         """Resolve one thread context using either snapshot or full history."""
         thread_id = await self._explicit_thread_id_for_event(
@@ -596,7 +596,7 @@ class ConversationResolver:
         full_history: bool,
         dispatch_safe: bool,
         payload_metadata: DispatchPayloadMetadata | None = None,
-        caller_label: str = "unknown",
+        caller_label: str,
     ) -> MessageContext:
         """Resolve event metadata, mentions, and thread history for one inbound turn."""
         resolved_event_source = await resolve_event_source_content(event.source, self._client())

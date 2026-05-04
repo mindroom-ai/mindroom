@@ -1252,7 +1252,7 @@ class TestSetManualThreadSummary:
         """Manual summary writes should normalize text, count non-summary messages, and update the cache."""
         client = _mock_client()
         conversation_cache = AsyncMock()
-        conversation_cache.get_thread_messages.return_value = [
+        conversation_cache.get_thread_history.return_value = [
             *_make_thread_history(3),
             _make_summary_notice_message("$root1", message_count=2),
         ]
@@ -1271,7 +1271,7 @@ class TestSetManualThreadSummary:
 
         assert result.event_id == "$summary1"
         assert result.summary == "Fix ISSUE-116"
-        assert result.message_count == _count_non_summary_messages(conversation_cache.get_thread_messages.return_value)
+        assert result.message_count == _count_non_summary_messages(conversation_cache.get_thread_history.return_value)
         mock_send.assert_awaited_once_with(
             client,
             "!room:x",
@@ -1287,7 +1287,7 @@ class TestSetManualThreadSummary:
         """A failed manual summary send should not advance the cached threshold baseline."""
         client = _mock_client()
         conversation_cache = AsyncMock()
-        conversation_cache.get_thread_messages.return_value = _make_thread_history(5)
+        conversation_cache.get_thread_history.return_value = _make_thread_history(5)
         update_last_summary_count("!room:x", "$root1", 2)
 
         with (
@@ -1311,7 +1311,7 @@ class TestSetManualThreadSummary:
         """A failed history fetch should raise the shared manual-summary fetch error."""
         client = _mock_client()
         conversation_cache = AsyncMock()
-        conversation_cache.get_thread_messages.side_effect = TimeoutError("timed out")
+        conversation_cache.get_thread_history.side_effect = TimeoutError("timed out")
 
         with pytest.raises(ThreadSummaryWriteError, match=r"Failed to fetch thread history for the target thread\."):
             await set_manual_thread_summary(

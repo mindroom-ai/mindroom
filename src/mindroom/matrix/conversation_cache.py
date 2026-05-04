@@ -658,6 +658,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
             caller_label="startup_thread_prewarm",
+            # Startup prewarm bypasses the read coordinator; 0.0 means no coordinator queue was used.
             coordinator_queue_wait_ms=0.0,
         )
 

@@ -8758,6 +8758,7 @@ class TestThreadingBehavior:
             event_info,
             full_history=False,
             dispatch_safe=False,
+            caller_label="threading_error_test",
         )
 
         assert thread_id is None
@@ -9026,6 +9027,7 @@ class TestThreadingBehavior:
                 event_info,
                 full_history=True,
                 dispatch_safe=False,
+                caller_label="threading_error_test",
             )
 
         assert is_thread is True

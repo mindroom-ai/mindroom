@@ -1277,11 +1277,9 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     else:
         if thread_id:
             thread_history = list(
-                await conversation_cache.get_thread_messages(
+                await conversation_cache.get_thread_history(
                     room_id,
                     thread_id,
-                    full_history=True,
-                    dispatch_safe=False,
                     caller_label="schedule_existing_thread",
                 ),
             )

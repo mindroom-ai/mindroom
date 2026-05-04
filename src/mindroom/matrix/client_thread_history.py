@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
+type ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
 @dataclass(slots=True)
@@ -87,7 +88,7 @@ def _log_thread_history_refresh(
     thread_id: str,
     caller_label: str,
     mode: str,
-    diagnostics: Mapping[str, str | int | float | bool],
+    diagnostics: Mapping[str, ThreadHistoryDiagnosticValue],
     coordinator_queue_wait_ms: float,
 ) -> None:
     """Emit one structured INFO line for a completed thread read."""
@@ -109,25 +110,6 @@ def _log_thread_history_refresh(
         thread_read_source=diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC),
         thread_read_degraded=diagnostics.get(THREAD_HISTORY_DEGRADED_DIAGNOSTIC, False),
         thread_read_error=diagnostics.get(THREAD_HISTORY_ERROR_DIAGNOSTIC),
-    )
-
-
-def _log_cached_thread_history_refresh(
-    *,
-    room_id: str,
-    thread_id: str,
-    caller_label: str,
-    cached_history: ThreadHistoryResult,
-    coordinator_queue_wait_ms: float,
-) -> None:
-    """Emit refresh diagnostics for a usable durable-cache hit."""
-    _log_thread_history_refresh(
-        room_id=room_id,
-        thread_id=thread_id,
-        caller_label=caller_label,
-        mode="cache_hit",
-        diagnostics=cached_history.diagnostics,
-        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
     )
 
 
@@ -811,11 +793,12 @@ async def fetch_thread_history(
         )
     else:
         if cached_history is not None:
-            _log_cached_thread_history_refresh(
+            _log_thread_history_refresh(
                 room_id=room_id,
                 thread_id=thread_id,
                 caller_label=caller_label,
-                cached_history=cached_history,
+                mode="cache_hit",
+                diagnostics=cached_history.diagnostics,
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
             return cached_history
@@ -864,11 +847,12 @@ async def fetch_thread_snapshot(
         )
     else:
         if cached_history is not None:
-            _log_cached_thread_history_refresh(
+            _log_thread_history_refresh(
                 room_id=room_id,
                 thread_id=thread_id,
                 caller_label=caller_label,
-                cached_history=cached_history,
+                mode="cache_hit",
+                diagnostics=cached_history.diagnostics,
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
             return cached_history
@@ -918,11 +902,12 @@ async def fetch_dispatch_thread_history(
         )
     else:
         if cached_history is not None:
-            _log_cached_thread_history_refresh(
+            _log_thread_history_refresh(
                 room_id=room_id,
                 thread_id=thread_id,
                 caller_label=caller_label,
-                cached_history=cached_history,
+                mode="cache_hit",
+                diagnostics=cached_history.diagnostics,
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
             return cached_history
@@ -972,11 +957,12 @@ async def fetch_dispatch_thread_snapshot(
         )
     else:
         if cached_history is not None:
-            _log_cached_thread_history_refresh(
+            _log_thread_history_refresh(
                 room_id=room_id,
                 thread_id=thread_id,
                 caller_label=caller_label,
-                cached_history=cached_history,
+                mode="cache_hit",
+                diagnostics=cached_history.diagnostics,
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
             return cached_history

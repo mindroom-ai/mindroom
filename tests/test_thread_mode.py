@@ -761,6 +761,7 @@ class TestExtractMessageContextRoomMode:
                 event,
                 full_history=True,
                 dispatch_safe=False,
+                caller_label="thread_mode_test",
             )
             is context
         )
@@ -776,6 +777,7 @@ class TestExtractMessageContextRoomMode:
             event,
             full_history=True,
             dispatch_safe=False,
+            caller_label="thread_mode_test",
         )
 
     def test_hot_reloaded_bot_uses_updated_thread_mode_without_restart(
@@ -1551,6 +1553,7 @@ class TestExtractedModuleLoggerRebinding:
             EventInfo.from_event(event.source),
             full_history=False,
             dispatch_safe=True,
+            caller_label="thread_mode_test",
         )
 
         assert thread_id == "$threadroot"
