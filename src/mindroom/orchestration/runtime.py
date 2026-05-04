@@ -163,6 +163,20 @@ async def _cancel_stalled_sync_task(
     sync_task: asyncio.Task[Any],
 ) -> None:
     """Request sync-task cancellation without letting the watchdog hang forever."""
+    await _cancel_sync_task_with_timeout(
+        bot,
+        sync_task,
+        timeout_log_message="Matrix sync watchdog cancellation timed out",
+    )
+
+
+async def _cancel_sync_task_with_timeout(
+    bot: AgentBot | TeamBot,
+    sync_task: asyncio.Task[Any],
+    *,
+    timeout_log_message: str,
+) -> None:
+    """Cancel a sync task and log diagnostics if it refuses to finish."""
     request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
     done, _ = await asyncio.wait({sync_task}, timeout=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS)
     if sync_task in done:
@@ -171,7 +185,7 @@ async def _cancel_stalled_sync_task(
         return
 
     logger.error(
-        "Matrix sync watchdog cancellation timed out",
+        timeout_log_message,
         agent_name=bot.agent_name,
         cancel_timeout_seconds=_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS,
         sync_task_name=sync_task.get_name(),
@@ -289,11 +303,16 @@ class _SyncIteration:
             if task is None:
                 continue
             setattr(self, attr, None)
-            if attr == "sync_task":
-                request_task_cancel(task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
-            else:
+            if attr != "sync_task":
                 task.cancel()
             try:
+                if attr == "sync_task":
+                    await _cancel_sync_task_with_timeout(
+                        self.bot,
+                        task,
+                        timeout_log_message="Matrix sync iteration cleanup cancellation timed out",
+                    )
+                    continue
                 await task
             except (asyncio.CancelledError, MatrixSyncStalledError):
                 pass

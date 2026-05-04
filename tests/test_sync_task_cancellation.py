@@ -253,6 +253,50 @@ async def test_watchdog_times_out_sync_restart_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_sync_forever_with_restart_does_not_hang_after_sync_cancel_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancellation timeout in the watchdog should not hang supervisor cleanup."""
+    bot = _FakeBot()
+    bot.agent_name = "wedged_agent"
+    cancellation_seen = asyncio.Event()
+    release_sync_task = asyncio.Event()
+    sync_task: asyncio.Task[None] | None = None
+
+    async def ignore_cancellation_until_released() -> None:
+        nonlocal sync_task
+        sync_task = asyncio.current_task()
+        bot.sync_calls += 1
+        while True:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                if release_sync_task.is_set():
+                    raise
+
+    bot.sync_forever = ignore_cancellation_until_released
+
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_CANCEL_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+
+    supervisor_task = asyncio.create_task(sync_forever_with_restart(bot, max_retries=1))
+    try:
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
+        await asyncio.sleep(0.05)
+        assert supervisor_task.done()
+    finally:
+        release_sync_task.set()
+        if sync_task is not None and not sync_task.done():
+            sync_task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+        with suppress(asyncio.CancelledError):
+            await supervisor_task
+
+
+@pytest.mark.asyncio
 async def test_sync_iteration_wait_does_not_block_on_unrelated_sync_cancellation() -> None:
     """Direct sync-task cancellation should surface immediately without waiting for the watchdog."""
     bot = _FakeBot()
