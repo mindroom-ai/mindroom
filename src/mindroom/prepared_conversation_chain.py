@@ -25,7 +25,7 @@ from mindroom.constants import (
 )
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.partial_reply_text import clean_partial_reply_text, is_interrupted_partial_reply
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.token_budget import stable_serialize
 
 if TYPE_CHECKING:
     from agno.run.agent import RunOutput
@@ -72,7 +72,6 @@ _COLD_CACHE_STATIC_OMISSION_NOTE = (
     "Static agent instructions and tool definitions were omitted from this cold-cache compaction request. "
     "They do not need to be summarized."
 )
-_SUMMARY_REQUEST_OVERHEAD_TOKENS = 200
 _COMPACTION_SUMMARY_INSTRUCTION = """\
 You are updating a durable conversation handoff summary for a future model call.
 
@@ -695,8 +694,7 @@ def build_compaction_summary_request(
     cold_cache: bool = False,
 ) -> tuple[CompactionSummaryRequest | None, list[RunOutput | TeamRunOutput]]:
     """Select a run prefix and build the chain-based summary request for one compaction chunk."""
-    previous_summary_tokens = estimate_text_tokens(previous_summary.strip()) if previous_summary is not None else 0
-    remaining = max_input_tokens - previous_summary_tokens - _SUMMARY_REQUEST_OVERHEAD_TOKENS
+    remaining = max_input_tokens - _summary_instruction_tokens(previous_summary)
     if remaining <= 0:
         return None, []
 
@@ -705,33 +703,44 @@ def build_compaction_summary_request(
         run_tokens = _estimate_run_chain_tokens(run, history_settings)
         if run_tokens > remaining:
             if not included_runs:
-                oversized_chain = _build_oversized_run_chain(
+                request = _build_oversized_summary_request(
                     run,
                     history_settings=history_settings,
-                    max_tokens=remaining,
-                )
-                if not oversized_chain.messages:
-                    return None, []
-                request = _summary_request_from_chain(
-                    oversized_chain,
+                    max_prefix_tokens=remaining,
+                    max_input_tokens=max_input_tokens,
                     previous_summary=previous_summary,
                     cold_cache=cold_cache,
                 )
+                if request is None:
+                    return None, []
                 return request, [run]
             break
         included_runs.append(run)
         remaining -= run_tokens
 
-    if not included_runs:
-        return None, []
+    while included_runs:
+        chain = build_persisted_run_chain(included_runs, history_settings=history_settings)
+        request = _summary_request_from_chain(
+            chain,
+            previous_summary=previous_summary,
+            cold_cache=cold_cache,
+        )
+        if request.estimated_tokens <= max_input_tokens:
+            return request, included_runs
+        if len(included_runs) == 1:
+            request = _build_oversized_summary_request(
+                included_runs[0],
+                history_settings=history_settings,
+                max_prefix_tokens=remaining + _estimate_run_chain_tokens(included_runs[0], history_settings),
+                max_input_tokens=max_input_tokens,
+                previous_summary=previous_summary,
+                cold_cache=cold_cache,
+            )
+            if request is not None:
+                return request, included_runs
+        included_runs.pop()
 
-    chain = build_persisted_run_chain(included_runs, history_settings=history_settings)
-    request = _summary_request_from_chain(
-        chain,
-        previous_summary=previous_summary,
-        cold_cache=cold_cache,
-    )
-    return request, included_runs
+    return None, []
 
 
 def compaction_summary_instruction(previous_summary: str | None) -> str:
@@ -740,22 +749,31 @@ def compaction_summary_instruction(previous_summary: str | None) -> str:
     return _COMPACTION_SUMMARY_INSTRUCTION.format(previous_summary=summary)
 
 
+def _summary_instruction_tokens(previous_summary: str | None) -> int:
+    return estimate_history_messages_tokens(
+        [Message(role="user", content=compaction_summary_instruction(previous_summary))],
+    )
+
+
 def validate_tool_result_adjacency(messages: Sequence[Message]) -> None:
     """Validate that a tool result still directly follows the assistant tool call it answers."""
     expected_tool_call_ids: list[str] = []
     for message in messages:
-        if message.role == "assistant":
-            expected_tool_call_ids = _tool_call_ids(message)
-            continue
         if expected_tool_call_ids:
             if message.role != "tool" or message.tool_call_id not in expected_tool_call_ids:
                 msg = "tool result adjacency would be broken by prepared-chain transform"
                 raise ValueError(msg)
             expected_tool_call_ids.remove(message.tool_call_id)
             continue
+        if message.role == "assistant":
+            expected_tool_call_ids = _tool_call_ids(message)
+            continue
         if message.role == "tool":
             msg = "tool result appears without an adjacent assistant tool call"
             raise ValueError(msg)
+    if expected_tool_call_ids:
+        msg = "tool result adjacency would be broken by prepared-chain transform"
+        raise ValueError(msg)
 
 
 def compaction_replay_messages(
@@ -930,27 +948,67 @@ def _estimate_run_chain_tokens(run: RunOutput | TeamRunOutput, history_settings:
     return estimate_history_messages_tokens(compaction_replay_messages(run, history_settings))
 
 
+def _build_oversized_summary_request(
+    run: RunOutput | TeamRunOutput,
+    *,
+    history_settings: ResolvedHistorySettings,
+    max_prefix_tokens: int,
+    max_input_tokens: int,
+    previous_summary: str | None,
+    cold_cache: bool,
+) -> CompactionSummaryRequest | None:
+    budget = max_prefix_tokens
+    while budget > 0:
+        chain = _build_oversized_run_chain(
+            run,
+            history_settings=history_settings,
+            max_tokens=budget,
+        )
+        if not chain.messages:
+            return None
+        request = _summary_request_from_chain(
+            chain,
+            previous_summary=previous_summary,
+            cold_cache=cold_cache,
+        )
+        if request.estimated_tokens <= max_input_tokens:
+            return request
+        budget -= max(1, request.estimated_tokens - max_input_tokens)
+    return None
+
+
 def _build_oversized_run_chain(
     run: RunOutput | TeamRunOutput,
     *,
     history_settings: ResolvedHistorySettings,
     max_tokens: int,
 ) -> PreparedConversationChain:
-    messages: list[Message] = [Message(role="user", content=_OVERSIZED_RUN_NOTE)]
-    remaining_chars = max(0, max_tokens * 4 - len(_OVERSIZED_RUN_NOTE))
+    note = Message(role="user", content=_OVERSIZED_RUN_NOTE)
+    messages: list[Message] = [note]
+    remaining_chars = max(0, max_tokens * 4 - _estimated_message_chars(note))
+    included_content_messages = 0
     for message in compaction_replay_messages(run, history_settings):
         if remaining_chars <= 0:
             break
-        content = render_message_content(message)
+        content = _oversized_excerpt_content(message)
         if not content:
             continue
         if len(content) > remaining_chars:
             content = _truncate_excerpt(content, remaining_chars)
-        copied = message.model_copy(deep=True)
-        copied.content = content
-        copied.compressed_content = None
+        if not content:
+            continue
+        copied = _plain_oversized_excerpt_message(message, content)
         messages.append(copied)
-        remaining_chars -= len(content)
+        included_content_messages += 1
+        remaining_chars -= _estimated_message_chars(copied)
+    if included_content_messages == 0:
+        return PreparedConversationChain(
+            messages=(),
+            rendered_text="",
+            source="persisted_runs",
+            source_run_ids=(),
+            estimated_tokens=0,
+        )
     source_run_ids = (run.run_id,) if isinstance(run.run_id, str) and run.run_id else ()
     return PreparedConversationChain(
         messages=tuple(messages),
@@ -959,6 +1017,28 @@ def _build_oversized_run_chain(
         source_run_ids=source_run_ids,
         estimated_tokens=estimate_history_messages_tokens(messages),
     )
+
+
+def _oversized_excerpt_content(message: Message) -> str:
+    parts: list[str] = []
+    content = render_message_content(message)
+    if content:
+        if message.role == "tool":
+            tool_label = f"Tool result for {message.tool_call_id}" if message.tool_call_id else "Tool result"
+            content = f"{tool_label}:\n{content}"
+        parts.append(content)
+    if message.tool_calls:
+        parts.append(f"Tool calls: {stable_serialize(message.tool_calls)}")
+    for tag, media_value in message_media_entries(message):
+        if media_value is None:
+            continue
+        parts.append(f"{tag}: {stable_serialize(media_payload_snapshot(media_value))}")
+    return "\n".join(parts)
+
+
+def _plain_oversized_excerpt_message(message: Message, content: str) -> Message:
+    role = message.role if message.role in {"assistant", "system", "user"} else "user"
+    return Message(role=role, content=content)
 
 
 def _classify_partial_reply(
