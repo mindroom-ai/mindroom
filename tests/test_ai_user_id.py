@@ -84,7 +84,7 @@ from mindroom.hooks import (
     render_system_enrichment_block,
 )
 from mindroom.hooks.registry import HookRegistryState
-from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail, KnowledgeResolution
 from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
 from mindroom.matrix.identity import MatrixID
@@ -766,7 +766,8 @@ def test_session_started_event_is_registered() -> None:
     """session:started should be a built-in event with the expected default timeout."""
     assert EVENT_SESSION_STARTED in BUILTIN_EVENT_NAMES
     assert validate_event_name(EVENT_SESSION_STARTED) == EVENT_SESSION_STARTED
-    assert "session" in RESERVED_EVENT_NAMESPACES
+    with pytest.raises(ValueError, match="reserved namespace"):
+        validate_event_name("session:custom")
     assert default_timeout_ms_for_event(EVENT_SESSION_STARTED) == 5000
 
 

@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
-type ThreadHistoryDiagnosticValue = str | int | float | bool
+type _ThreadHistoryDiagnosticValue = str | int | float | bool
 
 THREAD_HISTORY_SOURCE_DIAGNOSTIC = "thread_read_source"
 THREAD_HISTORY_SOURCE_CACHE = "cache"
@@ -28,7 +28,7 @@ class ThreadHistoryResult(Sequence["ResolvedVisibleMessage"]):  # noqa: PLW1641
 
     messages: list[ResolvedVisibleMessage]
     is_full_history: bool
-    diagnostics: dict[str, ThreadHistoryDiagnosticValue] = field(default_factory=dict)
+    diagnostics: dict[str, _ThreadHistoryDiagnosticValue] = field(default_factory=dict)
 
     def __iter__(self) -> Iterator[ResolvedVisibleMessage]:
         """Iterate over wrapped visible messages."""
@@ -61,7 +61,7 @@ def thread_history_result(
     history: Sequence[ResolvedVisibleMessage],
     *,
     is_full_history: bool,
-    diagnostics: Mapping[str, ThreadHistoryDiagnosticValue] | None = None,
+    diagnostics: Mapping[str, _ThreadHistoryDiagnosticValue] | None = None,
 ) -> ThreadHistoryResult:
     """Wrap history with hydration metadata used by dispatch fast paths."""
     resolved_diagnostics = dict(diagnostics or {})

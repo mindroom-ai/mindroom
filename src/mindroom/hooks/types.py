@@ -48,11 +48,11 @@ BUILTIN_EVENT_NAMES = frozenset(
         EVENT_TOOL_AFTER_CALL,
     },
 )
-RESERVED_EVENT_NAMESPACES = frozenset(
+_RESERVED_EVENT_NAMESPACES = frozenset(
     {"message", "system", "agent", "bot", "compaction", "schedule", "reaction", "config", "session", "tool"},
 )
-EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$")
-DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
+_EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$")
+_DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
     EVENT_MESSAGE_RECEIVED: 15000,
     EVENT_MESSAGE_ENRICH: 2000,
     EVENT_SYSTEM_ENRICH: 2000,
@@ -72,7 +72,7 @@ DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
     EVENT_TOOL_BEFORE_CALL: 200,
     EVENT_TOOL_AFTER_CALL: 300,
 }
-DEFAULT_CUSTOM_EVENT_TIMEOUT_MS = 1000
+_DEFAULT_CUSTOM_EVENT_TIMEOUT_MS = 1000
 
 EnrichmentCachePolicy = Literal["stable", "volatile"]
 
@@ -162,14 +162,9 @@ class RegisteredHook:
     rooms: tuple[str, ...] | None
 
 
-def is_custom_event_name(event_name: str) -> bool:
-    """Return whether *event_name* is outside the built-in event set."""
-    return event_name not in BUILTIN_EVENT_NAMES
-
-
 def default_timeout_ms_for_event(event_name: str) -> int:
     """Return the default timeout for one event name."""
-    return DEFAULT_EVENT_TIMEOUT_MS.get(event_name, DEFAULT_CUSTOM_EVENT_TIMEOUT_MS)
+    return _DEFAULT_EVENT_TIMEOUT_MS.get(event_name, _DEFAULT_CUSTOM_EVENT_TIMEOUT_MS)
 
 
 def validate_event_name(event_name: str) -> str:
@@ -177,12 +172,12 @@ def validate_event_name(event_name: str) -> str:
     normalized = event_name.strip()
     if normalized in BUILTIN_EVENT_NAMES:
         return normalized
-    if not EVENT_NAME_PATTERN.fullmatch(normalized):
+    if not _EVENT_NAME_PATTERN.fullmatch(normalized):
         msg = f"Invalid hook event name: {event_name!r}"
         raise ValueError(msg)
 
     namespace = normalized.split(":", 1)[0]
-    if namespace in RESERVED_EVENT_NAMESPACES:
+    if namespace in _RESERVED_EVENT_NAMESPACES:
         msg = f"Custom hook event uses reserved namespace: {event_name!r}"
         raise ValueError(msg)
     return normalized

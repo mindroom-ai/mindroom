@@ -37,7 +37,7 @@ from mindroom.hooks import (
     hook,
     render_system_enrichment_block,
 )
-from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.memory import MemoryPromptParts
@@ -191,7 +191,8 @@ def test_system_enrich_event_and_context_helpers(tmp_path: Path) -> None:
 
     assert EVENT_SYSTEM_ENRICH in BUILTIN_EVENT_NAMES
     assert validate_event_name(EVENT_SYSTEM_ENRICH) == EVENT_SYSTEM_ENRICH
-    assert "system" in RESERVED_EVENT_NAMESPACES
+    with pytest.raises(ValueError, match="reserved namespace"):
+        validate_event_name("system:custom")
     assert default_timeout_ms_for_event(EVENT_SYSTEM_ENRICH) == 2000
     assert context._items == [EnrichmentItem(key="team_state", text="Delegate to research", cache_policy="stable")]
 

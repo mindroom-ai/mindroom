@@ -109,7 +109,7 @@ from mindroom.hooks import (
     build_hook_matrix_admin,
     hook,
 )
-from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.memory import MemoryPromptParts
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
@@ -1366,7 +1366,8 @@ def test_compaction_hook_events_are_registered() -> None:
     assert EVENT_COMPACTION_AFTER in BUILTIN_EVENT_NAMES
     assert validate_event_name(EVENT_COMPACTION_BEFORE) == EVENT_COMPACTION_BEFORE
     assert validate_event_name(EVENT_COMPACTION_AFTER) == EVENT_COMPACTION_AFTER
-    assert "compaction" in RESERVED_EVENT_NAMESPACES
+    with pytest.raises(ValueError, match="reserved namespace"):
+        validate_event_name("compaction:custom")
     assert default_timeout_ms_for_event(EVENT_COMPACTION_BEFORE) == 15000
     assert default_timeout_ms_for_event(EVENT_COMPACTION_AFTER) == 5000
 

@@ -43,7 +43,7 @@ from mindroom.hooks import (
     emit_gate,
     hook,
 )
-from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
@@ -330,7 +330,8 @@ def test_tool_events_are_registered_with_expected_timeouts() -> None:
     assert EVENT_TOOL_AFTER_CALL in BUILTIN_EVENT_NAMES
     assert validate_event_name(EVENT_TOOL_BEFORE_CALL) == EVENT_TOOL_BEFORE_CALL
     assert validate_event_name(EVENT_TOOL_AFTER_CALL) == EVENT_TOOL_AFTER_CALL
-    assert "tool" in RESERVED_EVENT_NAMESPACES
+    with pytest.raises(ValueError, match="reserved namespace"):
+        validate_event_name("tool:custom")
     assert default_timeout_ms_for_event(EVENT_MESSAGE_RECEIVED) == 15000
     assert default_timeout_ms_for_event(EVENT_TOOL_BEFORE_CALL) == 200
     assert default_timeout_ms_for_event(EVENT_TOOL_AFTER_CALL) == 300

@@ -22,18 +22,18 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.config import MCPServerConfig, MCPTransport
 
-TransportStreams = tuple[
+_TransportStreams = tuple[
     MemoryObjectReceiveStream[SessionMessage | Exception],
     MemoryObjectSendStream[SessionMessage],
 ]
 
 
 @dataclass(frozen=True)
-class MCPTransportHandle:
+class _MCPTransportHandle:
     """Deferred transport opener for one configured server."""
 
     transport: MCPTransport
-    opener: Callable[[], AbstractAsyncContextManager[TransportStreams]]
+    opener: Callable[[], AbstractAsyncContextManager[_TransportStreams]]
 
 
 def _interpolate_value(value: str, runtime_paths: RuntimePaths) -> str:
@@ -43,17 +43,17 @@ def _interpolate_value(value: str, runtime_paths: RuntimePaths) -> str:
     return _ENV_REFERENCE_PATTERN.sub(replace, value)
 
 
-def interpolate_mcp_env(values: Mapping[str, str], runtime_paths: RuntimePaths) -> dict[str, str]:
+def _interpolate_mcp_env(values: Mapping[str, str], runtime_paths: RuntimePaths) -> dict[str, str]:
     """Resolve `${ENV_VAR}` placeholders in MCP env config."""
     return {name: _interpolate_value(value, runtime_paths) for name, value in values.items()}
 
 
-def interpolate_mcp_headers(values: Mapping[str, str], runtime_paths: RuntimePaths) -> dict[str, str]:
+def _interpolate_mcp_headers(values: Mapping[str, str], runtime_paths: RuntimePaths) -> dict[str, str]:
     """Resolve `${ENV_VAR}` placeholders in MCP header config."""
     return {name: _interpolate_value(value, runtime_paths) for name, value in values.items()}
 
 
-def build_stdio_server_parameters(
+def _build_stdio_server_parameters(
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths | None = None,
 ) -> StdioServerParameters:
@@ -63,7 +63,7 @@ def build_stdio_server_parameters(
         raise ValueError(msg)
     env = server_config.env
     if runtime_paths is not None:
-        env = interpolate_mcp_env(server_config.env, runtime_paths)
+        env = _interpolate_mcp_env(server_config.env, runtime_paths)
     return StdioServerParameters(
         command=server_config.command,
         args=list(server_config.args),
@@ -79,8 +79,8 @@ def build_stdio_server_parameters(
 async def _open_stdio(
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths,
-) -> AsyncIterator[TransportStreams]:
-    async with stdio_client(build_stdio_server_parameters(server_config, runtime_paths)) as streams:
+) -> AsyncIterator[_TransportStreams]:
+    async with stdio_client(_build_stdio_server_parameters(server_config, runtime_paths)) as streams:
         yield streams
 
 
@@ -88,13 +88,13 @@ async def _open_stdio(
 async def _open_sse(
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths,
-) -> AsyncIterator[TransportStreams]:
+) -> AsyncIterator[_TransportStreams]:
     if server_config.url is None:
         msg = "sse MCP servers require url"
         raise ValueError(msg)
     async with sse_client(
         server_config.url,
-        headers=interpolate_mcp_headers(server_config.headers, runtime_paths),
+        headers=_interpolate_mcp_headers(server_config.headers, runtime_paths),
         timeout=server_config.startup_timeout_seconds,
         sse_read_timeout=server_config.call_timeout_seconds,
     ) as streams:
@@ -105,13 +105,13 @@ async def _open_sse(
 async def _open_streamable_http(
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths,
-) -> AsyncIterator[TransportStreams]:
+) -> AsyncIterator[_TransportStreams]:
     if server_config.url is None:
         msg = "streamable-http MCP servers require url"
         raise ValueError(msg)
     async with streamablehttp_client(
         server_config.url,
-        headers=interpolate_mcp_headers(server_config.headers, runtime_paths),
+        headers=_interpolate_mcp_headers(server_config.headers, runtime_paths),
         timeout=server_config.startup_timeout_seconds,
         sse_read_timeout=server_config.call_timeout_seconds,
     ) as streams:
@@ -122,14 +122,14 @@ def build_transport_handle(
     server_id: str,
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths,
-) -> MCPTransportHandle:
+) -> _MCPTransportHandle:
     """Build a deferred transport opener for one configured MCP server."""
     if server_config.transport == "stdio":
-        return MCPTransportHandle(transport="stdio", opener=lambda: _open_stdio(server_config, runtime_paths))
+        return _MCPTransportHandle(transport="stdio", opener=lambda: _open_stdio(server_config, runtime_paths))
     if server_config.transport == "sse":
-        return MCPTransportHandle(transport="sse", opener=lambda: _open_sse(server_config, runtime_paths))
+        return _MCPTransportHandle(transport="sse", opener=lambda: _open_sse(server_config, runtime_paths))
     if server_config.transport == "streamable-http":
-        return MCPTransportHandle(
+        return _MCPTransportHandle(
             transport="streamable-http",
             opener=lambda: _open_streamable_http(server_config, runtime_paths),
         )

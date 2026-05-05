@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.transports import (
-    build_stdio_server_parameters,
+    _build_stdio_server_parameters,
+    _interpolate_mcp_env,
+    _interpolate_mcp_headers,
     build_transport_handle,
-    interpolate_mcp_env,
-    interpolate_mcp_headers,
 )
 
 if TYPE_CHECKING:
@@ -30,8 +30,8 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 def test_interpolate_mcp_env_and_headers(tmp_path: Path) -> None:
     """Resolve environment placeholders in env vars and HTTP headers."""
     runtime_paths = _runtime_paths(tmp_path)
-    assert interpolate_mcp_env({"TOKEN": "${API_TOKEN}"}, runtime_paths) == {"TOKEN": "secret-token"}
-    assert interpolate_mcp_headers({"Authorization": "Bearer ${API_TOKEN}"}, runtime_paths) == {
+    assert _interpolate_mcp_env({"TOKEN": "${API_TOKEN}"}, runtime_paths) == {"TOKEN": "secret-token"}
+    assert _interpolate_mcp_headers({"Authorization": "Bearer ${API_TOKEN}"}, runtime_paths) == {
         "Authorization": "Bearer secret-token",
     }
 
@@ -39,7 +39,7 @@ def test_interpolate_mcp_env_and_headers(tmp_path: Path) -> None:
 def test_build_stdio_server_parameters_interpolates_env(tmp_path: Path) -> None:
     """Interpolate stdio env vars while leaving argv entries unchanged."""
     runtime_paths = _runtime_paths(tmp_path)
-    params = build_stdio_server_parameters(
+    params = _build_stdio_server_parameters(
         MCPServerConfig(
             transport="stdio",
             command="npx",

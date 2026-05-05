@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tokenize
 from dataclasses import dataclass
 from importlib import util
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -439,9 +440,9 @@ def _load_plugin_module(
     try:
         if kind == "tools":
             with _scoped_plugin_registration_owner(module_name):
-                spec.loader.exec_module(module)
+                _exec_plugin_source(module_path, module)
         else:
-            spec.loader.exec_module(module)
+            _exec_plugin_source(module_path, module)
     except Exception as exc:
         if kind == "tools":
             _restore_failed_plugin_tool_module_reload(
@@ -468,3 +469,10 @@ def _load_plugin_module(
         module=module,
     )
     return module
+
+
+def _exec_plugin_source(module_path: Path, module: ModuleType) -> None:
+    with tokenize.open(str(module_path)) as source_file:
+        source = source_file.read()
+    code = compile(source, str(module_path), "exec", dont_inherit=True)
+    exec(code, module.__dict__)  # noqa: S102 - configured plugin modules are intentionally executable code.

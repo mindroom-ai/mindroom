@@ -207,6 +207,67 @@ exec uvicorn pkg.server:asgi --host 0.0.0.0 --port 8000
     assert ("pkg.server", "asgi") not in symbols
 
 
+def test_package_init_reexports_count_as_cross_module_imports(tmp_path: Path) -> None:
+    """Symbols re-exported from package ``__init__`` are production imports."""
+    _write(
+        tmp_path / "src" / "pkg" / "features" / "types.py",
+        """
+PUBLIC_VALUE = "value"
+
+def public_helper() -> str:
+    return PUBLIC_VALUE
+
+def local_helper() -> str:
+    return "local"
+""".strip()
+        + "\n",
+    )
+    _write(
+        tmp_path / "src" / "pkg" / "features" / "__init__.py",
+        """
+from .types import PUBLIC_VALUE, public_helper
+
+__all__ = ["PUBLIC_VALUE", "public_helper"]
+""".strip()
+        + "\n",
+    )
+
+    symbols = _symbols(tmp_path)
+    assert ("pkg.features.types", "PUBLIC_VALUE") not in symbols
+    assert ("pkg.features.types", "public_helper") not in symbols
+    assert ("pkg.features.types", "local_helper") in symbols
+
+
+def test_tach_interface_exposed_symbols_are_skipped(tmp_path: Path) -> None:
+    """Tach interface exposure marks a symbol as public even without src imports."""
+    _write(
+        tmp_path / "src" / "pkg" / "runtime.py",
+        """
+class RuntimeFacade:
+    pass
+
+def local_helper() -> int:
+    return 1
+""".strip()
+        + "\n",
+    )
+    _write(
+        tmp_path / "tach.toml",
+        """
+source_roots = ["src"]
+
+[[interfaces]]
+from = ["pkg.runtime"]
+expose = ["RuntimeFacade"]
+""".strip()
+        + "\n",
+    )
+
+    symbols = _symbols(tmp_path)
+    assert ("pkg.runtime", "RuntimeFacade") not in symbols
+    assert ("pkg.runtime", "local_helper") in symbols
+
+
 def test_private_module_imported_within_same_package_is_ignored(tmp_path: Path) -> None:
     """Private modules can be imported from within their own package subtree."""
     _write(

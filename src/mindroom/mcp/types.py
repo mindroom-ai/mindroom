@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from mindroom.mcp.errors import MCPError
 
 
-class AsyncReadWriteLock:
+class _AsyncReadWriteLock:
     """Coordinate concurrent tool calls against exclusive catalog refreshes."""
 
     def __init__(self) -> None:
@@ -95,7 +95,7 @@ class MCPServerState:
     server_id: str
     config: MCPServerConfig
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    call_lock: AsyncReadWriteLock = field(default_factory=AsyncReadWriteLock)
+    call_lock: _AsyncReadWriteLock = field(default_factory=_AsyncReadWriteLock)
     catalog: MCPServerCatalog | None = None
     session: ClientSession | None = None
     exit_stack: AsyncExitStack | None = None

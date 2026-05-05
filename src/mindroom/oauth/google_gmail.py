@@ -9,7 +9,7 @@ from mindroom.oauth.google import (
 )
 from mindroom.oauth.providers import OAuthProvider
 
-GOOGLE_GMAIL_OAUTH_SCOPES = (
+_GOOGLE_GMAIL_OAUTH_SCOPES = (
     *GOOGLE_IDENTITY_SCOPES,
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.modify",
@@ -24,7 +24,7 @@ def google_gmail_oauth_provider() -> OAuthProvider:
         display_name="Gmail",
         authorization_url="https://accounts.google.com/o/oauth2/v2/auth",
         token_url="https://oauth2.googleapis.com/token",  # noqa: S106
-        scopes=GOOGLE_GMAIL_OAUTH_SCOPES,
+        scopes=_GOOGLE_GMAIL_OAUTH_SCOPES,
         credential_service="google_gmail_oauth",
         tool_config_service="gmail",
         client_config_services=("google_gmail_oauth_client",),
