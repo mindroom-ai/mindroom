@@ -208,7 +208,7 @@ test-backend *args:
 
 # Check for public symbols that should be private
 check-module-privacy:
-    python3 scripts/check_module_privacy.py .
+    uv run privata .
 
 #############################
 # Developer-friendly aliases
