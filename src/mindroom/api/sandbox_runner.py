@@ -126,7 +126,8 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
 
 
 def _startup_runner_token_from_env() -> str | None:
-    raw_token = os.environ.get(_RUNNER_TOKEN_ENV, "").strip()
+    """Read and remove the runner auth token from process env after startup."""
+    raw_token = os.environ.pop(_RUNNER_TOKEN_ENV, "").strip()
     return raw_token or None
 
 

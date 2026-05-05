@@ -329,6 +329,16 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == "from-env"
 
 
+def test_startup_runner_token_is_removed_from_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup auth token loading should not leave runner auth in process env."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
+
+    assert sandbox_runner_module._startup_runner_token_from_env() == "from-env"
+
+    assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in os.environ
+    assert sandbox_runner_module._startup_runner_token_from_env() is None
+
+
 def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_config(tmp_path: Path) -> None:
     """Existing sandbox-runner state should survive lifespan startup without reparsing config.yaml."""
     config_path = tmp_path / "config.yaml"
