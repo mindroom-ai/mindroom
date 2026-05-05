@@ -400,7 +400,7 @@ class OAuthProvider:
             token_endpoint_auth_method=_TOKEN_ENDPOINT_AUTH_METHOD,
         )
         auth_params = dict(self.extra_auth_params)
-        if self.pkce_code_challenge_method == "S256":
+        if self.pkce_code_challenge_method is not None:
             if not code_verifier:
                 msg = "OAuth provider requires a PKCE code verifier"
                 raise OAuthProviderError(msg)
