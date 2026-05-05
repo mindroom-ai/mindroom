@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
+_ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
 type ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
@@ -1095,7 +1096,7 @@ async def _fetch_thread_event_sources_via_room_messages(
             room_id,
             start=from_token,
             limit=100,
-            message_filter={"types": ["m.room.message"]},
+            message_filter={"types": list(_ROOM_HISTORY_MESSAGE_TYPES)},
             direction=nio.MessageDirection.back,
         )
 
