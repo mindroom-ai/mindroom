@@ -308,7 +308,7 @@ def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | Non
     return worker_scope in (None, "shared")
 
 
-def requires_shared_only_integration_scope(
+def _requires_shared_only_integration_scope(
     name: str,
     *,
     configured_mcp_server_ids: Collection[str] | None = None,
@@ -328,7 +328,7 @@ def requires_shared_only_integration_scope(
 
 def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:
     """Return whether one tool/integration name is supported for the effective execution scope."""
-    return not requires_shared_only_integration_scope(name) or worker_scope_allows_shared_only_integrations(
+    return not _requires_shared_only_integration_scope(name) or worker_scope_allows_shared_only_integrations(
         worker_scope,
     )
 
@@ -345,7 +345,7 @@ def unsupported_shared_only_integration_names(
     return [
         name
         for name in names
-        if requires_shared_only_integration_scope(
+        if _requires_shared_only_integration_scope(
             name,
             configured_mcp_server_ids=configured_mcp_server_ids,
         )

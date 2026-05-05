@@ -19,7 +19,7 @@ from mindroom.mcp.registry import (
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
-from mindroom.tool_system.worker_routing import requires_shared_only_integration_scope
+from mindroom.tool_system.worker_routing import supports_tool_name_for_worker_scope
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -186,7 +186,7 @@ def test_mcp_server_id_from_tool_name_ignores_non_mcp_prefixed_plugin_tools() ->
     TOOL_METADATA["mcp_custom_plugin"] = replace(TOOL_METADATA["shell"], name="mcp_custom_plugin")
 
     assert mcp_server_id_from_tool_name("mcp_custom_plugin") is None
-    assert requires_shared_only_integration_scope("mcp_custom_plugin") is False
+    assert supports_tool_name_for_worker_scope("mcp_custom_plugin", "user") is True
 
 
 def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -> None:
@@ -299,4 +299,4 @@ def test_mcp_tool_names_are_shared_only(tmp_path: Path) -> None:
     sync_mcp_tool_registry(_config(tmp_path))
 
     assert mcp_server_id_from_tool_name("mcp_demo") == "demo"
-    assert requires_shared_only_integration_scope("mcp_demo") is True
+    assert supports_tool_name_for_worker_scope("mcp_demo", "user") is False

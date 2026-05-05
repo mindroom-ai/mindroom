@@ -312,7 +312,7 @@ def oauth_connect_url(
     )
 
 
-def _build_oauth_connect_instruction(
+def build_oauth_connect_instruction(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     *,

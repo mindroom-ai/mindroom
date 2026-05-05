@@ -2317,7 +2317,6 @@ expose = [
     "build_threaded_edit_content",
     "can_send_to_encrypted_room",
     "cached_room",
-    "cached_rooms",
     "edit_message_result",
     "send_file_message",
     "send_message_result",
@@ -2525,6 +2524,7 @@ expose = [
     "ToolRuntimeSupport",
     "append_tool_runtime_attachment_id",
     "attachment_id_available_in_tool_runtime_context",
+    "build_execution_identity_from_runtime_context",
     "build_scheduling_runtime_from_tool_runtime_context",
     "emit_custom_event",
     "execution_identity_matches_tool_runtime_context",
@@ -2566,7 +2566,6 @@ expose = [
     "resolve_worker_key",
     "resolve_worker_target",
     "resolved_worker_key_scope",
-    "requires_shared_only_integration_scope",
     "run_with_tool_execution_identity",
     "shared_storage_root",
     "stream_with_tool_execution_identity",
@@ -2707,6 +2706,12 @@ from = ["mindroom.hooks"]
 
 [[interfaces]]
 expose = [
+    "build_oauth_connect_instruction",
+]
+from = ["mindroom.oauth.service"]
+
+[[interfaces]]
+expose = [
     "InterruptedReplaySnapshot",
     "build_interrupted_replay_snapshot",
     "persist_interrupted_replay",
@@ -2774,7 +2779,6 @@ from = ["mindroom.sync_bridge_state"]
 
 [[interfaces]]
 expose = [
-    "DEFAULT_INLINE_ATTACHMENT_BYTES",
     "WorkerAttachmentSaveReceipt",
     "attachment_save_uses_worker",
     "inline_attachment_byte_limit",
