@@ -2317,7 +2317,6 @@ expose = [
     "build_threaded_edit_content",
     "can_send_to_encrypted_room",
     "cached_room",
-    "cached_rooms",
     "edit_message_result",
     "send_file_message",
     "send_message_result",
@@ -2566,7 +2565,6 @@ expose = [
     "resolve_worker_key",
     "resolve_worker_target",
     "resolved_worker_key_scope",
-    "requires_shared_only_integration_scope",
     "run_with_tool_execution_identity",
     "shared_storage_root",
     "stream_with_tool_execution_identity",
@@ -2774,7 +2772,6 @@ from = ["mindroom.sync_bridge_state"]
 
 [[interfaces]]
 expose = [
-    "DEFAULT_INLINE_ATTACHMENT_BYTES",
     "WorkerAttachmentSaveReceipt",
     "attachment_save_uses_worker",
     "inline_attachment_byte_limit",

@@ -123,10 +123,10 @@ async def _send_prepared_room_message(
 
 def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
     """Return one room from nio's in-memory room cache if present."""
-    return cached_rooms(client).get(room_id)
+    return _cached_rooms(client).get(room_id)
 
 
-def cached_rooms(client: nio.AsyncClient) -> Mapping[str, nio.MatrixRoom]:
+def _cached_rooms(client: nio.AsyncClient) -> Mapping[str, nio.MatrixRoom]:
     """Return the client room cache when nio has initialized it."""
     rooms = client.rooms
     return rooms if isinstance(rooms, Mapping) else {}

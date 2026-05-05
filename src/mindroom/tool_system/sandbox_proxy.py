@@ -56,7 +56,7 @@ _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 _EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 _SANDBOX_PROXY_SAVE_ATTACHMENT_PATH = "/api/sandbox-runner/save-attachment"
 _INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
-DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
+_DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS = frozenset({"file", "coding", "python", "shell"})
 
 
@@ -113,14 +113,14 @@ def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
     raw_value = (
         runtime_paths.env_value(_INLINE_ATTACHMENT_BYTES_ENV)
         or os.environ.get(_INLINE_ATTACHMENT_BYTES_ENV)
-        or str(DEFAULT_INLINE_ATTACHMENT_BYTES)
+        or str(_DEFAULT_INLINE_ATTACHMENT_BYTES)
     )
     try:
         limit = int(raw_value)
     except ValueError:
-        return DEFAULT_INLINE_ATTACHMENT_BYTES
+        return _DEFAULT_INLINE_ATTACHMENT_BYTES
     if limit <= 0:
-        return DEFAULT_INLINE_ATTACHMENT_BYTES
+        return _DEFAULT_INLINE_ATTACHMENT_BYTES
     return limit
 
 
