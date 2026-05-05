@@ -4059,6 +4059,7 @@ dev = [
     { name = "markdown-gfm-admonition" },
     { name = "pre-commit" },
     { name = "pre-commit-uv" },
+    { name = "privata" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -4084,7 +4085,7 @@ requires-dist = [
     { name = "apify-client", marker = "platform_machine != 'aarch64' and extra == 'apify'", specifier = ">=1.12.2" },
     { name = "arxiv", marker = "extra == 'arxiv'" },
     { name = "atlassian-python-api", marker = "extra == 'confluence'" },
-    { name = "authlib", specifier = ">=1.6.0" },
+    { name = "authlib", specifier = ">=1.6" },
     { name = "baidusearch", marker = "extra == 'baidusearch'" },
     { name = "beautifulsoup4", marker = "extra == 'website'" },
     { name = "boto3", marker = "extra == 'aws-lambda'", specifier = ">=1.40.8" },
@@ -4242,6 +4243,7 @@ dev = [
     { name = "markdown-gfm-admonition" },
     { name = "pre-commit", specifier = ">=4.2" },
     { name = "pre-commit-uv", specifier = ">=4.1.4" },
+    { name = "privata", specifier = ">=0.1.3" },
     { name = "pytest", specifier = ">=8.4.1" },
     { name = "pytest-asyncio", specifier = ">=1.1" },
     { name = "pytest-cov", specifier = ">=6.2.1" },
@@ -6033,6 +6035,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/7c/2f/2c3aafb2814703979bf5a216575f4478bcf6070bc6ec143056cf3b56c134/primp-1.2.3-cp314-cp314t-win32.whl", hash = "sha256:cb52db4d54105097773c0df4e2ef0ce7b42461d9d4d3ec28a0622ca2d22945bb", size = 3499126, upload-time = "2026-04-20T08:33:29.953Z" },
     { url = "https://files.pythonhosted.org/packages/54/f0/bad9c739a35f4cf69e2f39c01f664c9a5969e753c4cfcdc33e113cc984af/primp-1.2.3-cp314-cp314t-win_amd64.whl", hash = "sha256:d85a44585df27038e18298f7e35335c4961926e7401edd1a1bf4f7f967b3f107", size = 3870129, upload-time = "2026-04-20T08:34:11.666Z" },
     { url = "https://files.pythonhosted.org/packages/67/78/882563dc554c5f710b4e47c58978586c2528703435800a7a84e81b339d90/primp-1.2.3-cp314-cp314t-win_arm64.whl", hash = "sha256:6513dcb55e6b511c1ae383a3a0e887929b09d8d6b2c70e2b188b425c51471a02", size = 3874087, upload-time = "2026-04-20T08:33:58.109Z" },
+]
+
+[[package]]
+name = "privata"
+version = "0.1.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/12/b7/b156bfb0311edd85f93e5e820777de2b9e3dcf0d2aed70909eac670992a6/privata-0.1.3.tar.gz", hash = "sha256:ba043ee949a297e66ce822d0cca159f16e97e22fd1a1e5160cbf5f76d50a4ece", size = 59865, upload-time = "2026-05-05T23:08:09.889Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/de/9e/844d97499d5f85a3f1239bb3391115f2f63e893d21cd98ff9ee3cab00833/privata-0.1.3-py3-none-any.whl", hash = "sha256:73720de12233e9f6b002ef44c3226bb4a7dbca265f1e0edc6100288be54afadf", size = 10607, upload-time = "2026-05-05T23:08:08.576Z" },
 ]
 
 [[package]]

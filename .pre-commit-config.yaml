@@ -63,6 +63,12 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: privata
+        name: Enforce module privacy
+        entry: bash -c 'env -u VIRTUAL_ENV uv run privata .'
+        language: system
+        pass_filenames: false
+
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.21.1"
     hooks:

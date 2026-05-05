@@ -413,6 +413,7 @@ dev = [
   "markdown-gfm-admonition",
   "pre-commit>=4.2",
   "pre-commit-uv>=4.1.4",
+  "privata>=0.1.3",
   "pytest>=8.4.1",
   "pytest-asyncio>=1.1",
   "pytest-cov>=6.2.1",
