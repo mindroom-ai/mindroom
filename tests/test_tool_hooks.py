@@ -163,6 +163,7 @@ def _initialize_router_approval_store(
     editor: AsyncMock | None = None,
 ) -> tuple[MagicMock, AsyncMock]:
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
 
     client = MagicMock()

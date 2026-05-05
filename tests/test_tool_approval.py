@@ -1103,6 +1103,7 @@ async def test_shutdown_bounds_cancelled_send_cleanup_wait(tmp_path: Path, monke
 async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_room_send(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
     cache_started = asyncio.Event()
     release_cache = asyncio.Event()
@@ -1155,6 +1156,7 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
 async def test_approval_transport_returns_event_after_successful_send_without_sender_user_id(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
 
     client = MagicMock()
@@ -1183,6 +1185,7 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
 async def test_approval_notice_replies_to_room_mode_card(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
 
     client = MagicMock()
@@ -1209,6 +1212,7 @@ async def test_approval_notice_replies_to_room_mode_card(tmp_path: Path) -> None
 async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
     sent_contents: list[dict[str, Any]] = []
 
@@ -1284,6 +1288,7 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
 ) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
     monkeypatch.setattr("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False)
 
