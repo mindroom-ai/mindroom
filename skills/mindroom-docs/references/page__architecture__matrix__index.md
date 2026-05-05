@@ -177,7 +177,7 @@ The Space name is reconciled on each startup to match the configured value.
 
 Outgoing encrypted Matrix sends keep nio's device-trust checks enabled by default.
 
-```
+```yaml
 matrix_delivery:
   ignore_unverified_devices: false
 ```

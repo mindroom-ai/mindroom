@@ -299,6 +299,7 @@ class TestBotIntegration:
         bot.client.room_send = AsyncMock()
         bot.client.room_put_state = AsyncMock()
         install_runtime_cache_support(bot)
+        expected_config = config
 
         async def mock_send_message_result(
             _client: object,
@@ -307,7 +308,7 @@ class TestBotIntegration:
             *,
             config: Config,
         ) -> object:
-            assert isinstance(config, Config)
+            assert config is expected_config
             return delivered_matrix_event("$stream", content)
 
         async def mock_edit_message_result(
@@ -319,7 +320,7 @@ class TestBotIntegration:
             *,
             config: Config,
         ) -> object:
-            assert isinstance(config, Config)
+            assert config is expected_config
             return delivered_matrix_event("$edit", content)
 
         # Simulate a message from a user
