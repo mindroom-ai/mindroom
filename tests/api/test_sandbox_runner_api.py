@@ -331,12 +331,45 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
 
 def test_startup_runner_token_is_removed_from_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Startup auth token loading should not leave runner auth in process env."""
+    wiped_entries: list[tuple[int, int]] = []
+    monkeypatch.setattr(sandbox_runner_module, "_process_environment_entry", lambda _name: (123, 45))
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_wipe_process_environment_entry",
+        lambda address, size: wiped_entries.append((address, size)),
+    )
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
 
     assert sandbox_runner_module._startup_runner_token_from_env() == "from-env"
 
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in os.environ
     assert sandbox_runner_module._startup_runner_token_from_env() is None
+    assert wiped_entries == [(123, 45)]
+
+
+def test_startup_runner_token_is_removed_from_proc_environ() -> None:
+    """Linux exposes the original startup env through /proc, so wipe that entry too."""
+    if not Path("/proc/self/environ").exists():
+        pytest.skip("/proc/self/environ is not available on this platform")
+    env = os.environ.copy()
+    env["MINDROOM_SANDBOX_PROXY_TOKEN"] = "from-subprocess"  # noqa: S105
+    script = (
+        "from mindroom.api import sandbox_runner as m\n"
+        "token = m._startup_runner_token_from_env()\n"
+        "raw_environ = open('/proc/self/environ', 'rb').read()\n"
+        "print(token)\n"
+        "print(b'MINDROOM_SANDBOX_PROXY_TOKEN=' in raw_environ)\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.stdout.splitlines() == ["from-subprocess", "False"]
 
 
 def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_config(tmp_path: Path) -> None:

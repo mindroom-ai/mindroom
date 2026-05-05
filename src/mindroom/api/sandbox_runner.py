@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import ctypes
 import hashlib
 import inspect
 import io
@@ -127,8 +128,38 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
 
 def _startup_runner_token_from_env() -> str | None:
     """Read and remove the runner auth token from process env after startup."""
-    raw_token = os.environ.pop(_RUNNER_TOKEN_ENV, "").strip()
-    return raw_token or None
+    if _RUNNER_TOKEN_ENV not in os.environ:
+        return None
+    raw_token = os.environ.get(_RUNNER_TOKEN_ENV, "")
+    raw_process_entry = _process_environment_entry(_RUNNER_TOKEN_ENV)
+    if raw_process_entry is not None:
+        _wipe_process_environment_entry(*raw_process_entry)
+    os.environ.pop(_RUNNER_TOKEN_ENV, None)
+    return raw_token.strip() or None
+
+
+def _process_environment_entry(name: str) -> tuple[int, int] | None:
+    """Return the raw process environment entry address and size for an env var."""
+    prefix = os.fsencode(f"{name}=")
+    try:
+        envp = ctypes.POINTER(ctypes.c_void_p).in_dll(ctypes.CDLL(None), "environ")
+    except (AttributeError, OSError, ValueError):
+        return None
+
+    index = 0
+    while envp[index]:
+        address = int(envp[index])
+        entry = ctypes.string_at(address)
+        if entry.startswith(prefix):
+            return address, len(entry)
+        index += 1
+    return None
+
+
+def _wipe_process_environment_entry(address: int, size: int) -> None:
+    """Overwrite a raw process environment entry exposed by /proc/<pid>/environ."""
+    if size > 0:
+        ctypes.memset(address, 0, size)
 
 
 def _upstream_tool_validation_snapshot(runtime_paths: RuntimePaths) -> dict[str, ToolValidationInfo]:
