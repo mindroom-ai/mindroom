@@ -2524,6 +2524,7 @@ expose = [
     "ToolRuntimeSupport",
     "append_tool_runtime_attachment_id",
     "attachment_id_available_in_tool_runtime_context",
+    "build_execution_identity_from_runtime_context",
     "build_scheduling_runtime_from_tool_runtime_context",
     "emit_custom_event",
     "execution_identity_matches_tool_runtime_context",
@@ -2702,6 +2703,12 @@ expose = [
     "validate_event_name",
 ]
 from = ["mindroom.hooks"]
+
+[[interfaces]]
+expose = [
+    "build_oauth_connect_instruction",
+]
+from = ["mindroom.oauth.service"]
 
 [[interfaces]]
 expose = [
