@@ -31,11 +31,13 @@ import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom import interactive
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
-    ApprovalManager,
     PendingApproval,
     SentApprovalEvent,
     get_approval_store,
     initialize_approval_store,
+)
+from mindroom.approval_manager import (
+    _ApprovalManager as ApprovalManager,
 )
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
@@ -85,7 +87,7 @@ from mindroom.hooks import (
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
 from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
 from mindroom.knowledge.manager import KnowledgeManager
-from mindroom.knowledge.utils import MultiKnowledgeVectorDb
+from mindroom.knowledge.utils import _MultiKnowledgeVectorDb as MultiKnowledgeVectorDb
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import DeliveredMatrixEvent, PermanentMatrixStartupError, ResolvedVisibleMessage
@@ -94,14 +96,13 @@ from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
-from mindroom.orchestration.plugin_watch import collect_plugin_root_changes
+from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes as collect_plugin_root_changes
 from mindroom.orchestration.runtime import (
     _matrix_homeserver_startup_timeout_seconds_from_env,
     run_with_retry,
     wait_for_matrix_homeserver,
 )
 from mindroom.orchestrator import (
-    MultiAgentOrchestrator,
     _EmbeddedApiServerContext,
     _run_api_server,
     _run_auxiliary_task_forever,
@@ -109,7 +110,10 @@ from mindroom.orchestrator import (
     _wait_for_runtime_completion,
     main,
 )
-from mindroom.response_lifecycle import response_outcome_label
+from mindroom.orchestrator import (
+    _MultiAgentOrchestrator as MultiAgentOrchestrator,
+)
+from mindroom.response_lifecycle import _response_outcome_label as response_outcome_label
 from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
@@ -121,13 +125,15 @@ from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
-from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, shutdown_approval_store
+from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction
+from mindroom.tool_approval import _shutdown_approval_store as shutdown_approval_store
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from mindroom.turn_controller import TurnController, _PrecheckedEvent
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy
+from mindroom.turn_policy import _DispatchPlan as DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1341,7 +1347,7 @@ class TestAgentBot:
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
-            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             pytest.raises(PermanentMatrixStartupError, match="boom"),
         ):
@@ -1559,7 +1565,7 @@ class TestAgentBot:
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
-            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_and_blocks),
             patch("mindroom.orchestrator.logger.warning", side_effect=_record_warning) as mock_warning,
@@ -1631,7 +1637,7 @@ class TestAgentBot:
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
-            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_then_finishes),
         ):
@@ -1690,7 +1696,7 @@ class TestAgentBot:
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
-            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown),
         ):
@@ -1723,7 +1729,7 @@ class TestAgentBot:
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
-            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_fails),
             pytest.raises(RuntimeError, match="Embedded API server exited unexpectedly"),
@@ -1768,7 +1774,7 @@ class TestAgentBot:
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
-            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._watch_config_task", side_effect=_watch_config_task),
             patch("mindroom.orchestrator._watch_skills_task", new=AsyncMock()),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", side_effect=_run_auxiliary),
@@ -1804,7 +1810,7 @@ class TestAgentBot:
         with (
             patch("mindroom.orchestrator.setup_logging", side_effect=_capture_logging),
             patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_capture_credentials_sync),
-            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
         ):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(runtime_storage), api=False)
 
@@ -12019,7 +12025,7 @@ class TestMultiAgentOrchestrator:
         mock_config.teams = {}
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
             await orchestrator.initialize()
 
@@ -12038,7 +12044,7 @@ class TestMultiAgentOrchestrator:
         with (
             patch("mindroom.orchestrator.load_config", return_value=mock_config) as mock_load_config,
             patch("mindroom.orchestrator.load_plugins"),
-            patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
             patch.object(MultiAgentOrchestrator, "_create_managed_bot"),
         ):
             orchestrator = MultiAgentOrchestrator(
@@ -12196,7 +12202,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
             await orchestrator.initialize()  # Need to initialize first
 
@@ -13955,7 +13961,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
             await orchestrator.initialize()
 
@@ -13994,7 +14000,7 @@ class TestMultiAgentOrchestrator:
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         mock_load_config.return_value = mock_config
 
-        with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+        with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
             await orchestrator.initialize()
 

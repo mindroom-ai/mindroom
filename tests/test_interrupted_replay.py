@@ -13,10 +13,12 @@ from agno.session.agent import AgentSession
 from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
-    build_interrupted_replay_run,
     build_interrupted_replay_snapshot,
     persist_interrupted_replay_snapshot,
     split_interrupted_tool_trace,
+)
+from mindroom.history.interrupted_replay import (
+    _build_interrupted_replay_run as build_interrupted_replay_run,
 )
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.tool_system.events import ToolTraceEntry

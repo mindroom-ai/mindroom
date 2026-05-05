@@ -19,9 +19,11 @@ from mindroom.tool_system.dependencies import (
     _install_via_uv_sync,
     _pip_name_to_import,
     auto_install_enabled,
-    auto_install_optional_extra,
     check_deps_installed,
     install_command_for_current_python,
+)
+from mindroom.tool_system.dependencies import (
+    _auto_install_optional_extra as auto_install_optional_extra,
 )
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,

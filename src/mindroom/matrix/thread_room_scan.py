@@ -14,13 +14,13 @@ from mindroom.matrix.thread_membership import ThreadMembershipAccess, room_scan_
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
+type _EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
 
 
 class RoomScanConversationCache(Protocol):
     """Minimal cache reads needed to resolve room-scan-backed thread membership."""
 
-    async def get_event(self, room_id: str, event_id: str) -> EventLookupResult:
+    async def get_event(self, room_id: str, event_id: str) -> _EventLookupResult:
         """Resolve one Matrix event by ID."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
@@ -38,7 +38,7 @@ async def _scan_thread_event_sources(
 
 
 def _event_info_from_lookup_response(
-    response: EventLookupResult,
+    response: _EventLookupResult,
     *,
     event_id: str,
     strict: bool,

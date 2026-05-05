@@ -26,7 +26,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents
 from mindroom.orchestration.plugin_watch import watch_plugins_task
 from mindroom.orchestration.runtime import create_logged_task
-from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState, _watch_skills_task
+from mindroom.orchestrator import _ConfigReloadDrainState, _watch_skills_task
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 from mindroom.tool_system.plugins import PluginReloadResult
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import (
@@ -210,31 +211,31 @@ async def _noop_stop(self: AgentBot, reason: str = "shutdown") -> None:
 def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch bot and orchestrator runtime helpers unrelated to plugin teardown."""
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._prepare_user_account",
+        "mindroom.orchestrator._MultiAgentOrchestrator._prepare_user_account",
         _noop_prepare_user_account,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._sync_mcp_manager",
+        "mindroom.orchestrator._MultiAgentOrchestrator._sync_mcp_manager",
         _noop_sync_mcp_manager,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._sync_event_cache_service",
+        "mindroom.orchestrator._MultiAgentOrchestrator._sync_event_cache_service",
         _noop_sync_event_cache_service,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._sync_runtime_support_services",
+        "mindroom.orchestrator._MultiAgentOrchestrator._sync_runtime_support_services",
         _noop_sync_runtime_support_services,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships",
+        "mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships",
         _noop_setup_rooms_and_memberships,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._emit_config_reloaded",
+        "mindroom.orchestrator._MultiAgentOrchestrator._emit_config_reloaded",
         _noop_emit_config_reloaded,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._start_sync_task",
+        "mindroom.orchestrator._MultiAgentOrchestrator._start_sync_task",
         _noop_start_sync_task,
     )
     monkeypatch.setattr("mindroom.bot.AgentBot.try_start", _noop_try_start)
@@ -1876,8 +1877,8 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
     monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
-    monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
-    monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
     orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 

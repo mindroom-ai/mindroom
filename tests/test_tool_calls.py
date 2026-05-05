@@ -11,8 +11,12 @@ import pytest
 from mindroom.constants import tracking_dir
 from mindroom.tool_system import tool_calls
 from mindroom.tool_system.tool_calls import (
-    build_tool_failure_record,
-    build_tool_success_record,
+    _build_tool_failure_record as build_tool_failure_record,
+)
+from mindroom.tool_system.tool_calls import (
+    _build_tool_success_record as build_tool_success_record,
+)
+from mindroom.tool_system.tool_calls import (
     record_tool_failure,
     record_tool_success,
 )

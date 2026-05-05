@@ -32,7 +32,9 @@ if str(SRC_ROOT) not in sys.path:
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_path  # noqa: E402
 from mindroom.vertex_claude_prompt_cache import (  # noqa: E402
-    copy_messages_with_vertex_prompt_cache_breakpoint,
+    _copy_messages_with_vertex_prompt_cache_breakpoint as copy_messages_with_vertex_prompt_cache_breakpoint,
+)
+from mindroom.vertex_claude_prompt_cache import (  # noqa: E402
     install_vertex_claude_prompt_cache_hook,
 )
 

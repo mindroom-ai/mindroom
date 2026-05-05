@@ -25,7 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
-from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.execution_preparation import _PreparedExecutionContext as PreparedExecutionContext
 from mindroom.knowledge import KnowledgeResolution
 from mindroom.memory import MemoryPromptParts
 from mindroom.teams import materialize_exact_team_members

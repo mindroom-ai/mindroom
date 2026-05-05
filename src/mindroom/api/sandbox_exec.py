@@ -26,22 +26,22 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
-DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
-WORKSPACE_ENV_HOOK_RELATIVE_PATH = Path(".mindroom") / "worker-env.sh"
-WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS = 10.0
+_DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
+_WORKSPACE_ENV_HOOK_RELATIVE_PATH = Path(".mindroom") / "worker-env.sh"
+_WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS = 10.0
 _WORKSPACE_ENV_HOOK_MAX_SCRIPT_BYTES = 64 * 1024
 _WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES = 256 * 1024
 _WORKSPACE_ENV_HOOK_MAX_VALUE_BYTES = 32 * 1024
 _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES = 128 * 1024
-RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
-RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
-DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
-DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
-SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
-KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"
-DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
+_RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
+_RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
+_DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
+_DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
+_SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
+_KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"
+_DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
-SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
+_SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
     {
         "CURL_CA_BUNDLE",
         "HTTP_PROXY",
@@ -64,44 +64,44 @@ SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
 )
 
 
-def runner_execution_mode(runtime_paths: RuntimePaths) -> str:
+def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
     """Return the configured sandbox runner execution mode."""
-    return (runtime_paths.env_value(RUNNER_EXECUTION_MODE_ENV, default="inprocess") or "inprocess").strip().lower()
+    return (runtime_paths.env_value(_RUNNER_EXECUTION_MODE_ENV, default="inprocess") or "inprocess").strip().lower()
 
 
 def runner_uses_subprocess(runtime_paths: RuntimePaths) -> bool:
     """Return whether the runner should dispatch through a subprocess."""
-    return runner_execution_mode(runtime_paths) == "subprocess"
+    return _runner_execution_mode(runtime_paths) == "subprocess"
 
 
 def runner_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
     """Return the bounded subprocess timeout for sandbox execution."""
     raw_timeout = runtime_paths.env_value(
-        RUNNER_SUBPROCESS_TIMEOUT_ENV,
-        default=str(DEFAULT_SUBPROCESS_TIMEOUT_SECONDS),
+        _RUNNER_SUBPROCESS_TIMEOUT_ENV,
+        default=str(_DEFAULT_SUBPROCESS_TIMEOUT_SECONDS),
     )
     try:
-        timeout = float(raw_timeout or DEFAULT_SUBPROCESS_TIMEOUT_SECONDS)
+        timeout = float(raw_timeout or _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS)
     except ValueError:
-        timeout = DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
+        timeout = _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
     return max(1.0, timeout)
 
 
 def runner_dedicated_worker_key(runtime_paths: RuntimePaths) -> str | None:
     """Return the pinned dedicated worker key when configured."""
-    raw = (runtime_paths.env_value(DEDICATED_WORKER_KEY_ENV, default="") or "").strip()
+    raw = (runtime_paths.env_value(_DEDICATED_WORKER_KEY_ENV, default="") or "").strip()
     return raw or None
 
 
 def runner_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
     """Return the dedicated worker root visible to this runner."""
-    dedicated_root = (runtime_paths.env_value(DEDICATED_WORKER_ROOT_ENV, default="") or "").strip()
+    dedicated_root = (runtime_paths.env_value(_DEDICATED_WORKER_ROOT_ENV, default="") or "").strip()
     if dedicated_root:
         return Path(dedicated_root).expanduser().resolve()
     return runtime_paths.storage_root.resolve()
 
 
-def shared_root_from_dedicated_worker_root(
+def _shared_root_from_dedicated_worker_root(
     *,
     dedicated_root: Path,
     worker_key: str,
@@ -121,9 +121,9 @@ def shared_root_from_dedicated_worker_root(
     return parent.resolve()
 
 
-def runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
+def _runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
     """Return the shared storage root for worker-visible agent paths."""
-    shared_root = (runtime_paths.env_value(SHARED_STORAGE_ROOT_ENV, default="") or "").strip()
+    shared_root = (runtime_paths.env_value(_SHARED_STORAGE_ROOT_ENV, default="") or "").strip()
     if shared_root:
         return Path(shared_root).expanduser().resolve()
 
@@ -133,13 +133,13 @@ def runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
         return None
 
     raw_storage_subpath_prefix = runtime_paths.env_value(
-        KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV,
-        default=DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX,
+        _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV,
+        default=_DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX,
     )
-    storage_subpath_prefix = (raw_storage_subpath_prefix or DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX).strip() or (
-        DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX
+    storage_subpath_prefix = (raw_storage_subpath_prefix or _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX).strip() or (
+        _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX
     )
-    return shared_root_from_dedicated_worker_root(
+    return _shared_root_from_dedicated_worker_root(
         dedicated_root=dedicated_root,
         worker_key=worker_key,
         storage_subpath_prefix=storage_subpath_prefix,
@@ -148,7 +148,7 @@ def runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
 
 def runner_storage_root(runtime_paths: RuntimePaths) -> Path:
     """Return the storage root used for worker path validation."""
-    if shared_root := runner_shared_storage_root(runtime_paths):
+    if shared_root := _runner_shared_storage_root(runtime_paths):
         return shared_root
     return runtime_paths.storage_root.resolve()
 
@@ -209,12 +209,12 @@ def runtime_paths_with_execution_env(
     )
 
 
-def project_src_path() -> Path:
+def _project_src_path() -> Path:
     """Return the repository `src/` root used in worker subprocesses."""
     return Path(__file__).resolve().parents[2]
 
 
-def current_runtime_site_packages() -> list[str]:
+def _current_runtime_site_packages() -> list[str]:
     """Return site-packages paths visible to the current Python runtime."""
     site_package_paths = list(site.getsitepackages())
     user_site = site.getusersitepackages()
@@ -230,14 +230,14 @@ def current_runtime_site_packages() -> list[str]:
     return list(dict.fromkeys(discovered_paths))
 
 
-def subprocess_passthrough_env() -> dict[str, str]:
+def _subprocess_passthrough_env() -> dict[str, str]:
     """Return the small set of host env vars forwarded to subprocesses."""
-    return {key: value for key, value in os.environ.items() if key in SUBPROCESS_ENV_PASSTHROUGH_KEYS}
+    return {key: value for key, value in os.environ.items() if key in _SUBPROCESS_ENV_PASSTHROUGH_KEYS}
 
 
 def generic_subprocess_env() -> dict[str, str]:
     """Build the baseline subprocess env for non-worker execution."""
-    env = subprocess_passthrough_env()
+    env = _subprocess_passthrough_env()
     env.update(vendor_telemetry_env_values())
     for key in ("HOME", "PATH", "PYTHONPATH", "VIRTUAL_ENV"):
         value = os.environ.get(key)
@@ -259,7 +259,7 @@ def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     current_path = env.get("PATH", "")
     env["PATH"] = f"{paths.venv_dir / 'bin'}:{current_path}" if current_path else str(paths.venv_dir / "bin")
 
-    python_path_parts = [str(project_src_path()), *current_runtime_site_packages()]
+    python_path_parts = [str(_project_src_path()), *_current_runtime_site_packages()]
     existing_python_path = env.get("PYTHONPATH", "")
     if existing_python_path:
         python_path_parts.append(existing_python_path)
@@ -336,7 +336,7 @@ def resolve_workspace_env_hook_path(base_dir: Path | str | None) -> Path | None:
     except OSError as exc:
         msg = f"Failed to resolve base_dir for .mindroom/worker-env.sh: {exc}"
         raise WorkspaceEnvHookError(msg) from exc
-    candidate = base_resolved / WORKSPACE_ENV_HOOK_RELATIVE_PATH
+    candidate = base_resolved / _WORKSPACE_ENV_HOOK_RELATIVE_PATH
     if not candidate.exists():
         return None
     try:
@@ -404,7 +404,7 @@ def source_workspace_env_hook(
         _kill_workspace_env_hook_process_group(process)
         with suppress(OSError, subprocess.TimeoutExpired):
             process.wait(timeout=1.0)
-        msg = f".mindroom/worker-env.sh timed out after {WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS} seconds."
+        msg = f".mindroom/worker-env.sh timed out after {_WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS} seconds."
         raise WorkspaceEnvHookError(msg) from exc
     except _WorkspaceEnvHookOutputLimitError as exc:
         _kill_workspace_env_hook_process_group(process)
@@ -448,17 +448,17 @@ def _capture_workspace_env_hook_output(process: subprocess.Popen[bytes]) -> tupl
         os.set_blocking(fd, False)
         selector.register(fd, selectors.EVENT_READ, stream_name)
 
-    deadline = time.monotonic() + WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS
+    deadline = time.monotonic() + _WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS
     try:
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise subprocess.TimeoutExpired(cmd="bash", timeout=WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS)
+                raise subprocess.TimeoutExpired(cmd="bash", timeout=_WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS)
             events = selector.select(remaining)
             if not events:
                 if process.poll() is not None:
                     break
-                raise subprocess.TimeoutExpired(cmd="bash", timeout=WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS)
+                raise subprocess.TimeoutExpired(cmd="bash", timeout=_WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS)
             for key, _mask in events:
                 _read_workspace_env_hook_event(key, selector, buffers)
 

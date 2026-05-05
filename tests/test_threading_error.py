@@ -58,16 +58,21 @@ from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint
-from mindroom.matrix.sync_tokens import load_sync_token, load_sync_token_record, save_sync_token
+from mindroom.matrix.sync_tokens import _load_sync_token as load_sync_token
+from mindroom.matrix.sync_tokens import load_sync_token_record, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadRootProof,
     resolve_event_thread_id,
-    resolve_related_event_thread_id,
     resolve_related_event_thread_id_best_effort,
     room_scan_thread_membership_access,
-    snapshot_thread_membership_access,
+)
+from mindroom.matrix.thread_membership import (
+    _resolve_related_event_thread_id as resolve_related_event_thread_id,
+)
+from mindroom.matrix.thread_membership import (
+    _snapshot_thread_membership_access as snapshot_thread_membership_access,
 )
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.users import AgentMatrixUser

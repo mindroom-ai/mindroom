@@ -15,7 +15,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
-from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token, load_sync_token_record, save_sync_token
+from mindroom.matrix.sync_tokens import _load_sync_token as load_sync_token
+from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,

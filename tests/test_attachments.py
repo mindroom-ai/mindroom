@@ -19,10 +19,12 @@ from mindroom.attachments import (
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
     parse_attachment_ids_from_thread_history,
-    register_image_attachment,
     register_local_attachment,
     resolve_attachments,
     resolve_thread_attachment_ids,
+)
+from mindroom.attachments import (
+    _register_image_attachment as register_image_attachment,
 )
 from tests.conftest import make_visible_message
 

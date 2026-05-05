@@ -181,7 +181,7 @@ def test_event_cache_normalization_is_backend_neutral() -> None:
 @pytest.mark.asyncio
 async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path: Path) -> None:
     """Thread snapshot ownership should expose joined thread and room cache state."""
-    db = await event_cache_module.initialize_event_cache_db(tmp_path / "event_cache.db")
+    db = await event_cache_module._initialize_event_cache_db(tmp_path / "event_cache.db")
 
     try:
         await sqlite_event_cache_threads.replace_thread_locked(
@@ -233,7 +233,7 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
 @pytest.mark.asyncio
 async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
     """Older stale markers should not downgrade newer thread or room invalidations."""
-    db = await event_cache_module.initialize_event_cache_db(tmp_path / "event_cache.db")
+    db = await event_cache_module._initialize_event_cache_db(tmp_path / "event_cache.db")
 
     try:
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
@@ -571,7 +571,7 @@ async def test_individual_event_cache_store_and_retrieve(event_cache: Conversati
 
 def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
     """Idle per-room locks should be evicted instead of growing without bound."""
-    runtime = event_cache_module.SqliteEventCacheRuntime(tmp_path / "event_cache.db")
+    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
 
     for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
         _ = runtime.room_lock_entry(f"!room-{index}:localhost").lock
@@ -583,7 +583,7 @@ def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path: Path) -> None:
     """Queued waiters must keep a room lock alive across pruning churn."""
-    runtime = event_cache_module.SqliteEventCacheRuntime(tmp_path / "event_cache.db")
+    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
     room_id = "!busy:localhost"
     holder_entered = asyncio.Event()
     release_holder = asyncio.Event()
@@ -647,7 +647,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
 @pytest.mark.asyncio
 async def test_event_cache_room_lock_cache_keeps_new_active_room_at_capacity(tmp_path: Path) -> None:
     """A newly acquired room lock must survive pruning when the cache is already full of active rooms."""
-    runtime = event_cache_module.SqliteEventCacheRuntime(tmp_path / "event_cache.db")
+    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
     release_active_rooms = asyncio.Event()
     active_rooms_registered = asyncio.Event()
     release_new_room_holder = asyncio.Event()
@@ -1622,7 +1622,7 @@ async def test_initialize_resets_stale_old_cache_schema(tmp_path: Path) -> None:
 
     assert latest_edit is None
     assert cached_original is None
-    assert schema_version == event_cache_module.EVENT_CACHE_SCHEMA_VERSION
+    assert schema_version == event_cache_module._EVENT_CACHE_SCHEMA_VERSION
 
 
 @pytest.mark.asyncio
@@ -1863,7 +1863,7 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
 
 def test_event_cache_uses_distinct_locks_per_room(tmp_path: Path) -> None:
     """Event cache should keep independent locks per room."""
-    runtime = event_cache_module.SqliteEventCacheRuntime(tmp_path / "event_cache.db")
+    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
 
     assert runtime.room_lock_entry("!room:localhost").lock is runtime.room_lock_entry("!room:localhost").lock
     assert runtime.room_lock_entry("!room:localhost").lock is not runtime.room_lock_entry("!other:localhost").lock

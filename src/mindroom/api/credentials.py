@@ -114,7 +114,7 @@ class RequestCredentialsTarget:
 
 
 @dataclass(frozen=True)
-class DashboardAgentExecutionScopeResolution:
+class _DashboardAgentExecutionScopeResolution:
     """Resolved dashboard scope request for one agent selection."""
 
     agent_name: str | None
@@ -126,7 +126,7 @@ class DashboardAgentExecutionScopeResolution:
 
 
 @dataclass(frozen=True)
-class OAuthCredentialServiceMatch:
+class _OAuthCredentialServiceMatch:
     """OAuth provider service role for one credentials API service name."""
 
     provider: OAuthProvider
@@ -136,19 +136,19 @@ class OAuthCredentialServiceMatch:
 
 
 @dataclass(frozen=True)
-class OAuthCredentialServices:
+class _OAuthCredentialServices:
     """Classify dashboard credential services registered by OAuth providers."""
 
     providers: dict[str, OAuthProvider]
 
-    def match(self, service: str) -> OAuthCredentialServiceMatch | None:
+    def match(self, service: str) -> _OAuthCredentialServiceMatch | None:
         """Return the OAuth role for one credential service, if registered."""
         for provider in self.providers.values():
             token_service = provider.credential_service == service
             tool_config_service = provider.tool_config_service == service
             client_config_service = service in provider.all_client_config_services
             if token_service or tool_config_service or client_config_service:
-                return OAuthCredentialServiceMatch(
+                return _OAuthCredentialServiceMatch(
                     provider=provider,
                     token_service=token_service,
                     tool_config_service=tool_config_service,
@@ -187,7 +187,7 @@ def _require_auth_user_id(request: Request) -> str:
     raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
 
-def dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
+def _dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
     """Return the requester identity dashboard-scoped worker credentials should use."""
     auth_user = _request_auth_user(request) or {}
     if auth_user.get("auth_source") == "trusted_upstream":
@@ -304,7 +304,7 @@ def build_dashboard_execution_identity(
     return ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,
-        requester_id=dashboard_requester_id_for_request(request, runtime_paths),
+        requester_id=_dashboard_requester_id_for_request(request, runtime_paths),
         room_id=None,
         thread_id=None,
         resolved_thread_id=None,
@@ -352,7 +352,7 @@ def resolve_dashboard_agent_execution_scope_request(
     execution_scope_override_provided: bool,
     execution_scope_override: WorkerScope | None,
     allow_draft_override: bool,
-) -> DashboardAgentExecutionScopeResolution:
+) -> _DashboardAgentExecutionScopeResolution:
     """Resolve one dashboard execution-scope request against persisted agent config.
 
     Tools may preview draft execution scopes, but persistent credential writes must
@@ -364,7 +364,7 @@ def resolve_dashboard_agent_execution_scope_request(
                 status_code=400,
                 detail="Query parameter 'execution_scope' requires agent_name on the dashboard API.",
             )
-        return DashboardAgentExecutionScopeResolution(
+        return _DashboardAgentExecutionScopeResolution(
             agent_name=None,
             persisted_policy=None,
             persisted_execution_scope=None,
@@ -401,7 +401,7 @@ def resolve_dashboard_agent_execution_scope_request(
                 f"{requested_scope_label}. Persisted scope is {persisted_scope_label}."
             ),
         )
-    return DashboardAgentExecutionScopeResolution(
+    return _DashboardAgentExecutionScopeResolution(
         agent_name=agent_name,
         persisted_policy=persisted_policy,
         persisted_execution_scope=persisted_execution_scope,
@@ -646,23 +646,23 @@ def _oauth_providers_for_request(request: Request) -> dict[str, OAuthProvider]:
     return load_oauth_providers_for_snapshot(snapshot)
 
 
-def _oauth_services_for_request(request: Request) -> OAuthCredentialServices:
-    return OAuthCredentialServices(providers=_oauth_providers_for_request(request))
+def _oauth_services_for_request(request: Request) -> _OAuthCredentialServices:
+    return _OAuthCredentialServices(providers=_oauth_providers_for_request(request))
 
 
-def _oauth_service_match(request: Request, service: str) -> OAuthCredentialServiceMatch | None:
+def _oauth_service_match(request: Request, service: str) -> _OAuthCredentialServiceMatch | None:
     return _oauth_services_for_request(request).match(service)
 
 
 def _reject_oauth_token_service(
-    oauth_service_match: OAuthCredentialServiceMatch | None,
+    oauth_service_match: _OAuthCredentialServiceMatch | None,
 ) -> None:
     if oauth_service_match is None or _dashboard_may_edit_oauth_match(oauth_service_match):
         return
     raise HTTPException(status_code=400, detail=_OAUTH_TOKEN_CREDENTIALS_ERROR)
 
 
-def _dashboard_may_edit_oauth_match(oauth_service_match: OAuthCredentialServiceMatch | None) -> bool:
+def _dashboard_may_edit_oauth_match(oauth_service_match: _OAuthCredentialServiceMatch | None) -> bool:
     if oauth_service_match is None:
         return False
     if oauth_service_match.client_config_service:
@@ -673,13 +673,13 @@ def _dashboard_may_edit_oauth_match(oauth_service_match: OAuthCredentialServiceM
     )
 
 
-def _is_oauth_client_config_match(oauth_service_match: OAuthCredentialServiceMatch | None) -> bool:
+def _is_oauth_client_config_match(oauth_service_match: _OAuthCredentialServiceMatch | None) -> bool:
     return oauth_service_match is not None and oauth_service_match.client_config_service
 
 
 def _is_oauth_client_config_service(
     service: str,
-    oauth_service_match: OAuthCredentialServiceMatch | None,
+    oauth_service_match: _OAuthCredentialServiceMatch | None,
 ) -> bool:
     return _is_oauth_client_config_match(oauth_service_match) or is_oauth_client_config_service(service)
 
@@ -692,7 +692,7 @@ def _reject_oauth_credentials_document(credentials: dict[str, Any]) -> None:
 
 def _reject_oauth_api_key_read_field(
     service: str,
-    oauth_service_match: OAuthCredentialServiceMatch | None,
+    oauth_service_match: _OAuthCredentialServiceMatch | None,
     *,
     key_name: str,
 ) -> None:
@@ -720,7 +720,7 @@ def _reject_oauth_api_key_read_field(
 
 def _reject_oauth_api_key_write_field(
     service: str,
-    oauth_service_match: OAuthCredentialServiceMatch | None,
+    oauth_service_match: _OAuthCredentialServiceMatch | None,
     *,
     key_name: str,
 ) -> None:
@@ -734,9 +734,9 @@ def _reject_oauth_api_key_write_field(
 
 def _reject_oauth_client_config_copy(
     source_service: str,
-    source_match: OAuthCredentialServiceMatch | None,
+    source_match: _OAuthCredentialServiceMatch | None,
     destination_service: str,
-    destination_match: OAuthCredentialServiceMatch | None,
+    destination_match: _OAuthCredentialServiceMatch | None,
 ) -> None:
     if not _is_oauth_client_config_service(
         source_service,
@@ -812,11 +812,11 @@ def _require_or_preserve_oauth_client_config_secret(
 
 
 @dataclass(frozen=True)
-class DashboardCredentialAccess:
+class _DashboardCredentialAccess:
     """Credential storage access for one dashboard request target."""
 
     target: RequestCredentialsTarget
-    oauth_services: OAuthCredentialServices
+    oauth_services: _OAuthCredentialServices
 
     @classmethod
     def resolve(
@@ -826,7 +826,7 @@ class DashboardCredentialAccess:
         agent_name: str | None,
         service_names: tuple[str, ...] = (),
         allow_private_scopes: bool = False,
-    ) -> DashboardCredentialAccess:
+    ) -> _DashboardCredentialAccess:
         """Resolve dashboard credential access for one request."""
         oauth_services = _oauth_services_for_request(request)
         oauth_services.reject_non_editable_services(service_names)
@@ -841,7 +841,7 @@ class DashboardCredentialAccess:
         )
         return cls(target=target, oauth_services=oauth_services)
 
-    def match(self, service: str) -> OAuthCredentialServiceMatch | None:
+    def match(self, service: str) -> _OAuthCredentialServiceMatch | None:
         """Return the OAuth role for one credential service, if registered."""
         return self.oauth_services.match(service)
 
@@ -955,7 +955,7 @@ async def list_services(
     agent_name: str | None = None,
 ) -> list[str]:
     """List all services with stored credentials."""
-    access = DashboardCredentialAccess.resolve(request, agent_name=agent_name, allow_private_scopes=True)
+    access = _DashboardCredentialAccess.resolve(request, agent_name=agent_name, allow_private_scopes=True)
     return access.list_services()
 
 
@@ -967,7 +967,7 @@ async def get_credential_status(
 ) -> CredentialStatus:
     """Get the status of credentials for a service."""
     service = _validated_service(service)
-    access = DashboardCredentialAccess.resolve(
+    access = _DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
         service_names=(service,),
@@ -996,7 +996,7 @@ async def set_credentials(
     """Set multiple credentials for a service."""
     service = _validated_service(service)
     _reject_oauth_credentials_document(payload.credentials)
-    access = DashboardCredentialAccess.resolve(
+    access = _DashboardCredentialAccess.resolve(
         http_request,
         agent_name=agent_name,
         service_names=(service,),
@@ -1023,7 +1023,7 @@ async def set_api_key(
     request_service = _validated_service(payload.service)
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
-    access = DashboardCredentialAccess.resolve(
+    access = _DashboardCredentialAccess.resolve(
         http_request,
         agent_name=agent_name,
         service_names=(service,),
@@ -1049,7 +1049,7 @@ async def get_api_key(
 ) -> dict[str, Any]:
     """Get API key metadata for a service, and optionally the full key value."""
     service = _validated_service(service)
-    access = DashboardCredentialAccess.resolve(
+    access = _DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
         service_names=(service,),
@@ -1090,7 +1090,7 @@ async def get_credentials(
 ) -> dict[str, Any]:
     """Get credentials for a service (for editing)."""
     service = _validated_service(service)
-    access = DashboardCredentialAccess.resolve(
+    access = _DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
         service_names=(service,),
@@ -1115,7 +1115,7 @@ async def delete_credentials(
 ) -> dict[str, str]:
     """Delete all credentials for a service."""
     service = _validated_service(service)
-    access = DashboardCredentialAccess.resolve(
+    access = _DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
         service_names=(service,),

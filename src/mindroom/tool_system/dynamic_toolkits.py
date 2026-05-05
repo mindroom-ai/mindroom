@@ -26,11 +26,11 @@ class DynamicToolkitSelection:
     runtime_tool_configs: tuple[ResolvedToolConfig, ...]
 
 
-class DynamicToolkitMergeError(ValueError):
+class _DynamicToolkitMergeError(ValueError):
     """Raised when one runtime toolkit selection cannot be merged safely."""
 
 
-class DynamicToolkitConflictError(DynamicToolkitMergeError):
+class DynamicToolkitConflictError(_DynamicToolkitMergeError):
     """Raised when two active tool sources define one tool with conflicting overrides."""
 
     def __init__(
@@ -195,7 +195,7 @@ def save_loaded_toolkits_for_session(
     _loaded_toolkits[_toolkit_scope_key(session_id)] = _coerce_loaded_toolkits(loaded_toolkits)
 
 
-def clear_session_toolkits(session_id: str) -> None:
+def _clear_session_toolkits(session_id: str) -> None:
     """Clear one session's loaded toolkit state."""
     _loaded_toolkits.pop(_toolkit_scope_key(session_id), None)
 

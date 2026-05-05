@@ -115,7 +115,7 @@ if TYPE_CHECKING:
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
     from mindroom.tool_system.events import ToolTraceEntry
 
-type MatrixEventId = str
+type _MatrixEventId = str
 
 logger = get_logger(__name__)
 
@@ -1650,7 +1650,7 @@ class AgentBot:
         extra_content: dict[str, Any] | None = None,
         thread_mode_override: Literal["thread", "room"] | None = None,
         target: MessageTarget | None = None,
-    ) -> MatrixEventId | None:
+    ) -> _MatrixEventId | None:
         """Send a response message to a room."""
         resolved_target = target or self._conversation_resolver.build_message_target(
             room_id=room_id,
@@ -1678,7 +1678,7 @@ class AgentBot:
         extra_content: dict[str, Any] | None = None,
         *,
         trigger_dispatch: bool = False,
-    ) -> MatrixEventId | None:
+    ) -> _MatrixEventId | None:
         """Send a hook-originated Matrix message with stable metadata tags."""
         if self.client is None:
             self.logger.warning("Hook send requested before Matrix client is ready", room_id=room_id)

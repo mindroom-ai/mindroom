@@ -20,9 +20,15 @@ from mindroom.custom_tools.browser import (
     _BrowserProfileState,
     _BrowserTabState,
     _clean_str,
-    clear_stale_singleton_locks,
-    persistent_launch_kwargs,
-    profile_dir,
+)
+from mindroom.custom_tools.browser import (
+    _clear_stale_singleton_locks as clear_stale_singleton_locks,
+)
+from mindroom.custom_tools.browser import (
+    _persistent_launch_kwargs as persistent_launch_kwargs,
+)
+from mindroom.custom_tools.browser import (
+    _profile_dir as profile_dir,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import make_conversation_cache_mock, make_event_cache_mock

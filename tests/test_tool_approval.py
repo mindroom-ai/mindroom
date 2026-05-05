@@ -17,7 +17,6 @@ from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     _MAX_REMEMBERED_TERMINAL_CARD_IDS,
     ApprovalDecision,
-    ApprovalManager,
     PendingApproval,
     SentApprovalEvent,
     _build_event_arguments_preview,
@@ -25,12 +24,15 @@ from mindroom.approval_manager import (
     get_approval_store,
     initialize_approval_store,
 )
+from mindroom.approval_manager import (
+    _ApprovalManager as ApprovalManager,
+)
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.logging_config import get_logger
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 from mindroom.tool_approval import (
     MatrixApprovalAction,
     ToolApprovalCall,
@@ -40,7 +42,9 @@ from mindroom.tool_approval import (
     is_process_approval_card,
     request_tool_approval_for_call,
     resolve_tool_approval_approver,
-    shutdown_approval_store,
+)
+from mindroom.tool_approval import (
+    _shutdown_approval_store as shutdown_approval_store,
 )
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 

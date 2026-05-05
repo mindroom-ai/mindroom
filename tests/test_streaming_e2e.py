@@ -18,7 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
@@ -355,7 +355,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         # Patch create_bot_for_entity to create bots with proper user_ids
         with (
             patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
-            patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
         ):
 
             def create_bot_side_effect(

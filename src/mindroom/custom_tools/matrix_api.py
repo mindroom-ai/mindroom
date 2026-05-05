@@ -25,12 +25,12 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_ru
 logger = get_logger(__name__)
 
 
-class MatrixSearchError(nio.ErrorResponse):
+class _MatrixSearchError(nio.ErrorResponse):
     """Matrix search request failed or returned malformed data."""
 
 
 @dataclass
-class MatrixSearchResponse(nio.Response):
+class _MatrixSearchResponse(nio.Response):
     """Parsed subset of Matrix room-event search results."""
 
     count: int
@@ -38,13 +38,13 @@ class MatrixSearchResponse(nio.Response):
     results: list[dict[str, object]]
 
     @staticmethod
-    def _malformed_response_error() -> MatrixSearchError:
-        return MatrixSearchError("Malformed Matrix search response.")
+    def _malformed_response_error() -> _MatrixSearchError:
+        return _MatrixSearchError("Malformed Matrix search response.")
 
     @staticmethod
-    def _matrix_error_from_dict(parsed_dict: dict[Any, Any]) -> MatrixSearchError:
+    def _matrix_error_from_dict(parsed_dict: dict[Any, Any]) -> _MatrixSearchError:
         error_response = nio.ErrorResponse.from_dict(parsed_dict)
-        return MatrixSearchError(
+        return _MatrixSearchError(
             error_response.message,
             error_response.status_code,
             error_response.retry_after_ms,
@@ -55,7 +55,7 @@ class MatrixSearchResponse(nio.Response):
     def from_dict(
         cls,
         parsed_dict: dict[Any, Any],
-    ) -> MatrixSearchResponse | MatrixSearchError:
+    ) -> _MatrixSearchResponse | _MatrixSearchError:
         """Parse one Matrix search payload or normalize one Matrix error payload."""
         if not isinstance(parsed_dict, dict):
             return cls._malformed_response_error()
@@ -1349,7 +1349,7 @@ class MatrixApiTools(Toolkit):
 
         try:
             response = await context.client._send(
-                MatrixSearchResponse,
+                _MatrixSearchResponse,
                 method,
                 path,
                 nio.Api.to_json(request_body),
@@ -1362,7 +1362,7 @@ class MatrixApiTools(Toolkit):
                 response=exc,
             )
 
-        if isinstance(response, MatrixSearchResponse):
+        if isinstance(response, _MatrixSearchResponse):
             normalized_results: list[dict[str, object]] = []
             include_context = event_context is not None
             for raw_result in response.results:

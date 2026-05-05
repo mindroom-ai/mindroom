@@ -21,7 +21,9 @@ from agno.session.team import TeamSession
 
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
-    QUEUED_MESSAGE_NOTICE_TEXT,
+    _QUEUED_MESSAGE_NOTICE_TEXT as QUEUED_MESSAGE_NOTICE_TEXT,
+)
+from mindroom.ai_runtime import (
     cleanup_queued_notice_state,
     install_queued_message_notice_hook,
     queued_message_signal_context,
@@ -52,7 +54,8 @@ from mindroom.post_response_effects import (
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
+from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from mindroom.turn_policy import _DispatchPlan as DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,

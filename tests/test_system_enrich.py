@@ -24,7 +24,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.execution_preparation import _PreparedExecutionContext as PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,

@@ -24,7 +24,7 @@ def _vertex_claude_cache_control(model: VertexAIClaude) -> dict[str, str]:
     return cache_control
 
 
-def copy_messages_with_vertex_prompt_cache_breakpoint(  # noqa: C901
+def _copy_messages_with_vertex_prompt_cache_breakpoint(  # noqa: C901
     messages: list[Message],
     model: VertexAIClaude,
 ) -> list[Message]:
@@ -89,7 +89,7 @@ def install_vertex_claude_prompt_cache_hook(model: object) -> None:
     def _prepare_messages(messages: list[Message]) -> list[Message]:
         if not model.cache_system_prompt:
             return messages
-        return copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+        return _copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
 
     def _invoke_with_prompt_cache(
         messages: list[Message],

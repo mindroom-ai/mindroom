@@ -143,7 +143,7 @@ def merge_attachment_ids(*attachment_id_lists: list[str]) -> list[str]:
     return merged
 
 
-def append_attachment_ids_prompt(prompt: str, attachment_ids: list[str]) -> str:
+def _append_attachment_ids_prompt(prompt: str, attachment_ids: list[str]) -> str:
     """Append attachment guidance to a prompt when attachment IDs are available."""
     if not attachment_ids:
         return prompt
@@ -496,7 +496,7 @@ async def _register_media_attachment(
     )
 
 
-async def register_file_or_video_attachment(
+async def _register_file_or_video_attachment(
     client: nio.AsyncClient,
     storage_path: Path,
     *,
@@ -520,7 +520,7 @@ async def register_file_or_video_attachment(
     )
 
 
-async def register_image_attachment(
+async def _register_image_attachment(
     client: nio.AsyncClient,
     storage_path: Path,
     *,
@@ -713,7 +713,7 @@ async def register_matrix_media_attachment(
 ) -> AttachmentRecord | None:
     """Persist an image/file/video Matrix event and register an attachment record."""
     if is_image_message_event(event):
-        return await register_image_attachment(
+        return await _register_image_attachment(
             client,
             storage_path,
             room_id=room_id,
@@ -722,7 +722,7 @@ async def register_matrix_media_attachment(
             image_bytes=image_bytes,
         )
     if is_file_or_video_message_event(event):
-        return await register_file_or_video_attachment(
+        return await _register_file_or_video_attachment(
             client,
             storage_path,
             room_id=room_id,

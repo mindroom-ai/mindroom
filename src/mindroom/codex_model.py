@@ -28,38 +28,38 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
-CODEX_REFRESH_URL = "https://auth.openai.com/oauth/token"
-CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-CODEX_REFRESH_SKEW_SECONDS = 30
-CODEX_MODEL_PREFIX = "openai-codex/"
-CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
-CODEX_UNSUPPORTED_REQUEST_PARAMS = {"max_output_tokens", "temperature"}
-CODEX_PROMPT_CACHE_KEY_PREFIX = "mindroom"
-CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
-CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
+_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+_CODEX_REFRESH_URL = "https://auth.openai.com/oauth/token"
+_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+_CODEX_REFRESH_SKEW_SECONDS = 30
+_CODEX_MODEL_PREFIX = "openai-codex/"
+_CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
+_CODEX_UNSUPPORTED_REQUEST_PARAMS = {"max_output_tokens", "temperature"}
+_CODEX_PROMPT_CACHE_KEY_PREFIX = "mindroom"
+_CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
+_CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
 
 
-class CodexAuthError(ValueError):
+class _CodexAuthError(ValueError):
     """Raised when the local Codex CLI OAuth state cannot provide a usable token."""
 
 
 def normalize_codex_model_id(model_id: str) -> str:
     """Return the Codex endpoint model slug from either bare or LLM-plugin-style IDs."""
     normalized = model_id.strip()
-    if normalized.startswith(CODEX_MODEL_PREFIX):
-        return normalized.removeprefix(CODEX_MODEL_PREFIX)
+    if normalized.startswith(_CODEX_MODEL_PREFIX):
+        return normalized.removeprefix(_CODEX_MODEL_PREFIX)
     return normalized
 
 
-def borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str | None]:
+def _borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str | None]:
     """Return a valid Codex CLI ChatGPT access token and optional account id."""
     auth_path = _codex_auth_path(codex_home=codex_home)
     auth = _read_codex_auth(auth_path)
     tokens = auth.get("tokens")
     if not isinstance(tokens, dict) or not tokens.get("access_token"):
         msg = "No ChatGPT access token found in Codex auth.json. Run `codex login` first."
-        raise CodexAuthError(msg)
+        raise _CodexAuthError(msg)
 
     usable_token = _usable_access_token(tokens)
     if usable_token is not None:
@@ -70,7 +70,7 @@ def borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str 
         tokens = auth.get("tokens")
         if not isinstance(tokens, dict) or not tokens.get("access_token"):
             msg = "No ChatGPT access token found in Codex auth.json. Run `codex login` first."
-            raise CodexAuthError(msg)
+            raise _CodexAuthError(msg)
 
         usable_token = _usable_access_token(tokens)
         if usable_token is not None:
@@ -79,13 +79,13 @@ def borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str 
         refresh_token = tokens.get("refresh_token")
         if not refresh_token:
             msg = "No Codex refresh token found. Run `codex login` to re-authenticate."
-            raise CodexAuthError(msg)
+            raise _CodexAuthError(msg)
 
         account_id = str(tokens["account_id"]) if tokens.get("account_id") else None
         refreshed = _refresh_codex_tokens(str(refresh_token))
         if not refreshed.get("access_token"):
             msg = "Codex token refresh response did not include an access token."
-            raise CodexAuthError(msg)
+            raise _CodexAuthError(msg)
 
         _update_tokens(tokens, refreshed)
         auth["tokens"] = tokens
@@ -99,7 +99,7 @@ def _codex_auth_path(*, codex_home: str | Path | None) -> Path:
     auth_path = home / "auth.json"
     if not auth_path.exists():
         msg = f"Codex auth file not found at {auth_path}. Run `codex login` first."
-        raise CodexAuthError(msg)
+        raise _CodexAuthError(msg)
     return auth_path
 
 
@@ -112,7 +112,7 @@ def _read_codex_auth(auth_path: Path) -> dict[str, Any]:
         auth = json.load(auth_file)
     if auth.get("auth_mode") != "chatgpt":
         msg = "Codex auth.json must use ChatGPT OAuth auth_mode. Run `codex login` first."
-        raise CodexAuthError(msg)
+        raise _CodexAuthError(msg)
     return auth
 
 
@@ -130,7 +130,7 @@ def _codex_auth_refresh_lock(auth_path: Path) -> Iterator[None]:
 def _usable_access_token(tokens: dict[str, Any]) -> tuple[str, str | None] | None:
     access_token = str(tokens["access_token"])
     expires_at = _jwt_exp(access_token)
-    if expires_at is None or time.time() >= expires_at - CODEX_REFRESH_SKEW_SECONDS:
+    if expires_at is None or time.time() >= expires_at - _CODEX_REFRESH_SKEW_SECONDS:
         return None
     account_id = str(tokens["account_id"]) if tokens.get("account_id") else None
     return access_token, account_id
@@ -159,30 +159,30 @@ def _jwt_exp(token: str) -> int | None:
 
 def _refresh_codex_tokens(refresh_token: str) -> dict[str, Any]:
     payload = {
-        "client_id": CODEX_CLIENT_ID,
+        "client_id": _CODEX_CLIENT_ID,
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
     }
     try:
-        response = httpx.post(CODEX_REFRESH_URL, json=payload, timeout=10)
+        response = httpx.post(_CODEX_REFRESH_URL, json=payload, timeout=10)
     except httpx.HTTPError as exc:
         msg = f"Codex token refresh failed: {exc}"
-        raise CodexAuthError(msg) from exc
+        raise _CodexAuthError(msg) from exc
 
     if not response.is_success:
         error_body = response.text
         error_code = _refresh_error_code(error_body)
         if error_code in {"refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated"}:
             msg = f"Codex refresh token is no longer valid ({error_code}). Run `codex login` again."
-            raise CodexAuthError(msg) from None
+            raise _CodexAuthError(msg) from None
         msg = f"Codex token refresh failed (HTTP {response.status_code}): {error_body}"
-        raise CodexAuthError(msg) from None
+        raise _CodexAuthError(msg) from None
 
     try:
         return response.json()
     except json.JSONDecodeError as exc:
         msg = "Codex token refresh returned invalid JSON."
-        raise CodexAuthError(msg) from exc
+        raise _CodexAuthError(msg) from exc
 
 
 def _refresh_error_code(error_body: str) -> str | None:
@@ -215,14 +215,14 @@ def derive_codex_prompt_cache_key(identity: ToolExecutionIdentity) -> str | None
         ),
     )
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
-    return f"{CODEX_PROMPT_CACHE_KEY_PREFIX}-{digest}"
+    return f"{_CODEX_PROMPT_CACHE_KEY_PREFIX}-{digest}"
 
 
 def _codex_prompt_cache_headers(prompt_cache_key: str) -> dict[str, str]:
     return {
         "session_id": prompt_cache_key,
         "x-client-request-id": prompt_cache_key,
-        CODEX_WINDOW_ID_HEADER: f"{prompt_cache_key}:0",
+        _CODEX_WINDOW_ID_HEADER: f"{prompt_cache_key}:0",
     }
 
 
@@ -239,7 +239,7 @@ def _codex_prompt_cache_extra_body(*, installation_id: str | None) -> dict[str, 
         return {}
     return {
         "client_metadata": {
-            CODEX_INSTALLATION_ID_HEADER: installation_id,
+            _CODEX_INSTALLATION_ID_HEADER: installation_id,
         },
     }
 
@@ -269,7 +269,7 @@ class CodexResponses(OpenAIResponses):
     id: str = "gpt-5.5"
     name: str = "CodexResponses"
     provider: str = "OpenAI Codex"
-    base_url: str = CODEX_BASE_URL
+    base_url: str = _CODEX_BASE_URL
     store: bool = False
     codex_home: str | None = None
     prompt_cache_key: str | None = None
@@ -280,7 +280,7 @@ class CodexResponses(OpenAIResponses):
         super().__post_init__()
 
     def _get_client_params(self) -> dict[str, Any]:
-        token, account_id = borrow_codex_key(codex_home=self.codex_home)
+        token, account_id = _borrow_codex_key(codex_home=self.codex_home)
         headers = dict(self.default_headers or {})
         if account_id:
             headers["ChatGPT-Account-ID"] = account_id
@@ -301,7 +301,7 @@ class CodexResponses(OpenAIResponses):
 
     def _instructions_text(self) -> str:
         instructions = [self.system_prompt, *(self.instructions or [])]
-        return "\n\n".join(instruction for instruction in instructions if instruction) or CODEX_DEFAULT_INSTRUCTIONS
+        return "\n\n".join(instruction for instruction in instructions if instruction) or _CODEX_DEFAULT_INSTRUCTIONS
 
     def _prompt_cache_key(self) -> str | None:
         return self.prompt_cache_key
@@ -334,7 +334,7 @@ class CodexResponses(OpenAIResponses):
                     installation_id=_codex_installation_id(codex_home=self.codex_home),
                 ),
             )
-        for param_name in CODEX_UNSUPPORTED_REQUEST_PARAMS:
+        for param_name in _CODEX_UNSUPPORTED_REQUEST_PARAMS:
             request_params.pop(param_name, None)
         return request_params
 

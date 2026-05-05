@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-P = ParamSpec("P")
-R = TypeVar("R")
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 # When set, log lines include the scope for grouping related timers.
 timing_scope: ContextVar[str | None] = ContextVar("timing_scope", default=None)
@@ -37,9 +37,9 @@ def timing_enabled() -> bool:
     return _is_enabled()
 
 
-type TimingMetadataValue = str | int | float | bool
+type _TimingMetadataValue = str | int | float | bool
 
-PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
+_PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
     ("seg_ingress_ms", "message_received", "gate_enter"),
     ("seg_coalescing_ms", "gate_enter", "gate_exit"),
     ("seg_dispatch_ms", "gate_exit", "response_payload_ready"),
@@ -49,12 +49,12 @@ PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
     ("seg_after_first_visible_ms", "first_visible_reply", "response_complete"),
 )
 
-PRIMARY_TOTALS: tuple[tuple[str, str, str], ...] = (
+_PRIMARY_TOTALS: tuple[tuple[str, str, str], ...] = (
     ("time_to_first_visible_reply_ms", "message_received", "first_visible_reply"),
     ("total_pipeline_ms", "message_received", "response_complete"),
 )
 
-DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
+_DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
     ("diag_ingress_cache_append_ms", "ingress_cache_append_start", "ingress_cache_append_ready"),
     ("diag_ingress_normalize_ms", "ingress_normalize_start", "ingress_normalize_ready"),
     ("diag_dispatch_prepare_ms", "dispatch_prepare_start", "dispatch_prepare_ready"),
@@ -83,7 +83,7 @@ class DispatchPipelineTiming:
     source_event_id: str
     room_id: str
     marks: dict[str, float] = field(default_factory=dict)
-    metadata: dict[str, TimingMetadataValue] = field(default_factory=dict)
+    metadata: dict[str, _TimingMetadataValue] = field(default_factory=dict)
     summary_emitted: bool = False
 
     def mark(self, label: str, *, overwrite: bool = False) -> None:
@@ -91,7 +91,7 @@ class DispatchPipelineTiming:
         if overwrite or label not in self.marks:
             self.marks[label] = time.perf_counter()
 
-    def note(self, **metadata: TimingMetadataValue | None) -> None:
+    def note(self, **metadata: _TimingMetadataValue | None) -> None:
         """Attach diagnostic metadata for the eventual summary log."""
         for key, value in metadata.items():
             if value is not None:
@@ -123,7 +123,7 @@ class DispatchPipelineTiming:
             "outcome": outcome,
             **self.metadata,
         }
-        duration_pairs = (*PRIMARY_SEGMENTS, *PRIMARY_TOTALS, *DIAGNOSTIC_SPANS)
+        duration_pairs = (*_PRIMARY_SEGMENTS, *_PRIMARY_TOTALS, *_DIAGNOSTIC_SPANS)
         for key, start_label, end_label in duration_pairs:
             elapsed = self.elapsed_ms(start_label, end_label)
             if elapsed is not None:
@@ -200,14 +200,14 @@ def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
     )
 
 
-def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
+def timed(label: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
     """Decorator that logs elapsed time for sync/async functions.
 
     When MINDROOM_TIMING != "1", returns the original function unchanged (zero overhead).
     Log format: TIMING [<scope>] <label>: <elapsed>s  (scope omitted if not set)
     """
 
-    def decorator(fn: Callable[P, R]) -> Callable[P, R]:
+    def decorator(fn: Callable[_P, _R]) -> Callable[_P, _R]:
         if not _is_enabled():
             return fn
 
@@ -217,32 +217,32 @@ def timed(label: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
         if inspect.isasyncgenfunction(fn):
 
             @functools.wraps(fn)
-            async def async_generator_wrapper(*args: P.args, **kwargs: P.kwargs) -> AsyncIterator[object]:
+            async def async_generator_wrapper(*args: _P.args, **kwargs: _P.kwargs) -> AsyncIterator[object]:
                 start = time.monotonic()
                 try:
-                    async_generator_fn = cast("Callable[P, AsyncIterator[object]]", fn)
+                    async_generator_fn = cast("Callable[_P, AsyncIterator[object]]", fn)
                     async for item in async_generator_fn(*args, **kwargs):
                         yield item
                 finally:
                     emit_timing(start, kwargs)
 
-            return cast("Callable[P, R]", async_generator_wrapper)
+            return cast("Callable[_P, _R]", async_generator_wrapper)
 
         if asyncio.iscoroutinefunction(fn):
 
             @functools.wraps(fn)
-            async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            async def async_wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
                 start = time.monotonic()
                 try:
-                    async_fn = cast("Callable[P, Awaitable[R]]", fn)
+                    async_fn = cast("Callable[_P, Awaitable[_R]]", fn)
                     return await async_fn(*args, **kwargs)
                 finally:
                     emit_timing(start, kwargs)
 
-            return cast("Callable[P, R]", async_wrapper)
+            return cast("Callable[_P, _R]", async_wrapper)
 
         @functools.wraps(fn)
-        def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        def sync_wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
             start = time.monotonic()
             try:
                 return fn(*args, **kwargs)

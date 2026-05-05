@@ -66,7 +66,7 @@ def _split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:
     return resolved_root, resolved_pattern
 
 
-class MindRoomFileTools(AgnoFileTools):
+class _MindRoomFileTools(AgnoFileTools):
     """MindRoom wrapper around Agno's file tools."""
 
     def __init__(
@@ -392,4 +392,4 @@ class MindRoomFileTools(AgnoFileTools):
 )
 def file_tools() -> type[AgnoFileTools]:
     """Return file tools for local file operations."""
-    return MindRoomFileTools
+    return _MindRoomFileTools

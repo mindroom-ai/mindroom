@@ -218,7 +218,7 @@ def _install_optional_extras(extras: list[str], *, quiet: bool = False) -> bool:
     return _install_in_environment(extras, quiet=quiet)
 
 
-def auto_install_optional_extra(extra_name: str, runtime_paths: RuntimePaths) -> bool:
+def _auto_install_optional_extra(extra_name: str, runtime_paths: RuntimePaths) -> bool:
     """Auto-install an optional extra when supported and enabled."""
     if not auto_install_enabled(runtime_paths):
         return False
@@ -230,14 +230,14 @@ def auto_install_optional_extra(extra_name: str, runtime_paths: RuntimePaths) ->
 
 def auto_install_tool_extra(tool_name: str, runtime_paths: RuntimePaths) -> bool:
     """Auto-install a tool extra when supported and enabled."""
-    return auto_install_optional_extra(tool_name, runtime_paths)
+    return _auto_install_optional_extra(tool_name, runtime_paths)
 
 
 def ensure_optional_deps(dependencies: list[str], extra_name: str, runtime_paths: RuntimePaths) -> None:
     """Ensure dependencies are installed, auto-installing via optional extra if needed."""
     if check_deps_installed(dependencies):
         return
-    if not auto_install_optional_extra(extra_name, runtime_paths):
+    if not _auto_install_optional_extra(extra_name, runtime_paths):
         missing = ", ".join(dependencies)
         msg = f"Missing dependencies: {missing}. Install with: pip install 'mindroom[{extra_name}]'"
         raise ImportError(msg)

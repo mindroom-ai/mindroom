@@ -236,7 +236,7 @@ class _SignalAwareUvicornServer(uvicorn.Server):
 
 
 @dataclass
-class MultiAgentOrchestrator:
+class _MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
     runtime_paths: RuntimePaths
@@ -1690,13 +1690,13 @@ def _recover_failed_plugin_reload(
     )
 
 
-async def _handle_config_change(orchestrator: MultiAgentOrchestrator) -> None:
+async def _handle_config_change(orchestrator: _MultiAgentOrchestrator) -> None:
     """Handle configuration file changes."""
     logger.info("Configuration file changed; queueing hot reload")
     orchestrator.request_config_reload()
 
 
-async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestrator) -> None:
+async def _watch_config_task(config_path: Path, orchestrator: _MultiAgentOrchestrator) -> None:
     """Watch config file for changes."""
 
     async def on_config_change() -> None:
@@ -1705,7 +1705,7 @@ async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestr
     await file_watcher.watch_file(config_path, on_config_change)
 
 
-async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
+async def _watch_skills_task(orchestrator: _MultiAgentOrchestrator) -> None:
     """Watch skill roots for changes and clear cached skills."""
     while not orchestrator.running:  # noqa: ASYNC110
         await asyncio.sleep(0.1)
@@ -1945,7 +1945,7 @@ async def main(
     storage_path.mkdir(parents=True, exist_ok=True)
 
     logger.info("Starting orchestrator...")
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()

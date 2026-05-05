@@ -224,7 +224,7 @@ def test_validate_supabase_token_catches_supabase_auth_errors(monkeypatch: pytes
     monkeypatch.setattr(auth.importlib, "import_module", _fake_import_module)
     auth_state = auth.ApiAuthState(
         runtime_paths=_runtime_paths(tmp_path),
-        settings=auth.ApiAuthSettings(
+        settings=auth._ApiAuthSettings(
             platform_login_url="https://platform.example.com/login",
             supabase_url="https://supabase.example.com",
             supabase_anon_key="anon-key",
@@ -384,7 +384,7 @@ def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
     assert main._app_runtime_paths(fresh_app) == runtime_paths
     assert main._app_context(fresh_app).config_data == {}
     assert hasattr(config_lifecycle.require_api_state(fresh_app).config_lock, "acquire")
-    assert auth.app_auth_state(fresh_app).runtime_paths == runtime_paths
+    assert auth._app_auth_state(fresh_app).runtime_paths == runtime_paths
 
 
 def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
@@ -397,11 +397,11 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     )
 
     main.initialize_api_app(fresh_app, initial_runtime)
-    assert auth.app_auth_state(fresh_app).settings.mindroom_api_key is None
+    assert auth._app_auth_state(fresh_app).settings.mindroom_api_key is None
 
     main.initialize_api_app(fresh_app, refreshed_runtime)
 
-    assert auth.app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
+    assert auth._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
 
 def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_path: Path) -> None:
@@ -599,7 +599,7 @@ def test_reload_api_runtime_config_does_not_clear_worker_snapshot_on_failed_load
         patch("mindroom.api.runtime_reload.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
         pytest.raises(HTTPException) as exc_info,
     ):
-        runtime_reload.reload_api_runtime_config(fresh_app, runtime_paths)
+        runtime_reload._reload_api_runtime_config(fresh_app, runtime_paths)
 
     assert exc_info.value.status_code == 422
     mock_clear_snapshot_cache.assert_not_called()
@@ -643,7 +643,7 @@ def test_read_app_committed_config_uses_current_context_after_runtime_swap(tmp_p
         ),
     )
 
-    loaded_agents = config_lifecycle.read_app_committed_config(
+    loaded_agents = config_lifecycle._read_app_committed_config(
         fresh_app,
         lambda config_data: list(config_data["agents"]),
     )
@@ -704,7 +704,7 @@ def test_write_app_committed_config_uses_current_context_after_runtime_swap(tmp_
             "rooms": [],
         }
 
-    config_lifecycle.write_app_committed_config(
+    config_lifecycle._write_app_committed_config(
         fresh_app,
         _mutate,
         error_prefix="Failed to update configuration",
@@ -2038,7 +2038,7 @@ def test_spotify_connect_uses_pending_oauth_state(
     )
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
-        settings=auth.ApiAuthSettings(
+        settings=auth._ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
@@ -2088,7 +2088,7 @@ def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: 
     )
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
-        settings=auth.ApiAuthSettings(
+        settings=auth._ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
@@ -2162,7 +2162,7 @@ def test_spotify_callback_preserves_runtime_validation_error(
     )
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
-        settings=auth.ApiAuthSettings(
+        settings=auth._ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
@@ -2673,7 +2673,7 @@ def test_write_app_committed_config_restores_original_config_before_releasing_lo
     app_state.config_lock = _AssertingLock()
     try:
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_app_committed_config(
+            config_lifecycle._write_app_committed_config(
                 main.app,
                 lambda candidate_config: candidate_config.update(
                     {
@@ -2713,7 +2713,7 @@ def test_write_app_committed_config_returns_422_for_invalid_plugin_manifest_name
     }
 
     with pytest.raises(HTTPException) as exc_info:
-        config_lifecycle.write_app_committed_config(
+        config_lifecycle._write_app_committed_config(
             main.app,
             lambda candidate_config: candidate_config.update({"plugins": ["./plugins/bad-name"]}),
             error_prefix="Failed to save configuration",
@@ -2768,7 +2768,7 @@ def test_write_app_committed_config_checks_current_config_load_result_after_acqu
 
     def _run_write() -> None:
         try:
-            config_lifecycle.write_app_committed_config(
+            config_lifecycle._write_app_committed_config(
                 main.app,
                 lambda candidate_config: candidate_config["agents"].update(
                     {
@@ -2994,7 +2994,7 @@ def test_write_app_committed_config_omits_legacy_null_optional_sections(tmp_path
         "plugins": None,
     }
 
-    config_lifecycle.write_app_committed_config(
+    config_lifecycle._write_app_committed_config(
         main.app,
         lambda _candidate_config: None,
         error_prefix="Failed to save configuration",
@@ -3149,13 +3149,13 @@ def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
     runtime_paths = main._app_runtime_paths(api_key_client.app)
     main._app_context(api_key_client.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
-        settings=auth.ApiAuthSettings(
+        settings=auth._ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
             account_id=None,
             mindroom_api_key="test-key",
-            trusted_upstream=auth.TrustedUpstreamAuthSettings(enabled=True),
+            trusted_upstream=auth._TrustedUpstreamAuthSettings(enabled=True),
         ),
         supabase_auth=None,
     )
@@ -3505,7 +3505,7 @@ def api_key_client(temp_config_file: Path) -> TestClient:
     main.initialize_api_app(main.app, runtime_paths)
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
-        settings=auth.ApiAuthSettings(
+        settings=auth._ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
@@ -4161,7 +4161,7 @@ def _set_platform_auth(
 
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
-        settings=auth.ApiAuthSettings(
+        settings=auth._ApiAuthSettings(
             platform_login_url=platform_login_url,
             supabase_url="https://supabase.example.com",
             supabase_anon_key="anon-key",

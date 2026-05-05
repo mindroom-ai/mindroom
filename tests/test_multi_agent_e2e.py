@@ -20,7 +20,7 @@ from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 from mindroom.teams import TeamMode
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -600,7 +600,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
             mock_config.teams = {}
             mock_from_yaml.return_value = mock_config
 
-            with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
+            with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
                 orchestrator = MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
                 await orchestrator.initialize()
 

@@ -136,7 +136,7 @@ def _render_interrupted_tool_trace(events: Sequence[ToolTraceEntry]) -> str:
     return "\n".join(lines)
 
 
-def render_interrupted_replay_content(snapshot: InterruptedReplaySnapshot) -> str:
+def _render_interrupted_replay_content(snapshot: InterruptedReplaySnapshot) -> str:
     """Render one interrupted snapshot into canonical assistant replay text."""
     parts: list[str] = []
     if snapshot.partial_text:
@@ -172,7 +172,7 @@ def _interrupted_replay_metadata(snapshot: InterruptedReplaySnapshot) -> dict[st
     return metadata
 
 
-def build_interrupted_replay_run(
+def _build_interrupted_replay_run(
     *,
     snapshot: InterruptedReplaySnapshot,
     run_id: str,
@@ -181,7 +181,7 @@ def build_interrupted_replay_run(
     is_team: bool,
 ) -> RunOutput | TeamRunOutput:
     """Build one canonical replayable run for an interrupted top-level turn."""
-    content = render_interrupted_replay_content(snapshot)
+    content = _render_interrupted_replay_content(snapshot)
     messages = []
     if snapshot.user_message:
         messages.append(Message(role="user", content=snapshot.user_message))
@@ -265,7 +265,7 @@ def persist_interrupted_replay_snapshot(
             scope_id=scope_id,
             is_team=is_team,
         )
-    persisted_run = build_interrupted_replay_run(
+    persisted_run = _build_interrupted_replay_run(
         snapshot=snapshot,
         run_id=run_id,
         scope_id=scope_id,

@@ -18,7 +18,9 @@ from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
-    AUTHORED_OVERRIDE_INHERIT,
+    _AUTHORED_OVERRIDE_INHERIT as AUTHORED_OVERRIDE_INHERIT,
+)
+from mindroom.tool_system.metadata import (
     ConfigField,
     ToolAuthoredOverrideValidator,
     ToolCategory,
@@ -31,7 +33,9 @@ from mindroom.tool_system.metadata import (
     register_tool_with_metadata,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
-    validate_authored_overrides,
+)
+from mindroom.tool_system.metadata import (
+    _validate_authored_overrides as validate_authored_overrides,
 )
 from mindroom.tool_system.registry_state import (
     _PLUGIN_MODULE_PREFIX,

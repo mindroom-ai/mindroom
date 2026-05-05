@@ -70,7 +70,7 @@ class WorkerAttachmentSaveReceipt:
 
 
 @dataclass(frozen=True)
-class SandboxProxyConfig:
+class _SandboxProxyConfig:
     """Resolved sandbox proxy settings for one explicit runtime context."""
 
     runner_mode: bool
@@ -182,10 +182,10 @@ def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str,
     return policy
 
 
-def sandbox_proxy_config(runtime_paths: RuntimePaths) -> SandboxProxyConfig:
+def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
     """Return sandbox proxy settings for one explicit runtime context."""
     execution_mode = _read_execution_mode(runtime_paths)
-    return SandboxProxyConfig(
+    return _SandboxProxyConfig(
         runner_mode=runtime_paths.env_flag("MINDROOM_SANDBOX_RUNNER_MODE"),
         proxy_url=_read_proxy_url(runtime_paths),
         proxy_token=_read_proxy_token(runtime_paths),
@@ -214,7 +214,7 @@ def _credential_services_for_call(
     tool_name: str,
     function_name: str,
     *,
-    proxy_config: SandboxProxyConfig,
+    proxy_config: _SandboxProxyConfig,
 ) -> list[str]:
     policy = proxy_config.credential_policy
     selectors = ("*", tool_name, f"{tool_name}.{function_name}")
@@ -234,7 +234,7 @@ def _collect_credential_overrides(
     tool_name: str,
     function_name: str,
     *,
-    proxy_config: SandboxProxyConfig,
+    proxy_config: _SandboxProxyConfig,
     credentials_manager: CredentialsManager | None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> dict[str, object]:
@@ -266,7 +266,7 @@ def _collect_credential_overrides(
 def _create_credential_lease(
     client: httpx.Client,
     *,
-    proxy_config: SandboxProxyConfig,
+    proxy_config: _SandboxProxyConfig,
     lease_url: str,
     headers: Mapping[str, str],
     credentials_manager: CredentialsManager | None,
@@ -409,7 +409,7 @@ def _resolve_user_agent_worker_payload(
 
 def _get_worker_manager(
     runtime_paths: RuntimePaths,
-    proxy_config: SandboxProxyConfig,
+    proxy_config: _SandboxProxyConfig,
 ) -> WorkerManager:
     context = get_tool_runtime_context()
     storage_root = (
@@ -456,7 +456,7 @@ def _execution_env_payload(
 def _request_headers_for_handle(
     worker_handle: WorkerHandle | None,
     *,
-    proxy_config: SandboxProxyConfig,
+    proxy_config: _SandboxProxyConfig,
 ) -> dict[str, str]:
     token = worker_handle.auth_token if worker_handle is not None else proxy_config.proxy_token
     if token is None:
@@ -470,7 +470,7 @@ def _record_proxy_exception_for_worker(
     *,
     worker_handle: WorkerHandle | None,
     runtime_paths: RuntimePaths,
-    proxy_config: SandboxProxyConfig,
+    proxy_config: _SandboxProxyConfig,
 ) -> None:
     """Classify one proxy exception as either worker-health or request-level failure."""
     if worker_handle is None:
@@ -505,7 +505,7 @@ def _record_proxy_response_failure_for_worker(
     *,
     worker_handle: WorkerHandle | None,
     runtime_paths: RuntimePaths,
-    proxy_config: SandboxProxyConfig,
+    proxy_config: _SandboxProxyConfig,
     error: str,
     failure_kind: object,
 ) -> None:
@@ -542,7 +542,7 @@ def _record_worker_save_failure(
     *,
     worker_handle: WorkerHandle | None,
     runtime_paths: RuntimePaths,
-    proxy_config: SandboxProxyConfig,
+    proxy_config: _SandboxProxyConfig,
     error: str,
 ) -> None:
     """Record a worker save protocol/integrity failure against worker health."""
@@ -558,7 +558,7 @@ def _validated_worker_save_receipt(
     sha256: str,
     worker_handle: WorkerHandle | None,
     runtime_paths: RuntimePaths,
-    proxy_config: SandboxProxyConfig,
+    proxy_config: _SandboxProxyConfig,
 ) -> WorkerAttachmentSaveReceipt:
     """Validate one successful worker save response against the sent bytes."""
     worker_path = data.get("worker_path")

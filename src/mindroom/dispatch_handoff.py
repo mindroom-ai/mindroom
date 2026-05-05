@@ -299,7 +299,7 @@ def _single_prepared_dispatch_event(event: PreparedTextEvent, source_kind: str) 
     return replace(event, source_kind_override=source_kind)
 
 
-def build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
+def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     """Return the text dispatch event for one batch."""
     if len(batch.pending_events) == 1 and isinstance(batch.primary_event, nio.RoomMessageText | PreparedTextEvent):
         if isinstance(batch.primary_event, PreparedTextEvent):
@@ -320,7 +320,7 @@ def build_dispatch_handoff(batch: CoalescedBatch) -> DispatchHandoff:
     """Build the explicit dispatch handoff for one coalesced batch."""
     return DispatchHandoff(
         room=batch.room,
-        event=build_batch_dispatch_event(batch),
+        event=_build_batch_dispatch_event(batch),
         requester_user_id=batch.requester_user_id,
         ingress=DispatchIngressMetadata(
             source_kind=batch.source_kind,

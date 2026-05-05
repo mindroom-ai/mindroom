@@ -47,10 +47,16 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.execution_preparation import (
-    PreparedExecutionContext,
-    build_matrix_prompt_with_thread_history,
+    _build_matrix_prompt_with_thread_history as build_matrix_prompt_with_thread_history,
+)
+from mindroom.execution_preparation import (
+    _prepare_bound_team_execution_context as prepare_bound_team_execution_context,
+)
+from mindroom.execution_preparation import (
+    _PreparedExecutionContext as PreparedExecutionContext,
+)
+from mindroom.execution_preparation import (
     prepare_agent_execution_context,
-    prepare_bound_team_execution_context,
     prepare_bound_team_run_context,
 )
 from mindroom.history import PreparedHistoryState, prepare_history_for_run
@@ -62,22 +68,32 @@ from mindroom.history.compaction import (
     _rewrite_working_session_for_compaction,
     _strip_stale_anthropic_replay_fields,
     compact_scope_history,
-    effective_summary_input_budget_tokens,
     estimate_agent_static_tokens,
-    estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
-    estimate_static_tokens,
-    estimate_tool_definition_tokens,
+)
+from mindroom.history.compaction import (
+    _effective_summary_input_budget_tokens as effective_summary_input_budget_tokens,
+)
+from mindroom.history.compaction import (
+    _estimate_history_messages_tokens as estimate_history_messages_tokens,
+)
+from mindroom.history.compaction import (
+    _estimate_static_tokens as estimate_static_tokens,
+)
+from mindroom.history.compaction import (
+    _estimate_tool_definition_tokens as estimate_tool_definition_tokens,
 )
 from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
+from mindroom.history.runtime import (
+    _plan_replay_that_fits as plan_replay_that_fits,
+)
 from mindroom.history.runtime import (
     apply_replay_plan,
     estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
     open_bound_scope_session_context,
     open_scope_session_context,
-    plan_replay_that_fits,
     prepare_bound_scope_history,
     prepare_scope_history,
 )

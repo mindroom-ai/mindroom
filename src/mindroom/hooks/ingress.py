@@ -23,7 +23,7 @@ class HookIngressPolicy:
     allow_full_dispatch: bool = True
 
 
-def split_hook_source(hook_source: str | None) -> tuple[str | None, str | None]:
+def _split_hook_source(hook_source: str | None) -> tuple[str | None, str | None]:
     """Return ``(plugin_name, event_name)`` from one serialized hook source tag."""
     if not isinstance(hook_source, str):
         return None, None
@@ -38,7 +38,7 @@ def hook_ingress_policy(envelope: MessageEnvelope) -> HookIngressPolicy:
     if envelope.source_kind not in {"hook", "hook_dispatch"}:
         return HookIngressPolicy()
 
-    plugin_name, source_event_name = split_hook_source(envelope.hook_source)
+    plugin_name, source_event_name = _split_hook_source(envelope.hook_source)
     policy = HookIngressPolicy(
         bypass_unmentioned_agent_gate=envelope.source_kind == "hook_dispatch",
     )

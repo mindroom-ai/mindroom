@@ -15,7 +15,7 @@ _SYNC_TOKEN_RECORD_VERSION = "mindroom-sync-token-v1"  # noqa: S105
 
 
 @dataclass(frozen=True)
-class SyncTokenRecord:
+class _SyncTokenRecord:
     """Loaded sync token plus optional durable cache checkpoint."""
 
     token: str
@@ -45,7 +45,7 @@ def _normalized_token(value: object) -> str | None:
     return token or None
 
 
-def _record_from_json(text: str) -> SyncTokenRecord | None:
+def _record_from_json(text: str) -> _SyncTokenRecord | None:
     """Return a token record from the JSON checkpoint format."""
     try:
         payload = json.loads(text)
@@ -57,7 +57,7 @@ def _record_from_json(text: str) -> SyncTokenRecord | None:
     if token is None:
         return None
     checkpoint = SyncCheckpoint(token=token)
-    return SyncTokenRecord(token=token, checkpoint=checkpoint)
+    return _SyncTokenRecord(token=token, checkpoint=checkpoint)
 
 
 def _record_json(checkpoint: SyncCheckpoint) -> str:
@@ -94,7 +94,7 @@ def clear_sync_token(storage_path: Path, agent_name: str) -> None:
     certification_path.unlink(missing_ok=True)
 
 
-def load_sync_token(storage_path: Path, agent_name: str) -> str | None:
+def _load_sync_token(storage_path: Path, agent_name: str) -> str | None:
     """Load one persisted sync token, or ``None`` on first run."""
     record = load_sync_token_record(storage_path, agent_name)
     if record is None:
@@ -102,7 +102,7 @@ def load_sync_token(storage_path: Path, agent_name: str) -> str | None:
     return record.token
 
 
-def load_sync_token_record(storage_path: Path, agent_name: str) -> SyncTokenRecord | None:
+def load_sync_token_record(storage_path: Path, agent_name: str) -> _SyncTokenRecord | None:
     """Load one persisted sync token with its certification provenance."""
     token_path = _sync_token_path(storage_path, agent_name)
     if not token_path.is_file():
@@ -120,4 +120,4 @@ def load_sync_token_record(storage_path: Path, agent_name: str) -> SyncTokenReco
     token = _normalized_token(token_text)
     if token is None:
         return None
-    return SyncTokenRecord(token=token)
+    return _SyncTokenRecord(token=token)

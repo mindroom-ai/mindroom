@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 
 from mindroom.credential_policy import (
+    _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS as UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
+)
+from mindroom.credential_policy import (
     OAUTH_CREDENTIAL_FIELDS,
-    UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     credential_service_policy,
     dashboard_may_edit_oauth_service,
     filter_oauth_credential_fields,

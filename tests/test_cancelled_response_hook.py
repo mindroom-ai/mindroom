@@ -43,7 +43,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
-from mindroom.turn_store import LoadedTurnRecord
+from mindroom.turn_store import _LoadedTurnRecord as LoadedTurnRecord
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,

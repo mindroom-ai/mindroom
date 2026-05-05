@@ -68,7 +68,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.local import local_worker_state_paths_for_root
+from mindroom.workers.backends.local import _local_worker_state_paths_for_root as local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
 from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock, requires_linux
@@ -2034,7 +2034,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
 
     manager = sandbox_proxy_module._get_worker_manager(
         runtime_paths,
-        sandbox_proxy_module.SandboxProxyConfig(
+        sandbox_proxy_module._SandboxProxyConfig(
             runner_mode=False,
             proxy_url="http://sandbox",
             proxy_token="token",  # noqa: S106

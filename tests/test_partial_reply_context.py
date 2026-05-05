@@ -33,7 +33,9 @@ from mindroom.execution_preparation import (
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
-    render_interrupted_replay_content,
+)
+from mindroom.history.interrupted_replay import (
+    _render_interrupted_replay_content as render_interrupted_replay_content,
 )
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_thread_history import fetch_thread_history

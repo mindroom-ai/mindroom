@@ -22,7 +22,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
 from mindroom.response_runner import ResponseRunner
-from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
+from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE as INTERRUPTED_RESPONSE_NOTE
+from mindroom.streaming import build_restart_interrupted_body
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.conftest import (
     TEST_ACCESS_TOKEN,

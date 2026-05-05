@@ -33,8 +33,8 @@ OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "compact receipt. "
     "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
 )
-MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
-DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+_MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
+_DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
 _TEXT_FALLBACK_HEADER = (
@@ -47,7 +47,7 @@ class ToolOutputFilePolicy:
     """Resolved policy for one toolkit's model-requested output files."""
 
     workspace_root: Path
-    max_bytes: int = DEFAULT_MAX_BYTES
+    max_bytes: int = _DEFAULT_MAX_BYTES
 
     @classmethod
     def from_runtime(
@@ -77,7 +77,7 @@ class _SerializedToolOutput:
 
 
 @dataclass(frozen=True)
-class ToolOutputWriteResult:
+class _ToolOutputWriteResult:
     """Result from writing caller-managed bytes to a validated output path."""
 
     receipt: dict[str, object]
@@ -88,20 +88,20 @@ class ToolOutputWriteResult:
 
 def _output_redirect_max_bytes(runtime_paths: RuntimePaths) -> int:
     raw_value = (
-        runtime_paths.process_env.get(MAX_BYTES_ENV)
-        or runtime_paths.env_file_values.get(MAX_BYTES_ENV)
-        or os.environ.get(MAX_BYTES_ENV)
+        runtime_paths.process_env.get(_MAX_BYTES_ENV)
+        or runtime_paths.env_file_values.get(_MAX_BYTES_ENV)
+        or os.environ.get(_MAX_BYTES_ENV)
     )
     if raw_value is None or raw_value == "":
-        return DEFAULT_MAX_BYTES
+        return _DEFAULT_MAX_BYTES
     try:
         max_bytes = int(raw_value)
     except ValueError:
         logger.warning("invalid_tool_output_redirect_max_bytes", value=raw_value)
-        return DEFAULT_MAX_BYTES
+        return _DEFAULT_MAX_BYTES
     if max_bytes <= 0:
         logger.warning("invalid_tool_output_redirect_max_bytes", value=raw_value)
-        return DEFAULT_MAX_BYTES
+        return _DEFAULT_MAX_BYTES
     return max_bytes
 
 
@@ -147,7 +147,7 @@ def _has_output_path_argument(function: Function) -> bool:
     return isinstance(properties, dict) and OUTPUT_PATH_ARGUMENT in properties
 
 
-def ensure_output_path_schema_optional(function: Function) -> None:
+def _ensure_output_path_schema_optional(function: Function) -> None:
     """Keep MindRoom's reserved output-path argument optional in one tool schema."""
     parameters = dict(function.parameters or _DEFAULT_PARAMETERS)
     properties = dict(parameters.get("properties") or {})
@@ -178,7 +178,7 @@ def normalize_output_path_argument(raw_path: object) -> object | None:
 def _process_entrypoint_with_output_path_schema(self: Function, strict: bool = False) -> None:
     effective_strict = False if self.strict is False else strict
     Function.process_entrypoint(self, strict=effective_strict)
-    ensure_output_path_schema_optional(self)
+    _ensure_output_path_schema_optional(self)
 
 
 def _copy_function_model(self: Function, *, update: Mapping[str, object] | None, deep: bool) -> Function:
@@ -441,7 +441,7 @@ def write_bytes_to_output_path(
     *,
     output_format: Literal["binary"] = "binary",
     file_mode: int | None = None,
-) -> ToolOutputWriteResult | str:
+) -> _ToolOutputWriteResult | str:
     """Validate and atomically write caller-owned bytes to a MindRoom output path."""
     validated_path = _validate_output_path(policy, raw_path)
     if isinstance(validated_path, str):
@@ -461,7 +461,7 @@ def write_bytes_to_output_path(
     if write_error is not None:
         return write_error
 
-    return ToolOutputWriteResult(
+    return _ToolOutputWriteResult(
         receipt=_success_receipt(
             path=validated_path.requested_path,
             byte_count=byte_count,
@@ -583,7 +583,7 @@ def _wrap_entrypoint(
     return wrapper
 
 
-def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePolicy) -> Function:
+def _wrap_function_for_output_files(function: Function, policy: ToolOutputFilePolicy) -> Function:
     """Expose and handle ``mindroom_output_path`` on one Agno function."""
     if function.entrypoint is None or getattr(function.entrypoint, _WRAPPED_ATTR, False):
         return function
@@ -600,7 +600,7 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
     function.strict = False
     _install_output_path_schema_postprocessor(function)
     if uses_custom_parameters:
-        ensure_output_path_schema_optional(function)
+        _ensure_output_path_schema_optional(function)
     return function
 
 
@@ -617,5 +617,5 @@ def wrap_toolkit_for_output_files(
         if id(function) in seen_functions:
             continue
         seen_functions.add(id(function))
-        wrap_function_for_output_files(function, policy)
+        _wrap_function_for_output_files(function, policy)
     return toolkit

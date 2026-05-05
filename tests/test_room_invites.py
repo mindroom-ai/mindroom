@@ -22,7 +22,7 @@ from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,

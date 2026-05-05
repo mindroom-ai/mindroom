@@ -34,9 +34,15 @@ from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.backends.kubernetes_resources import (
-    ANNOTATION_RUNNER_TOKEN_HASH,
-    ANNOTATION_STARTUP_MANIFEST_HASH,
-    ANNOTATION_TEMPLATE_HASH,
+    _ANNOTATION_RUNNER_TOKEN_HASH as ANNOTATION_RUNNER_TOKEN_HASH,
+)
+from mindroom.workers.backends.kubernetes_resources import (
+    _ANNOTATION_STARTUP_MANIFEST_HASH as ANNOTATION_STARTUP_MANIFEST_HASH,
+)
+from mindroom.workers.backends.kubernetes_resources import (
+    _ANNOTATION_TEMPLATE_HASH as ANNOTATION_TEMPLATE_HASH,
+)
+from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_WORKER_KEY,
     worker_auth_token,
 )
@@ -595,7 +601,7 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
         ANNOTATION_WORKER_KEY,
     }
     assert template_annotations[ANNOTATION_WORKER_KEY] == worker_key
-    assert template_annotations[ANNOTATION_RUNNER_TOKEN_HASH] == kubernetes_resources_module.worker_auth_token_hash(
+    assert template_annotations[ANNOTATION_RUNNER_TOKEN_HASH] == kubernetes_resources_module._worker_auth_token_hash(
         _TEST_AUTH_TOKEN,
         worker_key,
     )

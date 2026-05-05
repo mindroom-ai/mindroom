@@ -20,11 +20,15 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.execution_preparation import _PreparedExecutionContext as PreparedExecutionContext
+from mindroom.history.compaction import (
+    _estimate_static_tokens as estimate_static_tokens,
+)
+from mindroom.history.compaction import (
+    _estimate_tool_definition_tokens as estimate_tool_definition_tokens,
+)
 from mindroom.history.compaction import (
     compute_prompt_token_breakdown,
-    estimate_static_tokens,
-    estimate_tool_definition_tokens,
 )
 from mindroom.history.policy import classify_compaction_decision
 from mindroom.history.runtime import create_scope_session_storage

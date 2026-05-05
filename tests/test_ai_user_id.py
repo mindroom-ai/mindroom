@@ -64,7 +64,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
-from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.execution_preparation import _PreparedExecutionContext as PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import PreparedHistoryState, strip_transient_enrichment_from_session
 from mindroom.history.runtime import ScopeSessionContext

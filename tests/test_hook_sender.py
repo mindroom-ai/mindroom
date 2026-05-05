@@ -45,9 +45,10 @@ from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 from mindroom.turn_controller import _PrecheckedEvent
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
+from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from mindroom.turn_policy import _DispatchPlan as DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -529,7 +530,7 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
-    with patch("mindroom.hooks.sender.send_message_result", side_effect=mock_send):
+    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
         event_id = await bot._hook_send_message(
             "!room:localhost",
             "hello",
@@ -572,7 +573,7 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
         return delivered_matrix_event("$hook-event", content)
 
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
-    with patch("mindroom.hooks.sender.send_message_result", side_effect=mock_send):
+    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
         event_id = await bot._hook_send_message(
             "!room:localhost",
             "hello",
@@ -1191,7 +1192,7 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
-    with patch("mindroom.hooks.sender.send_message_result", side_effect=mock_send):
+    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 
     assert captured_content["com.mindroom.source_kind"] == "hook"
@@ -1227,7 +1228,7 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
     bot._conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
 
-    with patch("mindroom.hooks.sender.send_message_result", side_effect=mock_send):
+    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send):
         await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 
     assert captured_content["com.mindroom.source_kind"] == "hook_dispatch"

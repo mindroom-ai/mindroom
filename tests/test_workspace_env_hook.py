@@ -12,7 +12,9 @@ import pytest
 
 from mindroom.api import sandbox_exec
 from mindroom.api.sandbox_exec import (
-    WORKSPACE_ENV_HOOK_RELATIVE_PATH,
+    _WORKSPACE_ENV_HOOK_RELATIVE_PATH as WORKSPACE_ENV_HOOK_RELATIVE_PATH,
+)
+from mindroom.api.sandbox_exec import (
     WorkspaceEnvHookError,
     resolve_workspace_env_hook_path,
     source_workspace_env_hook,
@@ -283,7 +285,7 @@ def test_source_workspace_env_hook_raises_on_timeout(
     workspace.mkdir()
     hook_path = _write_hook(workspace, "sleep 1\nexport FOO=bar\n")
 
-    monkeypatch.setattr(sandbox_exec, "WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(sandbox_exec, "_WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS", 0.01)
 
     with pytest.raises(WorkspaceEnvHookError, match="timed out"):
         source_workspace_env_hook(

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mindroom.stop import StopManager
     from mindroom.timing import DispatchPipelineTiming
 
-type MatrixEventId = str
+type _MatrixEventId = str
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,7 @@ class ResponseAttemptRunner:
 
     deps: ResponseAttemptDeps
 
-    async def _send_thinking_message(self, request: ResponseAttemptRequest) -> MatrixEventId | None:
+    async def _send_thinking_message(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:
         message_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=request.target,
@@ -114,7 +114,7 @@ class ResponseAttemptRunner:
         )
         return user_is_online
 
-    async def run(self, request: ResponseAttemptRequest) -> MatrixEventId | None:
+    async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:
         """Run one response coroutine under visible message tracking."""
         if request.thinking_message is not None and request.existing_event_id is not None:
             msg = "thinking_message and existing_event_id are mutually exclusive"

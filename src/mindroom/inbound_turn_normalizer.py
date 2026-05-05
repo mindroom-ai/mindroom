@@ -62,7 +62,7 @@ class VoiceNormalizationRequest:
 
 
 @dataclass(frozen=True)
-class VoiceNormalizationResult:
+class _VoiceNormalizationResult:
     """Normalized text event plus resolved delivery thread for one audio turn."""
 
     event: PreparedTextEvent
@@ -79,7 +79,7 @@ class BatchMediaAttachmentRequest:
 
 
 @dataclass(frozen=True)
-class BatchMediaAttachmentResult:
+class _BatchMediaAttachmentResult:
     """Attachment IDs and fallback images resolved from one media batch."""
 
     attachment_ids: list[str]
@@ -155,7 +155,7 @@ class InboundTurnNormalizer:
             server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
         )
 
-    async def prepare_voice_event(self, request: VoiceNormalizationRequest) -> VoiceNormalizationResult | None:
+    async def prepare_voice_event(self, request: VoiceNormalizationRequest) -> _VoiceNormalizationResult | None:
         """Normalize one audio message into a prepared text event."""
         client = self._client()
         event_info = EventInfo.from_event(request.event.source)
@@ -185,7 +185,7 @@ class InboundTurnNormalizer:
             if prepared_voice is None:
                 return None
 
-            return VoiceNormalizationResult(
+            return _VoiceNormalizationResult(
                 event=PreparedTextEvent(
                     sender=request.event.sender,
                     event_id=request.event.event_id,
@@ -255,7 +255,7 @@ class InboundTurnNormalizer:
     async def register_batch_media_attachments(
         self,
         request: BatchMediaAttachmentRequest,
-    ) -> BatchMediaAttachmentResult:
+    ) -> _BatchMediaAttachmentResult:
         """Register media attachments for one coalesced batch."""
         started = time.monotonic()
         media_event_count = len(request.media_events)
@@ -282,7 +282,7 @@ class InboundTurnNormalizer:
         try:
             if not request.media_events:
                 registration_succeeded = True
-                return BatchMediaAttachmentResult(attachment_ids=[])
+                return _BatchMediaAttachmentResult(attachment_ids=[])
 
             client = self._client()
             for media_event in request.media_events:
@@ -320,7 +320,7 @@ class InboundTurnNormalizer:
                 attachment_ids.append(attachment_record.attachment_id)
 
             registration_succeeded = True
-            return BatchMediaAttachmentResult(
+            return _BatchMediaAttachmentResult(
                 attachment_ids=attachment_ids,
                 fallback_images=fallback_images or None,
             )

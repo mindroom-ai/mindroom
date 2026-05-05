@@ -61,7 +61,7 @@ def _get_command_entries(format_code: bool = False) -> list[str]:
     return entries
 
 
-def get_command_list() -> str:
+def _get_command_list() -> str:
     """Get a formatted list of all available commands.
 
     Returns:

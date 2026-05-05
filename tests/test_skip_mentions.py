@@ -14,7 +14,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.conversation_resolver import should_skip_mentions
+from mindroom.conversation_resolver import _should_skip_mentions as should_skip_mentions
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,

@@ -29,7 +29,9 @@ from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
-from mindroom.streaming import CANCELLED_RESPONSE_NOTE, INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
+from mindroom.streaming import _CANCELLED_RESPONSE_NOTE as CANCELLED_RESPONSE_NOTE
+from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE as INTERRUPTED_RESPONSE_NOTE
+from mindroom.streaming import build_restart_interrupted_body
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,

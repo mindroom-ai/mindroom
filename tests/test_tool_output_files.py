@@ -29,8 +29,10 @@ from mindroom.tool_system.events import format_tool_combined
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
-    wrap_function_for_output_files,
     wrap_toolkit_for_output_files,
+)
+from mindroom.tool_system.output_files import (
+    _wrap_function_for_output_files as wrap_function_for_output_files,
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 

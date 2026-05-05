@@ -202,7 +202,7 @@ async def _worker_cleanup_loop(
                 logger.exception("Background worker cleanup failed")
 
 
-def api_runtime_paths(request: Request) -> constants.RuntimePaths:
+def _api_runtime_paths(request: Request) -> constants.RuntimePaths:
     """Return the API request's committed runtime paths."""
     return config_lifecycle.api_runtime_paths(request)
 
@@ -462,7 +462,7 @@ app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify
 async def health_check(request: Request) -> JSONResponse:
     """Health check endpoint with Matrix sync-loop liveness."""
     runtime_state = get_runtime_state()
-    runtime_paths = api_runtime_paths(request)
+    runtime_paths = _api_runtime_paths(request)
     sync_health = get_matrix_sync_health_snapshot(
         startup_grace_seconds=matrix_sync_startup_timeout_seconds(runtime_paths),
     )

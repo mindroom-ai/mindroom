@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.history import PreparedHistoryState
 
-AI_RUN_METADATA_VERSION = 1
+_AI_RUN_METADATA_VERSION = 1
 
 
 def empty_request_metric_totals() -> dict[str, int]:
@@ -197,7 +197,7 @@ def build_prepared_history_metadata_content(prepared_history: PreparedHistorySta
     """Build Matrix message metadata for prepared-context and compaction diagnostics."""
     if prepared_history is None:
         return None
-    payload: dict[str, Any] = {"version": AI_RUN_METADATA_VERSION}
+    payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
     if prepared_history.prepared_context_tokens is not None:
         payload["prepared_context"] = {
             "tokens": prepared_history.prepared_context_tokens,
@@ -296,7 +296,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     if resolved_context_cache_write_tokens is None and not explicit_context_scope:
         resolved_context_cache_write_tokens = _int_usage_value(usage_payload, "cache_write_tokens")
 
-    payload: dict[str, Any] = {"version": AI_RUN_METADATA_VERSION}
+    payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
     if run_id is not None:
         payload["run_id"] = run_id
     if session_id is not None:

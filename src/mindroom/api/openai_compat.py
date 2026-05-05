@@ -1447,7 +1447,7 @@ def _is_failed_team_output(response: TeamRunOutput | RunOutput) -> bool:
     return is_errored_run_output(response) or is_cancelled_run_output(response)
 
 
-async def prepare_materialized_team_execution(
+async def _prepare_materialized_team_execution(
     *,
     scope_context: ScopeSessionContext | None,
     agents: list[Agent],
@@ -1527,7 +1527,7 @@ async def _prepare_openai_team_prompt(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> _PreparedOpenAITeamPrompt:
     """Prepare the final prompt for one OpenAI-compatible team run."""
-    prepared_execution = await prepare_materialized_team_execution(
+    prepared_execution = await _prepare_materialized_team_execution(
         scope_context=scope_context,
         agents=agents,
         team=team,

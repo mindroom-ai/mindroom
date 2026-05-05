@@ -17,7 +17,7 @@ _HOOK_METADATA_ATTR = "__mindroom_hook_metadata__"
 
 
 @dataclass(frozen=True, slots=True)
-class HookMetadata:
+class _HookMetadata:
     """Static decorator metadata attached to a hook callback."""
 
     event_name: str
@@ -47,7 +47,7 @@ def hook(
             msg = f"Hook callback {callback!r} must be async"
             raise TypeError(msg)
 
-        metadata = HookMetadata(
+        metadata = _HookMetadata(
             event_name=event_name,
             hook_name=name or cast("Any", callback).__name__,
             priority=priority,
@@ -61,10 +61,10 @@ def hook(
     return decorator
 
 
-def get_hook_metadata(callback: object) -> HookMetadata | None:
+def get_hook_metadata(callback: object) -> _HookMetadata | None:
     """Return decorator metadata for a hook callback when present."""
     metadata = getattr(callback, _HOOK_METADATA_ATTR, None)
-    if isinstance(metadata, HookMetadata):
+    if isinstance(metadata, _HookMetadata):
         return metadata
     return None
 

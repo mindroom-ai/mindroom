@@ -6,9 +6,11 @@ from defusedxml.ElementTree import fromstring
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.execution_preparation import (
+    _build_matrix_prompt_with_thread_history as build_matrix_prompt_with_thread_history,
+)
+from mindroom.execution_preparation import (
     _build_unseen_context_messages,
     _collect_history_messages,
-    build_matrix_prompt_with_thread_history,
 )
 from tests.conftest import make_visible_message
 

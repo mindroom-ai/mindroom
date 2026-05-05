@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class TextResponseEvent(Protocol):
+class _TextResponseEvent(Protocol):
     """Minimal normalized text-event shape used for interactive replies."""
 
     sender: str
@@ -507,7 +507,7 @@ async def handle_reaction(
 async def handle_text_response(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
-    event: TextResponseEvent,
+    event: _TextResponseEvent,
     agent_name: str,
     *,
     resolved_thread_id: str | None,

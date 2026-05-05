@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
 
 
-class OAuthAuthSource(Enum):
+class _OAuthAuthSource(Enum):
     """Credential source selected for one tool auth attempt."""
 
     PROVIDED_CREDENTIALS = auto()
@@ -170,9 +170,9 @@ class ScopedOAuthClientMixin:
 
     def _ensure_structured_auth(self) -> str | None:
         auth_source = self._select_auth_source()
-        if auth_source in {OAuthAuthSource.PROVIDED_CREDENTIALS, OAuthAuthSource.VALID_CREDENTIALS}:
+        if auth_source in {_OAuthAuthSource.PROVIDED_CREDENTIALS, _OAuthAuthSource.VALID_CREDENTIALS}:
             return None
-        if auth_source is OAuthAuthSource.ORIGINAL_AUTH:
+        if auth_source is _OAuthAuthSource.ORIGINAL_AUTH:
             self._auth_with_original_fallback()
             return None
         try:
@@ -256,15 +256,15 @@ class ScopedOAuthClientMixin:
         """Return whether tool auth can return early with already-valid provided credentials."""
         return bool(self._provided_creds and self.creds and self.creds.valid)
 
-    def _select_auth_source(self) -> OAuthAuthSource:
+    def _select_auth_source(self) -> _OAuthAuthSource:
         """Select the credential source according to the tool auth priority contract."""
         if self._should_skip_auth():
-            return OAuthAuthSource.PROVIDED_CREDENTIALS
+            return _OAuthAuthSource.PROVIDED_CREDENTIALS
         if self._should_fallback_to_original_auth():
-            return OAuthAuthSource.ORIGINAL_AUTH
+            return _OAuthAuthSource.ORIGINAL_AUTH
         if self.creds and self.creds.valid:
-            return OAuthAuthSource.VALID_CREDENTIALS
-        return OAuthAuthSource.STORED_OAUTH
+            return _OAuthAuthSource.VALID_CREDENTIALS
+        return _OAuthAuthSource.STORED_OAUTH
 
     def _auth_with_original_fallback(self) -> None:
         """Authenticate through the wrapped tool's original auth flow."""
@@ -312,9 +312,9 @@ class ScopedOAuthClientMixin:
     def _auth(self) -> None:
         """Authenticate using the selected MindRoom or wrapped-tool credential source."""
         auth_source = self._select_auth_source()
-        if auth_source in {OAuthAuthSource.PROVIDED_CREDENTIALS, OAuthAuthSource.VALID_CREDENTIALS}:
+        if auth_source in {_OAuthAuthSource.PROVIDED_CREDENTIALS, _OAuthAuthSource.VALID_CREDENTIALS}:
             return
-        if auth_source is OAuthAuthSource.ORIGINAL_AUTH:
+        if auth_source is _OAuthAuthSource.ORIGINAL_AUTH:
             self._auth_with_original_fallback()
             return
         self._auth_with_stored_oauth()

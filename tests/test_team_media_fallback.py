@@ -27,17 +27,21 @@ from agno.team._run import _cleanup_and_store
 from agno.utils.message import get_text_from_message
 
 from mindroom.agents import create_agent
-from mindroom.ai_runtime import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.ai_runtime import _QUEUED_MESSAGE_NOTICE_TEXT as QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.execution_preparation import (
-    PreparedExecutionContext,
     ThreadHistoryRenderLimits,
-    prepare_bound_team_execution_context,
 )
-from mindroom.history.interrupted_replay import render_interrupted_replay_content
+from mindroom.execution_preparation import (
+    _prepare_bound_team_execution_context as prepare_bound_team_execution_context,
+)
+from mindroom.execution_preparation import (
+    _PreparedExecutionContext as PreparedExecutionContext,
+)
+from mindroom.history.interrupted_replay import _render_interrupted_replay_content as render_interrupted_replay_content
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
@@ -403,7 +407,7 @@ async def test_team_response_retry_scrubs_queued_notice_before_second_attempt() 
         patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.execution_preparation.prepare_bound_team_execution_context",
+            "mindroom.execution_preparation._prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -746,7 +750,7 @@ async def test_team_response_scrubs_queued_notices_before_prepare_and_after_run(
         patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         patch(
-            "mindroom.execution_preparation.prepare_bound_team_execution_context",
+            "mindroom.execution_preparation._prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -824,7 +828,7 @@ async def test_prepare_materialized_team_execution_scrubs_queued_notices_when_ca
             return _prepared_team_execution_context(final_prompt="Analyze this.")
 
         with patch(
-            "mindroom.execution_preparation.prepare_bound_team_execution_context",
+            "mindroom.execution_preparation._prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ):
             await _prepare_materialized_team_execution(

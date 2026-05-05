@@ -140,7 +140,7 @@ class LiveToolDispatchContext(ToolDispatchContext):
     def from_runtime_context(cls, runtime_context: ToolRuntimeContext) -> LiveToolDispatchContext:
         """Build the live dispatch contract represented by one tool runtime context."""
         return cls(
-            execution_identity=build_execution_identity_from_runtime_context(runtime_context),
+            execution_identity=_build_execution_identity_from_runtime_context(runtime_context),
             runtime_context=runtime_context,
         )
 
@@ -429,7 +429,7 @@ def resolve_current_session_id(
     return None
 
 
-def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -> ToolExecutionIdentity:
+def _build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -> ToolExecutionIdentity:
     """Build the canonical execution identity represented by one live runtime context."""
     target = MessageTarget.from_runtime_context(context)
     return build_tool_execution_identity(

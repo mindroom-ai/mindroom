@@ -46,12 +46,16 @@ from mindroom.knowledge.manager import (
 from mindroom.knowledge.redaction import credential_free_url_identity, redact_url_credentials
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
-    clear_published_indexes,
+    _clear_published_indexes as clear_published_indexes,
+)
+from mindroom.knowledge.registry import (
+    _published_indexed_count as published_indexed_count,
+)
+from mindroom.knowledge.registry import (
     get_published_index,
     load_published_index_state,
     published_index_metadata_path,
     published_index_refresh_state,
-    published_indexed_count,
     resolve_published_index_key,
 )
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
@@ -1390,7 +1394,7 @@ def test_source_changed_updates_refresh_state_without_changing_index(tmp_path: P
     )
     knowledge_registry.mark_published_index_refresh_succeeded(key)
 
-    marked_base_ids = knowledge_registry.mark_knowledge_source_changed(
+    marked_base_ids = knowledge_registry._mark_knowledge_source_changed(
         "docs",
         config=config,
         runtime_paths=runtime_paths,
@@ -1422,7 +1426,7 @@ async def test_mark_stale_fans_out_to_duplicate_physical_sources(tmp_path: Path)
     assert beta_lookup.availability is KnowledgeAvailability.READY
     doc.write_text("shared source new", encoding="utf-8")
 
-    marked_base_ids = knowledge_registry.mark_knowledge_source_changed(
+    marked_base_ids = knowledge_registry._mark_knowledge_source_changed(
         "alpha",
         config=config,
         runtime_paths=runtime_paths,
@@ -1774,7 +1778,7 @@ def test_raw_git_url_index_metadata_is_config_mismatch(tmp_path: Path) -> None:
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     stale_settings = list(key.indexing_settings)
-    stale_settings[knowledge_manager_module.INDEXING_SETTINGS_REPO_IDENTITY_INDEX] = raw_repo_url
+    stale_settings[knowledge_manager_module._INDEXING_SETTINGS_REPO_IDENTITY_INDEX] = raw_repo_url
     collection = "raw_git_metadata_collection"
     _VectorDb.collections[collection] = [
         {"content": "raw git metadata", "metadata": {"source_path": "doc.md"}},
@@ -1906,15 +1910,15 @@ def test_indexing_settings_layout_constants_match_settings_key(tmp_path: Path) -
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
 
-    assert len(key.indexing_settings) == knowledge_manager_module.INDEXING_SETTINGS_LAYOUT_LENGTH
-    assert key.indexing_settings[knowledge_manager_module.INDEXING_SETTINGS_BASE_ID_INDEX] == "docs"
-    assert key.indexing_settings[knowledge_manager_module.INDEXING_SETTINGS_CHUNK_SIZE_INDEX] == "5000"
-    assert key.indexing_settings[knowledge_manager_module.INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX] == "0"
-    assert key.indexing_settings[knowledge_manager_module.INDEXING_SETTINGS_REPO_IDENTITY_INDEX] == (
+    assert len(key.indexing_settings) == knowledge_manager_module._INDEXING_SETTINGS_LAYOUT_LENGTH
+    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_BASE_ID_INDEX] == "docs"
+    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_CHUNK_SIZE_INDEX] == "5000"
+    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX] == "0"
+    assert key.indexing_settings[knowledge_manager_module._INDEXING_SETTINGS_REPO_IDENTITY_INDEX] == (
         credential_free_url_identity("https://example.com/org/repo.git")
     )
     assert (
-        knowledge_manager_module.INDEXING_SETTINGS_REPO_IDENTITY_INDEX
+        knowledge_manager_module._INDEXING_SETTINGS_REPO_IDENTITY_INDEX
         in knowledge_manager_module.INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES
     )
 
@@ -2464,7 +2468,7 @@ async def test_shared_source_mutation_waits_for_duplicate_base_refresh(
         async with knowledge_binding_mutation_lock("beta", config=config, runtime_paths=runtime_paths):
             mutation_entered.set()
             doc.write_text("mutated", encoding="utf-8")
-            knowledge_registry.mark_knowledge_source_changed(
+            knowledge_registry._mark_knowledge_source_changed(
                 "beta",
                 config=config,
                 runtime_paths=runtime_paths,
@@ -4589,7 +4593,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
         )
         collection = f"private_collection_{index}"
         refresh_target = knowledge_registry.refresh_target_for_published_index_key(key)
-        knowledge_registry.publish_knowledge_index(
+        knowledge_registry._publish_knowledge_index(
             key,
             knowledge=_Knowledge(_VectorDb(collection=collection)),
             state=knowledge_registry.PublishedIndexState(
@@ -4693,7 +4697,7 @@ def test_publish_knowledge_index_caches_handle_without_collection_leases(tmp_pat
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge = _NonWeakrefKnowledge()
 
-    index = knowledge_registry.publish_knowledge_index(
+    index = knowledge_registry._publish_knowledge_index(
         key,
         knowledge=knowledge,
         state=knowledge_registry.PublishedIndexState(

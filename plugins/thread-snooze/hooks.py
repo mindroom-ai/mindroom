@@ -14,8 +14,12 @@ from mindroom.thread_tags import (
     THREAD_TAGS_EVENT_TYPE,
     ThreadTagsError,
     ThreadTagsState,
-    list_tagged_threads_from_state_map,
-    remove_thread_tag_via_room_state,
+)
+from mindroom.thread_tags import (
+    _list_tagged_threads_from_state_map as list_tagged_threads_from_state_map,
+)
+from mindroom.thread_tags import (
+    _remove_thread_tag_via_room_state as remove_thread_tag_via_room_state,
 )
 
 if TYPE_CHECKING:

@@ -30,7 +30,7 @@ class _ActiveWarmup:
 
 
 @dataclass(frozen=True)
-class RenderedWarmupLine:
+class _RenderedWarmupLine:
     """One warmup line rendered for plain-text and HTML Matrix bodies."""
 
     text: str
@@ -44,7 +44,7 @@ def _render_tool_labels(tool_labels: list[str]) -> tuple[str, str]:
     return plain, html
 
 
-def _render_worker_status_line(warmup: _ActiveWarmup, *, show_tool_calls: bool) -> RenderedWarmupLine:
+def _render_worker_status_line(warmup: _ActiveWarmup, *, show_tool_calls: bool) -> _RenderedWarmupLine:
     """Render one worker warmup line without leaking hidden tool metadata."""
     if show_tool_calls and warmup.tool_labels:
         labels_text, labels_html = _render_tool_labels(warmup.tool_labels)
@@ -60,18 +60,18 @@ def _render_worker_status_line(warmup: _ActiveWarmup, *, show_tool_calls: bool) 
     if phase == "failed":
         error = _shorten_warmup_error(warmup.last_event.error)
         suffix = "" if error.endswith((".", "!", "?")) else "."
-        return RenderedWarmupLine(
+        return _RenderedWarmupLine(
             text=f"⚠️ {failure_copy_text}: {error}{suffix}",
             html=f"⚠️ {failure_copy_html}: {escape(error)}{suffix}",
         )
     if phase == "cold_start":
-        return RenderedWarmupLine(
+        return _RenderedWarmupLine(
             text=f"⏳ {waiting_copy_text}",
             html=f"⏳ {waiting_copy_html}",
         )
 
     elapsed_seconds = max(1, int(warmup.last_event.elapsed_seconds))
-    return RenderedWarmupLine(
+    return _RenderedWarmupLine(
         text=f"⏳ {waiting_copy_text} {elapsed_seconds}s elapsed.",
         html=f"⏳ {waiting_copy_html} {elapsed_seconds}s elapsed.",
     )
@@ -121,7 +121,7 @@ class WorkerWarmupState:
         for stale_worker_key in stale_failed_worker_keys:
             self.active_warmups.pop(stale_worker_key, None)
 
-    def render_lines(self, *, show_tool_calls: bool) -> list[RenderedWarmupLine]:
+    def render_lines(self, *, show_tool_calls: bool) -> list[_RenderedWarmupLine]:
         """Render all active worker warmup notices as side-band suffix lines."""
         if not self.active_warmups:
             return []

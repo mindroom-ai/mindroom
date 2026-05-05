@@ -16,7 +16,7 @@ _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"
 
 
 @dataclass(frozen=True, slots=True)
-class SerializedCachedEvent:
+class _SerializedCachedEvent:
     """One normalized cached event plus its serialized storage row."""
 
     event_id: str
@@ -26,7 +26,7 @@ class SerializedCachedEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class CachedEventRow:
+class _CachedEventRow:
     """One cached event payload plus the time its visible row was written."""
 
     event: dict[str, Any]
@@ -79,7 +79,7 @@ def event_id_for_cache(event: dict[str, Any]) -> str:
     raise ValueError(msg)
 
 
-def event_timestamp_for_cache(event: dict[str, Any]) -> int:
+def _event_timestamp_for_cache(event: dict[str, Any]) -> int:
     """Return the required origin-server timestamp from one normalized cached event."""
     timestamp = event.get("origin_server_ts")
     if isinstance(timestamp, int) and not isinstance(timestamp, bool):
@@ -88,11 +88,11 @@ def event_timestamp_for_cache(event: dict[str, Any]) -> int:
     raise ValueError(msg)
 
 
-def serialize_cached_event(event_id: str, event: dict[str, Any]) -> SerializedCachedEvent:
+def serialize_cached_event(event_id: str, event: dict[str, Any]) -> _SerializedCachedEvent:
     """Serialize one normalized cached event for PostgreSQL writes."""
-    return SerializedCachedEvent(
+    return _SerializedCachedEvent(
         event_id=event_id,
-        origin_server_ts=event_timestamp_for_cache(event),
+        origin_server_ts=_event_timestamp_for_cache(event),
         event_json=json.dumps(event, separators=(",", ":")),
         event=event,
     )
@@ -100,7 +100,7 @@ def serialize_cached_event(event_id: str, event: dict[str, Any]) -> SerializedCa
 
 def serialize_cacheable_events(
     cacheable_events: list[tuple[str, dict[str, Any]]],
-) -> list[SerializedCachedEvent]:
+) -> list[_SerializedCachedEvent]:
     """Serialize one batch of normalized cacheable events."""
     return [serialize_cached_event(event_id, event) for event_id, event in cacheable_events]
 
@@ -207,7 +207,7 @@ async def load_latest_edit_row(
     namespace: str,
     room_id: str,
     original_event_id: str,
-) -> CachedEventRow | None:
+) -> _CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
     row = await _fetchone(
         db,
@@ -227,7 +227,7 @@ async def load_latest_edit_row(
     )
     if row is None:
         return None
-    return CachedEventRow(
+    return _CachedEventRow(
         event=json.loads(row[0]),
         cached_at=None if row[1] is None else float(row[1]),
     )
@@ -322,7 +322,7 @@ async def redact_event_locked(
     event_id: str,
 ) -> bool:
     """Delete one cached event after a redaction within an existing transaction."""
-    dependent_edit_ids = await dependent_edit_event_ids(
+    dependent_edit_ids = await _dependent_edit_event_ids(
         db,
         namespace,
         room_id,
@@ -420,7 +420,7 @@ async def write_lookup_index_rows(
     *,
     namespace: str,
     room_id: str,
-    serialized_events: list[SerializedCachedEvent],
+    serialized_events: list[_SerializedCachedEvent],
     cached_at: float,
     thread_id: str | None = None,
 ) -> None:
@@ -489,7 +489,7 @@ async def write_lookup_index_rows(
             )
 
 
-async def dependent_edit_event_ids(
+async def _dependent_edit_event_ids(
     db: AsyncConnection,
     namespace: str,
     room_id: str,
@@ -630,7 +630,7 @@ def _edit_cache_row(namespace: str, room_id: str, event: dict[str, Any]) -> tupl
         event_id_for_cache(event),
         room_id,
         event_info.original_event_id,
-        event_timestamp_for_cache(event),
+        _event_timestamp_for_cache(event),
     )
 
 

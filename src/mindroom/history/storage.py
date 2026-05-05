@@ -30,11 +30,11 @@ _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_
 
 def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> HistoryScopeState:
     """Return the scoped compaction state for one session and scope."""
-    states = read_scope_states(session)
+    states = _read_scope_states(session)
     return states.get(scope.key) or HistoryScopeState()
 
 
-def read_scope_states(session: AgentSession | TeamSession) -> dict[str, HistoryScopeState]:
+def _read_scope_states(session: AgentSession | TeamSession) -> dict[str, HistoryScopeState]:
     """Return all parsed compaction states from session metadata."""
     metadata = session.metadata
     if isinstance(metadata, dict):
@@ -57,7 +57,7 @@ def write_scope_state(
     state: HistoryScopeState,
 ) -> None:
     """Persist compaction control/audit state back into session metadata."""
-    states = read_scope_states(session)
+    states = _read_scope_states(session)
     if _state_is_empty(state):
         states.pop(scope.key, None)
     else:
@@ -256,7 +256,7 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
             continue
         if _scope_for_run(run) != scope:
             continue
-        seen_event_ids.update(run_seen_event_ids(run))
+        seen_event_ids.update(_run_seen_event_ids(run))
     return seen_event_ids
 
 
@@ -264,11 +264,11 @@ def seen_event_ids_for_runs(runs: Iterable[RunOutput | TeamRunOutput]) -> set[st
     """Return Matrix event ids already represented by run metadata."""
     seen_event_ids: set[str] = set()
     for run in runs:
-        seen_event_ids.update(run_seen_event_ids(run))
+        seen_event_ids.update(_run_seen_event_ids(run))
     return seen_event_ids
 
 
-def run_seen_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
+def _run_seen_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
     """Return Matrix event ids already represented by one run."""
     metadata = run.metadata
     if not isinstance(metadata, dict):

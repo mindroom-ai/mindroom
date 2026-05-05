@@ -503,7 +503,7 @@ class KnowledgeAccessSupport:
 
 
 @dataclass
-class MultiKnowledgeVectorDb:
+class _MultiKnowledgeVectorDb:
     """Thin vector DB wrapper that queries multiple vector DBs and merges results.
 
     Duck-types the vector_db interface expected by agno's ``Knowledge.__post_init__``.
@@ -616,6 +616,6 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
         return None
     return Knowledge(
         name=f"{agent_name}_multi_knowledge",
-        vector_db=MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
+        vector_db=_MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
         max_results=max(knowledge.max_results for knowledge in knowledges),
     )

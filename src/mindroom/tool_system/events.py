@@ -26,8 +26,8 @@ _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
 _TOOL_MARKER_PATTERN = re.compile(r"🔧 `([^`]+)` \[(\d+)\]( ⏳)?")
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
-StructuredResultDict = dict[str, object]
-StructuredResultList = list[object]
+_StructuredResultDict = dict[str, object]
+_StructuredResultList = list[object]
 
 
 @dataclass(slots=True)
@@ -58,19 +58,19 @@ def _to_compact_text(value: object) -> str:
         return str(value)
 
 
-def _as_structured_result_dict(value: object) -> StructuredResultDict | None:
+def _as_structured_result_dict(value: object) -> _StructuredResultDict | None:
     if not isinstance(value, dict):
         return None
-    return cast("StructuredResultDict", value)
+    return cast("_StructuredResultDict", value)
 
 
-def _as_structured_result_list(value: object) -> StructuredResultList | None:
+def _as_structured_result_list(value: object) -> _StructuredResultList | None:
     if not isinstance(value, list):
         return None
-    return cast("StructuredResultList", value)
+    return cast("_StructuredResultList", value)
 
 
-def _parse_structured_result(value: object) -> StructuredResultDict | None:
+def _parse_structured_result(value: object) -> _StructuredResultDict | None:
     parsed = _as_structured_result_dict(value)
     if isinstance(value, str):
         try:
@@ -103,10 +103,10 @@ def _truncate(text: str, limit: int) -> tuple[str, bool]:
 
 
 def _truncate_result_item_field(
-    item: StructuredResultDict,
+    item: _StructuredResultDict,
     field_name: str,
     limit: int,
-) -> tuple[StructuredResultDict, bool]:
+) -> tuple[_StructuredResultDict, bool]:
     value = item.get(field_name)
     if not isinstance(value, str):
         return item, False
@@ -227,7 +227,7 @@ def _format_structured_result_preview(result: object) -> tuple[str, bool] | None
     if not list_keys:
         return None
 
-    preview_payload: StructuredResultDict = {
+    preview_payload: _StructuredResultDict = {
         key: ([] if _as_structured_result_list(value) is not None else value)
         for key, value in structured_result.items()
     }
@@ -301,7 +301,7 @@ def _tool_marker_line(tool_name: str, tool_index: int | None, *, pending: bool) 
     return f"{_TOOL_REF_ICON} `{safe_tool_name}`{suffix}{pending_suffix}"
 
 
-def is_visible_tool_marker_line(line: str) -> bool:
+def _is_visible_tool_marker_line(line: str) -> bool:
     """Return whether one plain-text line is a Matrix-visible tool marker."""
     return _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) is not None
 
@@ -324,7 +324,7 @@ def ensure_visible_tool_marker_spacing(text: str) -> str:
     for index, line in enumerate(lines):
         spaced_lines.append(line)
         line_text = line.rstrip("\r\n")
-        if not is_visible_tool_marker_line(line_text):
+        if not _is_visible_tool_marker_line(line_text):
             continue
         next_line = lines[index + 1] if index + 1 < len(lines) else None
         if next_line is not None and next_line.strip():

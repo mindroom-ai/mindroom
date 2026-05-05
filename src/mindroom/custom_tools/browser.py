@@ -25,13 +25,13 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-DEFAULT_PROFILE = "mindroom"
+_DEFAULT_PROFILE = "mindroom"
 _DEFAULT_SNAPSHOT_LIMIT = 200
 _DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
 _DEFAULT_TIMEOUT_MS = 30_000
 _MAX_CONSOLE_ENTRIES = 200
-VIEWPORT_WIDTH = 1280
-VIEWPORT_HEIGHT = 720
+_VIEWPORT_WIDTH = 1280
+_VIEWPORT_HEIGHT = 720
 
 logger = get_logger(__name__)
 
@@ -187,17 +187,17 @@ def _clean_str(value: object) -> str | None:
     return cleaned or None
 
 
-def profile_dir(runtime_paths: RuntimePaths, profile_name: str) -> Path:
+def _profile_dir(runtime_paths: RuntimePaths, profile_name: str) -> Path:
     """Return the persistent Playwright profile directory for one browser profile."""
-    normalized_profile = _clean_str(profile_name) or DEFAULT_PROFILE
-    profile_slug = re.sub(r"[^a-zA-Z0-9._+-]+", "_", normalized_profile).strip("_") or DEFAULT_PROFILE
-    profile_dir = (runtime_paths.storage_root / "browser-profiles" / profile_slug).resolve()
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    profile_dir.chmod(0o700)
-    return profile_dir
+    normalized_profile = _clean_str(profile_name) or _DEFAULT_PROFILE
+    profile_slug = re.sub(r"[^a-zA-Z0-9._+-]+", "_", normalized_profile).strip("_") or _DEFAULT_PROFILE
+    _profile_dir = (runtime_paths.storage_root / "browser-profiles" / profile_slug).resolve()
+    _profile_dir.mkdir(parents=True, exist_ok=True)
+    _profile_dir.chmod(0o700)
+    return _profile_dir
 
 
-def persistent_launch_kwargs(
+def _persistent_launch_kwargs(
     runtime_paths: RuntimePaths,
     profile_name: str,
     *,
@@ -216,18 +216,18 @@ def persistent_launch_kwargs(
         # Block service workers because stale Cinny SW state after redeploy is a sharper risk than offline support.
         # Revisit if PWA targets matter.
         "service_workers": "block",
-        "user_data_dir": str(profile_dir(runtime_paths, profile_name)),
-        "viewport": {"height": VIEWPORT_HEIGHT, "width": VIEWPORT_WIDTH},
+        "user_data_dir": str(_profile_dir(runtime_paths, profile_name)),
+        "viewport": {"height": _VIEWPORT_HEIGHT, "width": _VIEWPORT_WIDTH},
     }
     if executable:
         launch_kwargs["executable_path"] = executable
     return launch_kwargs
 
 
-def clear_stale_singleton_locks(profile_dir: Path) -> None:
+def _clear_stale_singleton_locks(_profile_dir: Path) -> None:
     """Best-effort cleanup for stale Chromium singleton lock symlinks."""
     for entry_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-        entry = profile_dir / entry_name
+        entry = _profile_dir / entry_name
         try:
             if not entry.is_symlink():
                 continue
@@ -348,7 +348,7 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
 
         self._validate_target(target=target, node=node)
-        profile_name = _clean_str(profile) or DEFAULT_PROFILE
+        profile_name = _clean_str(profile) or _DEFAULT_PROFILE
 
         if normalized_action == "status":
             return json.dumps(await self._status_payload(profile_name), sort_keys=True)
@@ -496,7 +496,7 @@ class BrowserTools(Toolkit):
     async def _profiles_payload(self, selected_profile: str) -> dict[str, Any]:
         async with self._lock:
             running = sorted(self._profiles.keys())
-        advertised = sorted({DEFAULT_PROFILE, "chrome", *running})
+        advertised = sorted({_DEFAULT_PROFILE, "chrome", *running})
         return {
             "action": "profiles",
             "profiles": advertised,
@@ -997,9 +997,9 @@ class BrowserTools(Toolkit):
                 return state
 
             playwright = await async_playwright().start()
-            launch_kwargs = persistent_launch_kwargs(self._runtime_paths, profile_name, headless=True)
+            launch_kwargs = _persistent_launch_kwargs(self._runtime_paths, profile_name, headless=True)
             user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
-            clear_stale_singleton_locks(user_data_dir)
+            _clear_stale_singleton_locks(user_data_dir)
             context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
             state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state

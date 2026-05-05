@@ -73,7 +73,7 @@ def workspace_avatar_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
 
 def test_get_avatar_path_uses_workspace_avatars_dir(workspace_avatar_dir: Path) -> None:
     """Generated avatars should land in the workspace avatars directory."""
-    avatar_path = generate_avatars.get_avatar_path("agents", "general", _runtime_paths(workspace_avatar_dir.parent))
+    avatar_path = generate_avatars._get_avatar_path("agents", "general", _runtime_paths(workspace_avatar_dir.parent))
 
     assert avatar_path == workspace_avatar_dir / "agents" / "general.png"
     assert avatar_path.parent.is_dir()
@@ -81,7 +81,7 @@ def test_get_avatar_path_uses_workspace_avatars_dir(workspace_avatar_dir: Path) 
 
 def test_get_console_returns_shared_console_instance() -> None:
     """Avatar generation should reuse one Rich console instance across prints and progress."""
-    assert generate_avatars.get_console() is generate_avatars.get_console()
+    assert generate_avatars._get_console() is generate_avatars._get_console()
 
 
 def test_resolve_avatar_prompt_settings_applies_overrides_and_defaults(tmp_path: Path) -> None:
@@ -106,13 +106,13 @@ def test_resolve_avatar_prompt_settings_applies_overrides_and_defaults(tmp_path:
         tmp_path,
     )
 
-    prompt_settings = generate_avatars.resolve_avatar_prompt_settings(config)
+    prompt_settings = generate_avatars._resolve_avatar_prompt_settings(config)
 
     assert prompt_settings.character_style == "custom character style"
     assert prompt_settings.room_system_prompt == "custom room system prompt"
-    assert prompt_settings.room_style == generate_avatars.ROOM_STYLE
-    assert prompt_settings.agent_system_prompt == generate_avatars.AGENT_SYSTEM_PROMPT
-    assert prompt_settings.team_system_prompt == generate_avatars.TEAM_SYSTEM_PROMPT
+    assert prompt_settings.room_style == generate_avatars._ROOM_STYLE
+    assert prompt_settings.agent_system_prompt == generate_avatars._AGENT_SYSTEM_PROMPT
+    assert prompt_settings.team_system_prompt == generate_avatars._TEAM_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
@@ -186,7 +186,7 @@ def test_extract_image_bytes_returns_first_inline_image() -> None:
         ],
     )
 
-    assert generate_avatars.extract_image_bytes(response) == b"png-bytes"
+    assert generate_avatars._extract_image_bytes(response) == b"png-bytes"
 
 
 def test_has_missing_managed_avatars_detects_complete_avatar_set(
@@ -211,7 +211,7 @@ def test_has_missing_managed_avatars_detects_complete_avatar_set(
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars.has_missing_managed_avatars(config, runtime_paths)
+    assert not generate_avatars._has_missing_managed_avatars(config, runtime_paths)
 
 
 def test_has_missing_managed_avatars_ignores_direct_room_ids(
@@ -237,7 +237,7 @@ def test_has_missing_managed_avatars_ignores_direct_room_ids(
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars.has_missing_managed_avatars(config, runtime_paths)
+    assert not generate_avatars._has_missing_managed_avatars(config, runtime_paths)
 
 
 def test_has_missing_managed_avatars_ignores_full_room_aliases(
@@ -263,7 +263,7 @@ def test_has_missing_managed_avatars_ignores_full_room_aliases(
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars.has_missing_managed_avatars(config, runtime_paths)
+    assert not generate_avatars._has_missing_managed_avatars(config, runtime_paths)
 
 
 def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
@@ -302,7 +302,7 @@ def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars.has_missing_managed_avatars(config, runtime_paths)
+    assert not generate_avatars._has_missing_managed_avatars(config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -329,7 +329,7 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
 
     monkeypatch.setattr(
         generate_avatars,
-        "load_validated_config",
+        "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars.genai, "Client", lambda **_kwargs: pytest.fail("generation should be skipped"))
@@ -378,7 +378,7 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_a
 
     monkeypatch.setattr(
         generate_avatars,
-        "load_validated_config",
+        "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, tmp_path),
     )
     monkeypatch.setattr(generate_avatars, "workspace_avatar_path", _workspace_path)
@@ -421,7 +421,7 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
 
     monkeypatch.setattr(
         generate_avatars,
-        "load_validated_config",
+        "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(
@@ -429,7 +429,7 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
         "Client",
         lambda **_kwargs: SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock())),
     )
-    monkeypatch.setattr(generate_avatars, "generate_prompt", AsyncMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(generate_avatars, "_generate_prompt", AsyncMock(side_effect=RuntimeError("boom")))
     monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
 
     with pytest.raises(generate_avatars.AvatarGenerationError, match="Avatar generation failed"):
@@ -455,7 +455,7 @@ async def test_run_avatar_generation_accepts_null_optional_sections(
     for entity_type, entity_name in (
         ("agents", "a"),
         ("agents", "router"),
-        ("spaces", generate_avatars.ROOT_SPACE_AVATAR_NAME),
+        ("spaces", generate_avatars._ROOT_SPACE_AVATAR_NAME),
     ):
         avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
@@ -469,20 +469,20 @@ async def test_generate_prompt_uses_gemini_prompt_model() -> None:
     generate_content = AsyncMock(return_value=SimpleNamespace(text="teal and copper, visor eyes"))
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
 
-    prompt = await generate_avatars.generate_prompt(
+    prompt = await generate_avatars._generate_prompt(
         client,
-        generate_avatars.AvatarTarget(
+        generate_avatars._AvatarTarget(
             entity_type="agents",
             entity_name="research",
             role="Finds information",
         ),
     )
 
-    assert prompt == f"{generate_avatars.CHARACTER_STYLE}, teal and copper, visor eyes"
+    assert prompt == f"{generate_avatars._CHARACTER_STYLE}, teal and copper, visor eyes"
     kwargs = generate_content.await_args.kwargs
-    assert kwargs["model"] == generate_avatars.PROMPT_MODEL
+    assert kwargs["model"] == generate_avatars._PROMPT_MODEL
     assert kwargs["contents"] == "Agent name: research\nRole: Finds information\nType: agents"
-    assert kwargs["config"].system_instruction == generate_avatars.AGENT_SYSTEM_PROMPT
+    assert kwargs["config"].system_instruction == generate_avatars._AGENT_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
@@ -491,18 +491,18 @@ async def test_generate_prompt_uses_room_style_for_spaces() -> None:
     generate_content = AsyncMock(return_value=SimpleNamespace(text="deep blue, doorway outline"))
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
 
-    prompt = await generate_avatars.generate_prompt(
+    prompt = await generate_avatars._generate_prompt(
         client,
-        generate_avatars.AvatarTarget(
+        generate_avatars._AvatarTarget(
             entity_type="spaces",
             entity_name="root_space",
             role="Workspace space that organizes rooms",
         ),
     )
 
-    assert prompt == f"{generate_avatars.ROOM_STYLE}, deep blue, doorway outline"
+    assert prompt == f"{generate_avatars._ROOM_STYLE}, deep blue, doorway outline"
     kwargs = generate_content.await_args.kwargs
-    assert kwargs["config"].system_instruction == generate_avatars.ROOM_SYSTEM_PROMPT
+    assert kwargs["config"].system_instruction == generate_avatars._ROOM_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
@@ -522,12 +522,12 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
     generate_content = AsyncMock(return_value=image_response)
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
 
-    monkeypatch.setattr(generate_avatars, "get_avatar_path", lambda *_args, **_kwargs: avatar_path)
-    monkeypatch.setattr(generate_avatars, "generate_prompt", AsyncMock(return_value="avatar prompt"))
+    monkeypatch.setattr(generate_avatars, "_get_avatar_path", lambda *_args, **_kwargs: avatar_path)
+    monkeypatch.setattr(generate_avatars, "_generate_prompt", AsyncMock(return_value="avatar prompt"))
 
-    await generate_avatars.generate_avatar(
+    await generate_avatars._generate_avatar(
         client,
-        generate_avatars.AvatarTarget(
+        generate_avatars._AvatarTarget(
             entity_type="agents",
             entity_name="general",
             role="Helpful assistant",
@@ -537,7 +537,7 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
 
     assert avatar_path.read_bytes() == b"avatar-bytes"
     kwargs = generate_content.await_args.kwargs
-    assert kwargs["model"] == generate_avatars.IMAGE_MODEL
+    assert kwargs["model"] == generate_avatars._IMAGE_MODEL
     assert kwargs["contents"] == "avatar prompt"
     assert kwargs["config"].response_modalities == ["IMAGE"]
 
@@ -554,12 +554,12 @@ async def test_generate_avatar_skips_existing_file_without_force(
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
     generate_prompt = AsyncMock()
 
-    monkeypatch.setattr(generate_avatars, "get_avatar_path", lambda *_args, **_kwargs: avatar_path)
-    monkeypatch.setattr(generate_avatars, "generate_prompt", generate_prompt)
+    monkeypatch.setattr(generate_avatars, "_get_avatar_path", lambda *_args, **_kwargs: avatar_path)
+    monkeypatch.setattr(generate_avatars, "_generate_prompt", generate_prompt)
 
-    await generate_avatars.generate_avatar(
+    await generate_avatars._generate_avatar(
         client,
-        generate_avatars.AvatarTarget(
+        generate_avatars._AvatarTarget(
             entity_type="agents",
             entity_name="general",
             role="Helpful assistant",
@@ -593,12 +593,12 @@ async def test_generate_avatar_force_overwrites_existing_file(
     generate_content = AsyncMock(return_value=image_response)
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
 
-    monkeypatch.setattr(generate_avatars, "get_avatar_path", lambda *_args, **_kwargs: avatar_path)
-    monkeypatch.setattr(generate_avatars, "generate_prompt", AsyncMock(return_value="avatar prompt"))
+    monkeypatch.setattr(generate_avatars, "_get_avatar_path", lambda *_args, **_kwargs: avatar_path)
+    monkeypatch.setattr(generate_avatars, "_generate_prompt", AsyncMock(return_value="avatar prompt"))
 
-    await generate_avatars.generate_avatar(
+    await generate_avatars._generate_avatar(
         client,
-        generate_avatars.AvatarTarget(
+        generate_avatars._AvatarTarget(
             entity_type="agents",
             entity_name="general",
             role="Helpful assistant",
@@ -641,11 +641,11 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
 
     async def _generate_avatar(
         _client: object,
-        target: generate_avatars.AvatarTarget,
+        target: generate_avatars._AvatarTarget,
         runtime_paths: constants_mod.RuntimePaths,
         *,
         force: bool = False,
-        prompt_settings: generate_avatars.AvatarPromptSettings | None = None,
+        prompt_settings: generate_avatars._AvatarPromptSettings | None = None,
     ) -> None:
         del runtime_paths
         del force
@@ -663,11 +663,11 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
 
     monkeypatch.setattr(
         generate_avatars,
-        "load_validated_config",
+        "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars.genai, "Client", _make_client)
-    monkeypatch.setattr(generate_avatars, "generate_avatar", generated)
+    monkeypatch.setattr(generate_avatars, "_generate_avatar", generated)
     workspace_avatar_dir.mkdir(parents=True, exist_ok=True)
     api_key_file = workspace_avatar_dir / "google-key.txt"
     api_key_file.write_text("test-google-key", encoding="utf-8")
@@ -679,7 +679,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     generated_entities = {(call.args[1].entity_type, call.args[1].entity_name) for call in generated.await_args_list}
     assert ("rooms", "lobby") in generated_entities
     assert ("rooms", "war_room") in generated_entities
-    assert ("spaces", generate_avatars.ROOT_SPACE_AVATAR_NAME) in generated_entities
+    assert ("spaces", generate_avatars._ROOT_SPACE_AVATAR_NAME) in generated_entities
     client.aio.aclose.assert_awaited_once()
 
 
@@ -735,7 +735,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
 
     monkeypatch.setattr(
         generate_avatars,
-        "load_validated_config",
+        "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
@@ -800,7 +800,7 @@ async def test_set_room_avatars_in_matrix_skips_rooms_with_existing_matrix_avata
 
     monkeypatch.setattr(
         generate_avatars,
-        "load_validated_config",
+        "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
@@ -865,7 +865,7 @@ async def test_set_room_avatars_in_matrix_force_replaces_existing_matrix_avatar(
 
     monkeypatch.setattr(
         generate_avatars,
-        "load_validated_config",
+        "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
@@ -929,7 +929,7 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
 
     monkeypatch.setattr(
         generate_avatars,
-        "load_validated_config",
+        "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
@@ -992,7 +992,7 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
 
     monkeypatch.setattr(
         generate_avatars,
-        "load_validated_config",
+        "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
@@ -1050,7 +1050,7 @@ async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
 
     monkeypatch.setattr(
         generate_avatars,
-        "load_validated_config",
+        "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, tmp_path),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)

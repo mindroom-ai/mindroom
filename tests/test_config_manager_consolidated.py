@@ -18,9 +18,11 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
-from mindroom.credential_policy import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+from mindroom.credential_policy import (
+    _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS as UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
+)
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
-from mindroom.tool_system.metadata import AUTHORED_OVERRIDE_INHERIT
+from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT as AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
 

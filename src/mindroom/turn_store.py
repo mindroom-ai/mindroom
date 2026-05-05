@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class LoadedTurnRecord:
+class _LoadedTurnRecord:
     """Merged durable turn state used by regeneration and dispatch flows."""
 
     record: HandledTurnRecord
@@ -204,7 +204,7 @@ class TurnStore:
         thread_id: str | None,
         original_event_id: str,
         requester_user_id: str,
-    ) -> LoadedTurnRecord | None:
+    ) -> _LoadedTurnRecord | None:
         """Load one merged durable turn record for an edited or replayed source event."""
         turn_record = self._ledger.get_turn_record(original_event_id)
         ledger_turn_record = turn_record
@@ -231,7 +231,7 @@ class TurnStore:
         )
         response_owner_missing = turn_record.response_owner is None
         if persisted_turn_metadata is None:
-            return LoadedTurnRecord(
+            return _LoadedTurnRecord(
                 record=turn_record,
                 recorded_turn_context_available=recorded_turn_context_available,
                 response_owner_missing=response_owner_missing,
@@ -246,7 +246,7 @@ class TurnStore:
             response_event_id=persisted_turn_metadata.response_event_id or turn_record.response_event_id,
             source_event_prompts=merged_prompt_map,
         )
-        return LoadedTurnRecord(
+        return _LoadedTurnRecord(
             record=merged_turn_record,
             recorded_turn_context_available=recorded_turn_context_available,
             response_owner_missing=response_owner_missing,
@@ -256,7 +256,7 @@ class TurnStore:
     def remove_stale_runs_for_edit(
         self,
         *,
-        loaded_turn: LoadedTurnRecord,
+        loaded_turn: _LoadedTurnRecord,
         room: nio.MatrixRoom,
         thread_id: str | None,
         original_event_id: str,

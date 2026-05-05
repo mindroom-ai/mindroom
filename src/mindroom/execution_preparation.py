@@ -89,7 +89,7 @@ class _PartialReplyKind(str, Enum):
 
 
 @dataclass(frozen=True)
-class PreparedExecutionContext:
+class _PreparedExecutionContext:
     """Final request-scoped input planning result."""
 
     messages: tuple[Message, ...]
@@ -206,7 +206,7 @@ def _build_matrix_prompt_with_history(
     return f"{header}\n<conversation>\n{rendered_history}\n</conversation>\n\n{prompt_intro}{current_block}"
 
 
-def build_prompt_with_thread_history(
+def _build_prompt_with_thread_history(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     *,
@@ -233,7 +233,7 @@ def build_prompt_with_thread_history(
     )
 
 
-def build_matrix_prompt_with_thread_history(
+def _build_matrix_prompt_with_thread_history(
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
     *,
@@ -659,7 +659,7 @@ async def _prepare_execution_context_common(
     fallback_static_token_budget: int | None = None,
     timing_scope: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-) -> PreparedExecutionContext:
+) -> _PreparedExecutionContext:
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
     del timing_scope
     seen_event_ids = _scope_seen_event_ids(scope_context)
@@ -735,7 +735,7 @@ async def _prepare_execution_context_common(
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_ready")
 
-    return PreparedExecutionContext(
+    return _PreparedExecutionContext(
         messages=final_messages,
         replay_plan=prepared_history.replay_plan,
         estimated_context_tokens=prepared_history.estimated_context_tokens,
@@ -766,7 +766,7 @@ async def prepare_agent_execution_context(
     current_sender_id: str | None = None,
     timing_scope: str | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-) -> PreparedExecutionContext:
+) -> _PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call."""
     response_sender_id = config.get_ids(runtime_paths).get(agent_name)
     response_sender = response_sender_id.full_id if response_sender_id is not None else None
@@ -828,7 +828,7 @@ async def prepare_agent_execution_context(
     )
 
 
-async def prepare_bound_team_execution_context(
+async def _prepare_bound_team_execution_context(
     *,
     scope_context: ScopeSessionContext | None,
     agents: list[Agent],
@@ -848,7 +848,7 @@ async def prepare_bound_team_execution_context(
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-) -> PreparedExecutionContext:
+) -> _PreparedExecutionContext:
     """Prepare one bound team scope for the current call."""
 
     async def _prepare_team_scope_history(
@@ -935,14 +935,14 @@ async def prepare_bound_team_run_context(
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-) -> PreparedExecutionContext:
+) -> _PreparedExecutionContext:
     """Prepare a team run with queued-notice scrubbing and replay application."""
     _scrub_bound_team_scope_context(
         scope_context=scope_context,
         team=team,
         entity_name=entity_name,
     )
-    prepared_execution = await prepare_bound_team_execution_context(
+    prepared_execution = await _prepare_bound_team_execution_context(
         scope_context=scope_context,
         agents=agents,
         team=team,

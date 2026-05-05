@@ -15,7 +15,7 @@ from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import managed_space_alias_localpart, mindroom_namespace
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 

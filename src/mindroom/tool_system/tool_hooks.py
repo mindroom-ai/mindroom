@@ -64,7 +64,7 @@ _DECLINED_RESULT_TEMPLATE = (
 )
 _APPROVAL_POLICY_FAILURE_REASON = "Tool approval policy failed."
 _SYNC_BRIDGES: WeakKeyDictionary[Callable[..., Any], Callable[..., Any]] = WeakKeyDictionary()
-ToolHookResult = Any
+_ToolHookResult = Any
 # Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
 # deferred sync-bridge results. Keep these wrappers covered by tests when bumping Agno
 # in uv.lock, and drop them once upstream supports this as public API.
@@ -79,7 +79,7 @@ logger = get_logger(__name__)
 class _DeferredAsyncToolHookResult:
     """Sentinel used when a sync hook needs async completion on the current loop."""
 
-    awaitable: Awaitable[ToolHookResult]
+    awaitable: Awaitable[_ToolHookResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,14 +286,14 @@ def _approval_status_reason(status: str, reason: str | None) -> str:
     return "Tool approval request is pending."
 
 
-async def _await_result(awaitable: Awaitable[ToolHookResult]) -> ToolHookResult:
+async def _await_result(awaitable: Awaitable[_ToolHookResult]) -> _ToolHookResult:
     return await awaitable
 
 
-def _run_coroutine_from_sync(coroutine: ToolHookResult) -> ToolHookResult:
+def _run_coroutine_from_sync(coroutine: _ToolHookResult) -> _ToolHookResult:
     if not inspect.isawaitable(coroutine):
         return coroutine
-    runner_coroutine = cast("Coroutine[Any, Any, ToolHookResult]", _await_result(coroutine))
+    runner_coroutine = cast("Coroutine[Any, Any, _ToolHookResult]", _await_result(coroutine))
 
     try:
         asyncio.get_running_loop()
@@ -302,14 +302,14 @@ def _run_coroutine_from_sync(coroutine: ToolHookResult) -> ToolHookResult:
     return _DeferredAsyncToolHookResult(runner_coroutine)
 
 
-def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> ToolHookResult:
+def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> _ToolHookResult:
     """Run a deferred async hook result for Agno's synchronous execute() chain."""
     try:
         running_loop = asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(_await_result(deferred.awaitable))
 
-    result_box: list[ToolHookResult] = []
+    result_box: list[_ToolHookResult] = []
     error_box: list[BaseException] = []
     context = copy_context()
 
@@ -328,7 +328,7 @@ def _run_deferred_result_from_sync(deferred: _DeferredAsyncToolHookResult) -> To
     return result_box[0]
 
 
-def _resolve_deferred_sync_result(result: ToolHookResult) -> ToolHookResult:
+def _resolve_deferred_sync_result(result: _ToolHookResult) -> _ToolHookResult:
     while isinstance(result, _DeferredAsyncToolHookResult):
         result = _run_deferred_result_from_sync(result)
     return result
@@ -345,10 +345,10 @@ def _patch_agno_sync_tool_hook_chain() -> None:
     def _patched_build_nested_execution_chain(
         self: FunctionCall,
         entrypoint_args: dict[str, Any],
-    ) -> Callable[..., ToolHookResult]:
+    ) -> Callable[..., _ToolHookResult]:
         execution_chain = _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN(self, entrypoint_args)
 
-        def _wrapped_execution_chain(name: str, func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
+        def _wrapped_execution_chain(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
             return _resolve_deferred_sync_result(execution_chain(name, func, args))
 
         return _wrapped_execution_chain
@@ -368,10 +368,14 @@ def _patch_agno_async_tool_hook_chain() -> None:
     async def _patched_build_nested_execution_chain_async(
         self: FunctionCall,
         entrypoint_args: dict[str, Any],
-    ) -> Callable[..., Awaitable[ToolHookResult]]:
+    ) -> Callable[..., Awaitable[_ToolHookResult]]:
         execution_chain = await _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC(self, entrypoint_args)
 
-        async def _wrapped_execution_chain(name: str, func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
+        async def _wrapped_execution_chain(
+            name: str,
+            func: Callable[..., Any],
+            args: dict[str, Any],
+        ) -> _ToolHookResult:
             result = await execution_chain(name, func, args)
             while isinstance(result, _DeferredAsyncToolHookResult):
                 result = await result.awaitable
@@ -393,7 +397,7 @@ async def _call_tool(
     *,
     tool_name: str,
     agent_name: str | None,
-) -> ToolHookResult:
+) -> _ToolHookResult:
     async_entrypoint = inspect.iscoroutinefunction(func)
     emit_timing_event(
         "Tool hook dispatch timing",
@@ -418,7 +422,7 @@ async def _emit_after_call(
     hook_arguments: dict[str, Any] | None,
     args: dict[str, Any],
     tool_name: str,
-    result: ToolHookResult,
+    result: _ToolHookResult,
     error: BaseException | None,
     blocked: bool,
     duration_ms: float,
@@ -576,7 +580,7 @@ async def _execute_bridge(
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
-) -> ToolHookResult:
+) -> _ToolHookResult:
     started_at = time.perf_counter()
     effective_dispatch_context = _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context()
     bridge_context = _ToolHookBridgeContext(
@@ -622,7 +626,7 @@ async def _execute_bridge(
     if blocked_result is not None:
         return blocked_result
 
-    result: ToolHookResult = None
+    result: _ToolHookResult = None
     error: BaseException | None = None
     try:
         result = await _call_tool(
@@ -747,7 +751,7 @@ def build_tool_hook_bridge(
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
 
-    async def bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
+    async def bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
         return await _execute_bridge(
             hook_registry=hook_registry,
             tool_name=name,
@@ -761,7 +765,7 @@ def build_tool_hook_bridge(
             has_after_hooks=has_after_hooks,
         )
 
-    def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> ToolHookResult:
+    def sync_bridge(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
         if inspect.iscoroutinefunction(func):
             return _DeferredAsyncToolHookResult(
                 _execute_bridge(

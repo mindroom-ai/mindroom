@@ -7,7 +7,7 @@ from typing import Any
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 
 
-def strip_vertex_claude_tool_strict(
+def _strip_vertex_claude_tool_strict(
     tools: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]] | None:
     """Return Vertex-compatible tool definitions without mutating the caller's list.
@@ -56,7 +56,7 @@ class MindroomVertexAIClaude(VertexAIClaude):
     ) -> dict[str, Any]:
         return super()._prepare_request_kwargs(
             system_message=system_message,
-            tools=strip_vertex_claude_tool_strict(tools),
+            tools=_strip_vertex_claude_tool_strict(tools),
             response_format=response_format,
             messages=messages,
         )
@@ -68,5 +68,5 @@ class MindroomVertexAIClaude(VertexAIClaude):
     ) -> bool:
         return super()._has_beta_features(
             response_format=response_format,
-            tools=strip_vertex_claude_tool_strict(tools),
+            tools=_strip_vertex_claude_tool_strict(tools),
         )

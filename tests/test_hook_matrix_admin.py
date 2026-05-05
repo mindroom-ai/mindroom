@@ -17,7 +17,7 @@ from mindroom.hooks import HookContext, HookContextSupport
 from mindroom.hooks.registry import HookRegistry, HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import AgentMessageSnapshot
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:

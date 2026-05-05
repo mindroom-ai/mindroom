@@ -52,7 +52,7 @@ class SyncCertificationDecision:
 
 
 @dataclass(frozen=True)
-class SyncCertificationStart:
+class _SyncCertificationStart:
     """Initial runtime sync-token trust state."""
 
     state: SyncTrustState
@@ -68,22 +68,22 @@ def _non_empty_token(token: str | None) -> str | None:
     return normalized or None
 
 
-def start_from_loaded_token(loaded: SyncCheckpoint | str | None) -> SyncCertificationStart:
+def start_from_loaded_token(loaded: SyncCheckpoint | str | None) -> _SyncCertificationStart:
     """Build initial certifier state from a loaded token or checkpoint."""
     if isinstance(loaded, SyncCheckpoint):
         token = _non_empty_token(loaded.token)
         if token is None:
-            return SyncCertificationStart(
+            return _SyncCertificationStart(
                 state=SyncTrustState.COLD,
                 sync_token=None,
             )
-        return SyncCertificationStart(
+        return _SyncCertificationStart(
             state=SyncTrustState.PENDING,
             sync_token=token,
         )
 
     token = _non_empty_token(loaded) if isinstance(loaded, str) else None
-    return SyncCertificationStart(
+    return _SyncCertificationStart(
         state=SyncTrustState.COLD,
         sync_token=token,
         legacy_token=token is not None,

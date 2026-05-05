@@ -14,7 +14,7 @@ from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.memory.config import _get_memory_config, _memory_collection_name, create_memory_instance
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 from tests.conftest import orchestrator_runtime_paths
 
 

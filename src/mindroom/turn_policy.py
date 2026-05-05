@@ -81,7 +81,7 @@ class PreparedDispatch:
 
 
 @dataclass(frozen=True)
-class DispatchPlan:
+class _DispatchPlan:
     """Pure policy output for one normalized inbound turn."""
 
     kind: Literal["ignore", "route", "respond"]
@@ -94,7 +94,7 @@ class DispatchPlan:
 
 
 @dataclass(frozen=True)
-class PreparedHookedPayload:
+class _PreparedHookedPayload:
     """Concrete payload returned after ingress enrichment hooks run."""
 
     payload: DispatchPayload
@@ -137,7 +137,7 @@ class IngressHookRunner:
         *,
         target_entity_name: str,
         target_member_names: tuple[str, ...] | None,
-    ) -> PreparedHookedPayload:
+    ) -> _PreparedHookedPayload:
         """Run message:enrich and return the model-facing payload."""
         started = time.monotonic()
         hook_registered = self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH)
@@ -187,7 +187,7 @@ class IngressHookRunner:
             hook_registered=hook_registered,
             enrichment_item_count=item_count,
         )
-        return PreparedHookedPayload(
+        return _PreparedHookedPayload(
             payload=DispatchPayload(
                 prompt=payload.prompt,
                 model_prompt=model_prompt,
@@ -441,7 +441,7 @@ class TurnPolicy:
         extra_content: dict[str, Any] | None = None,
         media_events: list[MediaDispatchEvent] | None = None,
         router_event: DispatchEvent | None = None,
-    ) -> DispatchPlan | None:
+    ) -> _DispatchPlan | None:
         """Return one router-specific dispatch plan when this entity is the router."""
         if self.deps.agent_name != ROUTER_AGENT_NAME:
             return None
@@ -456,12 +456,12 @@ class TurnPolicy:
                 runtime_paths=self.deps.runtime_paths,
             ):
                 self.deps.logger.info("Skipping routing: thread already requires explicit agent targeting")
-                return DispatchPlan(kind="ignore", ignore_reason="router")
+                return _DispatchPlan(kind="ignore", ignore_reason="router")
             available_agents = await self.available_agents_for_sender(room, requester_user_id)
             if len(available_agents) == 1:
                 self.deps.logger.info("Skipping routing: only one agent present")
-                return DispatchPlan(kind="ignore", ignore_reason="router")
-            return DispatchPlan(
+                return _DispatchPlan(kind="ignore", ignore_reason="router")
+            return _DispatchPlan(
                 kind="route",
                 router_message=message,
                 extra_content=extra_content,
@@ -469,7 +469,7 @@ class TurnPolicy:
                 router_event=router_event or event,
             )
 
-        return DispatchPlan(kind="ignore", ignore_reason="router")
+        return _DispatchPlan(kind="ignore", ignore_reason="router")
 
     @timed("dispatch_action_resolution")
     async def plan_turn(
@@ -483,7 +483,7 @@ class TurnPolicy:
         extra_content: dict[str, Any] | None = None,
         media_events: list[MediaDispatchEvent] | None = None,
         router_event: DispatchEvent | None = None,
-    ) -> DispatchPlan:
+    ) -> _DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn."""
         router_plan = await self.plan_router_dispatch(
             room,
@@ -508,8 +508,8 @@ class TurnPolicy:
             has_active_response_for_target=has_active_response_for_target,
         )
         if action.kind == "skip":
-            return DispatchPlan(kind="ignore")
-        return DispatchPlan(kind="respond", response_action=action)
+            return _DispatchPlan(kind="ignore")
+        return _DispatchPlan(kind="respond", response_action=action)
 
     async def resolve_response_action(
         self,

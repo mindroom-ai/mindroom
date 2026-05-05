@@ -117,7 +117,7 @@ class ScopeSessionContext:
 
 
 @dataclass(frozen=True)
-class BoundTeamScopeContext:
+class _BoundTeamScopeContext:
     """Resolved stable owner and scope for one live team run."""
 
     owner_agent: Agent
@@ -323,7 +323,7 @@ async def _complete_no_compactable_history_failure(
     )
 
 
-def resolve_history_scope(agent: Agent) -> HistoryScope | None:
+def _resolve_history_scope(agent: Agent) -> HistoryScope | None:
     """Return the persisted history scope addressed by one live agent."""
     team_id = agent.team_id
     if isinstance(team_id, str) and team_id:
@@ -371,7 +371,7 @@ async def prepare_scope_history(  # noqa: C901
         static_prompt_tokens=static_prompt_tokens,
         execution_plan=execution_plan,
     )
-    resolved_scope = scope or resolve_history_scope(agent)
+    resolved_scope = scope or _resolve_history_scope(agent)
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
             scope=resolved_scope,
@@ -738,7 +738,7 @@ def finalize_history_preparation(
         history_settings=resolved_inputs.history_settings,
     )
     if history_budget is not None:
-        replay_plan = plan_replay_that_fits(
+        replay_plan = _plan_replay_that_fits(
             session=prepared_scope_history.session,
             scope=prepared_scope_history.scope,
             history_settings=resolved_inputs.history_settings,
@@ -807,7 +807,7 @@ async def prepare_history_for_run(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedHistoryState:
     """Prepare one scope by compacting durable history and planning safe replay for the run."""
-    resolved_scope = scope or resolve_history_scope(agent)
+    resolved_scope = scope or _resolve_history_scope(agent)
     if storage is not None and resolved_scope is not None and session_id is not None:
         persisted_session = session
         if persisted_session is None:
@@ -913,7 +913,7 @@ async def prepare_bound_scope_history(
                     full_prompt=full_prompt,
                 )
                 if team is not None
-                else estimate_preparation_prompt_tokens(
+                else _estimate_preparation_prompt_tokens(
                     full_prompt=full_prompt,
                 )
             ),
@@ -932,7 +932,7 @@ async def prepare_bound_scope_history(
             full_prompt=full_prompt,
         )
         if team is not None
-        else estimate_preparation_prompt_tokens(
+        else _estimate_preparation_prompt_tokens(
             full_prompt=full_prompt,
         )
     )
@@ -964,7 +964,7 @@ async def prepare_bound_scope_history(
     )
 
 
-def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
+def _resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
     """Return the canonical storage owner for one bound team run."""
     candidates = [(agent_id, agent) for agent in agents if isinstance((agent_id := agent.id), str) and agent_id]
     if not candidates:
@@ -982,9 +982,9 @@ def resolve_bound_team_scope_context(
     agents: list[Agent],
     config: Config,
     team_name: str | None = None,
-) -> BoundTeamScopeContext | None:
+) -> _BoundTeamScopeContext | None:
     """Resolve the stable owner and scope backing one live team run."""
-    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
+    owner_agent, owner_agent_name = _resolve_bound_history_owner(agents)
     if owner_agent is None or owner_agent_name is None:
         return None
 
@@ -992,7 +992,7 @@ def resolve_bound_team_scope_context(
     if team_scope_id is None:
         return None
     scope = HistoryScope(kind="team", scope_id=team_scope_id)
-    return BoundTeamScopeContext(
+    return _BoundTeamScopeContext(
         owner_agent=owner_agent,
         owner_agent_name=owner_agent_name,
         scope=scope,
@@ -1008,7 +1008,7 @@ def estimate_preparation_static_tokens(
     return estimate_agent_static_tokens(agent, full_prompt)
 
 
-def estimate_preparation_prompt_tokens(
+def _estimate_preparation_prompt_tokens(
     *,
     full_prompt: str,
 ) -> int:
@@ -1026,7 +1026,7 @@ def estimate_preparation_static_tokens_for_team(
 
 
 @contextmanager
-def open_scope_storage(
+def _open_scope_storage(
     *,
     agent_name: str,
     scope: HistoryScope,
@@ -1106,7 +1106,7 @@ def open_resolved_scope_session_context(
     if scope is None:
         yield None
         return
-    with open_scope_storage(
+    with _open_scope_storage(
         agent_name=agent_name,
         scope=scope,
         runtime_paths=runtime_paths,
@@ -1134,7 +1134,7 @@ def open_scope_session_context(
     create_session_if_missing: bool = False,
 ) -> Iterator[ScopeSessionContext | None]:
     """Open the canonical persisted history scope for one live agent."""
-    resolved_scope = scope or resolve_history_scope(agent)
+    resolved_scope = scope or _resolve_history_scope(agent)
     with open_resolved_scope_session_context(
         agent_name=agent_name,
         scope=resolved_scope,
@@ -1218,7 +1218,7 @@ def create_scope_session_storage(
     )
 
 
-def close_unique_state_dbs(*storages: BaseDb | None) -> None:
+def _close_unique_state_dbs(*storages: BaseDb | None) -> None:
     """Close each distinct state DB handle at most once."""
     seen: set[int] = set()
     for storage in storages:
@@ -1239,7 +1239,7 @@ def close_agent_runtime_state_dbs(
     """Close one agent's runtime-owned state DB handles except a shared scope storage."""
     if agent is None:
         return
-    close_unique_state_dbs(
+    _close_unique_state_dbs(
         *(storage for storage in get_agent_runtime_state_dbs(agent) if storage is not shared_scope_storage),
     )
 
@@ -1251,7 +1251,7 @@ def close_team_runtime_state_dbs(
     shared_scope_storage: BaseDb | None = None,
 ) -> None:
     """Close all runtime-owned state DB handles for one team request."""
-    close_unique_state_dbs(
+    _close_unique_state_dbs(
         *(
             storage
             for agent in agents
@@ -1425,7 +1425,7 @@ def _prepare_scope_state_for_run(
     return state
 
 
-def plan_replay_that_fits(
+def _plan_replay_that_fits(
     *,
     session: AgentSession | TeamSession,
     scope: HistoryScope,

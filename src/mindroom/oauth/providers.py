@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
 _TOKEN_ENDPOINT_AUTH_METHOD = "client_secret_post"  # noqa: S105
-PKCECodeChallengeMethod = Literal["S256"]
+_PKCECodeChallengeMethod = Literal["S256"]
 
 
 class OAuthProviderError(RuntimeError):
@@ -72,7 +72,7 @@ class OAuthClientConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class OAuthClientConfigResolution:
+class _OAuthClientConfigResolution:
     """Resolved OAuth client settings plus the credential service that supplied them."""
 
     config: OAuthClientConfig
@@ -99,12 +99,12 @@ class OAuthClaimValidationContext:
     runtime_paths: RuntimePaths
 
 
-OAuthTokenParser = Callable[["OAuthProvider", Mapping[str, Any], OAuthClientConfig, "RuntimePaths"], OAuthTokenResult]
-OAuthTokenExchanger = Callable[
+_OAuthTokenParser = Callable[["OAuthProvider", Mapping[str, Any], OAuthClientConfig, "RuntimePaths"], OAuthTokenResult]
+_OAuthTokenExchanger = Callable[
     ["OAuthProvider", str, OAuthClientConfig, "RuntimePaths", str | None],
     OAuthTokenResult | Awaitable[OAuthTokenResult],
 ]
-OAuthClaimValidator = Callable[[OAuthClaimValidationContext], None]
+_OAuthClaimValidator = Callable[[OAuthClaimValidationContext], None]
 
 
 def _normalize_env_names(names: str | Sequence[str] | None) -> tuple[str, ...]:
@@ -234,12 +234,12 @@ def oauth_expires_at_from_response(token_response: Mapping[str, Any]) -> float |
     return None
 
 
-def generate_pkce_code_verifier() -> str:
+def _generate_pkce_code_verifier() -> str:
     """Return one high-entropy PKCE verifier."""
     return secrets.token_urlsafe(64)
 
 
-def pkce_s256_code_challenge(code_verifier: str) -> str:
+def _pkce_s256_code_challenge(code_verifier: str) -> str:
     """Return the RFC 7636 S256 challenge for one verifier."""
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
@@ -260,15 +260,15 @@ class OAuthProvider:
     shared_client_config_services: tuple[str, ...] = ()
     default_redirect_path: str | None = None
     extra_auth_params: Mapping[str, str] = field(default_factory=dict)
-    pkce_code_challenge_method: PKCECodeChallengeMethod | None = None
+    pkce_code_challenge_method: _PKCECodeChallengeMethod | None = None
     allowed_email_domains: tuple[str, ...] = ()
     allowed_hosted_domains: tuple[str, ...] = ()
     allowed_email_domains_env: str | Sequence[str] | None = None
     allowed_hosted_domains_env: str | Sequence[str] | None = None
     status_capabilities: tuple[str, ...] = ()
-    token_parser: OAuthTokenParser | None = None
-    token_exchanger: OAuthTokenExchanger | None = None
-    claim_validator: OAuthClaimValidator | None = None
+    token_parser: _OAuthTokenParser | None = None
+    token_exchanger: _OAuthTokenExchanger | None = None
+    claim_validator: _OAuthClaimValidator | None = None
 
     def __post_init__(self) -> None:
         """Validate provider identifiers and redirect path shape."""
@@ -322,17 +322,17 @@ class OAuthProvider:
         resolution = self.client_config_resolution(runtime_paths)
         return resolution.config if resolution is not None else None
 
-    def client_config_resolution(self, runtime_paths: RuntimePaths) -> OAuthClientConfigResolution | None:
+    def client_config_resolution(self, runtime_paths: RuntimePaths) -> _OAuthClientConfigResolution | None:
         """Return stored OAuth app client settings and the supplying credential service."""
         manager = get_runtime_credentials_manager(runtime_paths)
         for service in self.client_config_services:
             config = self._stored_client_config_from_service(runtime_paths, manager.load_credentials(service), True)
             if config is not None:
-                return OAuthClientConfigResolution(config=config, service=service)
+                return _OAuthClientConfigResolution(config=config, service=service)
         for service in self.shared_client_config_services:
             config = self._stored_client_config_from_service(runtime_paths, manager.load_credentials(service), False)
             if config is not None:
-                return OAuthClientConfigResolution(config=config, service=service)
+                return _OAuthClientConfigResolution(config=config, service=service)
         return None
 
     def _stored_client_config_from_service(
@@ -381,7 +381,7 @@ class OAuthProvider:
         """Return a new PKCE verifier when this provider requires PKCE."""
         if self.pkce_code_challenge_method is None:
             return None
-        return generate_pkce_code_verifier()
+        return _generate_pkce_code_verifier()
 
     def authorization_uri(
         self,
@@ -404,7 +404,7 @@ class OAuthProvider:
             if not code_verifier:
                 msg = "OAuth provider requires a PKCE code verifier"
                 raise OAuthProviderError(msg)
-            auth_params["code_challenge"] = pkce_s256_code_challenge(code_verifier)
+            auth_params["code_challenge"] = _pkce_s256_code_challenge(code_verifier)
             auth_params["code_challenge_method"] = self.pkce_code_challenge_method
         try:
             authorization_url, _ = client.create_authorization_url(

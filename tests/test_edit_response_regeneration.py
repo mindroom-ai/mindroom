@@ -29,7 +29,8 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, ROUTER_AGEN
 from mindroom.conversation_state_writer import ConversationStateWriter
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
-from mindroom.history.interrupted_replay import build_interrupted_replay_run, build_interrupted_replay_snapshot
+from mindroom.history.interrupted_replay import _build_interrupted_replay_run as build_interrupted_replay_run
+from mindroom.history.interrupted_replay import build_interrupted_replay_snapshot
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.event_info import EventInfo
@@ -38,7 +39,7 @@ from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import create_session_id
-from mindroom.turn_store import LoadedTurnRecord
+from mindroom.turn_store import _LoadedTurnRecord as LoadedTurnRecord
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,

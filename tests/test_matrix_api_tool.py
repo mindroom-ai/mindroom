@@ -13,7 +13,8 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.custom_tools.matrix_api import MatrixApiTools, MatrixSearchResponse
+from mindroom.custom_tools.matrix_api import MatrixApiTools
+from mindroom.custom_tools.matrix_api import _MatrixSearchResponse as MatrixSearchResponse
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context

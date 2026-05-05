@@ -14,12 +14,16 @@ from mindroom.credentials import (
     _DEDICATED_WORKER_ROOT_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
-    get_credentials_manager,
     get_runtime_credentials_manager,
     load_scoped_credentials,
-    merge_scoped_credentials,
     save_scoped_credentials,
     sync_shared_credentials_to_worker,
+)
+from mindroom.credentials import (
+    _get_credentials_manager as get_credentials_manager,
+)
+from mindroom.credentials import (
+    _merge_scoped_credentials as merge_scoped_credentials,
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 
@@ -63,7 +67,7 @@ class TestCredentialsManager:
         config_path = tmp_path / "config.yaml"
         config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
         runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
-        manager = CredentialsManager(constants_mod.credentials_dir(runtime_paths=runtime_paths))
+        manager = CredentialsManager(constants_mod._credentials_dir(runtime_paths=runtime_paths))
         assert manager.base_path == tmp_path / "credentials"
         assert manager.base_path.exists()
 

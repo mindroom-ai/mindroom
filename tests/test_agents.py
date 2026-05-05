@@ -149,8 +149,8 @@ def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> N
         include_openai_compat_guidance=True,
     )
 
-    assert agent_prompts.OPENAI_COMPAT_HISTORY_GUIDANCE not in matrix_agent.role
-    assert agent_prompts.OPENAI_COMPAT_HISTORY_GUIDANCE in openai_compat_agent.role
+    assert agent_prompts._OPENAI_COMPAT_HISTORY_GUIDANCE not in matrix_agent.role
+    assert agent_prompts._OPENAI_COMPAT_HISTORY_GUIDANCE in openai_compat_agent.role
 
 
 def test_config_round_trips_structured_agent_tool_entries() -> None:

@@ -28,7 +28,7 @@ MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
 SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
-SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
+_SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
 CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
 CREDENTIAL_SEEDS_FILE_ENV = "MINDROOM_CREDENTIAL_SEEDS_FILE"
 _CREDENTIAL_SEED_DECLARATION_ENV_NAMES = frozenset(
@@ -160,7 +160,7 @@ _SANDBOX_SHELL_SYSTEM_ENV_NAMES = frozenset(
 # Bash bookkeeping vars that change every time printenv runs and are never
 # meaningful overlay output from `.mindroom/worker-env.sh`.
 WORKSPACE_ENV_OVERLAY_TRANSIENT_NAMES = frozenset({"PWD", "OLDPWD", "SHLVL", "_", "PIPESTATUS"})
-WORKSPACE_HOME_IDENTITY_ENV_NAMES = frozenset(
+_WORKSPACE_HOME_IDENTITY_ENV_NAMES = frozenset(
     {
         "HOME",
         "MINDROOM_AGENT_WORKSPACE",
@@ -178,7 +178,7 @@ WORKER_RUNTIME_ENV_NAMES = frozenset(
         "VIRTUAL_ENV",
     },
 )
-WORKSPACE_HOME_CONTRACT_ENV_NAMES = WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_ENV_NAMES
+WORKSPACE_HOME_CONTRACT_ENV_NAMES = _WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_ENV_NAMES
 
 
 def is_workspace_env_overlay_name_allowed(name: str) -> bool:
@@ -311,7 +311,7 @@ def resolve_runtime_paths(
     resolved_config_arg = Path(config_path).expanduser().resolve() if config_path is not None else None
     resolved_process_env = _copy_process_env(process_env)
     resolved_config_path = (
-        Path(resolved_config_arg or find_config(process_env=resolved_process_env)).expanduser().resolve()
+        Path(resolved_config_arg or _find_config(process_env=resolved_process_env)).expanduser().resolve()
     )
     config_dir = resolved_config_path.parent
     env_path = config_dir / ".env"
@@ -412,7 +412,7 @@ def _is_sandbox_execution_runtime_env_name(name: str) -> bool:
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
 
 
-def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
+def _serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
     process_env = {
         key: value for key, value in runtime_paths.process_env.items() if _is_public_runtime_startup_env_name(key)
@@ -428,7 +428,7 @@ def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, obj
     }
 
 
-def serialize_startup_manifest(
+def _serialize_startup_manifest(
     runtime_paths: RuntimePaths,
     *,
     tool_validation_snapshot: Mapping[str, object] | None = None,
@@ -436,14 +436,14 @@ def serialize_startup_manifest(
 ) -> dict[str, object]:
     """Return one JSON-compatible startup manifest for sandbox runners."""
     return {
-        "runtime_paths": serialize_public_runtime_paths(runtime_paths)
+        "runtime_paths": _serialize_public_runtime_paths(runtime_paths)
         if public_runtime
         else serialize_runtime_paths(runtime_paths),
         "tool_validation_snapshot": dict(tool_validation_snapshot or {}),
     }
 
 
-def startup_manifest_json(
+def _startup_manifest_json(
     runtime_paths: RuntimePaths,
     *,
     tool_validation_snapshot: Mapping[str, object] | None = None,
@@ -451,7 +451,7 @@ def startup_manifest_json(
 ) -> str:
     """Return one deterministic JSON string for sandbox-runner startup state."""
     return json.dumps(
-        serialize_startup_manifest(
+        _serialize_startup_manifest(
             runtime_paths,
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
@@ -468,7 +468,7 @@ def startup_manifest_sha256(
     public_runtime: bool = False,
 ) -> str:
     """Return one stable content hash for sandbox-runner startup state."""
-    payload = startup_manifest_json(
+    payload = _startup_manifest_json(
         runtime_paths,
         tool_validation_snapshot=tool_validation_snapshot,
         public_runtime=public_runtime,
@@ -478,7 +478,7 @@ def startup_manifest_sha256(
 
 def sandbox_startup_manifest_path(storage_root: Path) -> Path:
     """Return the canonical startup manifest path under one runtime root."""
-    return storage_root / SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH
+    return storage_root / _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH
 
 
 def write_startup_manifest(
@@ -492,7 +492,7 @@ def write_startup_manifest(
     manifest_path = sandbox_startup_manifest_path(storage_root)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
-        startup_manifest_json(
+        _startup_manifest_json(
             runtime_paths,
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
@@ -686,7 +686,7 @@ def shell_extra_env_values(
     return cast("Mapping[str, str]", MappingProxyType(selected_env))
 
 
-def sandbox_shell_system_env_values(
+def _sandbox_shell_system_env_values(
     *,
     process_env: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
@@ -763,7 +763,7 @@ def sandbox_shell_execution_runtime_env_values(
     process_env: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied shell execution."""
-    merged_env = dict(sandbox_shell_system_env_values(process_env=process_env))
+    merged_env = dict(_sandbox_shell_system_env_values(process_env=process_env))
     merged_env.update(
         shell_extra_env_values(
             extra_env_passthrough=extra_env_passthrough,
@@ -831,12 +831,12 @@ def tracking_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "tracking"
 
 
-def memory_dir(runtime_paths: RuntimePaths) -> Path:
+def _memory_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the shared memory directory for one runtime context."""
     return runtime_paths.storage_root / "memory"
 
 
-def credentials_dir(runtime_paths: RuntimePaths) -> Path:
+def _credentials_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the credentials directory for one runtime context."""
     return runtime_paths.storage_root / "credentials"
 
@@ -891,7 +891,7 @@ def _use_storage_path_for_workspace_assets(runtime_paths: RuntimePaths) -> bool:
     )
 
 
-def avatars_dir(runtime_paths: RuntimePaths) -> Path:
+def _avatars_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the writable avatars directory for the active workspace.
 
     Source checkouts keep avatars next to the active config file so generated
@@ -905,7 +905,7 @@ def avatars_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.config_dir / "avatars"
 
 
-def bundled_avatars_dir() -> Path:
+def _bundled_avatars_dir() -> Path:
     """Return the bundled avatar directory shipped with a source checkout or runtime image."""
     return Path(__file__).resolve().parents[2] / "avatars"
 
@@ -916,7 +916,7 @@ def workspace_avatar_path(
     runtime_paths: RuntimePaths,
 ) -> Path:
     """Return the writable workspace avatar path for a managed entity."""
-    return avatars_dir(runtime_paths) / entity_type / f"{entity_name}.png"
+    return _avatars_dir(runtime_paths) / entity_type / f"{entity_name}.png"
 
 
 def resolve_avatar_path(
@@ -939,14 +939,14 @@ def resolve_avatar_path(
     if workspace_path.exists():
         return workspace_path
 
-    bundled_path = bundled_avatars_dir() / entity_type / f"{entity_name}.png"
+    bundled_path = _bundled_avatars_dir() / entity_type / f"{entity_name}.png"
     if bundled_path.exists():
         return bundled_path
 
     return workspace_path
 
 
-def find_config(*, process_env: Mapping[str, str]) -> Path:
+def _find_config(*, process_env: Mapping[str, str]) -> Path:
     """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
 
     Returns the original (possibly relative) path, not a resolved one,
@@ -960,7 +960,7 @@ def find_config(*, process_env: Mapping[str, str]) -> Path:
     return _CONFIG_SEARCH_PATHS[-1]  # default to ~/.mindroom/config.yaml for creation
 
 
-def set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) -> Path:
+def _set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) -> Path:
     """Return the storage root for the updated primary runtime context."""
     updated_runtime_paths = resolve_primary_runtime_paths(
         config_path=runtime_paths.config_path,

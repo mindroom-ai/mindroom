@@ -37,7 +37,9 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
-    render_interrupted_replay_content,
+)
+from mindroom.history.interrupted_replay import (
+    _render_interrupted_replay_content as render_interrupted_replay_content,
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -50,9 +52,15 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
-    CANCELLED_RESPONSE_NOTE,
-    INTERRUPTED_RESPONSE_NOTE,
-    PROGRESS_PLACEHOLDER,
+    _CANCELLED_RESPONSE_NOTE as CANCELLED_RESPONSE_NOTE,
+)
+from mindroom.streaming import (
+    _INTERRUPTED_RESPONSE_NOTE as INTERRUPTED_RESPONSE_NOTE,
+)
+from mindroom.streaming import (
+    _PROGRESS_PLACEHOLDER as PROGRESS_PLACEHOLDER,
+)
+from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,

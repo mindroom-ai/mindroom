@@ -32,14 +32,18 @@ from mindroom.thread_summary import (
     _thread_locks,
     _ThreadSummary,
     maybe_generate_thread_summary,
-    next_thread_summary_threshold,
     normalize_thread_summary_text,
     send_thread_summary_event,
     set_manual_thread_summary,
     should_queue_thread_summary,
-    thread_summary_cache_key,
     thread_summary_message_count_hint,
     update_last_summary_count,
+)
+from mindroom.thread_summary import (
+    _next_thread_summary_threshold as next_thread_summary_threshold,
+)
+from mindroom.thread_summary import (
+    _thread_summary_cache_key as thread_summary_cache_key,
 )
 from tests.conftest import make_matrix_client_mock
 

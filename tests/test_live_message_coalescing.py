@@ -36,22 +36,27 @@ from mindroom.dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
     PreparedTextEvent,
-    build_batch_dispatch_event,
     build_dispatch_handoff,
+)
+from mindroom.dispatch_handoff import (
+    _build_batch_dispatch_event as build_batch_dispatch_event,
 )
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
-    BatchMediaAttachmentResult,
     DispatchPayload,
     DispatchPayloadWithAttachmentsRequest,
+)
+from mindroom.inbound_turn_normalizer import (
+    _BatchMediaAttachmentResult as BatchMediaAttachmentResult,
 )
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.turn_controller import _PrecheckedEvent
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch
+from mindroom.turn_policy import PreparedDispatch
+from mindroom.turn_policy import _DispatchPlan as DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,

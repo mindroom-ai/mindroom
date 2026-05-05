@@ -13,7 +13,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.config_updates import build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 
 if TYPE_CHECKING:
     from pathlib import Path

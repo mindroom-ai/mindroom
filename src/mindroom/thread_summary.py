@@ -54,7 +54,7 @@ class ThreadSummaryWriteError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class ThreadSummaryWriteResult:
+class _ThreadSummaryWriteResult:
     """Successful manual thread summary write details."""
 
     event_id: str
@@ -121,19 +121,19 @@ def normalize_thread_summary_text(raw_text: str) -> str:
     return " ".join(normalized.split())
 
 
-def thread_summary_cache_key(room_id: str, thread_id: str) -> str:
+def _thread_summary_cache_key(room_id: str, thread_id: str) -> str:
     """Return the in-memory cache key for one room/thread pair."""
     return f"{room_id}:{thread_id}"
 
 
-def thread_summary_lock(room_id: str, thread_id: str) -> asyncio.Lock:
+def _thread_summary_lock(room_id: str, thread_id: str) -> asyncio.Lock:
     """Return the shared per-thread lock for summary writes."""
-    return _thread_locks[thread_summary_cache_key(room_id, thread_id)]
+    return _thread_locks[_thread_summary_cache_key(room_id, thread_id)]
 
 
 def update_last_summary_count(room_id: str, thread_id: str, message_count: int) -> None:
     """Record the latest summarized message count for one thread monotonically."""
-    cache_key = thread_summary_cache_key(room_id, thread_id)
+    cache_key = _thread_summary_cache_key(room_id, thread_id)
     existing_count = _last_summary_counts.get(cache_key, 0)
     if message_count > existing_count:
         _last_summary_counts[cache_key] = message_count
@@ -168,14 +168,14 @@ def thread_summary_message_count_hint(
     return _count_non_summary_messages(thread_history) + 1
 
 
-def next_thread_summary_threshold(
+def _next_thread_summary_threshold(
     room_id: str,
     thread_id: str,
     config: Config,
 ) -> int:
     """Return the next summary threshold using the current in-memory baseline."""
     return _next_threshold(
-        _last_summary_counts.get(thread_summary_cache_key(room_id, thread_id), 0),
+        _last_summary_counts.get(_thread_summary_cache_key(room_id, thread_id), 0),
         first_threshold=config.defaults.thread_summary_first_threshold,
         subsequent_interval=config.defaults.thread_summary_subsequent_interval,
     )
@@ -191,7 +191,7 @@ def should_queue_thread_summary(
     """Return whether the lower-bound hint is close enough to justify a live recheck."""
     if message_count_hint is None:
         return True
-    threshold = next_thread_summary_threshold(room_id, thread_id, config)
+    threshold = _next_thread_summary_threshold(room_id, thread_id, config)
     return message_count_hint >= threshold - _PREQUEUE_CONCURRENCY_MARGIN
 
 
@@ -447,7 +447,7 @@ async def set_manual_thread_summary(
     *,
     config: Config,
     conversation_cache: ConversationCacheProtocol,
-) -> ThreadSummaryWriteResult:
+) -> _ThreadSummaryWriteResult:
     """Write one validated manual summary for a canonical thread root."""
     if not isinstance(summary, str) or not summary.strip():
         msg = "summary must be a non-empty string."
@@ -461,7 +461,7 @@ async def set_manual_thread_summary(
         msg = f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
         raise ThreadSummaryWriteError(msg)
 
-    async with thread_summary_lock(room_id, thread_id):
+    async with _thread_summary_lock(room_id, thread_id):
         try:
             thread_history = await _load_thread_history(
                 conversation_cache,
@@ -492,7 +492,7 @@ async def set_manual_thread_summary(
             raise ThreadSummaryWriteError(msg)
 
         update_last_summary_count(room_id, thread_id, message_count)
-        return ThreadSummaryWriteResult(
+        return _ThreadSummaryWriteResult(
             event_id=event_id,
             message_count=message_count,
             summary=normalized_summary,
@@ -510,15 +510,15 @@ async def maybe_generate_thread_summary(
     message_count_hint: int | None = None,
 ) -> None:
     """Generate and send a thread summary if the message count crosses a threshold."""
-    async with thread_summary_lock(room_id, thread_id):
-        cache_key = thread_summary_cache_key(room_id, thread_id)
+    async with _thread_summary_lock(room_id, thread_id):
+        cache_key = _thread_summary_cache_key(room_id, thread_id)
         # Recover from existing summary events on cache miss (e.g., after restart)
         if cache_key not in _last_summary_counts:
             recovered = await _recover_last_summary_count(client, room_id, thread_id)
             if recovered > 0:
                 update_last_summary_count(room_id, thread_id, recovered)
 
-        threshold = next_thread_summary_threshold(room_id, thread_id, config)
+        threshold = _next_thread_summary_threshold(room_id, thread_id, config)
 
         # message_count_hint comes from a pre-send snapshot and is only a
         # lower bound. Other agents or humans can post before this background

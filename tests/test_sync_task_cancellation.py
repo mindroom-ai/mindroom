@@ -12,13 +12,13 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, cancel_failure_reason
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
+from mindroom.cancellation import _cancel_failure_reason as cancel_failure_reason
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.runtime import (
     EntityStartResults,
-    MatrixSyncStalledError,
     _SyncIteration,
     cancel_sync_task,
     classify_cancel_source,
@@ -27,7 +27,10 @@ from mindroom.orchestration.runtime import (
     stop_entities,
     sync_forever_with_restart,
 )
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestration.runtime import (
+    _MatrixSyncStalledError as MatrixSyncStalledError,
+)
+from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
 from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock, orchestrator_runtime_paths
 
 
@@ -774,7 +777,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.orchestrator.sync_forever_with_restart"),
         patch("mindroom.orchestrator.create_temp_user") as mock_create_temp_user,
-        patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
+        patch("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # Create orchestrator with existing agent
         orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))

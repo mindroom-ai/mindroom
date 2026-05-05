@@ -41,9 +41,9 @@ ANNOTATION_FAILURE_REASON = "mindroom.ai/failure-reason"
 ANNOTATION_WORKER_KEY = "mindroom.ai/worker-key"
 ANNOTATION_WORKER_STATUS = "mindroom.ai/worker-status"
 ANNOTATION_STATE_SUBPATH = "mindroom.ai/state-subpath"
-ANNOTATION_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
-ANNOTATION_RUNNER_TOKEN_HASH = "mindroom.ai/runner-token-hash"  # noqa: S105
-ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
+_ANNOTATION_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
+_ANNOTATION_RUNNER_TOKEN_HASH = "mindroom.ai/runner-token-hash"  # noqa: S105
+_ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -196,7 +196,7 @@ def worker_auth_token(shared_token: str | None, worker_key: str) -> str | None:
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
-def worker_auth_token_hash(shared_token: str | None, worker_key: str) -> str | None:
+def _worker_auth_token_hash(shared_token: str | None, worker_key: str) -> str | None:
     """Return a stable non-secret marker for the derived worker token."""
     token = worker_auth_token(shared_token, worker_key)
     if token is None:
@@ -407,7 +407,7 @@ class KubernetesResourceManager:
             existing_annotations = existing.metadata.annotations or {}
             desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
             desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
-            if existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]:
+            if existing_annotations.get(_ANNOTATION_TEMPLATE_HASH) != desired_annotations[_ANNOTATION_TEMPLATE_HASH]:
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
                 return DeploymentApplyResult(recreated=True)
         self._apply_object(
@@ -675,12 +675,12 @@ class KubernetesResourceManager:
         )
         template_annotations = dict(self.config.extra_annotations)
         template_annotations[ANNOTATION_WORKER_KEY] = worker_key
-        template_annotations[ANNOTATION_STARTUP_MANIFEST_HASH] = startup_manifest_hash
-        token_hash = worker_auth_token_hash(self.auth_token, worker_key)
+        template_annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] = startup_manifest_hash
+        token_hash = _worker_auth_token_hash(self.auth_token, worker_key)
         if token_hash is None:
             msg = "A worker auth token is required for Kubernetes workers."
             raise WorkerBackendError(msg)
-        template_annotations[ANNOTATION_RUNNER_TOKEN_HASH] = token_hash
+        template_annotations[_ANNOTATION_RUNNER_TOKEN_HASH] = token_hash
         template_metadata = {
             "labels": worker_labels,
             "annotations": template_annotations,
@@ -754,7 +754,7 @@ class KubernetesResourceManager:
         if node_name is not None:
             template_spec["nodeName"] = node_name
         desired_annotations = dict(annotations)
-        desired_annotations[ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
+        desired_annotations[_ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
         metadata["annotations"] = desired_annotations
 
         return {

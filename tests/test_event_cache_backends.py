@@ -19,20 +19,32 @@ from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cac
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
     PostgresEventCache,
-    PostgresEventCacheRuntime,
     _is_transient_postgres_failure,
-    initialize_postgres_event_cache_db,
+)
+from mindroom.matrix.cache.postgres_event_cache import (
+    _initialize_postgres_event_cache_db as initialize_postgres_event_cache_db,
+)
+from mindroom.matrix.cache.postgres_event_cache import (
+    _PostgresEventCacheRuntime as PostgresEventCacheRuntime,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.runtime_support import (
-    EventCacheRuntimeIdentity,
     OwnedRuntimeSupport,
     StartupThreadPrewarmRegistry,
-    build_event_cache,
-    event_cache_runtime_identity,
-    initialize_event_cache_best_effort,
     sync_owned_runtime_support,
+)
+from mindroom.runtime_support import (
+    _build_event_cache as build_event_cache,
+)
+from mindroom.runtime_support import (
+    _event_cache_runtime_identity as event_cache_runtime_identity,
+)
+from mindroom.runtime_support import (
+    _EventCacheRuntimeIdentity as EventCacheRuntimeIdentity,
+)
+from mindroom.runtime_support import (
+    _initialize_event_cache_best_effort as initialize_event_cache_best_effort,
 )
 
 if TYPE_CHECKING:
@@ -305,10 +317,10 @@ async def test_sqlite_event_cache_initialize_closes_db_after_cancellation(
         raise asyncio.CancelledError(cancel_reason)
 
     monkeypatch.setattr(sqlite_event_cache.aiosqlite, "connect", connect)
-    monkeypatch.setattr(sqlite_event_cache, "reset_stale_cache_if_needed", reset_stale_cache_if_needed)
+    monkeypatch.setattr(sqlite_event_cache, "_reset_stale_cache_if_needed", reset_stale_cache_if_needed)
 
     with pytest.raises(asyncio.CancelledError, match=cancel_reason):
-        await sqlite_event_cache.initialize_event_cache_db(tmp_path / "event_cache.db")
+        await sqlite_event_cache._initialize_event_cache_db(tmp_path / "event_cache.db")
 
     db.close.assert_awaited_once()
 
@@ -348,7 +360,7 @@ async def test_postgres_event_cache_initialize_attempts_cleanup_without_masking_
         raise asyncio.CancelledError(cancel_reason)
 
     monkeypatch.setattr("mindroom.matrix.cache.postgres_event_cache.psycopg.AsyncConnection.connect", connect)
-    monkeypatch.setattr("mindroom.matrix.cache.postgres_event_cache.create_postgres_event_cache_schema", create_schema)
+    monkeypatch.setattr("mindroom.matrix.cache.postgres_event_cache._create_postgres_event_cache_schema", create_schema)
 
     with pytest.raises(asyncio.CancelledError, match=cancel_reason):
         await initialize_postgres_event_cache_db(

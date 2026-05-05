@@ -5,16 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol, cast, runtime_checkable
 
-MESSAGE_SOURCE_KIND = "message"
-VOICE_SOURCE_KIND = "voice"
-IMAGE_SOURCE_KIND = "image"
-MEDIA_SOURCE_KIND = "media"
+_MESSAGE_SOURCE_KIND = "message"
+_VOICE_SOURCE_KIND = "voice"
+_IMAGE_SOURCE_KIND = "image"
+_MEDIA_SOURCE_KIND = "media"
 SCHEDULED_SOURCE_KIND = "scheduled"
 HOOK_SOURCE_KIND = "hook"
 HOOK_DISPATCH_SOURCE_KIND = "hook_dispatch"
 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND = "active_thread_follow_up"
 TRUSTED_INTERNAL_RELAY_SOURCE_KIND = "trusted_internal_relay"
-AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
+_AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         SCHEDULED_SOURCE_KIND,
         HOOK_SOURCE_KIND,
@@ -50,7 +50,7 @@ class _HasSender(Protocol):
 
 def is_automation_source_kind(source_kind: str) -> bool:
     """Return whether one source kind is synthetic automation."""
-    return source_kind in AUTOMATION_SOURCE_KINDS
+    return source_kind in _AUTOMATION_SOURCE_KINDS
 
 
 def _source_kind_from_content(content: Mapping[str, Any]) -> str | None:
@@ -93,4 +93,4 @@ def is_voice_event(
             sender_is_trusted=sender_is_trusted,
         )
     )
-    return source_kind == VOICE_SOURCE_KIND
+    return source_kind == _VOICE_SOURCE_KIND

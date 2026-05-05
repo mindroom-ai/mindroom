@@ -103,7 +103,7 @@ def _publish_config(
     context.config_load_result = main.ConfigLoadResult(success=True)
     context.auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
-        settings=auth.ApiAuthSettings(
+        settings=auth._ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
             supabase_anon_key=None,
@@ -1669,7 +1669,7 @@ def test_agent_connect_token_stores_credentials_in_matrix_requester_scope(tmp_pa
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
     assert worker_target.execution_identity is not None
-    connect_token = oauth_service.issue_oauth_connect_token(
+    connect_token = oauth_service._issue_oauth_connect_token(
         provider,
         runtime_paths,
         worker_target,
@@ -1754,7 +1754,7 @@ def test_agent_connect_token_uses_trusted_upstream_matrix_requester(tmp_path: Pa
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -1801,7 +1801,7 @@ def test_agent_connect_token_accepts_trusted_upstream_derived_matrix_requester(t
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
 
     headers = {
@@ -1852,7 +1852,7 @@ def test_agent_connect_token_accepts_historical_trusted_upstream_matrix_requeste
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -1895,7 +1895,7 @@ def test_agent_connect_token_rejects_trusted_upstream_requester_mismatch(tmp_pat
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -1930,7 +1930,7 @@ def test_agent_connect_token_rejects_missing_trusted_upstream_identity(tmp_path:
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -1965,7 +1965,7 @@ def test_agent_connect_token_missing_trusted_identity_does_not_redirect_to_stand
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -2001,7 +2001,7 @@ def test_agent_connect_token_rejects_trusted_upstream_identity_without_matrix_ma
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -2032,7 +2032,7 @@ def test_agent_connect_token_callback_rejects_missing_trusted_upstream_identity(
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -2069,7 +2069,7 @@ def test_agent_connect_token_callback_rejects_changed_trusted_matrix_requester(t
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -2122,7 +2122,7 @@ def _connect_token_for_devagent(provider: OAuthProvider, runtime_paths: constant
         session_id=None,
     )
     worker_target = resolve_worker_target("user_agent", "devagent", execution_identity=identity)
-    connect_token = oauth_service.issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
     return connect_token
 
@@ -2222,7 +2222,7 @@ def test_agent_connect_token_rejects_wrong_authenticated_requester(tmp_path: Pat
     )
     worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
     assert worker_target.execution_identity is not None
-    connect_token = oauth_service.issue_oauth_connect_token(
+    connect_token = oauth_service._issue_oauth_connect_token(
         provider,
         runtime_paths,
         worker_target,
@@ -2266,7 +2266,7 @@ def test_shared_agent_connect_token_rejects_wrong_authenticated_requester(tmp_pa
     )
     worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
     assert worker_target.execution_identity is not None
-    connect_token = oauth_service.issue_oauth_connect_token(
+    connect_token = oauth_service._issue_oauth_connect_token(
         provider,
         runtime_paths,
         worker_target,

@@ -17,7 +17,9 @@ from agno.models.message import Message
 from agno.models.response import ModelResponse
 
 from mindroom import codex_model
-from mindroom.codex_model import CODEX_BASE_URL, CodexResponses, borrow_codex_key
+from mindroom.codex_model import _CODEX_BASE_URL as CODEX_BASE_URL
+from mindroom.codex_model import CodexResponses
+from mindroom.codex_model import _borrow_codex_key as borrow_codex_key
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths

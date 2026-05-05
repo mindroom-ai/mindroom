@@ -51,7 +51,7 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
     )
 
 
-class CommandEvent(Protocol):
+class _CommandEvent(Protocol):
     """Minimal canonical text-event shape required by command handling."""
 
     sender: str
@@ -60,7 +60,7 @@ class CommandEvent(Protocol):
     source: dict[str, Any]
 
 
-class DeriveConversationContext(Protocol):
+class _DeriveConversationContext(Protocol):
     """Callable signature for deriving conversation thread context."""
 
     async def __call__(
@@ -82,7 +82,7 @@ class CommandHandlerContext:
     config: Config
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
-    derive_conversation_context: DeriveConversationContext
+    derive_conversation_context: _DeriveConversationContext
     conversation_cache: ConversationCacheProtocol
     event_cache: ConversationEventCache
     build_message_target: Callable[..., MessageTarget]
@@ -190,7 +190,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     *,
     context: CommandHandlerContext,
     room: nio.MatrixRoom,
-    event: CommandEvent,
+    event: _CommandEvent,
     command: Command,
     requester_user_id: str,
 ) -> None:

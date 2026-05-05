@@ -21,7 +21,7 @@ _OPENAI_EMBEDDING_DIMENSIONS = {
     "text-embedding-3-large": 3072,
     "text-embedding-3-small": 1536,
 }
-DEFAULT_SENTENCE_TRANSFORMERS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+_DEFAULT_SENTENCE_TRANSFORMERS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 _SENTENCE_TRANSFORMERS_DEPENDENCIES = ["sentence-transformers"]
 _SENTENCE_TRANSFORMERS_EXTRA = "sentence_transformers"
 
@@ -82,7 +82,7 @@ def ensure_sentence_transformers_dependencies(runtime_paths: RuntimePaths) -> No
 
 def create_sentence_transformers_embedder(
     runtime_paths: RuntimePaths,
-    model: str = DEFAULT_SENTENCE_TRANSFORMERS_MODEL,
+    model: str = _DEFAULT_SENTENCE_TRANSFORMERS_MODEL,
     *,
     dimensions: int | None = None,
 ) -> Embedder:
