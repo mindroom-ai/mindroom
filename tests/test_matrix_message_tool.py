@@ -337,7 +337,7 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
             {"emoji": "✅", "label": "Approve", "value": "approve"},
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
-        ignore_unverified_devices=False,
+        config=ctx.config,
     )
 
 
@@ -1164,7 +1164,7 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
             {"emoji": "✅", "label": "Approve", "value": "approve"},
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
-        ignore_unverified_devices=False,
+        config=ctx.config,
     )
 
 
@@ -1258,7 +1258,7 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
             {"emoji": "✅", "label": "Approve", "value": "approve"},
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
-        ignore_unverified_devices=False,
+        config=ctx.config,
     )
 
 

@@ -374,7 +374,7 @@ async def send_thread_summary_event(
     model_name: str,
     conversation_cache: ConversationCacheProtocol,
     *,
-    config: Config | None = None,
+    config: Config,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event."""
     normalized_summary = normalize_thread_summary_text(summary)
@@ -445,7 +445,7 @@ async def set_manual_thread_summary(
     thread_id: str,
     summary: str,
     *,
-    config: Config | None = None,
+    config: Config,
     conversation_cache: ConversationCacheProtocol,
 ) -> ThreadSummaryWriteResult:
     """Write one validated manual summary for a canonical thread root."""
@@ -474,7 +474,6 @@ async def set_manual_thread_summary(
 
         message_count = _count_non_summary_messages(thread_history)
         try:
-            send_kwargs = {"config": config} if config is not None else {}
             event_id = await send_thread_summary_event(
                 client,
                 room_id,
@@ -483,7 +482,7 @@ async def set_manual_thread_summary(
                 message_count,
                 "manual",
                 conversation_cache,
-                **send_kwargs,
+                config=config,
             )
         except Exception as exc:
             msg = "Failed to send thread summary event."

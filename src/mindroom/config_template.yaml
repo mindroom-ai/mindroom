@@ -53,11 +53,6 @@ matrix_space:
   enabled: true
   name: MindRoom
 
-# Matrix delivery behavior.
-# Leave disabled unless you intentionally accept delivery to encrypted rooms with unverified devices.
-matrix_delivery:
-  ignore_unverified_devices: false
-
 # Persistent Matrix thread history cache.
 # This cache is always enabled.
 # SQLite is the default for local installs.

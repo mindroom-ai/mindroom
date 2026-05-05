@@ -10,6 +10,7 @@ import nio
 import pytest
 from nio.exceptions import OlmUnverifiedDeviceError
 
+from mindroom.config.main import Config
 from mindroom.matrix.client import DeliveredMatrixEvent, join_room
 from mindroom.matrix.client_delivery import (
     _msgtype_for_mimetype,
@@ -156,8 +157,15 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
             nonlocal sent_content
+            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -169,6 +177,7 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
+                config=Config(),
             )
 
         assert event_id == "$evt:localhost"
@@ -188,8 +197,15 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
             nonlocal sent_content
+            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -215,6 +231,7 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
+                config=Config(),
             )
 
         assert event_id == "$evt:localhost"
@@ -231,8 +248,15 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
             nonlocal sent_content
+            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -244,6 +268,7 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
+                config=Config(),
                 thread_id="$root:localhost",
                 latest_thread_event_id="$latest:localhost",
             )
@@ -264,8 +289,15 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
             nonlocal sent_content
+            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -277,6 +309,7 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
+                config=Config(),
                 thread_id="$root:localhost",
                 latest_thread_event_id="$precomputed:localhost",
             )
@@ -298,6 +331,7 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
+                config=Config(),
                 thread_id="$root:localhost",
             )
 
@@ -334,6 +368,7 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
+                config=Config(),
                 thread_id="$root:localhost",
                 latest_thread_event_id="$precomputed:localhost",
                 conversation_cache=conversation_cache,
@@ -355,6 +390,7 @@ class TestSendFileMessage:
             client,
             "!room:localhost",
             tmp_path / "gone.txt",
+            config=Config(),
         )
         assert result is None
 
@@ -374,6 +410,7 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
+                config=Config(),
             )
 
         assert result is None
@@ -387,8 +424,15 @@ class TestSendFileMessage:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
             nonlocal sent_content
+            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -400,6 +444,7 @@ class TestSendFileMessage:
                 client,
                 "!room:localhost",
                 file,
+                config=Config(),
                 caption="Q4 Report",
             )
 
@@ -439,7 +484,12 @@ class TestSendMessageResult:
             patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False),
             patch("mindroom.matrix.client_delivery.prepare_large_message", new_callable=AsyncMock) as mock_prepare,
         ):
-            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+                config=Config(),
+            )
 
         assert result is None
         mock_prepare.assert_not_awaited()
@@ -462,7 +512,12 @@ class TestSendMessageResult:
         prepared_content = {"body": "hello", "msgtype": "m.text"}
         with patch("mindroom.matrix.client_delivery.prepare_large_message", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = prepared_content
-            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+                config=Config(),
+            )
 
         assert result is not None
         assert result.event_id == "$evt:localhost"
@@ -491,7 +546,12 @@ class TestSendMessageResult:
             "mindroom.matrix.client_delivery.prepare_large_message",
             new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
         ):
-            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+                config=Config(),
+            )
 
         assert result is None
         client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
@@ -509,7 +569,12 @@ class TestSendMessageResult:
             "mindroom.matrix.client_delivery.prepare_large_message",
             new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
         ):
-            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+                config=Config(),
+            )
 
         assert result is not None
         assert result.event_id == "$evt:localhost"
@@ -531,7 +596,12 @@ class TestSendMessageResult:
             ),
             patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
         ):
-            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+                config=Config(),
+            )
 
         assert result is None
         mock_error.assert_called_once()
@@ -563,6 +633,7 @@ class TestSendMessageResult:
                 "$placeholder",
                 {"body": "hello", "msgtype": "m.text"},
                 "hello",
+                config=Config(),
             )
 
         assert result is None
@@ -585,7 +656,12 @@ class TestSendMessageResult:
             ),
             patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
         ):
-            result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+                config=Config(),
+            )
 
         assert result is None
         assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
@@ -621,8 +697,15 @@ class TestSendFileMessageMsgtype:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
             nonlocal sent_content
+            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -634,6 +717,7 @@ class TestSendFileMessageMsgtype:
                 client,
                 "!room:localhost",
                 file,
+                config=Config(),
             )
 
         assert event_id == "$evt:localhost"
@@ -651,8 +735,15 @@ class TestSendFileMessageMsgtype:
 
         sent_content: dict | None = None
 
-        async def capture_send(_client: object, _room: str, content: dict, **_kwargs: object) -> DeliveredMatrixEvent:
+        async def capture_send(
+            _client: object,
+            _room: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> DeliveredMatrixEvent:
             nonlocal sent_content
+            assert isinstance(config, Config)
             sent_content = content
             return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
 
@@ -664,6 +755,7 @@ class TestSendFileMessageMsgtype:
                 client,
                 "!room:localhost",
                 file,
+                config=Config(),
             )
 
         assert event_id == "$evt:localhost"

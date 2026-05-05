@@ -518,7 +518,14 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
 
     captured_content: dict[str, object] = {}
 
-    async def mock_send(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+    async def mock_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+        *,
+        config: Config,
+    ) -> object:
+        assert isinstance(config, Config)
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
@@ -553,7 +560,14 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
 
     captured_content: dict[str, object] = {}
 
-    async def mock_send(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+    async def mock_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+        *,
+        config: Config,
+    ) -> object:
+        assert isinstance(config, Config)
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
@@ -1159,7 +1173,14 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
 
     captured_content: dict[str, object] = {}
 
-    async def mock_send(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+    async def mock_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+        *,
+        config: Config,
+    ) -> object:
+        assert isinstance(config, Config)
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
@@ -1185,7 +1206,14 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
 
     captured_content: dict[str, object] = {}
 
-    async def mock_send(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+    async def mock_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+        *,
+        config: Config,
+    ) -> object:
+        assert isinstance(config, Config)
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 

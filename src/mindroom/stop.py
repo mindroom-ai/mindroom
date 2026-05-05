@@ -11,6 +11,7 @@ import nio
 from agno.run.cancel import acancel_run
 
 from mindroom.cancellation import USER_STOP_CANCEL_MSG, request_task_cancel
+from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 
     from nio import AsyncClient
 
+    from mindroom.config.main import Config
     from mindroom.message_target import MessageTarget
 
 logger = get_logger(__name__)
@@ -350,7 +352,7 @@ class StopManager:
         client: AsyncClient,
         message_id: str,
         *,
-        ignore_unverified_devices: bool = False,
+        config: Config,
         notify_outbound_event: Callable[[str, dict[str, object]], None] | None = None,
     ) -> str | None:
         """Add a stop button reaction to a tracked message."""
@@ -375,7 +377,7 @@ class StopManager:
                         "key": "🛑",
                     },
                 },
-                ignore_unverified_devices=ignore_unverified_devices,
+                ignore_unverified_devices=ignore_unverified_devices_for_config(config),
             )
             if isinstance(response, nio.RoomSendResponse):
                 event_id = str(response.event_id)

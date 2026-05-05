@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 
+from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id
 from mindroom.custom_tools.attachments import (
@@ -22,7 +23,11 @@ from mindroom.interactive import (
     should_create_interactive_question,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import edit_message_result, send_file_message, send_message_result
+from mindroom.matrix.client_delivery import (
+    edit_message_result,
+    send_file_message,
+    send_message_result,
+)
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_visible_messages import extract_visible_message as extract_and_resolve_message
 from mindroom.matrix.client_visible_messages import (
@@ -129,7 +134,7 @@ class MatrixMessageOperations:
             room_id,
             event_id,
             response.interactive_metadata.options_as_list(),
-            ignore_unverified_devices=context.config.matrix_delivery.ignore_unverified_devices,
+            config=context.config,
         )
 
     async def _message_send_or_reply(  # noqa: C901, PLR0911, PLR0912
@@ -345,7 +350,7 @@ class MatrixMessageOperations:
             room_id=room_id,
             message_type="m.reaction",
             content=content,
-            ignore_unverified_devices=context.config.matrix_delivery.ignore_unverified_devices,
+            ignore_unverified_devices=ignore_unverified_devices_for_config(context.config),
         )
         if isinstance(response, nio.RoomSendResponse):
             return self._result(
@@ -685,7 +690,7 @@ class MatrixMessageOperations:
                 room_id,
                 target,
                 interactive_response.interactive_metadata.options_as_list(),
-                ignore_unverified_devices=context.config.matrix_delivery.ignore_unverified_devices,
+                config=context.config,
             )
 
         return self._result(

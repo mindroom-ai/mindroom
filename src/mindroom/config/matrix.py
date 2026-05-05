@@ -17,6 +17,7 @@ from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, r
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 _RoomAccessMode = Literal["single_user_private", "multi_user"]
@@ -101,6 +102,11 @@ class MatrixDeliveryConfig(BaseModel):
             "The default keeps nio's device-trust checks enabled."
         ),
     )
+
+
+def ignore_unverified_devices_for_config(config: Config) -> bool:
+    """Return the explicit Matrix delivery trust policy for outgoing sends."""
+    return config.matrix_delivery.ignore_unverified_devices
 
 
 class MatrixRoomAccessConfig(BaseModel):

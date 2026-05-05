@@ -16,6 +16,7 @@ from nio import crypto
 from nio.api import Api
 from nio.exceptions import OlmTrustError
 
+from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -64,13 +65,6 @@ def _log_matrix_delivery_exception(
         exception_type=error.__class__.__name__,
         error_message=_sanitized_delivery_error_message(error),
     )
-
-
-def _ignore_unverified_devices_for_config(config: Config | None) -> bool:
-    """Return the explicit Matrix delivery trust policy for outgoing sends."""
-    if config is None:
-        return False
-    return config.matrix_delivery.ignore_unverified_devices
 
 
 async def _send_prepared_room_message(
@@ -162,7 +156,7 @@ async def send_message_result(
     room_id: str,
     content: dict[str, Any],
     *,
-    config: Config | None = None,
+    config: Config,
     operation: str = "send_message",
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
@@ -221,7 +215,7 @@ async def send_message_result(
         message_type=message_type,
         cache_bypass=cache_bypass,
         operation=operation,
-        ignore_unverified_devices=_ignore_unverified_devices_for_config(config),
+        ignore_unverified_devices=ignore_unverified_devices_for_config(config),
     )
     if response is None:
         emit_timing_event(
@@ -365,7 +359,7 @@ async def send_file_message(
     room_id: str,
     file_path: str | Path,
     *,
-    config: Config | None = None,
+    config: Config,
     thread_id: str | None = None,
     caption: str | None = None,
     latest_thread_event_id: str | None = None,
@@ -484,7 +478,7 @@ async def edit_message_result(
     new_content: dict[str, Any],
     new_text: str,
     *,
-    config: Config | None = None,
+    config: Config,
     extra_content: dict[str, Any] | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the exact delivered payload."""

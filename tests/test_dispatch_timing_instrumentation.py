@@ -13,6 +13,7 @@ from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallStartedEvent
 
 from mindroom import ai as ai_module
+from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.matrix.cache.thread_writes import ThreadOutboundWritePolicy
@@ -137,7 +138,12 @@ async def test_send_message_result_marks_prepare_and_send_phases() -> None:
             create=True,
         ),
     ):
-        result = await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
+        result = await send_message_result(
+            client,
+            "!room:localhost",
+            {"body": "hello", "msgtype": "m.text"},
+            config=Config(),
+        )
 
     assert result is not None
     assert result.event_id == "$evt:localhost"

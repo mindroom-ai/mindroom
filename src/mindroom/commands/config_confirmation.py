@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -301,7 +302,7 @@ async def add_confirmation_reactions(
     room_id: str,
     event_id: str,
     *,
-    config: Config | None = None,
+    config: Config,
 ) -> None:
     """Add confirmation reaction buttons to a config change message.
 
@@ -309,10 +310,10 @@ async def add_confirmation_reactions(
         client: The Matrix client
         room_id: The room ID
         event_id: The event ID of the message to add reactions to
-        config: Optional active config for Matrix delivery policy
+        config: Active config for Matrix delivery policy
 
     """
-    ignore_unverified_devices = False if config is None else config.matrix_delivery.ignore_unverified_devices
+    ignore_unverified_devices = ignore_unverified_devices_for_config(config)
     # Add ✅ reaction
     confirm_response = await client.room_send(
         room_id=room_id,

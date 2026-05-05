@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 import nio
 from agno.tools import Toolkit
 
+from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_bookkeeping import (
@@ -822,7 +823,7 @@ class MatrixApiTools(Toolkit):
                 room_id=room_id,
                 message_type=normalized_event_type,
                 content=normalized_content,
-                ignore_unverified_devices=context.config.matrix_delivery.ignore_unverified_devices,
+                ignore_unverified_devices=ignore_unverified_devices_for_config(context.config),
             )
         except Exception as exc:
             self._audit_write(

@@ -21,7 +21,7 @@ async def send_message_result(
     room_id: str,
     content: dict[str, Any],
     *,
-    config: Config | None = None,
+    config: Config,
 ) -> DeliveredMatrixEvent | None:
     """Late-bind Matrix delivery to avoid the hooks facade import cycle."""
     # why-lazy: client_delivery imports config through Matrix formatting helpers during facade startup.

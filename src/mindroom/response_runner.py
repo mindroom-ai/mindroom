@@ -1424,9 +1424,7 @@ class ResponseRunner:
                     stop_manager=self.deps.stop_manager,
                     logger=self.deps.logger,
                     show_stop_button=lambda: self.deps.runtime.config.defaults.show_stop_button,
-                    ignore_unverified_devices=(
-                        lambda: self.deps.runtime.config.matrix_delivery.ignore_unverified_devices
-                    ),
+                    config=self.deps.runtime.config,
                     notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
                     notify_outbound_redaction=(
                         self.deps.post_response_effects.conversation_cache.notify_outbound_redaction

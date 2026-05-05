@@ -41,6 +41,11 @@ def _matrix_client_mock() -> AsyncMock:
     return make_matrix_client_mock()
 
 
+def _require_config(value: Config, text: str) -> str:
+    assert isinstance(value, Config)
+    return text
+
+
 @pytest.mark.asyncio
 async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None:
     """Worker warmup notices should edit the placeholder stream body and disappear before content arrives."""
@@ -69,9 +74,10 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         _client: object,
         _room_id: str,
         content: dict[str, object],
-        **_kwargs: object,
+        *,
+        config: Config,
     ) -> DeliveredMatrixEvent:
-        deliveries.append(("send", str(content["body"])))
+        deliveries.append(("send", _require_config(config, str(content["body"]))))
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
     async def record_edit(
@@ -80,9 +86,10 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         _event_id: str,
         new_content: dict[str, object],
         new_text: str,
-        **_kwargs: object,
+        *,
+        config: Config,
     ) -> DeliveredMatrixEvent:
-        deliveries.append(("edit", new_text))
+        deliveries.append(("edit", _require_config(config, new_text)))
         return DeliveredMatrixEvent(event_id="$stream_edit", content_sent=dict(new_content))
 
     async def stream() -> AsyncGenerator[object, None]:
