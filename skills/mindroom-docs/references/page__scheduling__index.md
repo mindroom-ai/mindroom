@@ -64,7 +64,7 @@ Include `@agent_name` in your schedule to have specific agents respond. The sche
 
 Schedules use the timezone from `config.yaml` (defaults to UTC):
 
-```
+```yaml
 timezone: America/Los_Angeles
 ```
 

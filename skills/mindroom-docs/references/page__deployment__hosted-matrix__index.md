@@ -23,7 +23,7 @@ This guide covers the simplest production-like setup:
 
 ## 1. Initialize Local Config
 
-```
+```bash
 uvx mindroom config init --profile public
 ```
 
@@ -34,7 +34,7 @@ Use `uvx mindroom config init --profile public-codex` if you want the starter co
 
 Edit `~/.mindroom/.env` and set at least one provider key:
 
-```
+```bash
 OPENAI_API_KEY=...
 # or OPENROUTER_API_KEY=...
 ```
@@ -49,7 +49,7 @@ MindRoom reads `~/.codex/auth.json` by default.
 1. Click `Generate Pair Code`.
 1. Run locally:
 
-```
+```bash
 uvx mindroom connect --pair-code ABCD-EFGH
 ```
 
@@ -62,7 +62,7 @@ After successful pairing, local provisioning credentials are written to `~/.mind
 
 ## 4. Start MindRoom
 
-```
+```bash
 uvx mindroom run
 ```
 

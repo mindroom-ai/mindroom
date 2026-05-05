@@ -49,7 +49,7 @@ The file-management surface includes `create_file()`, `get_file_content()`, `upd
 
 ### Example
 
-```
+```yaml
 agents:
   maintainer:
     tools:
@@ -57,7 +57,7 @@ agents:
           base_url: https://github.example.com/api/v3
 ```
 
-```
+```python
 get_repository("mindroom-ai/mindroom")
 list_issues("mindroom-ai/mindroom", state="open", page=1, per_page=20)
 get_pull_request("mindroom-ai/mindroom", 123)
@@ -93,7 +93,7 @@ If `server_url` has no scheme, the upstream tool normalizes it to `https://<serv
 
 ### Example
 
-```
+```yaml
 agents:
   maintainer:
     tools:
@@ -103,7 +103,7 @@ agents:
           repo_slug: docs
 ```
 
-```
+```python
 get_repository_details()
 list_all_pull_requests(state="OPEN")
 list_repository_commits(count=10)
@@ -142,7 +142,7 @@ list_repository_commits(count=10)
 
 ### Example
 
-```
+```yaml
 agents:
   delivery:
     tools:
@@ -152,7 +152,7 @@ agents:
           enable_add_worklog: false
 ```
 
-```
+```python
 get_issue("PROJ-123")
 search_issues("project = PROJ AND status != Done", max_results=20)
 add_comment("PROJ-123", "Reviewed and ready for testing.")
@@ -182,14 +182,14 @@ The read methods are useful for discovering the IDs you need before calling `cre
 
 ### Example
 
-```
+```yaml
 agents:
   delivery:
     tools:
       - linear
 ```
 
-```
+```python
 get_user_details()
 get_teams_details()
 get_high_priority_issues()
@@ -221,7 +221,7 @@ Name-based space and list lookup is case-insensitive and also supports regex-sty
 
 ### Example
 
-```
+```yaml
 agents:
   delivery:
     tools:
@@ -229,7 +229,7 @@ agents:
           master_space_id: "90123456"
 ```
 
-```
+```python
 list_spaces()
 list_lists("Engineering")
 create_task("Engineering", "ISSUE-075", "Draft the project-management tool page")
@@ -264,7 +264,7 @@ At runtime the tool accepts either `api_key` or `password`, with the current imp
 
 ### Example
 
-```
+```yaml
 agents:
   docs:
     tools:
@@ -273,7 +273,7 @@ agents:
           username: docs@example.com
 ```
 
-```
+```python
 get_all_space_detail()
 get_page_content("Engineering", "Runbook")
 create_page("Engineering", "Release Notes", "<p>Initial draft</p>")
@@ -310,7 +310,7 @@ The current upstream implementation assumes the target database has a title prop
 
 ### Example
 
-```
+```yaml
 agents:
   docs:
     tools:
@@ -319,7 +319,7 @@ agents:
           enable_update_page: false
 ```
 
-```
+```python
 search_pages("docs")
 create_page("ISSUE-075", "docs", "Draft the project-management tool page")
 update_page("PAGE_ID", "Added rollout notes")
@@ -352,14 +352,14 @@ If the Trello client cannot initialize, the current upstream methods return `"Tr
 
 ### Example
 
-```
+```yaml
 agents:
   planner:
     tools:
       - trello
 ```
 
-```
+```python
 list_boards(board_filter="open")
 get_board_lists("BOARD_ID")
 create_card("BOARD_ID", "To Do", "Write docs", "Draft the new tool page")
@@ -390,14 +390,14 @@ create_card("BOARD_ID", "To Do", "Write docs", "Draft the new tool page")
 
 ### Example
 
-```
+```yaml
 agents:
   planner:
     tools:
       - todoist
 ```
 
-```
+```python
 create_task("Write project-management docs", due_string="tomorrow", priority=4)
 get_active_tasks()
 close_task("TASK_ID")
@@ -432,7 +432,7 @@ This tool does not expose ticket lookup or ticket updates on this branch.
 
 ### Example
 
-```
+```yaml
 agents:
   support:
     tools:
@@ -441,7 +441,7 @@ agents:
           company_name: acme
 ```
 
-```
+```python
 search_zendesk("Matrix onboarding")
 ```
 

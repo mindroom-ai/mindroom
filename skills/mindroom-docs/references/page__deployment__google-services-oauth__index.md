@@ -21,7 +21,7 @@ Add one authorized redirect URI for each provider you enable.
 
 For local development, the redirect URIs are:
 
-```
+```text
 http://localhost:8765/api/oauth/google_drive/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
@@ -39,7 +39,7 @@ Provider-specific services win over `google_oauth_client`.
 
 Store these fields on the client config service:
 
-```
+```json
 {
   "client_id": "your-client-id.apps.googleusercontent.com",
   "client_secret": "your-client-secret",
@@ -59,7 +59,7 @@ Client config services cannot be copied into ordinary credential services.
 
 For non-interactive deployments, you can seed the shared client config service at startup with `MINDROOM_CREDENTIAL_SEEDS_FILE`:
 
-```
+```json
 [
   {
     "service": "google_oauth_client",
@@ -78,7 +78,7 @@ MindRoom updates env-sourced seeded credentials on restart, but it does not over
 
 Optional account restrictions are service-specific:
 
-```
+```bash
 GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.com
 GOOGLE_CALENDAR_ALLOWED_HOSTED_DOMAINS=example.com
 GOOGLE_SHEETS_ALLOWED_EMAIL_DOMAINS=example.com

@@ -51,7 +51,7 @@ It uses the normal MindRoom memory backend.
 
 Use this as a starting point for importing an OpenClaw workspace into MindRoom's canonical agent workspace:
 
-```
+```yaml
 agents:
   openclaw:
     display_name: OpenClawAgent
@@ -108,7 +108,7 @@ If `openclaw_memory` is Git-backed, update the repository and reindex instead of
 
 ## Recommended workspace layout
 
-```
+```text
 mindroom_data/
 └── agents/
     └── openclaw/
@@ -165,7 +165,7 @@ For details on skill eligibility gating (`openclaw.os`, `openclaw.requires`, `op
 
 Skills are loaded from `~/.mindroom/skills/<name>/`. To use an OpenClaw skill like `transcribe`, copy the skill directory from your OpenClaw workspace:
 
-```
+```bash
 mkdir -p ~/.mindroom/skills
 cp -r /path/to/openclaw-workspace/skills/transcribe ~/.mindroom/skills/
 ```

@@ -13,7 +13,7 @@ MindRoom ships as a single runtime container that serves:
 
 Run it with:
 
-```
+```bash
 docker run -d \
   --name mindroom \
   -p 8765:8765 \
@@ -27,7 +27,7 @@ docker run -d \
 
 Create a `docker-compose.yml`:
 
-```
+```yaml
 services:
   mindroom:
     image: ghcr.io/mindroom-ai/mindroom:latest
@@ -52,7 +52,7 @@ services:
 
 Run with:
 
-```
+```bash
 docker compose up -d
 ```
 
@@ -85,7 +85,7 @@ If `MINDROOM_API_KEY` is set, the browser dashboard will prompt for the key via 
 
 Build from the repository root:
 
-```
+```bash
 docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 ```
 
@@ -97,7 +97,7 @@ A `Dockerfile.mindroom-minimal` variant is also available, which builds a smalle
 
 For development, run MindRoom alongside a local Matrix server:
 
-```
+```bash
 # Start Matrix (Synapse + Postgres + Redis)
 cd local/matrix && docker compose up -d
 
@@ -116,7 +116,7 @@ The local Matrix stack includes:
 
 If you're running the backend on the host (not in Docker), you can use `mindroom local-stack-setup` to start Synapse + MindRoom Cinny and persist local Matrix env vars automatically:
 
-```
+```bash
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 mindroom run
 ```
@@ -125,7 +125,7 @@ mindroom run
 
 The container exposes a health endpoint on port 8765:
 
-```
+```bash
 curl http://localhost:8765/api/health
 ```
 

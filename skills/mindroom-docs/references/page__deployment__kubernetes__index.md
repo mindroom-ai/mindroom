@@ -21,7 +21,7 @@ MindRoom uses three Helm charts:
 
 ### Via Provisioner API (Recommended)
 
-```
+```bash
 export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
 # Provision, check status, view logs
@@ -34,7 +34,7 @@ export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
 For debugging only:
 
-```
+```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
   --create-namespace \
@@ -50,7 +50,7 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 Only enable trusted upstream auth when the instance is behind a verified access layer that strips client-supplied copies of those headers and injects authenticated values itself:
 
-```
+```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
   --reuse-values \
@@ -71,7 +71,7 @@ Use the runtime chart when you already operate the surrounding platform and only
 
 The chart intentionally does not create Matrix, ingress, a model gateway, or platform services.
 
-```
+```bash
 helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
   --namespace mindroom \
   --create-namespace \
@@ -80,7 +80,7 @@ helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
 
 Typical production values point at existing resources:
 
-```
+```yaml
 config:
   create: false
   existingConfigMap: mindroom-config
@@ -148,7 +148,7 @@ The hosted instance worker-manager Role does not grant broad Secret API access i
 
 Typical Helm values look like:
 
-```
+```yaml
 workerBackend: kubernetes
 workerCleanupIntervalSeconds: 30
 storageAccessMode: ReadWriteMany
@@ -212,7 +212,7 @@ Dedicated workers are internal-only cluster Services and are authenticated with 
 
 API keys are mounted as files at `/etc/secrets/` (not environment variables). MindRoom reads paths from `*_API_KEY_FILE` environment variables:
 
-```
+```yaml
 env:
   - name: ANTHROPIC_API_KEY_FILE
     value: "/etc/secrets/anthropic_key"
@@ -230,7 +230,7 @@ Each instance gets three hosts:
 
 ## Platform Deployment
 
-```
+```bash
 # Create values file from example
 cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-staging.yaml
 # Edit with your configuration
@@ -250,7 +250,7 @@ Platform ingress hosts:
 
 ## Local Development with Kind
 
-```
+```bash
 just cluster-kind-fresh              # Start cluster with everything
 just cluster-kind-port-frontend      # http://localhost:3000
 just cluster-kind-port-backend       # http://localhost:8000
@@ -261,7 +261,7 @@ See `cluster/k8s/kind/README.md` for details.
 
 ## CLI Helper
 
-```
+```bash
 ./cluster/scripts/mindroom-cli.sh list              # List instances
 ./cluster/scripts/mindroom-cli.sh status            # Overall status
 ./cluster/scripts/mindroom-cli.sh logs <id>         # View logs
@@ -287,7 +287,7 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 
 Example provision request:
 
-```
+```bash
 curl -X POST "https://api.mindroom.chat/system/provision" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PROVISIONER_API_KEY" \
@@ -298,7 +298,7 @@ The provisioner creates the namespace, generates URLs, deploys via Helm, and upd
 
 ## Deployment Scripts
 
-```
+```bash
 cd saas-platform
 ./deploy.sh platform-frontend          # Deploy platform frontend
 ./deploy.sh platform-backend           # Deploy platform backend

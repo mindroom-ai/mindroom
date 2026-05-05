@@ -6,7 +6,7 @@ MindRoom includes a web dashboard for configuring agents, teams, rooms, and inte
 
 **Standalone Mode:**
 
-```
+```bash
 mindroom run
 ```
 

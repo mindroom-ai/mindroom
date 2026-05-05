@@ -4,7 +4,7 @@ MindRoom provides a command-line interface for managing agents.
 
 ## Basic Usage
 
-```
+```bash
 mindroom [OPTIONS] COMMAND [ARGS]...
 ```
 
@@ -201,7 +201,7 @@ Profiles control the template style:
 
 Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `openai`, `openrouter`, or `vertexai_claude`.
 
-```
+```bash
 # Hosted Matrix quickstart (creates ~/.mindroom/config.yaml)
 mindroom config init --profile public
 
@@ -227,7 +227,7 @@ Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 
 Display the current config file with syntax highlighting.
 
-```
+```bash
 # Show config with syntax highlighting
 mindroom config show
 
@@ -243,7 +243,7 @@ mindroom config show --path /custom/path/config.yaml
 Open `config.yaml` in your default editor.
 Editor preference: `$EDITOR` → `$VISUAL` → `nano` → `vim` → `vi`.
 
-```
+```bash
 mindroom config edit
 ```
 
@@ -253,7 +253,7 @@ Validate `config.yaml` and check for common issues.
 Parses the YAML config using Pydantic and reports errors in a friendly format.
 Also checks whether required API keys are set as environment variables.
 
-```
+```bash
 mindroom config validate
 ```
 
@@ -261,7 +261,7 @@ mindroom config validate
 
 Show the resolved config file path and all search locations.
 
-```
+```bash
 mindroom config path
 ```
 
@@ -271,7 +271,7 @@ Pair this local MindRoom install with a provisioning service.
 
 Default provisioning URL is `https://mindroom.chat` unless you override it with `--provisioning-url` or `MINDROOM_PROVISIONING_URL`.
 
-```
+```bash
 mindroom connect --pair-code ABCD-EFGH
 ```
 
@@ -286,13 +286,13 @@ If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER
 
 Use `--no-persist-env` if you want to export variables only for the current shell session.
 
-```
+```bash
 mindroom connect --pair-code ABCD-EFGH --no-persist-env
 ```
 
 Use `--provisioning-url` for non-default deployments:
 
-```
+```bash
 mindroom connect \
   --pair-code ABCD-EFGH \
   --provisioning-url https://matrix.example.com
@@ -359,73 +359,73 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 
 ### Basic run
 
-```
+```bash
 mindroom run
 ```
 
 ### Debug logging
 
-```
+```bash
 mindroom run --log-level DEBUG
 ```
 
 To debug MindRoom internals without enabling debug logs from every dependency, keep the global level at `INFO` and set targeted logger overrides:
 
-```
+```bash
 LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING" mindroom run
 ```
 
 Matrix crypto decrypt warnings from `nio.crypto` are quieted by default because missing Megolm sessions can produce bursts of diagnostically useful but high-volume logs.
 To inspect those warnings while debugging encryption state, explicitly restore that logger:
 
-```
+```bash
 LOG_LEVEL=INFO MINDROOM_LOGGER_LEVELS="nio.crypto:WARNING" mindroom run
 ```
 
 ### Custom storage path
 
-```
+```bash
 mindroom run --storage-path /data/mindroom
 ```
 
 ### Pair local install with hosted provisioning
 
-```
+```bash
 mindroom connect --pair-code ABCD-EFGH
 ```
 
 ### Start local Synapse + Cinny (default local setup)
 
-```
+```bash
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 ```
 
 ### Start local stack without writing `.env`
 
-```
+```bash
 mindroom local-stack-setup --no-persist-env
 ```
 
 ### Show version
 
-```
+```bash
 mindroom version
 ```
 
 ### Preflight environment check
 
-```
+```bash
 mindroom doctor
 ```
 
 ### Initialize a config
 
-```
+```bash
 mindroom config init --profile public
 ```
 
 ### Validate your config
 
-```
+```bash
 mindroom config validate
 ```

@@ -19,7 +19,7 @@ Agents access skills via `get_skill_instructions()`, scripts via `get_skill_scri
 
 ## SKILL.md format (OpenClaw compatible)
 
-```
+```markdown
 ---
 name: repo-quick-audit
 description: Quick repository audit checklist
@@ -80,7 +80,7 @@ Agent workspace skills are only available to the owning agent at runtime. They d
 
 Add skills to an agent allowlist in `config.yaml`:
 
-```
+```yaml
 agents:
   developer:
     display_name: Developer

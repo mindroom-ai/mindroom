@@ -7,7 +7,7 @@ MindRoom includes 100+ built-in tools and presets that agents can use to work wi
 Tools are enabled per-agent in the configuration.
 Each tool entry can be a plain string or a single-key dict with inline config overrides:
 
-```
+```yaml
 agents:
   assistant:
     display_name: Assistant
@@ -23,7 +23,7 @@ agents:
 
 You can also assign tools to all agents globally:
 
-```
+```yaml
 defaults:
   tools:
     - scheduler

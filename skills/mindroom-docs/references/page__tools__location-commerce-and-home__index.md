@@ -45,14 +45,14 @@ MindRoom does not add extra runtime behavior on top of the upstream toolkit beyo
 
 ### Example
 
-```
+```yaml
 agents:
   local_guide:
     tools:
       - google_maps
 ```
 
-```
+```python
 search_places("coffee shops near Pike Place Market")
 get_directions("Seattle, WA", "Portland, OR", mode="driving")
 geocode_address("1600 Amphitheatre Parkway, Mountain View, CA")
@@ -92,7 +92,7 @@ MindRoom does not add custom behavior here beyond metadata, dependency managemen
 
 ### Example
 
-```
+```yaml
 agents:
   weather:
     tools:
@@ -101,7 +101,7 @@ agents:
           enable_air_pollution: false
 ```
 
-```
+```python
 get_current_weather("San Francisco")
 get_forecast("Chicago", days=3)
 get_air_pollution("Los Angeles")
@@ -137,7 +137,7 @@ MindRoom does not wrap the Shopify API further, so behavior comes directly from 
 
 ### Example
 
-```
+```yaml
 agents:
   store_analyst:
     tools:
@@ -147,7 +147,7 @@ agents:
           timeout: 45
 ```
 
-```
+```python
 get_shop_info()
 get_products(max_results=25, status="ACTIVE")
 get_orders(max_results=50, created_after="2026-03-01", created_before="2026-03-31")
@@ -182,7 +182,7 @@ MindRoom adds important runtime behavior here by loading scoped credentials, enf
 
 ### Example
 
-```
+```yaml
 agents:
   home:
     worker_scope: shared
@@ -190,7 +190,7 @@ agents:
       - homeassistant
 ```
 
-```
+```python
 list_entities("light")
 get_entity_state("climate.thermostat")
 turn_on("light.living_room")
