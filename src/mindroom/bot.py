@@ -38,6 +38,7 @@ from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
 from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
+from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
@@ -1136,16 +1137,7 @@ class AgentBot:
 
             # Register media callbacks on all agents (each agent handles its own routing)
             media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
-            for event_type in (
-                nio.RoomMessageImage,
-                nio.RoomEncryptedImage,
-                nio.RoomMessageFile,
-                nio.RoomEncryptedFile,
-                nio.RoomMessageVideo,
-                nio.RoomEncryptedVideo,
-                nio.RoomMessageAudio,
-                nio.RoomEncryptedAudio,
-            ):
+            for event_type in MATRIX_MEDIA_EVENT_TYPES:
                 client.add_event_callback(media_callback, event_type)
             client.add_event_callback(
                 _create_task_wrapper(self._on_unknown_event, owner=self._runtime_view),

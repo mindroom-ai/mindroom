@@ -21,6 +21,14 @@ type FileOrVideoMessageEvent = FileMessageEvent | VideoMessageEvent
 type AudioMessageEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
 type MatrixMediaDispatchEvent = ImageMessageEvent | FileOrVideoMessageEvent
 
+IMAGE_MESSAGE_EVENT_TYPES = (nio.RoomMessageImage, nio.RoomEncryptedImage)
+FILE_MESSAGE_EVENT_TYPES = (nio.RoomMessageFile, nio.RoomEncryptedFile)
+VIDEO_MESSAGE_EVENT_TYPES = (nio.RoomMessageVideo, nio.RoomEncryptedVideo)
+FILE_OR_VIDEO_MESSAGE_EVENT_TYPES = (*FILE_MESSAGE_EVENT_TYPES, *VIDEO_MESSAGE_EVENT_TYPES)
+AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
+MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*IMAGE_MESSAGE_EVENT_TYPES, *FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
+MATRIX_MEDIA_EVENT_TYPES = (*MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *AUDIO_MESSAGE_EVENT_TYPES)
+
 
 @dataclass(frozen=True)
 class _ImageMimeResolution:
@@ -34,17 +42,17 @@ class _ImageMimeResolution:
 
 def is_image_message_event(event: object) -> TypeGuard[ImageMessageEvent]:
     """Return whether *event* is a Matrix image message."""
-    return isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
+    return isinstance(event, IMAGE_MESSAGE_EVENT_TYPES)
 
 
 def is_file_message_event(event: object) -> TypeGuard[FileMessageEvent]:
     """Return whether *event* is a Matrix file message."""
-    return isinstance(event, nio.RoomMessageFile | nio.RoomEncryptedFile)
+    return isinstance(event, FILE_MESSAGE_EVENT_TYPES)
 
 
 def is_video_message_event(event: object) -> TypeGuard[VideoMessageEvent]:
     """Return whether *event* is a Matrix video message."""
-    return isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo)
+    return isinstance(event, VIDEO_MESSAGE_EVENT_TYPES)
 
 
 def is_file_or_video_message_event(event: object) -> TypeGuard[FileOrVideoMessageEvent]:
@@ -54,7 +62,7 @@ def is_file_or_video_message_event(event: object) -> TypeGuard[FileOrVideoMessag
 
 def is_audio_message_event(event: object) -> TypeGuard[AudioMessageEvent]:
     """Return whether *event* is a Matrix audio message."""
-    return isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
+    return isinstance(event, AUDIO_MESSAGE_EVENT_TYPES)
 
 
 def is_matrix_media_dispatch_event(event: object) -> TypeGuard[MatrixMediaDispatchEvent]:

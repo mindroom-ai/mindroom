@@ -71,6 +71,7 @@ from mindroom.matrix.media import (
     is_audio_message_event,
     is_file_message_event,
     is_image_message_event,
+    is_matrix_media_dispatch_event,
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
@@ -1087,15 +1088,7 @@ class TurnController:
         thread_event_id = resolved_target.resolved_thread_id
         routed_extra_content = dict(extra_content) if extra_content is not None else {}
         routed_media_events = list(media_events or [])
-        if not routed_media_events and isinstance(
-            event,
-            nio.RoomMessageFile
-            | nio.RoomEncryptedFile
-            | nio.RoomMessageVideo
-            | nio.RoomEncryptedVideo
-            | nio.RoomMessageImage
-            | nio.RoomEncryptedImage,
-        ):
+        if not routed_media_events and is_matrix_media_dispatch_event(event):
             routed_media_events.append(event)
         if routed_media_events:
             routed_attachment_ids = merge_attachment_ids(
@@ -1757,15 +1750,7 @@ class TurnController:
                     else None
                 )
                 single_direct_media_route = (
-                    isinstance(
-                        route_event,
-                        nio.RoomMessageFile
-                        | nio.RoomEncryptedFile
-                        | nio.RoomMessageVideo
-                        | nio.RoomEncryptedVideo
-                        | nio.RoomMessageImage
-                        | nio.RoomEncryptedImage,
-                    )
+                    is_matrix_media_dispatch_event(route_event)
                     and media_events == [route_event]
                     and handled_turn.source_event_ids == (event.event_id,)
                 )
