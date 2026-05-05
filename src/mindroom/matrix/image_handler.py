@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from agno.media import Image
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.media import download_media_bytes, media_mime_type, resolve_image_mime_type
+from mindroom.matrix.media import ImageMessageEvent, download_media_bytes, media_mime_type, resolve_image_mime_type
 
 if TYPE_CHECKING:
     import nio
@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 
 async def download_image(
     client: nio.AsyncClient,
-    event: nio.RoomMessageImage | nio.RoomEncryptedImage,
+    event: ImageMessageEvent,
 ) -> Image | None:
     """Download image from Matrix, returning an agno Image or None.
 

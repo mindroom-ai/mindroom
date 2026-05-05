@@ -7,14 +7,12 @@ from collections.abc import Sequence  # noqa: TC003
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import nio
-
 from mindroom.attachment_media import resolve_attachment_media
 from mindroom.attachments import (
     merge_attachment_ids,
     parse_attachment_ids_from_thread_history,
-    register_file_or_video_attachment,
-    register_image_attachment,
+    register_matrix_media_attachment,
+    register_thread_history_media_attachments,
     resolve_thread_attachment_ids,
 )
 from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedTextEvent
@@ -22,6 +20,14 @@ from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import resolve_visible_event_source
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.image_handler import download_image
+from mindroom.matrix.media import (
+    AudioMessageEvent,
+    FileMessageEvent,
+    FileOrVideoMessageEvent,
+    is_file_or_video_message_event,
+    is_image_message_event,
+    is_matrix_media_dispatch_event,
+)
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -31,6 +37,7 @@ from mindroom.voice_handler import prepare_voice_message
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import nio
     import structlog
     from agno.media import Image
 
@@ -51,7 +58,7 @@ class VoiceNormalizationRequest:
     """One inbound audio event to normalize into a text dispatch event."""
 
     room: nio.MatrixRoom
-    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio
+    event: AudioMessageEvent
 
 
 @dataclass(frozen=True)
@@ -199,7 +206,7 @@ class InboundTurnNormalizer:
 
     async def prepare_file_sidecar_text_event(
         self,
-        event: nio.RoomMessageFile | nio.RoomEncryptedFile,
+        event: FileMessageEvent,
     ) -> PreparedTextEvent | None:
         """Return a prepared text event when a file event is really a long-text preview."""
         if not is_v2_sidecar_text_preview(event.source):
@@ -228,43 +235,22 @@ class InboundTurnNormalizer:
         event: nio.RoomMessageText | PreparedTextEvent | MediaDispatchEvent,
     ) -> str | None:
         """Register a routed media event and return its attachment ID when available."""
-        client = self._client()
-        if isinstance(
-            event,
-            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-        ):
-            attachment_record = await register_file_or_video_attachment(
-                client,
-                self.deps.storage_path,
-                room_id=room_id,
-                thread_id=thread_id,
-                event=event,
+        if not is_matrix_media_dispatch_event(event):
+            return None
+        attachment_record = await register_matrix_media_attachment(
+            self._client(),
+            self.deps.storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
+        if attachment_record is None:
+            self.deps.logger.error(
+                "Failed to register routed media attachment",
+                event_id=event.event_id,
             )
-            if attachment_record is None:
-                self.deps.logger.error(
-                    "Failed to register routed media attachment",
-                    event_id=event.event_id,
-                )
-                return None
-            return attachment_record.attachment_id
-
-        if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-            attachment_record = await register_image_attachment(
-                client,
-                self.deps.storage_path,
-                room_id=room_id,
-                thread_id=thread_id,
-                event=event,
-            )
-            if attachment_record is None:
-                self.deps.logger.error(
-                    "Failed to register routed image attachment",
-                    event_id=event.event_id,
-                )
-                return None
-            return attachment_record.attachment_id
-
-        return None
+            return None
+        return attachment_record.attachment_id
 
     async def register_batch_media_attachments(
         self,
@@ -300,13 +286,13 @@ class InboundTurnNormalizer:
 
             client = self._client()
             for media_event in request.media_events:
-                if isinstance(media_event, nio.RoomMessageImage | nio.RoomEncryptedImage):
+                if is_image_message_event(media_event):
                     image_event_count += 1
                     image = await download_image(client, media_event)
                     if image is None:
                         msg = "Failed to download image"
                         raise RuntimeError(msg)
-                    attachment_record = await register_image_attachment(
+                    attachment_record = await register_matrix_media_attachment(
                         client,
                         self.deps.storage_path,
                         room_id=request.room_id,
@@ -321,7 +307,7 @@ class InboundTurnNormalizer:
                     continue
 
                 file_or_video_event_count += 1
-                attachment_record = await register_file_or_video_attachment(
+                attachment_record = await register_matrix_media_attachment(
                     client,
                     self.deps.storage_path,
                     room_id=request.room_id,
@@ -357,10 +343,18 @@ class InboundTurnNormalizer:
             else []
         )
         history_attachment_ids = parse_attachment_ids_from_thread_history(request.thread_history)
+        history_media_attachment_ids = await register_thread_history_media_attachments(
+            self._client(),
+            self.deps.storage_path,
+            room_id=request.room_id,
+            thread_id=request.media_thread_id,
+            thread_history=request.thread_history,
+        )
         attachment_ids = merge_attachment_ids(
             request.current_attachment_ids,
             thread_attachment_ids,
             history_attachment_ids,
+            history_media_attachment_ids,
         )
         resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
             resolve_attachment_media(
@@ -397,12 +391,9 @@ class InboundTurnNormalizer:
     @staticmethod
     def _as_file_or_video_dispatch_event(
         event: MediaDispatchEvent,
-    ) -> nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo:
+    ) -> FileOrVideoMessageEvent:
         """Narrow a media dispatch event to the file/video subset used for attachment registration."""
-        if isinstance(
-            event,
-            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-        ):
+        if is_file_or_video_message_event(event):
             return event
         msg = f"Expected file or video event, got {type(event).__name__}"
         raise TypeError(msg)

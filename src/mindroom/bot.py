@@ -38,6 +38,7 @@ from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
 from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
+from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
@@ -109,6 +110,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
     from mindroom.tool_system.events import ToolTraceEntry
@@ -230,15 +232,6 @@ def create_bot_for_entity(
     msg = f"Entity '{entity_name}' not found in configuration."
     raise ValueError(msg)
 
-
-type _MediaDispatchEvent = (
-    nio.RoomMessageImage
-    | nio.RoomEncryptedImage
-    | nio.RoomMessageFile
-    | nio.RoomEncryptedFile
-    | nio.RoomMessageVideo
-    | nio.RoomEncryptedVideo
-)
 
 type _MessageContext = MessageContext
 
@@ -1144,16 +1137,7 @@ class AgentBot:
 
             # Register media callbacks on all agents (each agent handles its own routing)
             media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
-            for event_type in (
-                nio.RoomMessageImage,
-                nio.RoomEncryptedImage,
-                nio.RoomMessageFile,
-                nio.RoomEncryptedFile,
-                nio.RoomMessageVideo,
-                nio.RoomEncryptedVideo,
-                nio.RoomMessageAudio,
-                nio.RoomEncryptedAudio,
-            ):
+            for event_type in MATRIX_MEDIA_EVENT_TYPES:
                 client.add_event_callback(media_callback, event_type)
             client.add_event_callback(
                 _create_task_wrapper(self._on_unknown_event, owner=self._runtime_view),
@@ -1353,7 +1337,7 @@ class AgentBot:
     def _log_matrix_event_callback_started(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText | _MediaDispatchEvent,
+        event: nio.RoomMessageText | MatrixMediaEvent,
         *,
         callback_name: str,
     ) -> None:
@@ -1501,7 +1485,7 @@ class AgentBot:
     async def _on_media_message(
         self,
         room: nio.MatrixRoom,
-        event: _MediaDispatchEvent,
+        event: MatrixMediaEvent,
     ) -> None:
         """Delegate one inbound media event to the turn engine."""
         self._log_matrix_event_callback_started(room, event, callback_name="media")

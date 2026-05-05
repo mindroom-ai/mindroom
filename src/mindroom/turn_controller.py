@@ -65,6 +65,15 @@ from mindroom.logging_config import bound_log_context
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import extract_agent_name, is_agent_id
+from mindroom.matrix.media import (
+    AudioMessageEvent,
+    FileMessageEvent,
+    MatrixMediaEvent,
+    is_audio_message_event,
+    is_file_message_event,
+    is_image_message_event,
+    is_matrix_media_dispatch_event,
+)
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
@@ -106,11 +115,6 @@ if TYPE_CHECKING:
     from mindroom.turn_store import TurnStore
 
 type DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
-
-type _MediaDispatchEvent = MediaDispatchEvent
-type _InboundMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
-type _TextDispatchEvent = TextDispatchEvent
-type _DispatchEvent = DispatchEvent
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 
@@ -163,8 +167,8 @@ class _PrecheckedEvent[T]:
     requester_user_id: str
 
 
-type _PrecheckedTextDispatchEvent = _PrecheckedEvent[_TextDispatchEvent]
-type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
+type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
+type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
 
 
 @dataclass(frozen=True)
@@ -228,11 +232,11 @@ class TurnController:
         """Return whether one sender may supply trusted ingress metadata overrides."""
         return extract_agent_name(sender_id, self.deps.runtime.config, self.deps.runtime_paths) is not None
 
-    def _should_trust_internal_payload_metadata(self, event: _DispatchEvent) -> bool:
+    def _should_trust_internal_payload_metadata(self, event: DispatchEvent) -> bool:
         """Return whether internal payload keys on one event should be treated as authoritative."""
         return self._sender_is_trusted_for_ingress_metadata(event.sender)
 
-    def _is_trusted_internal_relay_event(self, event: _DispatchEvent) -> bool:
+    def _is_trusted_internal_relay_event(self, event: DispatchEvent) -> bool:
         """Return whether one agent-authored relay should bypass user-turn coalescing."""
         if not isinstance(event, nio.RoomMessageText | PreparedTextEvent):
             return False
@@ -250,7 +254,7 @@ class TurnController:
         original_sender = content.get(ORIGINAL_SENDER_KEY)
         return isinstance(original_sender, str) and bool(original_sender)
 
-    def _is_trusted_router_relay_event(self, event: _DispatchEvent) -> bool:
+    def _is_trusted_router_relay_event(self, event: DispatchEvent) -> bool:
         """Return whether one trusted internal relay originated from the router."""
         if not self._is_trusted_internal_relay_event(event):
             return False
@@ -263,7 +267,7 @@ class TurnController:
 
     def _should_use_trusted_router_relay_context(
         self,
-        event: _DispatchEvent,
+        event: DispatchEvent,
         *,
         ingress_metadata: DispatchIngressMetadata | None,
         payload_metadata: DispatchPayloadMetadata | None,
@@ -283,7 +287,7 @@ class TurnController:
     def _precheck_event(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent | _InboundMediaEvent,
+        event: DispatchEvent | MatrixMediaEvent,
         *,
         is_edit: bool = False,
     ) -> str | None:
@@ -317,7 +321,7 @@ class TurnController:
 
         return requester_user_id
 
-    def _precheck_dispatch_event[T: _DispatchEvent](
+    def _precheck_dispatch_event[T: DispatchEvent | MatrixMediaEvent](
         self,
         room: nio.MatrixRoom,
         event: T,
@@ -336,7 +340,7 @@ class TurnController:
 
     def _has_newer_unresponded_in_thread(
         self,
-        event: _TextDispatchEvent,
+        event: TextDispatchEvent,
         requester_user_id: str,
         thread_history: Sequence[ResolvedVisibleMessage],
         *,
@@ -421,7 +425,7 @@ class TurnController:
         self,
         *,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
+        event: DispatchEvent,
         target: MessageTarget,
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
@@ -466,7 +470,7 @@ class TurnController:
         *,
         room: nio.MatrixRoom,
         prepared_event: PreparedTextEvent,
-        dispatch_event: _TextDispatchEvent,
+        dispatch_event: TextDispatchEvent,
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
@@ -512,13 +516,13 @@ class TurnController:
         self,
         *,
         room: nio.MatrixRoom,
-        event: _MediaDispatchEvent,
+        event: MediaDispatchEvent,
         coalescing_thread_id: str | None,
         requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> None:
         """Queue one media event with the same active-follow-up policy as text."""
-        source_kind = "image" if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage) else "media"
+        source_kind = "image" if is_image_message_event(event) else "media"
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -597,7 +601,7 @@ class TurnController:
     async def _coalescing_key_for_event(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
+        event: DispatchEvent,
         requester_user_id: str,
     ) -> CoalescingKey:
         """Return the sender or thread scoped dispatch key for one event."""
@@ -641,7 +645,7 @@ class TurnController:
 
     async def _enqueue_for_dispatch(
         self,
-        event: _DispatchEvent,
+        event: DispatchEvent,
         room: nio.MatrixRoom,
         *,
         source_kind: str,
@@ -715,7 +719,7 @@ class TurnController:
     async def _maybe_send_visible_voice_echo(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+        event: AudioMessageEvent,
         *,
         text: str,
         thread_id: str | None,
@@ -748,7 +752,7 @@ class TurnController:
     async def _prepare_dispatch(
         self,
         room: nio.MatrixRoom,
-        event: _TextDispatchEvent,
+        event: TextDispatchEvent,
         requester_user_id: str,
         *,
         event_label: str,
@@ -856,7 +860,7 @@ class TurnController:
     async def _execute_command(
         self,
         room: nio.MatrixRoom,
-        event: _TextDispatchEvent,
+        event: TextDispatchEvent,
         requester_user_id: str,
         command: Command,
     ) -> None:
@@ -1007,14 +1011,14 @@ class TurnController:
     async def _execute_router_relay(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
+        event: DispatchEvent,
         thread_history: Sequence[ResolvedVisibleMessage],
         thread_id: str | None = None,
         message: str | None = None,
         *,
         requester_user_id: str,
         extra_content: dict[str, Any] | None = None,
-        media_events: list[_MediaDispatchEvent] | None = None,
+        media_events: list[MediaDispatchEvent] | None = None,
         handled_turn: HandledTurnState | None = None,
     ) -> None:
         """Run one explicit router relay from the turn controller."""
@@ -1080,15 +1084,7 @@ class TurnController:
         thread_event_id = resolved_target.resolved_thread_id
         routed_extra_content = dict(extra_content) if extra_content is not None else {}
         routed_media_events = list(media_events or [])
-        if not routed_media_events and isinstance(
-            event,
-            nio.RoomMessageFile
-            | nio.RoomEncryptedFile
-            | nio.RoomMessageVideo
-            | nio.RoomEncryptedVideo
-            | nio.RoomMessageImage
-            | nio.RoomEncryptedImage,
-        ):
+        if not routed_media_events and is_matrix_media_dispatch_event(event):
             routed_media_events.append(event)
         if routed_media_events:
             routed_attachment_ids = merge_attachment_ids(
@@ -1205,7 +1201,7 @@ class TurnController:
     async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
+        event: DispatchEvent,
         dispatch: PreparedDispatch,
         action: ResponseAction,
         payload_builder: DispatchPayloadBuilder,
@@ -1593,10 +1589,10 @@ class TurnController:
     async def _dispatch_text_message(  # noqa: C901, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
-        event: _TextDispatchEvent | _PrecheckedTextDispatchEvent,
+        event: TextDispatchEvent | _PrecheckedTextDispatchEvent,
         requester_user_id: str | None = None,
         *,
-        media_events: list[_MediaDispatchEvent] | None = None,
+        media_events: list[MediaDispatchEvent] | None = None,
         handled_turn: HandledTurnState | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         ingress_metadata: DispatchIngressMetadata | None = None,
@@ -1604,16 +1600,16 @@ class TurnController:
         trust_hydrated_internal_metadata: bool | None = None,
     ) -> None:
         """Run the normal text or command dispatch pipeline for a prepared text event."""
-        raw_event: _TextDispatchEvent
+        raw_event: TextDispatchEvent
         if isinstance(event, _PrecheckedEvent):
             requester_user_id = event.requester_user_id
-            raw_event = cast("_TextDispatchEvent", event.event)
+            raw_event = cast("TextDispatchEvent", event.event)
         else:
             raw_event = event
         if requester_user_id is None:
             msg = "requester_user_id is required when dispatching a raw event"
             raise TypeError(msg)
-        router_event: _DispatchEvent = raw_event
+        router_event: DispatchEvent = raw_event
         reservation = queued_notice_reservation
         dispatch: PreparedDispatch | None = None
         timing_scope_token = None
@@ -1750,15 +1746,7 @@ class TurnController:
                     else None
                 )
                 single_direct_media_route = (
-                    isinstance(
-                        route_event,
-                        nio.RoomMessageFile
-                        | nio.RoomEncryptedFile
-                        | nio.RoomMessageVideo
-                        | nio.RoomEncryptedVideo
-                        | nio.RoomMessageImage
-                        | nio.RoomEncryptedImage,
-                    )
+                    is_matrix_media_dispatch_event(route_event)
                     and media_events == [route_event]
                     and handled_turn.source_event_ids == (event.event_id,)
                 )
@@ -1850,7 +1838,7 @@ class TurnController:
     async def handle_media_event(
         self,
         room: nio.MatrixRoom,
-        event: _MediaDispatchEvent,
+        event: MatrixMediaEvent,
     ) -> None:
         """Handle one inbound media event."""
         async with self.deps.resolver.turn_thread_cache_scope():
@@ -1859,7 +1847,7 @@ class TurnController:
     async def _handle_media_message_inner(
         self,
         room: nio.MatrixRoom,
-        event: _MediaDispatchEvent,
+        event: MatrixMediaEvent,
     ) -> None:
         """Handle one media event inside the per-turn conversation lookup scope."""
         prechecked_event = self._precheck_dispatch_event(room, event)
@@ -1882,6 +1870,8 @@ class TurnController:
 
         if await self._dispatch_special_media_as_text(room, prechecked_event):
             return
+        if not is_matrix_media_dispatch_event(prechecked_event.event):
+            return
         await self._enqueue_media_for_dispatch(
             room=room,
             event=prechecked_event.event,
@@ -1893,11 +1883,11 @@ class TurnController:
     async def _dispatch_special_media_as_text(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedMediaDispatchEvent,
+        prechecked_event: _PrecheckedInboundMediaEvent,
     ) -> bool:
         """Handle media events that normalize into the text dispatch pipeline."""
         event = prechecked_event.event
-        if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
+        if is_audio_message_event(event):
             await self._on_audio_media_message(
                 room,
                 _PrecheckedEvent(
@@ -1906,7 +1896,7 @@ class TurnController:
                 ),
             )
             return True
-        if isinstance(event, nio.RoomMessageFile | nio.RoomEncryptedFile):
+        if is_file_message_event(event):
             return await self._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(
@@ -1919,7 +1909,7 @@ class TurnController:
     async def _on_audio_media_message(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedEvent[nio.RoomMessageAudio | nio.RoomEncryptedAudio],
+        prechecked_event: _PrecheckedEvent[AudioMessageEvent],
     ) -> None:
         """Normalize audio into a synthetic text event and reuse text dispatch."""
         event = prechecked_event.event
@@ -1980,7 +1970,7 @@ class TurnController:
     async def _dispatch_file_sidecar_text_preview(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedEvent[nio.RoomMessageFile | nio.RoomEncryptedFile],
+        prechecked_event: _PrecheckedEvent[FileMessageEvent],
     ) -> bool:
         """Dispatch one sidecar-backed file preview through the normal text pipeline."""
         event = prechecked_event.event
