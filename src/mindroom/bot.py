@@ -109,6 +109,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.matrix.media import MatrixMediaDispatchEvent
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
     from mindroom.tool_system.events import ToolTraceEntry
@@ -230,15 +231,6 @@ def create_bot_for_entity(
     msg = f"Entity '{entity_name}' not found in configuration."
     raise ValueError(msg)
 
-
-type _MediaDispatchEvent = (
-    nio.RoomMessageImage
-    | nio.RoomEncryptedImage
-    | nio.RoomMessageFile
-    | nio.RoomEncryptedFile
-    | nio.RoomMessageVideo
-    | nio.RoomEncryptedVideo
-)
 
 type _MessageContext = MessageContext
 
@@ -1353,7 +1345,7 @@ class AgentBot:
     def _log_matrix_event_callback_started(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText | _MediaDispatchEvent,
+        event: nio.RoomMessageText | MatrixMediaDispatchEvent,
         *,
         callback_name: str,
     ) -> None:
@@ -1501,7 +1493,7 @@ class AgentBot:
     async def _on_media_message(
         self,
         room: nio.MatrixRoom,
-        event: _MediaDispatchEvent,
+        event: MatrixMediaDispatchEvent,
     ) -> None:
         """Delegate one inbound media event to the turn engine."""
         self._log_matrix_event_callback_started(room, event, callback_name="media")

@@ -19,7 +19,7 @@ from mindroom.authorization import get_available_agents_for_sender_authoritative
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_PREFIX, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.logging_config import get_logger
-from mindroom.matrix.media import download_media_bytes, extract_media_caption, media_mime_type
+from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix_identifiers import agent_username_localpart
 
@@ -113,7 +113,7 @@ async def _compute_normalized_voice_message(
     client: nio.AsyncClient,
     storage_path: Path,
     room: nio.MatrixRoom,
-    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    event: AudioMessageEvent,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
@@ -157,7 +157,7 @@ async def _normalize_voice_message(
     client: nio.AsyncClient,
     storage_path: Path,
     room: nio.MatrixRoom,
-    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    event: AudioMessageEvent,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
@@ -192,7 +192,7 @@ async def prepare_voice_message(
     client: nio.AsyncClient,
     storage_path: Path,
     room: nio.MatrixRoom,
-    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    event: AudioMessageEvent,
     config: Config,
     *,
     runtime_paths: RuntimePaths,
@@ -256,7 +256,7 @@ async def prepare_voice_message(
 async def _handle_voice_message(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
-    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    event: AudioMessageEvent,
     config: Config,
     runtime_paths: RuntimePaths,
     audio: Audio | None = None,
@@ -323,7 +323,7 @@ async def _handle_voice_message(
 
 async def _download_audio(
     client: nio.AsyncClient,
-    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    event: AudioMessageEvent,
 ) -> Audio | None:
     """Download Matrix audio and convert it to an agno Audio media object."""
     audio_data = await download_media_bytes(client, event)

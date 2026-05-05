@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any, TypeGuard
 
 import nio
 from nio import crypto
@@ -10,6 +12,14 @@ from nio import crypto
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+type ImageMessageEvent = nio.RoomMessageImage | nio.RoomEncryptedImage
+type FileMessageEvent = nio.RoomMessageFile | nio.RoomEncryptedFile
+type VideoMessageEvent = nio.RoomMessageVideo | nio.RoomEncryptedVideo
+type FileOrVideoMessageEvent = FileMessageEvent | VideoMessageEvent
+type AudioMessageEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
+type MatrixMediaDispatchEvent = ImageMessageEvent | FileOrVideoMessageEvent
 
 
 @dataclass(frozen=True)
@@ -20,6 +30,53 @@ class _ImageMimeResolution:
     declared_mime_type: str | None
     detected_mime_type: str | None
     is_mismatch: bool
+
+
+def is_image_message_event(event: object) -> TypeGuard[ImageMessageEvent]:
+    """Return whether *event* is a Matrix image message."""
+    return isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
+
+
+def is_file_message_event(event: object) -> TypeGuard[FileMessageEvent]:
+    """Return whether *event* is a Matrix file message."""
+    return isinstance(event, nio.RoomMessageFile | nio.RoomEncryptedFile)
+
+
+def is_video_message_event(event: object) -> TypeGuard[VideoMessageEvent]:
+    """Return whether *event* is a Matrix video message."""
+    return isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo)
+
+
+def is_file_or_video_message_event(event: object) -> TypeGuard[FileOrVideoMessageEvent]:
+    """Return whether *event* is a Matrix file or video message."""
+    return is_file_message_event(event) or is_video_message_event(event)
+
+
+def is_audio_message_event(event: object) -> TypeGuard[AudioMessageEvent]:
+    """Return whether *event* is a Matrix audio message."""
+    return isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
+
+
+def is_matrix_media_dispatch_event(event: object) -> TypeGuard[MatrixMediaDispatchEvent]:
+    """Return whether *event* is image, file, or video media."""
+    return is_image_message_event(event) or is_file_or_video_message_event(event)
+
+
+def parse_matrix_media_dispatch_event_source(
+    event_source: Mapping[str, Any],
+) -> MatrixMediaDispatchEvent | None:
+    """Parse one Matrix event source into image/file/video media when possible."""
+    normalized_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
+    content = normalized_source.get("content")
+    try:
+        parsed_event = (
+            nio.RoomMessage.parse_decrypted_event(normalized_source)
+            if isinstance(content, Mapping) and "file" in content
+            else nio.RoomMessage.parse_event(normalized_source)
+        )
+    except Exception:
+        return None
+    return parsed_event if is_matrix_media_dispatch_event(parsed_event) else None
 
 
 def _event_id_for_log(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str | None:

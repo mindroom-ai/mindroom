@@ -6606,7 +6606,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=image),
             patch(
-                "mindroom.inbound_turn_normalizer.register_image_attachment",
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
                 return_value=attachment_record,
             ),
@@ -6782,7 +6782,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.should_agent_respond", return_value=True),
             patch("mindroom.inbound_turn_normalizer.download_image", new_callable=AsyncMock, return_value=image),
             patch(
-                "mindroom.inbound_turn_normalizer.register_image_attachment",
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
                 return_value=attachment_record,
             ),
@@ -7076,7 +7076,7 @@ class TestAgentBot:
             ),
             patch("mindroom.turn_policy.should_agent_respond", return_value=True),
             patch(
-                "mindroom.inbound_turn_normalizer.register_file_or_video_attachment",
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
                 return_value=attachment_record,
             ),
@@ -7167,7 +7167,7 @@ class TestAgentBot:
             ),
             patch("mindroom.turn_policy.should_agent_respond", return_value=True),
             patch(
-                "mindroom.inbound_turn_normalizer.register_file_or_video_attachment",
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -7381,7 +7381,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.get_available_agents_for_sender_authoritative") as mock_get_available,
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch(
-                "mindroom.inbound_turn_normalizer.register_file_or_video_attachment",
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
                 return_value=attachment_record,
             ) as mock_register_file,
@@ -7471,7 +7471,7 @@ class TestAgentBot:
                 return_value="general",
             ),
             patch(
-                "mindroom.inbound_turn_normalizer.register_file_or_video_attachment",
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
                 return_value=attachment_record,
             ) as mock_register_file,
@@ -7549,7 +7549,7 @@ class TestAgentBot:
                 return_value="general",
             ),
             patch(
-                "mindroom.inbound_turn_normalizer.register_image_attachment",
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
                 return_value=attachment_record,
             ) as mock_register_image,
@@ -7687,7 +7687,7 @@ class TestAgentBot:
                 return_value="general",
             ),
             patch(
-                "mindroom.inbound_turn_normalizer.register_file_or_video_attachment",
+                "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
                 new_callable=AsyncMock,
                 return_value=attachment_record,
             ) as mock_register,

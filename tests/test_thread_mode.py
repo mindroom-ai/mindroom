@@ -1257,7 +1257,7 @@ class TestExtractedModuleLoggerRebinding:
         event.source = {"content": {"body": "photo.png", "msgtype": "m.image"}}
 
         with patch(
-            "mindroom.inbound_turn_normalizer.register_image_attachment",
+            "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
             new_callable=AsyncMock,
             return_value=None,
         ):
@@ -1269,7 +1269,7 @@ class TestExtractedModuleLoggerRebinding:
 
         assert attachment_id is None
         original_logger.error.assert_called_once_with(
-            "Failed to register routed image attachment",
+            "Failed to register routed media attachment",
             event_id="$img123",
         )
         rebound_logger.error.assert_not_called()

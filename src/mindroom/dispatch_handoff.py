@@ -14,7 +14,15 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
-from mindroom.matrix.media import extract_media_caption
+from mindroom.matrix.media import (
+    MatrixMediaDispatchEvent,
+    extract_media_caption,
+    is_audio_message_event,
+    is_file_message_event,
+    is_image_message_event,
+    is_matrix_media_dispatch_event,
+    is_video_message_event,
+)
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 
 if TYPE_CHECKING:
@@ -42,16 +50,9 @@ class PreparedTextEvent:
     source_kind_override: str | None = None
 
 
-type MediaDispatchEvent = (
-    # Voice messages are normalized into PreparedTextEvent before coalescing,
-    # so this contract only includes routed image/file/video events.
-    nio.RoomMessageImage
-    | nio.RoomEncryptedImage
-    | nio.RoomMessageFile
-    | nio.RoomEncryptedFile
-    | nio.RoomMessageVideo
-    | nio.RoomEncryptedVideo
-)
+# Voice messages are normalized into PreparedTextEvent before coalescing, so
+# this contract only includes routed image/file/video events.
+type MediaDispatchEvent = MatrixMediaDispatchEvent
 type TextDispatchEvent = nio.RoomMessageText | PreparedTextEvent
 type DispatchEvent = TextDispatchEvent | MediaDispatchEvent
 
@@ -115,27 +116,19 @@ def _event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
 
 def is_media_dispatch_event(event: DispatchEvent) -> TypeGuard[MediaDispatchEvent]:
     """Return whether one dispatch event is image, file, or video media."""
-    return isinstance(
-        event,
-        nio.RoomMessageImage
-        | nio.RoomEncryptedImage
-        | nio.RoomMessageFile
-        | nio.RoomEncryptedFile
-        | nio.RoomMessageVideo
-        | nio.RoomEncryptedVideo,
-    )
+    return is_matrix_media_dispatch_event(event)
 
 
 def dispatch_prompt_for_event(event: DispatchEvent) -> str:
     """Return the prompt text contributed by one dispatch event."""
-    if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
+    if is_audio_message_event(event):
         msg = "Raw audio must be normalized into PreparedTextEvent before coalescing"
         raise TypeError(msg)
-    if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
+    if is_image_message_event(event):
         return extract_media_caption(event, default="[Attached image]")
-    if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo):
+    if is_video_message_event(event):
         return extract_media_caption(event, default="[Attached video]")
-    if isinstance(event, nio.RoomMessageFile | nio.RoomEncryptedFile):
+    if is_file_message_event(event):
         return extract_media_caption(event, default="[Attached file]")
     return event.body
 

@@ -19,7 +19,20 @@ import nio
 
 from .constants import ATTACHMENT_IDS_KEY
 from .logging_config import get_logger
-from .matrix.media import download_media_bytes, media_mime_type, resolve_image_mime_type
+from .matrix.media import (
+    AudioMessageEvent,
+    FileOrVideoMessageEvent,
+    ImageMessageEvent,
+    download_media_bytes,
+    is_audio_message_event,
+    is_file_or_video_message_event,
+    is_image_message_event,
+    is_matrix_media_dispatch_event,
+    is_video_message_event,
+    media_mime_type,
+    parse_matrix_media_dispatch_event_source,
+    resolve_image_mime_type,
+)
 from .timing import emit_elapsed_timing
 
 if TYPE_CHECKING:
@@ -30,9 +43,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _AttachmentKind = Literal["audio", "file", "image", "video"]
-_FileOrVideoEvent = nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo
-_ImageEvent = nio.RoomMessageImage | nio.RoomEncryptedImage
-_AudioEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
 _ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
 _ATTACHMENT_RETENTION_DAYS = 30
 _CLEANUP_INTERVAL = timedelta(hours=1)
@@ -442,7 +452,7 @@ def register_local_attachment(
     return record
 
 
-def _filename_for_media_event(event: _FileOrVideoEvent | _ImageEvent | _AudioEvent) -> str | None:
+def _filename_for_media_event(event: FileOrVideoMessageEvent | ImageMessageEvent | AudioMessageEvent) -> str | None:
     """Extract best-effort filename from Matrix media event content."""
     content = event.source.get("content", {})
     filename = content.get("filename")
@@ -492,11 +502,11 @@ async def register_file_or_video_attachment(
     *,
     room_id: str,
     thread_id: str | None,
-    event: _FileOrVideoEvent,
+    event: FileOrVideoMessageEvent,
 ) -> AttachmentRecord | None:
     """Persist a file/video event and register it as an attachment record."""
     media_bytes = await download_media_bytes(client, event)
-    kind: _AttachmentKind = "video" if isinstance(event, nio.RoomMessageVideo | nio.RoomEncryptedVideo) else "file"
+    kind: _AttachmentKind = "video" if is_video_message_event(event) else "file"
     return await _register_media_attachment(
         storage_path=storage_path,
         event_id=event.event_id,
@@ -516,7 +526,7 @@ async def register_image_attachment(
     *,
     room_id: str,
     thread_id: str | None,
-    event: _ImageEvent,
+    event: ImageMessageEvent,
     image_bytes: bytes | None = None,
 ) -> AttachmentRecord | None:
     """Persist an image event and register it as an attachment record."""
@@ -657,39 +667,70 @@ def filter_attachments_for_context(
     return allowed_records, rejected_attachment_ids
 
 
+def _load_existing_context_attachment(
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    event_id: str,
+) -> AttachmentRecord | None:
+    existing_record = load_attachment(storage_path, _attachment_id_for_event(event_id))
+    if (
+        existing_record is not None
+        and existing_record.room_id == room_id
+        and existing_record.thread_id == thread_id
+        and existing_record.local_path.is_file()
+    ):
+        return existing_record
+    return None
+
+
 def _media_event_from_thread_history_message(
     room_id: str,
     message: ResolvedVisibleMessage,
-) -> _FileOrVideoEvent | _ImageEvent | None:
-    msgtype = message.content.get("msgtype")
-    if msgtype not in {"m.file", "m.image", "m.video"}:
-        return None
-
+) -> FileOrVideoMessageEvent | ImageMessageEvent | None:
     content = {key: value for key, value in message.content.items() if isinstance(key, str)}
-    event_source = {
-        "content": content,
-        "event_id": message.event_id,
-        "origin_server_ts": message.timestamp,
-        "room_id": room_id,
-        "sender": message.sender,
-        "type": "m.room.message",
-    }
-    parsed_event = (
-        nio.RoomMessage.parse_decrypted_event(event_source)
-        if "file" in content
-        else nio.RoomMessage.parse_event(event_source)
+    return parse_matrix_media_dispatch_event_source(
+        {
+            "content": content,
+            "event_id": message.event_id,
+            "origin_server_ts": message.timestamp,
+            "room_id": room_id,
+            "sender": message.sender,
+            "type": "m.room.message",
+        },
     )
-    if isinstance(
-        parsed_event,
-        nio.RoomMessageFile
-        | nio.RoomEncryptedFile
-        | nio.RoomMessageVideo
-        | nio.RoomEncryptedVideo
-        | nio.RoomMessageImage
-        | nio.RoomEncryptedImage,
-    ):
-        return parsed_event
-    return None
+
+
+async def register_matrix_media_attachment(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    event: FileOrVideoMessageEvent | ImageMessageEvent,
+    image_bytes: bytes | None = None,
+) -> AttachmentRecord | None:
+    """Persist an image/file/video Matrix event and register an attachment record."""
+    if is_image_message_event(event):
+        return await register_image_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+            image_bytes=image_bytes,
+        )
+    if is_file_or_video_message_event(event):
+        return await register_file_or_video_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
+    msg = f"Expected image, file, or video event, got {type(event).__name__}"
+    raise TypeError(msg)
 
 
 async def _register_thread_history_media_attachment(
@@ -698,28 +739,18 @@ async def _register_thread_history_media_attachment(
     *,
     room_id: str,
     thread_id: str | None,
-    event: _FileOrVideoEvent | _ImageEvent,
+    event: FileOrVideoMessageEvent | ImageMessageEvent,
 ) -> AttachmentRecord | None:
-    attachment_id = _attachment_id_for_event(event.event_id)
-    existing_record = load_attachment(storage_path, attachment_id)
-    if (
-        existing_record is not None
-        and existing_record.room_id == room_id
-        and existing_record.thread_id == thread_id
-        and existing_record.local_path.is_file()
-    ):
+    existing_record = _load_existing_context_attachment(
+        storage_path,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_id=event.event_id,
+    )
+    if existing_record is not None:
         return existing_record
 
-    if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
-        return await register_image_attachment(
-            client,
-            storage_path,
-            room_id=room_id,
-            thread_id=thread_id,
-            event=event,
-        )
-
-    return await register_file_or_video_attachment(
+    return await register_matrix_media_attachment(
         client,
         storage_path,
         room_id=room_id,
@@ -802,49 +833,31 @@ async def resolve_thread_attachment_ids(
     # Check for an existing attachment record for any media root (file, video,
     # image, or audio). Audio roots are registered by the voice handler and
     # can be looked up but not re-downloaded here.
-    is_file_or_video = isinstance(
-        event,
-        nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-    )
-    is_image = isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
-    is_audio = isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio)
-    if not is_file_or_video and not is_image and not is_audio:
+    if not is_matrix_media_dispatch_event(event) and not is_audio_message_event(event):
         return finish([], "not_media_root")
 
-    existing_attachment_id = _attachment_id_for_event(event.event_id)
-    existing_record = load_attachment(storage_path, existing_attachment_id)
-    if (
-        existing_record is not None
-        and existing_record.room_id == room_id
-        and existing_record.thread_id == thread_id
-        and existing_record.local_path.is_file()
-    ):
+    existing_record = _load_existing_context_attachment(
+        storage_path,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_id=event.event_id,
+    )
+    if existing_record is not None:
         return finish([existing_record.attachment_id], "existing_record")
 
-    record: AttachmentRecord | None = None
-    if is_file_or_video:
-        assert isinstance(
-            event,
-            nio.RoomMessageFile | nio.RoomEncryptedFile | nio.RoomMessageVideo | nio.RoomEncryptedVideo,
-        )
-        record = await register_file_or_video_attachment(
-            client,
-            storage_path,
-            room_id=room_id,
-            thread_id=thread_id,
-            event=event,
-        )
-    elif is_image:
-        assert isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage)
-        record = await register_image_attachment(
-            client,
-            storage_path,
-            room_id=room_id,
-            thread_id=thread_id,
-            event=event,
-        )
     # Audio roots cannot be re-registered here (the voice handler owns that
-    # lifecycle), so ``record`` stays ``None``.
+    # lifecycle), so only existing audio records are returned above.
+    record = (
+        await register_matrix_media_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
+        if is_matrix_media_dispatch_event(event)
+        else None
+    )
     if record is None:
         return finish([], "no_record")
     return finish([record.attachment_id], "registered_record")

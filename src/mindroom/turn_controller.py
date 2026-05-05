@@ -65,6 +65,13 @@ from mindroom.logging_config import bound_log_context
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import extract_agent_name, is_agent_id
+from mindroom.matrix.media import (
+    AudioMessageEvent,
+    FileMessageEvent,
+    is_audio_message_event,
+    is_file_message_event,
+    is_image_message_event,
+)
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
@@ -108,7 +115,7 @@ if TYPE_CHECKING:
 type DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
 
 type _MediaDispatchEvent = MediaDispatchEvent
-type _InboundMediaEvent = _MediaDispatchEvent | nio.RoomMessageAudio | nio.RoomEncryptedAudio
+type _InboundMediaEvent = _MediaDispatchEvent | AudioMessageEvent
 type _TextDispatchEvent = TextDispatchEvent
 type _DispatchEvent = DispatchEvent
 
@@ -518,7 +525,7 @@ class TurnController:
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> None:
         """Queue one media event with the same active-follow-up policy as text."""
-        source_kind = "image" if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage) else "media"
+        source_kind = "image" if is_image_message_event(event) else "media"
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_thread_id,
@@ -715,7 +722,7 @@ class TurnController:
     async def _maybe_send_visible_voice_echo(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+        event: AudioMessageEvent,
         *,
         text: str,
         thread_id: str | None,
@@ -1897,7 +1904,7 @@ class TurnController:
     ) -> bool:
         """Handle media events that normalize into the text dispatch pipeline."""
         event = prechecked_event.event
-        if isinstance(event, nio.RoomMessageAudio | nio.RoomEncryptedAudio):
+        if is_audio_message_event(event):
             await self._on_audio_media_message(
                 room,
                 _PrecheckedEvent(
@@ -1906,7 +1913,7 @@ class TurnController:
                 ),
             )
             return True
-        if isinstance(event, nio.RoomMessageFile | nio.RoomEncryptedFile):
+        if is_file_message_event(event):
             return await self._dispatch_file_sidecar_text_preview(
                 room,
                 _PrecheckedEvent(
@@ -1919,7 +1926,7 @@ class TurnController:
     async def _on_audio_media_message(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedEvent[nio.RoomMessageAudio | nio.RoomEncryptedAudio],
+        prechecked_event: _PrecheckedEvent[AudioMessageEvent],
     ) -> None:
         """Normalize audio into a synthetic text event and reuse text dispatch."""
         event = prechecked_event.event
@@ -1980,7 +1987,7 @@ class TurnController:
     async def _dispatch_file_sidecar_text_preview(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedEvent[nio.RoomMessageFile | nio.RoomEncryptedFile],
+        prechecked_event: _PrecheckedEvent[FileMessageEvent],
     ) -> bool:
         """Dispatch one sidecar-backed file preview through the normal text pipeline."""
         event = prechecked_event.event
