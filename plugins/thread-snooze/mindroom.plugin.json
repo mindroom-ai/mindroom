@@ -1,5 +1,0 @@
-{
-  "name": "thread-snooze",
-  "hooks_module": "hooks.py",
-  "tools_module": "tools.py"
-}
