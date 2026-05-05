@@ -71,11 +71,6 @@ def is_matrix_media_dispatch_event(event: object) -> TypeGuard[MatrixMediaDispat
     return is_image_message_event(event) or is_file_or_video_message_event(event)
 
 
-def is_matrix_media_event(event: object) -> TypeGuard[MatrixMediaEvent]:
-    """Return whether *event* is image, file, video, or audio media."""
-    return isinstance(event, MATRIX_MEDIA_EVENT_TYPES)
-
-
 def parse_matrix_media_dispatch_event_source(
     event_source: Mapping[str, Any],
 ) -> MatrixMediaDispatchEvent | None:
