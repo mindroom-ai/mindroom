@@ -17,9 +17,9 @@ No real duplication requiring refactor.
 
 Related-only:
 
-- [src/mindroom/knowledge_refresh_runner.py](/Users/bas.nijholt/Work/dev/mindroom/src/mindroom/knowledge_refresh_runner.py:5) imports `main` from [src/mindroom/knowledge/refresh_runner.py](/Users/bas.nijholt/Work/dev/mindroom/src/mindroom/knowledge/refresh_runner.py:931) and exits through it when run as a module.
-- [src/mindroom/knowledge/refresh_runner.py](/Users/bas.nijholt/Work/dev/mindroom/src/mindroom/knowledge/refresh_runner.py:950) has the same `if __name__ == "__main__": raise SystemExit(main())` idiom for direct execution of the implementation module.
-- This is not meaningful duplicated functionality because [src/mindroom/knowledge/refresh_runner.py](/Users/bas.nijholt/Work/dev/mindroom/src/mindroom/knowledge/refresh_runner.py:230) explicitly launches subprocesses with `sys.executable -m mindroom.knowledge_refresh_runner`, and [tests/test_knowledge_manager.py](/Users/bas.nijholt/Work/dev/mindroom/tests/test_knowledge_manager.py:3991) asserts that module name.
+- [src/mindroom/knowledge_refresh_runner.py](mindroom/src/mindroom/knowledge_refresh_runner.py:5) imports `main` from [src/mindroom/knowledge/refresh_runner.py](mindroom/src/mindroom/knowledge/refresh_runner.py:931) and exits through it when run as a module.
+- [src/mindroom/knowledge/refresh_runner.py](mindroom/src/mindroom/knowledge/refresh_runner.py:950) has the same `if __name__ == "__main__": raise SystemExit(main())` idiom for direct execution of the implementation module.
+- This is not meaningful duplicated functionality because [src/mindroom/knowledge/refresh_runner.py](mindroom/src/mindroom/knowledge/refresh_runner.py:230) explicitly launches subprocesses with `sys.executable -m mindroom.knowledge_refresh_runner`, and [tests/test_knowledge_manager.py](mindroom/tests/test_knowledge_manager.py:3991) asserts that module name.
 
 Differences to preserve:
 
