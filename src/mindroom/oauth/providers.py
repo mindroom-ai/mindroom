@@ -101,7 +101,7 @@ class OAuthClaimValidationContext:
 
 OAuthTokenParser = Callable[["OAuthProvider", Mapping[str, Any], OAuthClientConfig, "RuntimePaths"], OAuthTokenResult]
 OAuthTokenExchanger = Callable[
-    ["OAuthProvider", str, OAuthClientConfig, "RuntimePaths"],
+    ["OAuthProvider", str, OAuthClientConfig, "RuntimePaths", str | None],
     OAuthTokenResult | Awaitable[OAuthTokenResult],
 ]
 OAuthClaimValidator = Callable[[OAuthClaimValidationContext], None]
@@ -425,8 +425,11 @@ class OAuthProvider:
     ) -> OAuthTokenResult:
         """Exchange an authorization code for normalized credentials."""
         client_config = self.require_client_config(runtime_paths)
+        if self.pkce_code_challenge_method is not None and not code_verifier:
+            msg = "OAuth provider requires a PKCE code verifier"
+            raise OAuthProviderError(msg)
         if self.token_exchanger is not None:
-            result = self.token_exchanger(self, code, client_config, runtime_paths)
+            result = self.token_exchanger(self, code, client_config, runtime_paths, code_verifier)
             if isinstance(result, OAuthTokenResult):
                 return _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
             return _token_result_with_core_metadata(
@@ -449,9 +452,6 @@ class OAuthProvider:
                     "grant_type": "authorization_code",
                 }
                 if self.pkce_code_challenge_method is not None:
-                    if not code_verifier:
-                        msg = "OAuth provider requires a PKCE code verifier"
-                        raise OAuthProviderError(msg)
                     fetch_kwargs["code_verifier"] = code_verifier
                 token_response = await client.fetch_token(
                     self.token_url,

@@ -121,19 +121,19 @@ def _issue_authorization_url(
             allow_private_scopes=True,
         )
         _verify_connect_target_binding(provider, connect_target, target)
-        oauth_code_verifier = provider.issue_pkce_code_verifier()
+        code_verifier = provider.issue_pkce_code_verifier()
         state = issue_pending_oauth_state(
             request,
             provider.id,
             agent_name,
             payload=_target_binding_payload(provider, target),
-            oauth_code_verifier=oauth_code_verifier,
+            code_verifier=code_verifier,
         )
         try:
             auth_url = provider.authorization_uri(
                 target.runtime_paths,
                 state=state,
-                code_verifier=oauth_code_verifier,
+                code_verifier=code_verifier,
             )
         except OAuthProviderError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -154,18 +154,18 @@ def _issue_authorization_url(
         allow_private_scopes=True,
     )
     try:
-        oauth_code_verifier = provider.issue_pkce_code_verifier()
+        code_verifier = provider.issue_pkce_code_verifier()
         state = issue_pending_oauth_state(
             request,
             provider.id,
             agent_name,
             payload=_target_binding_payload(provider, target),
-            oauth_code_verifier=oauth_code_verifier,
+            code_verifier=code_verifier,
         )
         auth_url = provider.authorization_uri(
             target.runtime_paths,
             state=state,
-            code_verifier=oauth_code_verifier,
+            code_verifier=code_verifier,
         )
     except OAuthProviderError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -398,7 +398,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
         token_result = await provider.exchange_code(
             code,
             runtime_paths,
-            code_verifier=pending.oauth_code_verifier,
+            code_verifier=pending.code_verifier,
         )
         provider.validate_claims(token_result, runtime_paths)
         safe_result = sanitized_oauth_token_result(provider, token_result)

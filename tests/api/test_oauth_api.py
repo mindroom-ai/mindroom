@@ -28,6 +28,7 @@ from mindroom.oauth import (
     OAuthClaimValidationError,
     OAuthClientConfig,
     OAuthProvider,
+    OAuthProviderError,
     OAuthTokenResult,
     load_oauth_providers,
 )
@@ -138,8 +139,10 @@ def _fake_provider(
         code: str,
         client_config: object,
         _runtime_paths: object,
+        code_verifier: str | None,
     ) -> OAuthTokenResult:
         assert code == "test-code"
+        assert code_verifier is None
         assert isinstance(client_config, OAuthClientConfig)
         token_data = {
             "token": f"{provider.id}-access-token",
@@ -344,6 +347,20 @@ def test_oauth_provider_requires_client_config_service() -> None:
             token_url="https://auth.example.test/token",
             scopes=("plugin.read",),
             credential_service="plugin_drive_oauth",
+        )
+
+
+def test_oauth_provider_rejects_unsupported_pkce_code_challenge_method() -> None:
+    with pytest.raises(ValueError, match="supports only S256 PKCE"):
+        OAuthProvider(
+            id="plugin_drive",
+            display_name="Plugin Drive",
+            authorization_url="https://auth.example.test/authorize",
+            token_url="https://auth.example.test/token",
+            scopes=("plugin.read",),
+            credential_service="plugin_drive_oauth",
+            client_config_services=("plugin_drive_oauth_client",),
+            pkce_code_challenge_method="plain",
         )
 
 
@@ -682,7 +699,9 @@ def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> N
 
     state_store = runtime_paths.storage_root / "oauth_state" / "oauth_state.json"
     stored = json.loads(state_store.read_text(encoding="utf-8"))
-    code_verifier = stored["states"][verifier_state]["data"]["oauth_code_verifier"]
+    pending_data = stored["states"][verifier_state]["data"]
+    assert "oauth_code_verifier" not in pending_data
+    code_verifier = pending_data["code_verifier"]
     assert 43 <= len(code_verifier) <= 128
     expected_challenge = (
         base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
@@ -830,14 +849,126 @@ def test_pkce_provider_exchange_sends_code_verifier(
     assert result.token_data["token"] == "access-token"
 
 
+def test_pkce_provider_requires_code_verifier_for_authorization_and_exchange(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = OAuthProvider(
+        id="test_drive",
+        display_name="Test Drive",
+        authorization_url="https://auth.example.test/test_drive/authorize",
+        token_url="https://auth.example.test/test_drive/token",
+        scopes=("scope.read",),
+        credential_service="test_drive",
+        client_config_services=("test_drive_oauth_client",),
+        pkce_code_challenge_method="S256",
+    )
+
+    with pytest.raises(OAuthProviderError, match="requires a PKCE code verifier"):
+        provider.authorization_uri(runtime_paths, state="state")
+    with pytest.raises(OAuthProviderError, match="requires a PKCE code verifier"):
+        asyncio.run(provider.exchange_code("auth-code", runtime_paths))
+
+
+def test_pkce_custom_token_exchanger_receives_code_verifier(tmp_path: Path) -> None:
+    seen: dict[str, str | None] = {}
+
+    async def _exchange(
+        provider: OAuthProvider,
+        code: str,
+        _client_config: object,
+        _runtime_paths: object,
+        code_verifier: str | None,
+    ) -> OAuthTokenResult:
+        seen["code"] = code
+        seen["code_verifier"] = code_verifier
+        return OAuthTokenResult(token_data={"token": f"{provider.id}-access-token"})
+
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = OAuthProvider(
+        id="custom_pkce_drive",
+        display_name="Custom PKCE Drive",
+        authorization_url="https://auth.example.test/custom_pkce/authorize",
+        token_url="https://auth.example.test/custom_pkce/token",
+        scopes=("scope.read",),
+        credential_service="custom_pkce_drive_oauth",
+        client_config_services=("test_drive_oauth_client",),
+        pkce_code_challenge_method="S256",
+        token_exchanger=_exchange,
+    )
+
+    result = asyncio.run(provider.exchange_code("test-code", runtime_paths, code_verifier="pkce-verifier"))
+
+    assert seen == {"code": "test-code", "code_verifier": "pkce-verifier"}
+    assert result.token_data["token"] == "custom_pkce_drive-access-token"
+
+
+def test_pkce_callback_passes_stored_code_verifier_to_exchange(tmp_path: Path) -> None:
+    seen: dict[str, str | None] = {}
+
+    async def _exchange(
+        _provider: OAuthProvider,
+        code: str,
+        _client_config: object,
+        _runtime_paths: object,
+        code_verifier: str | None,
+    ) -> OAuthTokenResult:
+        seen["code"] = code
+        seen["code_verifier"] = code_verifier
+        return OAuthTokenResult(token_data={"token": "pkce-access-token"})
+
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    provider = OAuthProvider(
+        id="test_drive",
+        display_name="Test Drive",
+        authorization_url="https://auth.example.test/test_drive/authorize",
+        token_url="https://auth.example.test/test_drive/token",
+        scopes=("scope.read",),
+        credential_service="test_drive",
+        client_config_services=("test_drive_oauth_client",),
+        pkce_code_challenge_method="S256",
+        token_exchanger=_exchange,
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            connect_response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+            state = _state_from_auth_url(connect_response.json()["auth_url"])
+            state_store = runtime_paths.storage_root / "oauth_state" / "oauth_state.json"
+            stored = json.loads(state_store.read_text(encoding="utf-8"))
+            stored_verifier = stored["states"][state]["data"]["code_verifier"]
+            callback_response = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+
+    assert callback_response.status_code == 307
+    assert seen == {"code": "test-code", "code_verifier": stored_verifier}
+
+
 def test_custom_token_exchanger_metadata_is_stamped_by_core(tmp_path: Path) -> None:
     async def _exchange(
         provider: OAuthProvider,
         code: str,
         _client_config: object,
         _runtime_paths: object,
+        code_verifier: str | None,
     ) -> OAuthTokenResult:
         assert code == "test-code"
+        assert code_verifier is None
         return OAuthTokenResult(token_data={"token": f"{provider.id}-access-token"})
 
     runtime_paths = _runtime_paths(
