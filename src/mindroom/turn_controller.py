@@ -68,6 +68,7 @@ from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.media import (
     AudioMessageEvent,
     FileMessageEvent,
+    MatrixMediaEvent,
     is_audio_message_event,
     is_file_message_event,
     is_image_message_event,
@@ -116,7 +117,7 @@ if TYPE_CHECKING:
 type DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
 
 type _MediaDispatchEvent = MediaDispatchEvent
-type _InboundMediaEvent = _MediaDispatchEvent | AudioMessageEvent
+type _InboundMediaEvent = MatrixMediaEvent
 type _TextDispatchEvent = TextDispatchEvent
 type _DispatchEvent = DispatchEvent
 
@@ -172,7 +173,7 @@ class _PrecheckedEvent[T]:
 
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[_TextDispatchEvent]
-type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
+type _PrecheckedInboundMediaEvent = _PrecheckedEvent[_InboundMediaEvent]
 
 
 @dataclass(frozen=True)
@@ -325,7 +326,7 @@ class TurnController:
 
         return requester_user_id
 
-    def _precheck_dispatch_event[T: _DispatchEvent](
+    def _precheck_dispatch_event[T: _DispatchEvent | _InboundMediaEvent](
         self,
         room: nio.MatrixRoom,
         event: T,
@@ -1842,7 +1843,7 @@ class TurnController:
     async def handle_media_event(
         self,
         room: nio.MatrixRoom,
-        event: _MediaDispatchEvent,
+        event: _InboundMediaEvent,
     ) -> None:
         """Handle one inbound media event."""
         async with self.deps.resolver.turn_thread_cache_scope():
@@ -1851,7 +1852,7 @@ class TurnController:
     async def _handle_media_message_inner(
         self,
         room: nio.MatrixRoom,
-        event: _MediaDispatchEvent,
+        event: _InboundMediaEvent,
     ) -> None:
         """Handle one media event inside the per-turn conversation lookup scope."""
         prechecked_event = self._precheck_dispatch_event(room, event)
@@ -1874,6 +1875,8 @@ class TurnController:
 
         if await self._dispatch_special_media_as_text(room, prechecked_event):
             return
+        if not is_matrix_media_dispatch_event(prechecked_event.event):
+            return
         await self._enqueue_media_for_dispatch(
             room=room,
             event=prechecked_event.event,
@@ -1885,7 +1888,7 @@ class TurnController:
     async def _dispatch_special_media_as_text(
         self,
         room: nio.MatrixRoom,
-        prechecked_event: _PrecheckedMediaDispatchEvent,
+        prechecked_event: _PrecheckedInboundMediaEvent,
     ) -> bool:
         """Handle media events that normalize into the text dispatch pipeline."""
         event = prechecked_event.event

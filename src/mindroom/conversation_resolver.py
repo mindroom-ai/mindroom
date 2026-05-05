@@ -16,7 +16,7 @@ from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, Pr
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
-from mindroom.matrix.media import is_audio_message_event, is_image_message_event
+from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
@@ -324,7 +324,7 @@ class ConversationResolver:
     async def coalescing_thread_id(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
+        event: DispatchEvent | MatrixMediaEvent,
     ) -> str | None:
         """Return the coalescing thread scope for one inbound event."""
         config = self.deps.runtime.config

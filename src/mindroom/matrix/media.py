@@ -20,6 +20,7 @@ type VideoMessageEvent = nio.RoomMessageVideo | nio.RoomEncryptedVideo
 type FileOrVideoMessageEvent = FileMessageEvent | VideoMessageEvent
 type AudioMessageEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
 type MatrixMediaDispatchEvent = ImageMessageEvent | FileOrVideoMessageEvent
+type MatrixMediaEvent = MatrixMediaDispatchEvent | AudioMessageEvent
 
 IMAGE_MESSAGE_EVENT_TYPES = (nio.RoomMessageImage, nio.RoomEncryptedImage)
 FILE_MESSAGE_EVENT_TYPES = (nio.RoomMessageFile, nio.RoomEncryptedFile)
@@ -68,6 +69,11 @@ def is_audio_message_event(event: object) -> TypeGuard[AudioMessageEvent]:
 def is_matrix_media_dispatch_event(event: object) -> TypeGuard[MatrixMediaDispatchEvent]:
     """Return whether *event* is image, file, or video media."""
     return is_image_message_event(event) or is_file_or_video_message_event(event)
+
+
+def is_matrix_media_event(event: object) -> TypeGuard[MatrixMediaEvent]:
+    """Return whether *event* is image, file, video, or audio media."""
+    return isinstance(event, MATRIX_MEDIA_EVENT_TYPES)
 
 
 def parse_matrix_media_dispatch_event_source(
