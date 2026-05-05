@@ -62,7 +62,7 @@ Draft and send operations accept local file-system paths for attachments.
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     worker_scope: shared
@@ -70,7 +70,7 @@ agents:
       - gmail
 ```
 
-```
+```python
 get_latest_emails(10)
 search_emails("label:unread from:billing@example.com", 10)
 send_email("alice@example.com", "Project update", "Here is the latest status.")
@@ -112,7 +112,7 @@ Channel-history responses are normalized into a smaller JSON structure instead o
 
 ### Example
 
-```
+```yaml
 agents:
   support:
     tools:
@@ -121,7 +121,7 @@ agents:
           enable_get_channel_history: true
 ```
 
-```
+```python
 list_channels()
 send_message("C0123456789", "Deployment finished.")
 send_message_thread("C0123456789", "Following up in the same thread.", "1743112345.678900")
@@ -159,7 +159,7 @@ Most functions expect Discord IDs such as `channel_id`, `guild_id`, and `message
 
 ### Example
 
-```
+```yaml
 agents:
   community:
     tools:
@@ -167,7 +167,7 @@ agents:
           enable_delete_message: false
 ```
 
-```
+```python
 list_channels("123456789012345678")
 get_channel_info("123456789012345678")
 get_channel_messages("123456789012345678", limit=25)
@@ -202,7 +202,7 @@ Responses are returned as the raw Telegram API response text.
 
 ### Example
 
-```
+```yaml
 agents:
   notifier:
     tools:
@@ -210,7 +210,7 @@ agents:
           chat_id: "-1001234567890"
 ```
 
-```
+```python
 send_message("Nightly backup completed.")
 ```
 
@@ -243,7 +243,7 @@ If no default recipient is configured, every send call must provide one.
 
 ### Example
 
-```
+```yaml
 agents:
   pager:
     tools:
@@ -253,7 +253,7 @@ agents:
           async_mode: false
 ```
 
-```
+```python
 send_text_message_sync("The deployment finished.")
 send_template_message_sync(template_name="deployment_notice", language_code="en_US")
 ```
@@ -293,7 +293,7 @@ Optional `region` and `edge` are passed into the Twilio client for regional rout
 
 ### Example
 
-```
+```yaml
 agents:
   phone_ops:
     tools:
@@ -303,7 +303,7 @@ agents:
           enable_list_messages: true
 ```
 
-```
+```python
 send_sms("+15551234567", "+15557654321", "Build passed.")
 get_call_details("CA1234567890abcdef")
 list_messages(limit=10)
@@ -337,7 +337,7 @@ Responses are returned as JSON strings built from the SDK result objects.
 
 ### Example
 
-```
+```yaml
 agents:
   meetings:
     tools:
@@ -345,7 +345,7 @@ agents:
           enable_list_rooms: true
 ```
 
-```
+```python
 list_rooms()
 send_message("Y2lzY29zcGFyazovL3VzL1JPT00v...", "Agenda is ready.")
 ```
@@ -378,7 +378,7 @@ The current implementation passes the message body as HTML, not plain text.
 
 ### Example
 
-```
+```yaml
 agents:
   mailer:
     tools:
@@ -386,7 +386,7 @@ agents:
           from_email: no-reply@example.com
 ```
 
-```
+```python
 send_email("alice@example.com", "Welcome", "<p>Your account is ready.</p>")
 ```
 
@@ -420,7 +420,7 @@ The current implementation sends plain-text bodies only.
 
 ### Example
 
-```
+```yaml
 agents:
   alerts:
     tools:
@@ -430,7 +430,7 @@ agents:
           sender_email: alerts@gmail.com
 ```
 
-```
+```python
 email_user("Nightly report", "The report finished successfully.")
 ```
 
@@ -466,7 +466,7 @@ The implementation clamps `max_results` for search to the Twitter API's supporte
 
 ### Example
 
-```
+```yaml
 agents:
   social:
     tools:
@@ -475,7 +475,7 @@ agents:
           wait_on_rate_limit: true
 ```
 
-```
+```python
 search_posts("mindroom matrix", max_results=10)
 get_user_info("mindroom_ai")
 create_post("MindRoom now supports another release.")
@@ -512,7 +512,7 @@ If `username` and `password` are also configured, the tool enables posting and r
 
 ### Example
 
-```
+```yaml
 agents:
   research:
     tools:
@@ -520,7 +520,7 @@ agents:
           user_agent: MindRoomResearchBot/1.0
 ```
 
-```
+```python
 get_top_posts("matrixdotorg", time_filter="week", limit=10)
 get_subreddit_info("python")
 get_trending_subreddits()
@@ -554,7 +554,7 @@ Meeting creation always targets `users/me/meetings` and applies a fixed set of d
 
 ### Example
 
-```
+```yaml
 agents:
   coordinator:
     tools:
@@ -563,7 +563,7 @@ agents:
           client_id: your_client_id
 ```
 
-```
+```python
 schedule_meeting("Weekly sync", "2026-04-02T16:00:00Z", 30, timezone="America/Los_Angeles")
 get_upcoming_meetings()
 list_meetings(type="scheduled")

@@ -11,7 +11,7 @@ You only run MindRoom locally.
 
 ### 1. Initialize local config
 
-```
+```bash
 uvx mindroom config init --profile public
 ```
 
@@ -23,7 +23,7 @@ This creates:
 The `--profile public` template defaults to the `openai` provider.
 Use `--provider` to select a different provider preset:
 
-```
+```bash
 # Use Anthropic Claude
 uvx mindroom config init --profile public --provider anthropic
 
@@ -48,7 +48,7 @@ Other profiles:
 
 ### 2. Add model API key(s)
 
-```
+```bash
 $EDITOR ~/.mindroom/.env
 ```
 
@@ -67,7 +67,7 @@ Set at least one key:
 1. Click `Generate Pair Code`.
 1. Run locally:
 
-```
+```bash
 uvx mindroom connect --pair-code ABCD-EFGH
 ```
 
@@ -79,7 +79,7 @@ Notes:
 
 ### 4. Run MindRoom
 
-```
+```bash
 uvx mindroom run
 ```
 
@@ -101,21 +101,21 @@ Use this when you want everything local: the bundled MindRoom dashboard, Matrix 
 
 ### 1. Clone the full stack repo
 
-```
+```bash
 git clone https://github.com/mindroom-ai/mindroom-stack
 cd mindroom-stack
 ```
 
 ### 2. Add your API keys
 
-```
+```bash
 cp .env.example .env
 $EDITOR .env  # add at least one AI provider key
 ```
 
 ### 3. Start everything
 
-```
+```bash
 docker compose up -d
 ```
 
@@ -143,33 +143,33 @@ Use this if you already have a Matrix homeserver and want to run MindRoom direct
 
 === "uv (recommended)"
 
-````
+```bash
 ```bash
 uv tool install mindroom
-````
+```bash
 
 ```
 
 === "pip"
 
-```
+```bash
 
 ```bash
 pip install mindroom
-```
+```yaml
 
 ```
 
 === "From source"
 
-```
+```bash
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom
 cd mindroom
 uv sync
 source .venv/bin/activate
-```
+```bash
 
 ```
 
@@ -179,7 +179,7 @@ source .venv/bin/activate
 
 Create a `config.yaml` in your working directory:
 
-```
+```bash
 
 agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby] # Optional: file-based context (OpenClaw-style) # context_files: [SOUL.md, USER.md]
 
@@ -195,7 +195,7 @@ timezone: America/Los_Angeles
 
 Create a `.env` file with your credentials:
 
-```
+```bash
 
 # Matrix homeserver (must allow open registration for agent accounts)
 

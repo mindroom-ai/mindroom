@@ -49,14 +49,14 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
       - matrix_message
 ```
 
-```
+```python
 matrix_message(action="context")
 matrix_message(action="send", message="Posting this to the room timeline.", thread_id="room")
 matrix_message(
@@ -96,14 +96,14 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
       - thread_tags
 ```
 
-```
+```python
 tag_thread("blocked")
 untag_thread("blocked")
 list_thread_tags(thread_id="$threadRootEvent")
@@ -134,14 +134,14 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
       - thread_summary
 ```
 
-```
+```python
 set_thread_summary("Decision: ship the current plan and revisit logs tomorrow.")
 set_thread_summary(
     "Summary for the import thread.",
@@ -178,14 +178,14 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
       - matrix_api
 ```
 
-```
+```python
 matrix_api(action="get_event", event_id="$event123")
 matrix_api(action="get_state", event_type="m.room.topic")
 matrix_api(
@@ -233,14 +233,14 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
       - attachments
 ```
 
-```
+```python
 list_attachments()
 get_attachment("att_abc123")
 get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")

@@ -30,7 +30,7 @@ Each model configuration supports the following fields:
 
 ## Configuration Examples
 
-```
+```yaml
 models:
   # Anthropic Claude
   sonnet:
@@ -109,7 +109,7 @@ The model ID may be either the bare Codex slug, such as `gpt-5.5`, or the LLM-pl
 If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`.
 For starter config generation, use `mindroom config init --profile public-codex` or `mindroom config init --provider codex`.
 
-```
+```yaml
 models:
   default:
     provider: codex
@@ -153,7 +153,7 @@ MindRoom does not mutate configured `num_history_runs` to fit the window.
 Instead, it computes the replay plan that actually fits the current call and uses compaction to keep future replay healthy.
 If needed, that replay plan can reduce raw replay, fall back to summary-only replay, or disable persisted replay entirely for the run.
 
-```
+```yaml
 models:
   default:
     provider: anthropic
@@ -175,7 +175,7 @@ The `extra_kwargs` field passes additional parameters directly to the underlying
 
 API keys are read from environment variables:
 
-```
+```bash
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=...
@@ -187,13 +187,13 @@ DEEPSEEK_API_KEY=...
 
 For Ollama, you can also set:
 
-```
+```bash
 OLLAMA_HOST=http://localhost:11434
 ```
 
 For Vertex AI Claude, set these instead of an API key:
 
-```
+```bash
 ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project
 CLOUD_ML_REGION=us-central1
 ```
@@ -204,7 +204,7 @@ Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICA
 
 For container environments (Kubernetes, Docker Swarm), you can also use file-based secrets by appending `_FILE` to any environment variable name:
 
-```
+```bash
 # Instead of setting the key directly:
 ANTHROPIC_API_KEY=sk-ant-...
 

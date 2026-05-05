@@ -193,12 +193,58 @@ def _source_paragraph_lines(source_text: str) -> list[list[str]]:
     return paragraphs
 
 
+def _source_fence_openings(source_text: str) -> list[str]:
+    openings: list[str] = []
+    in_code = False
+    for line in _strip_frontmatter(source_text).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("```"):
+            continue
+        if not in_code:
+            openings.append(stripped)
+        in_code = not in_code
+    return openings
+
+
+def _restore_source_fence_languages(rendered_text: str, source_text: str) -> str:
+    source_openings = _source_fence_openings(source_text)
+    if not source_openings:
+        return rendered_text
+
+    restored_lines: list[str] = []
+    in_code = False
+    opening_index = 0
+    for line in rendered_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("```"):
+            restored_lines.append(line)
+            continue
+
+        if in_code:
+            restored_lines.append(line)
+            in_code = False
+            continue
+
+        source_opening = source_openings[opening_index] if opening_index < len(source_openings) else stripped
+        opening_index += 1
+        in_code = True
+        if source_opening == stripped:
+            restored_lines.append(line)
+            continue
+
+        prefix = line[: len(line) - len(line.lstrip())]
+        restored_lines.append(f"{prefix}{source_opening}")
+
+    suffix = "\n" if rendered_text.endswith("\n") else ""
+    return "\n".join(restored_lines) + suffix
+
+
 def _restore_source_line_breaks(rendered_text: str, source_text: str) -> str:
     for paragraph in _source_paragraph_lines(source_text):
         for left, right in pairwise(paragraph):
             rendered_text = rendered_text.replace(f"{left} {right}", f"{left}\n{right}")
 
-    return rendered_text
+    return _restore_source_fence_languages(rendered_text, source_text)
 
 
 def _flatten_page_references(site_dir: Path, nav_pages: list[NavPage]) -> dict[str, str]:

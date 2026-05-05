@@ -5,7 +5,7 @@ This makes it easy for users to discover and navigate MindRoom rooms in their Ma
 
 ## Configuration
 
-```
+```yaml
 matrix_space:
   enabled: true    # Default: true
   name: MindRoom   # Default: "MindRoom"

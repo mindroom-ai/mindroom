@@ -43,7 +43,7 @@ Telegram Cloud <--> mautrix-telegram <--> Synapse <--> Element
 
 Edit `telegram-bridge/config.yaml` and replace the placeholders in the `telegram:` section:
 
-```
+```yaml
 telegram:
     api_id: 12345678          # Your numeric api_id
     api_hash: abcdef123456    # Your api_hash string
@@ -52,7 +52,7 @@ telegram:
 
 Also update the same values in your `.env`:
 
-```
+```bash
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=abcdef123456
 TELEGRAM_BOT_TOKEN=123456:ABC...
@@ -62,7 +62,7 @@ TELEGRAM_BOT_TOKEN=123456:ABC...
 
 Synapse needs a new volume mount for the bridge registration file, so it must be **recreated** (not just restarted):
 
-```
+```bash
 # Recreate Synapse to pick up the new volume mount and bridge registration
 docker compose up -d synapse
 
@@ -77,7 +77,7 @@ docker compose up -d telegram-bridge
 
 ### 3. Verify
 
-```
+```bash
 # Check bridge logs
 docker compose logs telegram-bridge --tail 20
 
@@ -200,7 +200,7 @@ To make your messages from Matrix appear as your real Telegram account (not the 
 
 The bridge uses SQLite stored in the `telegram-bridge` data volume. To reset:
 
-```
+```bash
 docker compose stop telegram-bridge
 rm <data-dir>/telegram-bridge/mautrix-telegram.db
 docker compose up -d telegram-bridge
@@ -212,7 +212,7 @@ Note: This will require re-logging into Telegram.
 
 If Synapse reports appservice errors, regenerate the registration:
 
-```
+```bash
 docker compose stop telegram-bridge
 rm telegram-bridge/registration.yaml
 # Temporarily set valid api_id in config.yaml, then:
@@ -227,7 +227,7 @@ docker compose up -d telegram-bridge
 
 ### Updating
 
-```
+```bash
 docker compose pull telegram-bridge
 docker compose up -d telegram-bridge
 ```

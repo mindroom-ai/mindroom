@@ -69,7 +69,7 @@ This is a local crawler rather than a hosted API, so it does not need an API key
 
 #### Example
 
-```
+```yaml
 agents:
   researcher:
     tools:
@@ -79,7 +79,7 @@ agents:
           wait_until: networkidle
 ```
 
-```
+```python
 crawl("https://matrix.org/blog/", search_query="bridges and federation")
 ```
 
@@ -108,14 +108,14 @@ In normal hand-authored `config.yaml`, you should treat this as a quick page-rea
 
 #### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
       - website
 ```
 
-```
+```python
 read_url("https://docs.mindroom.chat")
 ```
 
@@ -165,7 +165,7 @@ If the spider module is missing, the tool skips crawler registration instead of 
 
 #### Example
 
-```
+```yaml
 agents:
   analyst:
     tools:
@@ -175,7 +175,7 @@ agents:
           include_links: true
 ```
 
-```
+```python
 extract_text("https://matrix.org/blog/", output_format="markdown")
 extract_metadata_only("https://matrix.org/blog/")
 ```
@@ -209,7 +209,7 @@ That means old references to `newspaper4k` are stale for current MindRoom config
 
 #### Example
 
-```
+```yaml
 agents:
   newsdesk:
     tools:
@@ -218,7 +218,7 @@ agents:
           article_length: 6000
 ```
 
-```
+```python
 read_article("https://matrix.org/blog/")
 ```
 
@@ -257,7 +257,7 @@ The installed implementation only adds the `Authorization` header when an API ke
 
 #### Example
 
-```
+```yaml
 agents:
   researcher:
     tools:
@@ -266,7 +266,7 @@ agents:
           search_query_content: false
 ```
 
-```
+```python
 read_url("https://matrix.org/blog/")
 search_query("latest Matrix bridge updates")
 ```
@@ -310,7 +310,7 @@ The upstream tool falls back to `FIRECRAWL_API_KEY` when `api_key` is not provid
 
 #### Example
 
-```
+```yaml
 agents:
   research:
     tools:
@@ -320,7 +320,7 @@ agents:
           limit: 5
 ```
 
-```
+```python
 scrape_website("https://matrix.org/blog/")
 search_web("latest Matrix bridges")
 ```
@@ -357,7 +357,7 @@ The installed `spider-client` constructor raises when no API key is available, e
 
 #### Example
 
-```
+```yaml
 agents:
   crawler:
     tools:
@@ -366,7 +366,7 @@ agents:
           enable_crawl: true
 ```
 
-```
+```python
 search_web("MindRoom Matrix setup", max_results=5)
 scrape("https://matrix.org/blog/")
 ```
@@ -407,7 +407,7 @@ scrape("https://matrix.org/blog/")
 
 #### Example
 
-```
+```yaml
 agents:
   extractor:
     tools:
@@ -416,7 +416,7 @@ agents:
           enable_agentic_crawler: true
 ```
 
-```
+```python
 smartscraper("https://matrix.org/blog/", "Extract the title, date, and three main points.")
 markdownify("https://matrix.org/blog/")
 ```
@@ -448,7 +448,7 @@ This is best thought of as a hosted Actor adapter rather than a single scraper A
 
 #### Example
 
-```
+```yaml
 agents:
   extractor:
     tools:
@@ -492,7 +492,7 @@ Zone selection is controlled by `serp_zone` and `web_unlocker_zone`, which can a
 
 #### Example
 
-```
+```yaml
 agents:
   research:
     tools:
@@ -501,7 +501,7 @@ agents:
           timeout: 300
 ```
 
-```
+```python
 scrape_as_markdown("https://matrix.org/blog/")
 search_engine("Matrix hosting", engine="google", num_results=5)
 ```
@@ -534,14 +534,14 @@ This tool is credentialed with a username and password pair rather than one API 
 
 #### Example
 
-```
+```yaml
 agents:
   commerce:
     tools:
       - oxylabs
 ```
 
-```
+```python
 search_google("Matrix hosting", domain_code="com")
 search_amazon_products("ergonomic keyboard", domain_code="com")
 ```
@@ -578,7 +578,7 @@ The current upstream implementation launches Playwright with `headless=False`, w
 
 #### Example
 
-```
+```yaml
 agents:
   extractor:
     tools:
@@ -590,7 +590,7 @@ agents:
             }
 ```
 
-```
+```python
 scrape_website("https://matrix.org/blog/")
 custom_scrape_website("https://matrix.org/blog/")
 ```
@@ -631,7 +631,7 @@ This is simpler than `browser` when you only need remote navigation, screenshots
 
 #### Example
 
-```
+```yaml
 agents:
   browser_worker:
     tools:
@@ -640,7 +640,7 @@ agents:
           max_content_length: 20000
 ```
 
-```
+```python
 navigate_to("https://matrix.org/blog/")
 get_page_content()
 ```
@@ -674,7 +674,7 @@ The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `googl
 
 #### Example
 
-```
+```yaml
 agents:
   browser_worker:
     tools:
@@ -682,7 +682,7 @@ agents:
           output_dir: browser-artifacts
 ```
 
-```
+```python
 browser(action="open", targetUrl="https://matrix.org/blog/")
 browser(action="snapshot", snapshotFormat="ai")
 browser(action="act", request={"kind": "click", "ref": "e1"})
@@ -713,14 +713,14 @@ This makes it useful for human handoff or local desktop workflows, but not for s
 
 #### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
       - web_browser_tools
 ```
 
-```
+```python
 open_page("https://docs.mindroom.chat")
 open_page("https://matrix.org/blog/", new_window=True)
 ```

@@ -30,7 +30,7 @@ Many plugins combine both.
 
 The manifest is a JSON file named `mindroom.plugin.json` at the plugin root:
 
-```
+```json
 {
   "name": "my-plugin",
   "tools_module": "tools.py",
@@ -59,7 +59,7 @@ If both fields point at the same file, MindRoom imports it once and reuses it fo
 
 Add plugin paths under `plugins:` in `config.yaml`:
 
-```
+```yaml
 plugins:
   - ./plugins/my-plugin
   - python:my_skill_pack
@@ -82,14 +82,14 @@ Both forms can be mixed in the same list.
 
 **String entry** — just the path:
 
-```
+```yaml
 plugins:
   - ./plugins/my-plugin
 ```
 
 **Object entry** — path plus options:
 
-```
+```yaml
 plugins:
   - path: ./plugins/my-plugin
     enabled: true
@@ -127,7 +127,7 @@ Paths are resolved in this order:
 
 MindRoom can resolve plugins from installed Python packages:
 
-```
+```yaml
 plugins:
   - my_skill_pack
   - python:my_skill_pack
@@ -157,7 +157,7 @@ The provider module supplies only provider-specific details such as endpoint URL
 
 Declare the module in the manifest:
 
-```
+```json
 {
   "name": "drive-plugin",
   "tools_module": "tools.py",
@@ -167,7 +167,7 @@ Declare the module in the manifest:
 
 Then expose `register_oauth_providers(settings, runtime_paths)`:
 
-```
+```python
 from __future__ import annotations
 
 from mindroom.oauth import OAuthProvider
@@ -214,7 +214,7 @@ If a configured restriction cannot be checked from verified claims, MindRoom fai
 
 ### Minimal example
 
-```
+```python
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -254,7 +254,7 @@ def greeter_tools() -> type[Toolkit]:
 
 After registering the plugin, assign the tool to agents in `config.yaml`:
 
-```
+```yaml
 plugins:
   - ./plugins/my-greeter
 
@@ -305,7 +305,7 @@ MindRoom checks whether each package is importable before the tool is instantiat
 **For plugin tools**, automatic installation does **not** apply — there is no matching optional extra in MindRoom's package metadata. If the listed dependencies are not already installed in the environment, MindRoom raises an `ImportError` with a message listing the missing packages.
 Plugin authors should document their dependencies in their README so users can install them manually:
 
-```
+```bash
 pip install openviking-client aiohttp
 ```
 
@@ -331,7 +331,7 @@ Each `ConfigField` describes one constructor parameter that can be configured th
 
 Example — a tool that requires an API key:
 
-```
+```python
 from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
@@ -379,7 +379,7 @@ MindRoom does **not** auto-detect constructor parameter names — undeclared man
 
 Example:
 
-```
+```python
 from agno.tools import Toolkit
 from mindroom.tool_system.metadata import ToolCategory, ToolManagedInitArg, register_tool_with_metadata
 
@@ -404,7 +404,7 @@ def needs_runtime_tools() -> type[Toolkit]:
 
 MindRoom supports native MCP servers in `config.yaml` — see [MCP](https://docs.mindroom.chat/mcp/index.md) for the normal setup path. This plugin pattern is still useful when you want a custom wrapper around Agno `MCPTools`:
 
-```
+```python
 from agno.tools.mcp import MCPTools
 from mindroom.tool_system.metadata import (
     SetupType,
@@ -436,7 +436,7 @@ def mcp_filesystem_tools():
 
 Reference the plugin and tool in `config.yaml`:
 
-```
+```yaml
 plugins:
   - ./plugins/mcp-filesystem
 
@@ -482,7 +482,7 @@ No service restart and no agent session disruption.
 
 ### Iterating on a plugin
 
-```
+```bash
 # 1. Edit any file under your plugin
 $EDITOR ~/.mindroom/plugins/my-plugin/hooks.py
 
@@ -531,11 +531,11 @@ Edit any configured plugin directory directly while `mindroom.service` is runnin
 The [mindroom-ai](https://github.com/mindroom-ai) organization maintains a collection of open-source plugins.
 Clone any of them into your plugins directory and add the path to `config.yaml`:
 
-```
+```bash
 git clone https://github.com/mindroom-ai/ping-hook-plugin.git ~/.mindroom/plugins/ping-hook
 ```
 
-```
+```yaml
 plugins:
   - ~/.mindroom/plugins/ping-hook
 ```

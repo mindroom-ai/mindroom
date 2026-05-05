@@ -34,7 +34,7 @@ User sends message
 Streaming is enabled by default.
 Disable it globally in `config.yaml`:
 
-```
+```yaml
 defaults:
   enable_streaming: false   # Default: true
 ```
@@ -43,7 +43,7 @@ defaults:
 
 Tune the streaming edit cadence globally under `defaults.streaming`:
 
-```
+```yaml
 defaults:
   enable_streaming: true
   streaming:
@@ -151,7 +151,7 @@ If a streamed response exceeds the Matrix event size limit (55KB for new message
 
 Two global defaults control what users see during streaming:
 
-```
+```yaml
 defaults:
   show_tool_calls: true     # Default: true — show inline tool markers and tool-trace metadata
   show_stop_button: true    # Default: true — add 🛑 reaction for cancellation

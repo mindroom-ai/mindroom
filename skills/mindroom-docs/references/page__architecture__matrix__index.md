@@ -88,7 +88,7 @@ Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindr
 
 Marker format:
 
-```
+```text
 🔧 `tool_name` [N] ⏳     ← pending
 🔧 `tool_name` [N]        ← completed
 ```
@@ -147,7 +147,7 @@ This runs automatically — no manual intervention is needed.
 
 The `MatrixID` class handles Matrix user ID parsing and agent identification:
 
-```
+```python
 mid = MatrixID.parse("@mindroom_assistant:example.com")
 mid.username  # "mindroom_assistant"
 mid.domain    # "example.com"
@@ -164,7 +164,7 @@ agent_name = extract_agent_name("@mindroom_code:localhost", config, runtime_path
 
 MindRoom can create and maintain a root Matrix Space that groups all managed rooms.
 
-```
+```yaml
 matrix_space:
   enabled: true        # Default: true
   name: MindRoom       # Display name for the Space
@@ -177,7 +177,7 @@ The Space name is reconciled on each startup to match the configured value.
 
 Outgoing encrypted Matrix sends keep nio's device-trust checks enabled by default.
 
-```
+```yaml
 matrix_delivery:
   ignore_unverified_devices: false
 ```
@@ -189,7 +189,7 @@ This is a security tradeoff because Matrix may encrypt outgoing events for devic
 
 Matrix settings are derived from `config.yaml`:
 
-```
+```yaml
 agents:
   assistant:
     rooms: [lobby, dev]  # Room aliases (auto-created if needed)

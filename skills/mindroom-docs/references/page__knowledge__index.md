@@ -32,7 +32,7 @@ Querying (agentic RAG):
 
 Add a knowledge base and assign it to an agent:
 
-```
+```yaml
 knowledge_bases:
   docs:
     path: ./knowledge_docs
@@ -58,7 +58,7 @@ Use a non-empty single path component such as `docs` or `company_docs`, not `""`
 
 ### Basic Knowledge Base
 
-```
+```yaml
 knowledge_bases:
   my_docs:
     path: ./knowledge_docs/my_docs   # Folder containing documents
@@ -82,7 +82,7 @@ If chunking is too large, indexing retries will fail with embedder 500 errors.
 
 Use `agents.<name>.private.knowledge` when one shared agent definition should index PrivateAgentKnowledge from that requester's private root.
 
-```
+```yaml
 knowledge_bases:
   company_docs:
     path: ./company_docs
@@ -133,7 +133,7 @@ Use top-level `knowledge_bases` when the same documents should stay shared acros
 
 You can define multiple knowledge bases and assign them to different agents:
 
-```
+```yaml
 knowledge_bases:
   engineering:
     path: ./knowledge_docs/engineering
@@ -177,7 +177,7 @@ MindRoom starts a background refresh for configured shared Git knowledge bases w
 After that, it schedules another background refresh every `poll_interval_seconds`.
 Reads keep using the last published index while a refresh is running.
 
-```
+```yaml
 knowledge_bases:
   pipefunc_docs:
     path: ./knowledge_docs/pipefunc
@@ -225,7 +225,7 @@ Bundled container images already include it.
 
 Patterns are matched from the repository root. `*` matches one path segment, `**` matches zero or more segments.
 
-```
+```yaml
 knowledge_bases:
   project_docs:
     path: ./knowledge_docs/project
@@ -246,7 +246,7 @@ knowledge_bases:
 Multiple knowledge bases may point at the same root when they use the same source ownership settings.
 This is the preferred way to expose separate views of a large repository without cloning it more than once.
 
-```
+```yaml
 knowledge_bases:
   project_docs:
     path: ./knowledge_docs/project
@@ -268,7 +268,7 @@ For private HTTPS repositories, store credentials and reference them in the conf
 
 **Step 1:** Store credentials via the API or Dashboard (Credentials tab):
 
-```
+```bash
 curl -X POST http://localhost:8765/api/credentials/github_private \
   -H "Content-Type: application/json" \
   -d '{"credentials":{"username":"x-access-token","token":"ghp_your_token_here"}}'
@@ -276,7 +276,7 @@ curl -X POST http://localhost:8765/api/credentials/github_private \
 
 **Step 2:** Reference the service name in your knowledge base config:
 
-```
+```yaml
 knowledge_bases:
   private_docs:
     path: ./knowledge_docs/private
@@ -297,7 +297,7 @@ Accepted credential fields:
 
 Knowledge bases use the same embedder configured in the `memory` section:
 
-```
+```yaml
 memory:
   embedder:
     provider: openai        # or "ollama", "huggingface", or "sentence_transformers"

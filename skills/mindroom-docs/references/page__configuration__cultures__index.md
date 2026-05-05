@@ -4,7 +4,7 @@ Cultures let a group of agents share evolving principles, practices, and convent
 
 ## Basic Culture
 
-```
+```yaml
 cultures:
   engineering:
     description: Follow clean code principles and write tests
@@ -13,7 +13,7 @@ cultures:
 
 ## Full Configuration
 
-```
+```yaml
 cultures:
   engineering:
     # Describes the shared principles this culture captures

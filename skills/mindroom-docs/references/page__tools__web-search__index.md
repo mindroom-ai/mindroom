@@ -60,7 +60,7 @@ The tool returns JSON strings from DDGS rather than a MindRoom-specific normaliz
 
 ### Example
 
-```
+```yaml
 agents:
   researcher:
     tools:
@@ -69,7 +69,7 @@ agents:
           fixed_max_results: 8
 ```
 
-```
+```python
 web_search("latest Matrix client features", max_results=5)
 search_news("Matrix ecosystem", max_results=5)
 ```
@@ -105,7 +105,7 @@ This is still a DDGS-backed scraper-style search path rather than an official Go
 
 ### Example
 
-```
+```yaml
 agents:
   researcher:
     tools:
@@ -114,7 +114,7 @@ agents:
           fixed_max_results: 6
 ```
 
-```
+```python
 web_search("MindRoom Matrix threads", max_results=5)
 search_news("open source Matrix news", max_results=5)
 ```
@@ -151,7 +151,7 @@ The returned payload is a JSON array with `title`, `url`, `abstract`, and `rank`
 
 ### Example
 
-```
+```yaml
 agents:
   cn_research:
     tools:
@@ -160,7 +160,7 @@ agents:
           fixed_max_results: 8
 ```
 
-```
+```python
 baidu_search("Matrix 协议 新闻", max_results=5, language="zh")
 ```
 
@@ -203,7 +203,7 @@ baidu_search("Matrix 协议 新闻", max_results=5, language="zh")
 
 ### Example
 
-```
+```yaml
 agents:
   newsdesk:
     tools:
@@ -214,7 +214,7 @@ agents:
           format: markdown
 ```
 
-```
+```python
 web_search_using_tavily("latest Matrix bridge updates", max_results=5)
 extract_url_content("https://matrix.org/blog/")
 ```
@@ -267,7 +267,7 @@ The toolkit supports domain allowlists and denylists, crawl-date and publish-dat
 
 ### Example
 
-```
+```yaml
 agents:
   analyst:
     tools:
@@ -280,7 +280,7 @@ agents:
           research_model: exa-research
 ```
 
-```
+```python
 search_exa("Matrix sliding sync adoption", num_results=5)
 find_similar("https://matrix.org/blog/")
 exa_answer("What changed in the Matrix ecosystem this week?")
@@ -315,7 +315,7 @@ MindRoom does not add extra behavior here beyond registering the tool metadata a
 
 ### Example
 
-```
+```yaml
 agents:
   researcher:
     tools:
@@ -323,7 +323,7 @@ agents:
           enable_search_youtube: true
 ```
 
-```
+```python
 search_google("Matrix bridges", num_results=10)
 search_youtube("Matrix conference talks")
 ```
@@ -362,7 +362,7 @@ The search methods return raw JSON responses from Serper.
 
 ### Example
 
-```
+```yaml
 agents:
   analyst:
     tools:
@@ -372,7 +372,7 @@ agents:
           enable_search_scholar: true
 ```
 
-```
+```python
 search_web("latest Matrix rooms UX", num_results=5)
 search_news("Matrix foundation news", num_results=5)
 search_scholar("Matrix protocol paper", num_results=5)
@@ -406,7 +406,7 @@ If `engines` is set, the tool appends those engine names to the SearXNG request.
 
 ### Example
 
-```
+```yaml
 agents:
   privacy_research:
     tools:
@@ -418,7 +418,7 @@ agents:
           fixed_max_results: 6
 ```
 
-```
+```python
 search_web("Matrix federation guide", max_results=5)
 news_search("Matrix news", max_results=5)
 science_search("decentralized messaging protocol", max_results=5)
@@ -454,7 +454,7 @@ The tool returns the raw response from the Linkup SDK rather than a MindRoom-spe
 
 ### Example
 
-```
+```yaml
 agents:
   briefings:
     tools:
@@ -463,7 +463,7 @@ agents:
           output_type: sourcedAnswer
 ```
 
-```
+```python
 web_search_with_linkup(
     "Summarize the latest Matrix bridge announcements",
     depth="deep",

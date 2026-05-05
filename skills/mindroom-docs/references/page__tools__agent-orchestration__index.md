@@ -49,7 +49,7 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   coordinator:
     display_name: Coordinator
@@ -59,7 +59,7 @@ agents:
       - subagents
 ```
 
-```
+```python
 agents_list()
 sessions_spawn(
     task="Review the failing deployment and propose a rollback plan.",
@@ -103,7 +103,7 @@ MindRoom adds the tool automatically when `delegate_to` is non-empty, so listing
 
 ### Example
 
-```
+```yaml
 agents:
   lead:
     display_name: Lead
@@ -129,7 +129,7 @@ agents:
       - duckduckgo
 ```
 
-```
+```python
 delegate_task(
     agent_name="research",
     task="Summarize the three main risks in this proposal and cite supporting facts.",
@@ -167,7 +167,7 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   builder:
     display_name: Builder
@@ -177,7 +177,7 @@ agents:
       - config_manager
 ```
 
-```
+```python
 get_info("available_tools")
 get_info("tool_details", name="claude_agent")
 manage_agent(
@@ -227,7 +227,7 @@ The normal way to enable it is `agents.<name>.allow_self_config: true` or `defau
 
 ### Example
 
-```
+```yaml
 defaults:
   allow_self_config: false
 
@@ -242,7 +242,7 @@ agents:
       - wikipedia
 ```
 
-```
+```python
 get_own_config()
 update_own_config(
     instructions=[
@@ -280,7 +280,7 @@ This preset has no inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   openclaw:
     display_name: OpenClawAgent
@@ -348,7 +348,7 @@ On SDK failures, the tool includes recent Claude CLI stderr lines in its error o
 
 ### Example
 
-```
+```yaml
 agents:
   code:
     display_name: Code Agent
@@ -364,7 +364,7 @@ agents:
           max_sessions: 20
 ```
 
-```
+```json
 {
   "api_key": "sk-ant-or-proxy-key",
   "model": "claude-sonnet-4-6",
@@ -375,7 +375,7 @@ agents:
 }
 ```
 
-```
+```json
 {
   "api_key": "sk-dummy",
   "anthropic_base_url": "http://litellm.local",
@@ -384,7 +384,7 @@ agents:
 }
 ```
 
-```
+```python
 claude_send(
     prompt="Refactor the failing test and explain the diff.",
     session_label="bugfix",

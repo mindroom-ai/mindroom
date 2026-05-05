@@ -42,7 +42,7 @@ Reading papers downloads each PDF locally, parses it with `pypdf`, and returns t
 
 ### Example
 
-```
+```yaml
 agents:
   researcher:
     tools:
@@ -50,7 +50,7 @@ agents:
           download_dir: mindroom_data/arxiv
 ```
 
-```
+```python
 search_arxiv_and_return_articles("matrix protocol", num_articles=5)
 read_arxiv_papers(["2103.03404v1"], pages_to_read=3)
 ```
@@ -80,14 +80,14 @@ This makes `wikipedia` a simple direct lookup tool by default, with an advanced 
 
 ### Example
 
-```
+```yaml
 agents:
   researcher:
     tools:
       - wikipedia
 ```
 
-```
+```python
 search_wikipedia("Matrix protocol")
 ```
 
@@ -120,7 +120,7 @@ When `results_expanded` is enabled, each result also includes first author, jour
 
 ### Example
 
-```
+```yaml
 agents:
   clinician:
     tools:
@@ -130,7 +130,7 @@ agents:
           results_expanded: true
 ```
 
-```
+```python
 search_pubmed("CRISPR therapy", max_results=5)
 ```
 
@@ -160,14 +160,14 @@ User lookups return a smaller JSON object with karma, about text, and total subm
 
 ### Example
 
-```
+```yaml
 agents:
   tech_watch:
     tools:
       - hackernews
 ```
 
-```
+```python
 get_top_hackernews_stories(num_stories=5)
 get_user_details("pg")
 ```
