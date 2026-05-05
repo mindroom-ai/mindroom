@@ -434,7 +434,7 @@ class TestRouterHandoffThreadMode:
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
+        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
             captured_content.clear()
             captured_content.update(content)
             return delivered_matrix_event("$reply", content)
@@ -475,7 +475,7 @@ class TestRouterHandoffThreadMode:
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
+        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
             captured_content.clear()
             captured_content.update(content)
             return delivered_matrix_event("$reply", content)
@@ -946,7 +946,7 @@ class TestSendResponseRoomMode:
 
         captured_content: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
+        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
             captured_content.update(content)
             return delivered_matrix_event("$response_event", content)
 
@@ -1008,7 +1008,7 @@ class TestStreamingResponseRoomMode:
 
         captured: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
+        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
             captured.update(content)
             return delivered_matrix_event("$sent", content)
 
@@ -1034,7 +1034,7 @@ class TestStreamingResponseRoomMode:
 
         captured: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
+        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
             captured.update(content)
             return delivered_matrix_event("$sent", content)
 
@@ -1069,7 +1069,7 @@ class TestSendStreamingResponseRoomMode:
 
         captured: dict = {}
 
-        async def mock_send(_client: object, _room_id: str, content: dict) -> object:
+        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
             captured.update(content)
             return delivered_matrix_event("$sent", content)
 
@@ -1079,6 +1079,7 @@ class TestSendStreamingResponseRoomMode:
             _event_id: str,
             content: dict,
             _display_text: str,
+            **_kwargs: object,
         ) -> object:
             captured.update(content)
             return delivered_matrix_event("$edit", content)

@@ -97,6 +97,7 @@ class TestConfigInit:
         assert "authorization:" in content
         assert "matrix_space:" in content
         assert "matrix_space:\n  enabled: true\n  name: MindRoom" in content
+        assert "matrix_delivery:\n  ignore_unverified_devices: false" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
     def test_init_prompt_defaults_to_openai(self, tmp_path: Path) -> None:
@@ -287,6 +288,7 @@ class TestConfigInit:
         assert "authorization:" in content
         assert "matrix_space:" in content
         assert "matrix_space:\n  enabled: true\n  name: MindRoom" in content
+        assert "matrix_delivery:\n  ignore_unverified_devices: false" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
     def test_init_profile_minimal(self, tmp_path: Path) -> None:

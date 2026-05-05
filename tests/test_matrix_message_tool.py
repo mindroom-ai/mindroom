@@ -337,6 +337,7 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
             {"emoji": "✅", "label": "Approve", "value": "approve"},
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
+        config=ctx.config,
     )
 
 
@@ -427,6 +428,7 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
         ctx.client,
         ctx.room_id,
         attachment.local_path,
+        config=ctx.config,
         thread_id="$evt",
         latest_thread_event_id="$evt",
         conversation_cache=ctx.conversation_cache,
@@ -483,6 +485,7 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
         ctx.client,
         ctx.room_id,
         attachment.local_path,
+        config=ctx.config,
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
@@ -533,6 +536,7 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
         ctx.client,
         ctx.room_id,
         attachment.local_path,
+        config=ctx.config,
         thread_id=ctx.thread_id,
         latest_thread_event_id=ctx.thread_id,
         conversation_cache=ctx.conversation_cache,
@@ -591,6 +595,7 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
         ctx.client,
         ctx.room_id,
         attachment.local_path,
+        config=ctx.config,
         thread_id=explicit_thread_id,
         latest_thread_event_id=explicit_thread_id,
         conversation_cache=ctx.conversation_cache,
@@ -641,6 +646,7 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
         ctx.client,
         ctx.room_id,
         attachment.local_path,
+        config=ctx.config,
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
@@ -701,6 +707,7 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
         ctx.client,
         ctx.room_id,
         first_attachment.local_path,
+        config=ctx.config,
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
@@ -781,12 +788,14 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
     second_call = mock_send_file.await_args_list[1]
     assert first_call.args == (ctx.client, ctx.room_id, first_attachment.local_path)
     assert first_call.kwargs == {
+        "config": ctx.config,
         "thread_id": None,
         "latest_thread_event_id": None,
         "conversation_cache": ctx.conversation_cache,
     }
     assert second_call.args == (ctx.client, ctx.room_id, second_attachment.local_path)
     assert second_call.kwargs == {
+        "config": ctx.config,
         "thread_id": None,
         "latest_thread_event_id": "$file_one",
         "conversation_cache": ctx.conversation_cache,
@@ -832,6 +841,7 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
         ctx.client,
         ctx.room_id,
         generated_file,
+        config=ctx.config,
         thread_id="$evt",
         latest_thread_event_id="$evt",
         conversation_cache=ctx.conversation_cache,
@@ -939,6 +949,7 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
         ctx.client,
         ctx.room_id,
         first_attachment.local_path,
+        config=ctx.config,
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
@@ -1059,6 +1070,7 @@ async def test_matrix_message_react_happy_path() -> None:
                 "key": "🔥",
             },
         },
+        ignore_unverified_devices=False,
     )
 
 
@@ -1152,6 +1164,7 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
             {"emoji": "✅", "label": "Approve", "value": "approve"},
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
+        config=ctx.config,
     )
 
 
@@ -1245,6 +1258,7 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
             {"emoji": "✅", "label": "Approve", "value": "approve"},
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
+        config=ctx.config,
     )
 
 

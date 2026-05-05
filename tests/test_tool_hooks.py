@@ -1466,13 +1466,20 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         runtime_paths,
     )
 
-    async def mock_room_send(room_id: str, message_type: str, content: dict[str, object]) -> nio.RoomSendResponse:
+    async def mock_room_send(
+        room_id: str,
+        message_type: str,
+        content: dict[str, object],
+        *,
+        ignore_unverified_devices: bool = False,
+    ) -> nio.RoomSendResponse:
         current_loop = asyncio.get_running_loop()
         current_thread = threading.get_ident()
         assert current_thread == request_thread
         assert current_loop is request_loop
         assert room_id == "!room:localhost"
         assert message_type == "io.mindroom.tool_approval"
+        assert ignore_unverified_devices is False
         assert content["status"] == "pending"
         return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 

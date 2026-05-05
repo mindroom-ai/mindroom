@@ -519,7 +519,12 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
     )
     mock_get_pending.assert_called_once_with("$preview")
     mock_store_pending.assert_awaited_once_with(context.client, "$preview", pending_change)
-    mock_add_reactions.assert_awaited_once_with(context.client, "!room:example.org", "$preview")
+    mock_add_reactions.assert_awaited_once_with(
+        context.client,
+        "!room:example.org",
+        "$preview",
+        config=context.config,
+    )
     context.record_handled_turn.assert_called_once_with(
         HandledTurnState.from_source_event_id(
             "$event",

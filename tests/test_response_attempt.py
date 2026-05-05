@@ -11,6 +11,7 @@ import pytest
 
 from mindroom import response_attempt as response_attempt_module
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
+from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.message_target import MessageTarget
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
@@ -45,10 +46,17 @@ class _StopManager:
         self,
         _client: object,
         message_id: str,
-        **_kwargs: object,
+        *,
+        config: Config,
+        notify_outbound_event: object,
     ) -> str:
         self.added_buttons.append(message_id)
-        self.add_stop_button_kwargs.append(_kwargs)
+        self.add_stop_button_kwargs.append(
+            {
+                "config": config,
+                "notify_outbound_event": notify_outbound_event,
+            },
+        )
         self.tracked_messages[message_id].reaction_event_id = "$reaction"
         return "$reaction"
 
@@ -90,6 +98,7 @@ def _runner(
                 stop_manager=resolved_stop_manager,
                 logger=MagicMock(),
                 show_stop_button=lambda: show_stop_button,
+                config=Config(),
                 notify_outbound_event=MagicMock(),
                 notify_outbound_redaction=MagicMock(),
             ),
@@ -184,7 +193,10 @@ async def test_response_attempt_adds_stop_button_for_online_user_and_removes_it_
     )
     assert stop_manager.added_buttons == ["$thinking"]
     assert stop_manager.add_stop_button_kwargs == [
-        {"notify_outbound_event": runner.deps.notify_outbound_event},
+        {
+            "config": runner.deps.config,
+            "notify_outbound_event": runner.deps.notify_outbound_event,
+        },
     ]
     assert stop_manager.cleared_messages == [("$thinking", True)]
     assert stop_manager.clear_message_kwargs == [

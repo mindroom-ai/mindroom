@@ -234,6 +234,7 @@ async def test_matrix_api_send_event_happy_path() -> None:
         room_id=ctx.room_id,
         message_type="com.example.event",
         content={"body": "hello"},
+        ignore_unverified_devices=False,
     )
 
 
@@ -312,6 +313,7 @@ async def test_matrix_api_send_event_room_message_preserves_raw_payload() -> Non
         room_id=ctx.room_id,
         message_type="m.room.message",
         content=content,
+        ignore_unverified_devices=False,
     )
 
 
@@ -1911,6 +1913,7 @@ async def test_matrix_api_cross_room_access_allowed_uses_target_room_id(
             room_id="!other:localhost",
             message_type="com.example.event",
             content={"body": "x"},
+            ignore_unverified_devices=False,
         )
     elif action == "get_state":
         ctx.client.room_get_state_event.assert_awaited_once_with(

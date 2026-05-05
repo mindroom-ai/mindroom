@@ -95,6 +95,9 @@ _CANONICAL_INIT_PROFILES: tuple[str, ...] = (
     "public-codex",
     "public-vertexai-anthropic",
 )
+_MATRIX_DELIVERY_TEMPLATE_BLOCK = """\
+matrix_delivery:
+  ignore_unverified_devices: false"""
 
 
 def _config_init_storage_plan(
@@ -832,6 +835,8 @@ matrix_space:
   enabled: true
   name: MindRoom
 
+{_MATRIX_DELIVERY_TEMPLATE_BLOCK}
+
 knowledge_bases:
   mind_memory:
     path: {mind_memory_knowledge_path}
@@ -957,6 +962,8 @@ mindroom_user:
 matrix_space:
   enabled: true
   name: MindRoom
+
+{_MATRIX_DELIVERY_TEMPLATE_BLOCK}
 
 authorization:
   default_room_access: false

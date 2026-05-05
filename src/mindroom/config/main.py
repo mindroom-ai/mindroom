@@ -25,7 +25,13 @@ from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.config.matrix import CacheConfig, MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
+from mindroom.config.matrix import (
+    CacheConfig,
+    MatrixDeliveryConfig,
+    MatrixRoomAccessConfig,
+    MatrixSpaceConfig,
+    MindRoomUserConfig,
+)
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import (
     CompactionConfig,
@@ -88,6 +94,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "mcp_servers",
     "matrix_room_access",
     "matrix_space",
+    "matrix_delivery",
 )
 _OPTIONAL_MODEL_SECTION_NAMES = ("debug", "avatars", "tool_approval")
 
@@ -399,6 +406,10 @@ class Config(BaseModel):
     matrix_space: MatrixSpaceConfig = Field(
         default_factory=MatrixSpaceConfig,
         description="Optional root Matrix Space for grouping managed rooms",
+    )
+    matrix_delivery: MatrixDeliveryConfig = Field(
+        default_factory=MatrixDeliveryConfig,
+        description="Outgoing Matrix event delivery behavior",
     )
     authorization: AuthorizationConfig = Field(
         default_factory=AuthorizationConfig,

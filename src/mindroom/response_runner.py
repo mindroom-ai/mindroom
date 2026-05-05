@@ -1424,6 +1424,7 @@ class ResponseRunner:
                     stop_manager=self.deps.stop_manager,
                     logger=self.deps.logger,
                     show_stop_button=lambda: self.deps.runtime.config.defaults.show_stop_button,
+                    config=self.deps.runtime.config,
                     notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
                     notify_outbound_redaction=(
                         self.deps.post_response_effects.conversation_cache.notify_outbound_redaction

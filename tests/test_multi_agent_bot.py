@@ -3166,7 +3166,12 @@ class TestAgentBot:
         """Team helper should preserve the canonical thread root across placeholder and edit flow."""
         sent_contents: list[dict[str, object]] = []
 
-        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+        async def record_send(
+            _client: object,
+            _room_id: str,
+            content: dict[str, object],
+            **_kwargs: object,
+        ) -> DeliveredMatrixEvent:
             sent_contents.append(content)
             return delivered_matrix_event("$team", content)
 
@@ -5147,7 +5152,12 @@ class TestAgentBot:
             scheduled_tasks.append(task)
             return task
 
-        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+        async def record_send(
+            _client: object,
+            _room_id: str,
+            content: dict[str, object],
+            **_kwargs: object,
+        ) -> DeliveredMatrixEvent:
             sent_contents.append(content)
             return delivered_matrix_event("$thinking", content)
 
@@ -12649,6 +12659,7 @@ class TestMultiAgentOrchestrator:
             room_id: str,
             message_type: str,
             content: dict[str, object],
+            **_kwargs: object,
         ) -> nio.RoomSendResponse:
             del content
             assert room_id == "!room:localhost"
@@ -13044,6 +13055,7 @@ class TestMultiAgentOrchestrator:
             room_id: str,
             message_type: str,
             content: dict[str, object],
+            **_kwargs: object,
         ) -> nio.RoomSendResponse:
             assert room_id == "!room:localhost"
             assert message_type == "io.mindroom.tool_approval"
@@ -13178,6 +13190,7 @@ class TestMultiAgentOrchestrator:
             room_id: str,
             message_type: str,
             content: dict[str, object],
+            **_kwargs: object,
         ) -> nio.RoomSendResponse:
             assert room_id == "!room:localhost"
             assert message_type == "io.mindroom.tool_approval"

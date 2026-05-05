@@ -346,7 +346,7 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
     config = _config(tmp_path)
     client = _client()
 
-    async def record_edit(*_args: object) -> DeliveredMatrixEvent:
+    async def record_edit(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
         content = _args[3]
         return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(content))
 
@@ -507,7 +507,7 @@ async def test_transport_final_event_only_body_uses_canonical_final_candidate(tm
     async def final_only_stream() -> AsyncIterator[object]:
         yield RunCompletedEvent(content="hello from final event")
 
-    async def record_edit(*_args: object) -> DeliveredMatrixEvent:
+    async def record_edit(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
         content = _args[3]
         return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(content))
 
@@ -546,7 +546,7 @@ async def test_run_completed_content_does_not_rewrite_visible_stream_text(tmp_pa
         yield ToolCallCompletedEvent(tool=tool)
         yield RunCompletedEvent(content="Final answer")
 
-    async def record_edit(*_args: object) -> DeliveredMatrixEvent:
+    async def record_edit(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
         content = _args[3]
         captured_edits.append(content)
         return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(content))
@@ -598,7 +598,7 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
     async def interactive_stream() -> AsyncIterator[str]:
         yield raw_interactive
 
-    async def record_stream_edit(*args: object) -> DeliveredMatrixEvent:
+    async def record_stream_edit(*args: object, **_kwargs: object) -> DeliveredMatrixEvent:
         content = args[3]
         assert isinstance(content, dict)
         captured_stream_edits.append(dict(content))

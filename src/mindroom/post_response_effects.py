@@ -129,6 +129,7 @@ class PostResponseEffectsSupport:
             room_id,
             event_id,
             interactive_metadata.options_as_list(),
+            config=self.runtime.config,
         )
 
     def queue_thread_summary(

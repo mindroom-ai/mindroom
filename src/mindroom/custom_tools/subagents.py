@@ -272,7 +272,7 @@ async def _send_matrix_text(
     )
     if original_sender:
         content[ORIGINAL_SENDER_KEY] = original_sender
-    delivered = await send_message_result(context.client, room_id, content)
+    delivered = await send_message_result(context.client, room_id, content, config=context.config)
     if delivered is not None:
         context.conversation_cache.notify_outbound_message(room_id, delivered.event_id, delivered.content_sent)
     if delivered is not None:
@@ -311,6 +311,7 @@ async def _spawn_followup_warnings(
             summary_message_count,
             "manual",
             context.conversation_cache,
+            config=context.config,
         )
     except Exception as exc:
         warnings.append(f"Failed to set thread summary: {exc}")

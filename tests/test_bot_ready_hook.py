@@ -239,7 +239,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
 
     captured_content: dict[str, object] = {}
 
-    async def mock_send(_client: object, _room_id: str, content: dict[str, object]) -> object:
+    async def mock_send(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
         captured_content.update(content)
         return delivered_matrix_event("$hook-event", content)
 
@@ -1164,7 +1164,7 @@ async def test_non_router_hook_sender_prefers_current_bot_client(tmp_path: Path)
 
     sent_clients: list[object] = []
 
-    async def mock_send(client: object, _room_id: str, content: dict[str, object]) -> object:
+    async def mock_send(client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
         sent_clients.append(client)
         return delivered_matrix_event("$hook-event", content)
 

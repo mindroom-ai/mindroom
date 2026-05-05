@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.config.main import Config
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
@@ -35,6 +36,7 @@ class ResponseAttemptDeps:
     stop_manager: StopManager
     logger: structlog.stdlib.BoundLogger
     show_stop_button: Callable[[], bool]
+    config: Config
     notify_outbound_event: Callable[[str, dict[str, object]], None]
     notify_outbound_redaction: Callable[[str, str], None]
 
@@ -143,6 +145,7 @@ class ResponseAttemptRunner:
                     await self.deps.stop_manager.add_stop_button(
                         self.deps.client,
                         message_id,
+                        config=self.deps.config,
                         notify_outbound_event=self.deps.notify_outbound_event,
                     )
 

@@ -318,6 +318,7 @@ async def test_stop_manager_add_and_remove_button_notifies_cache_bookkeeping() -
     added_event_id = await stop_manager.add_stop_button(
         client,
         "$message:example.com",
+        config=Config(),
         notify_outbound_event=notify_outbound_event,
     )
 

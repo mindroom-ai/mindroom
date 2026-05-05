@@ -11,6 +11,7 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom.config.matrix import MatrixDeliveryConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
@@ -44,8 +45,17 @@ class MockClient:
         self.uploads: list[dict] = []
         self.should_upload_succeed = should_upload_succeed
 
-    async def room_send(self, room_id: str, message_type: str, content: dict) -> MagicMock:  # noqa: ARG002
+    async def room_send(
+        self,
+        room_id: str,
+        message_type: str,
+        content: dict,
+        *,
+        ignore_unverified_devices: bool = False,
+    ) -> MagicMock:
         """Mock sending a message."""
+        assert message_type == "m.room.message"
+        assert ignore_unverified_devices is False
         self.messages_sent.append(("send", room_id, content))
 
         # Create a mock that passes isinstance check
@@ -75,6 +85,7 @@ class MockConfig:
     def __init__(self) -> None:
         self.agents = {}
         self.defaults = DefaultsConfig()
+        self.matrix_delivery = MatrixDeliveryConfig()
 
 
 def _runtime_paths() -> RuntimePaths:
@@ -96,7 +107,7 @@ async def test_regular_message_under_limit() -> None:
     content = {"body": "Hello world", "msgtype": "m.text"}
 
     # Should pass through unchanged
-    await send_message_result(client, "!room:server", content)
+    await send_message_result(client, "!room:server", content, config=MockConfig())
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
@@ -113,7 +124,7 @@ async def test_regular_message_over_limit() -> None:
     large_text = "x" * 100000
     content = {"body": large_text, "msgtype": "m.text"}
 
-    await send_message_result(client, "!room:server", content)
+    await send_message_result(client, "!room:server", content, config=MockConfig())
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
@@ -145,7 +156,7 @@ async def test_edit_message_with_lower_threshold() -> None:
     text = "y" * 30000
     content = {"body": text, "msgtype": "m.text", "formatted_body": f"<p>{text}</p>"}
 
-    await edit_message_result(client, "!room:server", "$original", content, text)
+    await edit_message_result(client, "!room:server", "$original", content, text, config=MockConfig())
 
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
@@ -175,6 +186,7 @@ async def test_large_edit_preserves_mindroom_metadata_in_both_payload_layers() -
         "$original",
         content,
         text,
+        config=MockConfig(),
         extra_content=extra_content,
     )
 
@@ -212,6 +224,7 @@ async def test_threaded_edit_strips_nested_relations_from_replacement_payload() 
         "$original",
         content,
         "Updated reply",
+        config=MockConfig(),
     )
 
     assert len(client.messages_sent) == 1

@@ -173,6 +173,18 @@ matrix_space:
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
 The Space name is reconciled on each startup to match the configured value.
 
+## Delivery Policy
+
+Outgoing encrypted Matrix sends keep nio's device-trust checks enabled by default.
+
+```
+matrix_delivery:
+  ignore_unverified_devices: false
+```
+
+Operators can set `matrix_delivery.ignore_unverified_devices` to `true` when bot delivery should proceed even if encrypted rooms contain unverified devices.
+This is a security tradeoff because Matrix may encrypt outgoing events for devices the bot has not verified.
+
 ## Configuration
 
 Matrix settings are derived from `config.yaml`:

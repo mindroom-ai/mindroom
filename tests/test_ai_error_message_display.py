@@ -166,6 +166,7 @@ class TestAIErrorDisplay:
             event_id: str,
             content: dict[str, object],
             text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_messages.append((event_id, text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
@@ -252,6 +253,7 @@ class TestAIErrorDisplay:
             event_id: str,
             content: dict[str, object],
             text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_messages.append((event_id, text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
@@ -290,6 +292,7 @@ class TestAIErrorDisplay:
             event_id: str,
             content: dict[str, object],
             text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_messages.append((event_id, text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
@@ -328,6 +331,7 @@ class TestAIErrorDisplay:
             event_id: str,
             content: dict[str, object],
             text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_messages.append((event_id, text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
@@ -391,6 +395,7 @@ class TestAIErrorDisplay:
             event_id: str,
             content: dict[str, object],
             text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_messages.append((event_id, text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
@@ -449,6 +454,7 @@ class TestAIErrorDisplay:
             event_id: str,  # noqa: ARG001
             content: dict[str, object],
             text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_messages.append(text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
@@ -511,6 +517,7 @@ class TestAIErrorDisplay:
             event_id: str,
             content: dict[str, object],
             text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_messages.append((event_id, content, text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)

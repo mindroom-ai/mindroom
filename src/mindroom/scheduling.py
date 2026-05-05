@@ -791,6 +791,7 @@ async def _notify_scheduled_workflow_failure(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
     target: MessageTarget,
+    config: Config,
     error: Exception,
     conversation_cache: ConversationCacheProtocol,
 ) -> None:
@@ -805,7 +806,7 @@ async def _notify_scheduled_workflow_failure(
         conversation_cache,
     )
     try:
-        delivered = await send_message_result(client, workflow.room_id, error_content)
+        delivered = await send_message_result(client, workflow.room_id, error_content, config=config)
         if delivered is not None:
             conversation_cache.notify_outbound_message(
                 workflow.room_id,
@@ -879,7 +880,7 @@ async def _execute_scheduled_workflow(
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
             content["com.mindroom.source_kind"] = "scheduled"
-            delivered = await send_message_result(client, workflow.room_id, content)
+            delivered = await send_message_result(client, workflow.room_id, content, config=config)
             if delivered is None:
                 _raise_scheduled_workflow_send_error()
             conversation_cache.notify_outbound_message(
@@ -900,6 +901,7 @@ async def _execute_scheduled_workflow(
                 client,
                 workflow,
                 target,
+                config,
                 e,
                 conversation_cache,
             )
@@ -1019,7 +1021,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     error_message,
                     conversation_cache,
                 )
-                delivered = await send_message_result(client, workflow.room_id, error_content)
+                delivered = await send_message_result(client, workflow.room_id, error_content, config=config)
                 if delivered is not None:
                     conversation_cache.notify_outbound_message(
                         workflow.room_id,
@@ -1132,7 +1134,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     error_message,
                     conversation_cache,
                 )
-                delivered = await send_message_result(client, workflow.room_id, error_content)
+                delivered = await send_message_result(client, workflow.room_id, error_content, config=config)
                 if delivered is not None:
                     conversation_cache.notify_outbound_message(
                         workflow.room_id,

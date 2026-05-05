@@ -560,7 +560,10 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             _new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
         with (
@@ -1955,7 +1958,10 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             edited_contents.append((new_content, new_text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
@@ -2004,7 +2010,10 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             return DeliveredMatrixEvent(event_id="$stream-send", content_sent=dict(content))
 
         async def record_edit(
@@ -2013,7 +2022,10 @@ class TestStreamingBehavior:
             event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             return DeliveredMatrixEvent(
                 event_id="$stream-edit",
                 content_sent=build_edit_event_content(
@@ -2118,7 +2130,10 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             sent_contents.append(content)
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
@@ -2128,7 +2143,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent={})
 
         with (
@@ -2173,7 +2191,10 @@ class TestStreamingBehavior:
             _client: object,
             room_id: str,
             content: dict[str, object],
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             sent_messages.append((room_id, content))
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
@@ -2387,7 +2408,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2430,7 +2454,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2539,7 +2566,10 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             edited_messages.append((new_content, new_text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
@@ -2593,8 +2623,10 @@ class TestStreamingBehavior:
                 new_content: dict[str, object],
                 _new_text: str,
                 *,
+                config: Config,
                 _edited_messages: list[dict[str, object]] = edited_messages,
             ) -> DeliveredMatrixEvent:
+                assert isinstance(config, Config)
                 _edited_messages.append(new_content)
                 return DeliveredMatrixEvent(event_id="$edit", content_sent=new_content)
 
@@ -2641,7 +2673,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2690,7 +2725,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2738,7 +2776,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             if "Preparing isolated worker" in new_text:
                 msg = "edit blew up"
                 raise RuntimeError(msg)
@@ -2797,7 +2838,10 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             terminal_statuses.append(str(new_content[STREAM_STATUS_KEY]))
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text:
@@ -2858,7 +2902,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text:
                 msg = "edit blew up"
@@ -2915,7 +2962,10 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             return DeliveredMatrixEvent(event_id="$event123", content_sent=dict(content))
 
         async def lingering_drain(
@@ -2979,7 +3029,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text and "hello" not in new_text and "world" not in new_text:
                 warmup_edit_started.set()
@@ -3053,7 +3106,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             await stream_finished.wait()
             if _new_content.get("io.mindroom.stream_status") == "streaming":
                 msg = "late edit blew up"
@@ -3110,7 +3166,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent | None:
+            assert isinstance(config, Config)
             terminal_texts.append(new_text)
             return edit_results.pop(0)
 
@@ -3183,7 +3242,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             streaming.accumulated_text = "hello"
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -3420,7 +3482,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             nonlocal in_flight, max_in_flight
             in_flight += 1
             max_in_flight = max(max_in_flight, in_flight)
@@ -3726,7 +3791,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -3836,7 +3904,10 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            config: Config,
         ) -> DeliveredMatrixEvent:
+            assert isinstance(config, Config)
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 

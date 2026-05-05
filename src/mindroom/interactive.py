@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import nio
 
+from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.identity import is_agent_id
 
@@ -715,6 +716,8 @@ async def add_reaction_buttons(
     room_id: str,
     event_id: str,
     options: list[dict[str, str]],
+    *,
+    config: Config,
 ) -> None:
     """Add reaction buttons to a message.
 
@@ -723,6 +726,7 @@ async def add_reaction_buttons(
         room_id: The room ID
         event_id: The event ID of the message to add reactions to
         options: List of option dictionaries with 'emoji' keys
+        config: Active configuration for Matrix delivery policy
 
     """
     for opt in options:
@@ -737,6 +741,7 @@ async def add_reaction_buttons(
                     "key": emoji_char,
                 },
             },
+            ignore_unverified_devices=ignore_unverified_devices_for_config(config),
         )
         if not isinstance(reaction_response, nio.RoomSendResponse):
             logger.warning("Failed to add reaction", emoji=emoji_char, error=str(reaction_response))

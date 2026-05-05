@@ -15,6 +15,7 @@ import pytest
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
+from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.matrix.client import get_joined_rooms, get_room_name, matrix_client, send_message_result
@@ -30,6 +31,7 @@ def test_manual_script_is_not_collected_for_automation() -> None:
 async def run_message_sizes_manual() -> None:  # noqa: PLR0915
     """Test messages of different sizes."""
     runtime_paths = resolve_primary_runtime_paths()
+    config = Config()
 
     # Get credentials from environment
     homeserver = os.getenv("MATRIX_HOMESERVER", "https://m-test-3.mindroom.chat")
@@ -95,7 +97,7 @@ Features tested:
 
         content = {"body": short_text, "msgtype": "m.text"}
         print(f"📊 Size: {len(short_text):,} bytes")
-        delivered = await send_message_result(client, room_id, content)
+        delivered = await send_message_result(client, room_id, content, config=config)
         event_id = delivered.event_id if delivered is not None else None
         if event_id:
             print(f"✅ Sent: {event_id}")
@@ -119,7 +121,7 @@ This represents a typical long AI response that fits within Matrix limits.
 
         content = {"body": medium_text, "msgtype": "m.text"}
         print(f"📊 Size: {len(medium_text):,} bytes")
-        delivered = await send_message_result(client, room_id, content)
+        delivered = await send_message_result(client, room_id, content, config=config)
         event_id = delivered.event_id if delivered is not None else None
         if event_id:
             print(f"✅ Sent: {event_id}")
@@ -143,7 +145,7 @@ The attachment contains the full message content.
 
         content = {"body": over_text, "msgtype": "m.text"}
         print(f"📊 Size: {len(over_text):,} bytes")
-        delivered = await send_message_result(client, room_id, content)
+        delivered = await send_message_result(client, room_id, content, config=config)
         event_id = delivered.event_id if delivered is not None else None
         if event_id:
             print(f"✅ Sent: {event_id}")
@@ -176,7 +178,7 @@ Key points about large messages:
 
         content = {"body": large_text, "msgtype": "m.text"}
         print(f"📊 Size: {len(large_text):,} bytes")
-        delivered = await send_message_result(client, room_id, content)
+        delivered = await send_message_result(client, room_id, content, config=config)
         event_id = delivered.event_id if delivered is not None else None
         if event_id:
             print(f"✅ Sent: {event_id}")

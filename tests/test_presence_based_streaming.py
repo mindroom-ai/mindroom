@@ -299,8 +299,16 @@ class TestBotIntegration:
         bot.client.room_send = AsyncMock()
         bot.client.room_put_state = AsyncMock()
         install_runtime_cache_support(bot)
+        expected_config = config
 
-        async def mock_send_message_result(_client: object, _room_id: str, content: dict) -> object:
+        async def mock_send_message_result(
+            _client: object,
+            _room_id: str,
+            content: dict,
+            *,
+            config: Config,
+        ) -> object:
+            assert config is expected_config
             return delivered_matrix_event("$stream", content)
 
         async def mock_edit_message_result(
@@ -309,7 +317,10 @@ class TestBotIntegration:
             _event_id: str,
             content: dict,
             _display_text: str,
+            *,
+            config: Config,
         ) -> object:
+            assert config is expected_config
             return delivered_matrix_event("$edit", content)
 
         # Simulate a message from a user

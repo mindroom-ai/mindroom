@@ -487,6 +487,7 @@ async def test_delivery_gateway_edit_text_preserves_plain_reply_relation_in_room
         _event_id: str,
         new_content: dict[str, object],
         _new_text: str,
+        **_kwargs: object,
     ) -> object:
         captured_content.update(new_content)
         return await delivered_matrix_side_effect("$edit-event")(_client, _room_id, new_content)

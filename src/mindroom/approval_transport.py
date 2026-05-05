@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import nio
 
+from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import normalize_nio_event_for_cache
@@ -185,6 +186,7 @@ class ApprovalMatrixTransport:
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
             content=send_content,
+            ignore_unverified_devices=self._ignore_unverified_devices(),
         )
         if isinstance(response, nio.RoomSendResponse):
             sender_user_id = bot.client.user_id
@@ -259,6 +261,14 @@ class ApprovalMatrixTransport:
             room_ids.update(bot.client.rooms)
         return room_ids
 
+    def _ignore_unverified_devices(self) -> bool:
+        """Return the active Matrix delivery trust policy for approval sends."""
+        config = self.config_provider()
+        if config is None:
+            msg = "Approval Matrix transport requires an active config."
+            raise ToolApprovalTransportError(msg)
+        return ignore_unverified_devices_for_config(config)
+
     async def edit_approval_event_now(
         self,
         room_id: str,
@@ -288,6 +298,7 @@ class ApprovalMatrixTransport:
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
             content=build_matrix_edit_content(event_id, replacement_content),
+            ignore_unverified_devices=self._ignore_unverified_devices(),
         )
         if not isinstance(response, nio.RoomSendResponse):
             logger.warning(
@@ -375,6 +386,7 @@ class ApprovalMatrixTransport:
             room_id=room_id,
             message_type="m.room.message",
             content=content,
+            ignore_unverified_devices=self._ignore_unverified_devices(),
         )
         if isinstance(response, nio.RoomSendResponse):
             return True

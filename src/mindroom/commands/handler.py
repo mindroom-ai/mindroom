@@ -344,6 +344,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     context.client,
                     room.room_id,
                     response_event_id,
+                    config=context.config,
                 )
 
             if response_event_id is None:
