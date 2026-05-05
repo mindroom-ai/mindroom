@@ -21,7 +21,13 @@ from mindroom.constants import (
 )
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import (
+    MatrixExpectedDeliveryPolicyError,
+    build_edit_event_content,
+    edit_message_result,
+    is_expected_matrix_delivery_policy_error,
+    send_message_result,
+)
 from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
@@ -66,6 +72,7 @@ __all__ = [
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "cancel_failure_reason",
+    "is_expected_streaming_delivery_policy_error",
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
@@ -97,6 +104,11 @@ class StreamingDeliveryError(Exception):
         self.accumulated_text = accumulated_text
         self.tool_trace = tool_trace.copy()
         self.transport_outcome = transport_outcome
+
+
+def is_expected_streaming_delivery_policy_error(error: StreamingDeliveryError) -> bool:
+    """Return whether a streaming failure was caused by Matrix delivery policy."""
+    return is_expected_matrix_delivery_policy_error(error.error)
 
 
 def _build_streaming_delivery_error(
@@ -603,11 +615,14 @@ class StreamingResponse:
             "placeholder_only" if attempted_rendered_body == _PROGRESS_PLACEHOLDER else "visible_body"
         )
         try:
-            retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED
+            retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED and not (
+                error is not None and is_expected_matrix_delivery_policy_error(error)
+            )
             retry_terminal_update_immediately = (
                 final_stream_status != STREAM_STATUS_COMPLETED
                 and not restart_interrupted
                 and cancel_source != "sync_restart"
+                and not (error is not None and is_expected_matrix_delivery_policy_error(error))
             )
             send_succeeded = await self._send_or_edit_message(
                 client,
@@ -639,14 +654,24 @@ class StreamingResponse:
                 interactive_metadata=self._last_committed_interactive_metadata,
             )
         except Exception as exc:
-            logger.warning(
-                "Terminal streaming update raised after retries",
-                event_id=self.event_id,
-                room_id=self.room_id,
-                stream_status=final_stream_status,
-                reason=str(exc),
-                exc_info=True,
-            )
+            if is_expected_matrix_delivery_policy_error(exc):
+                logger.warning(
+                    "Terminal streaming update rejected by Matrix delivery policy",
+                    event_id=self.event_id,
+                    room_id=self.room_id,
+                    stream_status=final_stream_status,
+                    exception_type=exc.__class__.__name__,
+                    error=str(exc),
+                )
+            else:
+                logger.warning(
+                    "Terminal streaming update raised after retries",
+                    event_id=self.event_id,
+                    room_id=self.room_id,
+                    stream_status=final_stream_status,
+                    reason=str(exc),
+                    exc_info=True,
+                )
             (
                 committed_rendered_body,
                 committed_visible_body_state,
@@ -982,7 +1007,23 @@ class StreamingResponse:
                     if await self._edit_existing_content(client, content=content, display_text=display_text):
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
-            except Exception:
+            except Exception as exc:
+                if is_expected_matrix_delivery_policy_error(exc):
+                    log_fields: dict[str, object] = {"exception_type": exc.__class__.__name__}
+                    if isinstance(exc, MatrixExpectedDeliveryPolicyError):
+                        log_fields.update(
+                            operation=exc.operation,
+                            exception_type=exc.exception_type,
+                            failure_kind=exc.failure_kind,
+                        )
+                    logger.warning(
+                        "Streaming update rejected by Matrix delivery policy",
+                        attempt=attempt,
+                        event_id=self.event_id,
+                        room_id=self.room_id,
+                        **log_fields,
+                    )
+                    raise
                 logger.warning(
                     "Streaming update attempt raised an exception",
                     attempt=attempt,
@@ -1157,7 +1198,14 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             ) from exc
         except Exception as exc:
             delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
-            logger.exception("Streaming response failed", error=str(delivery_error))
+            if is_expected_matrix_delivery_policy_error(delivery_error):
+                logger.warning(
+                    "Streaming response failed due to Matrix delivery policy",
+                    error=str(delivery_error),
+                    exception_type=delivery_error.__class__.__name__,
+                )
+            else:
+                logger.exception("Streaming response failed", error=str(delivery_error))
             cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
             if cleanup_error is None:
                 progress_task = None

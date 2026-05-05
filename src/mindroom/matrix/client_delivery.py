@@ -32,6 +32,7 @@ logger = get_logger(__name__)
 
 _MATRIX_TRUST_DELIVERY_ERROR_MESSAGE = "Matrix encrypted delivery rejected by local device trust policy."
 _MATRIX_GENERIC_DELIVERY_ERROR_MESSAGE = "Matrix delivery raised an unexpected local exception."
+_MATRIX_POLICY_FAILURE_KIND = "matrix_delivery_policy_rejection"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,9 +43,33 @@ class DeliveredMatrixEvent:
     content_sent: dict[str, Any]
 
 
+class MatrixExpectedDeliveryPolicyError(Exception):
+    """Expected deterministic Matrix delivery rejection from local trust policy."""
+
+    def __init__(
+        self,
+        *,
+        room_id: str,
+        operation: str,
+        cache_bypass: bool,
+        exception_type: str,
+    ) -> None:
+        super().__init__(_MATRIX_TRUST_DELIVERY_ERROR_MESSAGE)
+        self.room_id = room_id
+        self.operation = operation
+        self.cache_bypass = cache_bypass
+        self.exception_type = exception_type
+        self.failure_kind = _MATRIX_POLICY_FAILURE_KIND
+
+
+def is_expected_matrix_delivery_policy_error(error: BaseException) -> bool:
+    """Return whether an exception is a deterministic Matrix policy rejection."""
+    return isinstance(error, MatrixExpectedDeliveryPolicyError | OlmTrustError)
+
+
 def _sanitized_delivery_error_message(error: Exception) -> str:
     """Return a log-safe Matrix delivery failure message."""
-    if isinstance(error, OlmTrustError):
+    if is_expected_matrix_delivery_policy_error(error):
         return _MATRIX_TRUST_DELIVERY_ERROR_MESSAGE
     return _MATRIX_GENERIC_DELIVERY_ERROR_MESSAGE
 
@@ -64,6 +89,22 @@ def _log_matrix_delivery_exception(
         cache_bypass=cache_bypass,
         exception_type=error.__class__.__name__,
         error_message=_sanitized_delivery_error_message(error),
+    )
+
+
+def _matrix_delivery_policy_error(
+    error: Exception,
+    *,
+    room_id: str,
+    operation: str,
+    cache_bypass: bool,
+) -> MatrixExpectedDeliveryPolicyError:
+    """Build one typed expected Matrix delivery policy rejection."""
+    return MatrixExpectedDeliveryPolicyError(
+        room_id=room_id,
+        operation=operation,
+        cache_bypass=cache_bypass,
+        exception_type=error.__class__.__name__,
     )
 
 
@@ -118,7 +159,14 @@ async def _send_prepared_room_message(
             operation=operation,
             cache_bypass=cache_bypass,
         )
-        return None
+        if is_expected_matrix_delivery_policy_error(error):
+            raise _matrix_delivery_policy_error(
+                error,
+                room_id=room_id,
+                operation=operation,
+                cache_bypass=cache_bypass,
+            ) from error
+        raise
 
 
 def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
@@ -494,9 +542,11 @@ async def edit_message_result(
 
 __all__ = [
     "DeliveredMatrixEvent",
+    "MatrixExpectedDeliveryPolicyError",
     "build_edit_event_content",
     "build_threaded_edit_content",
     "edit_message_result",
+    "is_expected_matrix_delivery_policy_error",
     "send_file_message",
     "send_message_result",
 ]
