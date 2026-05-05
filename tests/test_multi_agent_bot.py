@@ -26,6 +26,7 @@ from agno.media import Image
 from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
 
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom import interactive
@@ -68,7 +69,7 @@ from mindroom.delivery_gateway import (
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
-from mindroom.history import CompactionLifecycleStart, CompactionOutcome
+from mindroom.history import CompactionLifecycleStart, CompactionOutcome, HistoryScopeState, write_scope_state
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -5676,6 +5677,14 @@ class TestAgentBot:
             thread_id=None,
             reply_to_event_id=root_event_id,
         ).with_thread_root(root_event_id)
+        scope = HistoryScope(kind="agent", scope_id=bot.agent_name)
+        storage = bot._conversation_state_writer.create_storage(None, scope=scope)
+        try:
+            session = AgentSession(session_id=resolved_target.session_id, created_at=1, updated_at=1)
+            write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+            storage.upsert_session(session)
+        finally:
+            storage.close()
         response_envelope = replace(_hook_envelope(source_event_id=root_event_id), target=resolved_target)
 
         with (
@@ -5732,7 +5741,7 @@ class TestAgentBot:
         mock_send_compaction_lifecycle_start.assert_awaited_once()
         compaction_notice_kwargs = mock_send_compaction_lifecycle_start.await_args.kwargs
         assert compaction_notice_kwargs["target"].resolved_thread_id == root_event_id
-        assert compaction_notice_kwargs["reply_to_event_id"] == "$response"
+        assert compaction_notice_kwargs["reply_to_event_id"] == root_event_id
         assert "thread_summary_!test:localhost_$root_event" in scheduled_names
 
     @pytest.mark.asyncio

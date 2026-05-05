@@ -155,6 +155,23 @@ def consume_pending_force_compaction_scope(
     return True
 
 
+def has_pending_force_compaction_scope(
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+) -> bool:
+    """Return whether Agno session_state has an unconsumed compaction request."""
+    session_data = session.session_data
+    if not isinstance(session_data, dict):
+        return False
+    raw_session_state = session_data.get("session_state")
+    if not isinstance(raw_session_state, dict):
+        return False
+    raw_scope_keys = raw_session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
+    if not isinstance(raw_scope_keys, list):
+        return False
+    return scope.key in {scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key}
+
+
 def strip_transient_enrichment_from_session(
     storage: BaseDb,
     *,

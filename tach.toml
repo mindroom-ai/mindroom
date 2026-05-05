@@ -2846,6 +2846,7 @@ expose = [
     "estimate_preparation_static_tokens",
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
+    "has_pending_force_compaction_scope",
     "manual_compaction_unavailable_message",
     "normalize_compaction_budget_tokens",
     "note_prepared_history_timing",
