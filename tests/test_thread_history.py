@@ -1928,6 +1928,48 @@ class TestThreadHistory:
         assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_history_room_scan_includes_encrypted_timeline_events(self) -> None:
+        """Request encrypted timeline events so nio can decrypt threaded history."""
+        client = AsyncMock()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$agent_msg",
+            sender="@agent:localhost",
+            body="reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "reply",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+
+        async def room_messages(*_args: object, **kwargs: object) -> MagicMock:
+            message_filter = kwargs.get("message_filter")
+            requested_types = set(message_filter.get("types", ())) if isinstance(message_filter, dict) else set()
+            response = MagicMock(spec=nio.RoomMessagesResponse)
+            response.chunk = [thread_message, root_event] if "m.room.encrypted" in requested_types else []
+            response.end = None
+            return response
+
+        client.room_messages = AsyncMock(side_effect=room_messages)
+
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        message_filter = client.room_messages.await_args.kwargs["message_filter"]
+        assert set(message_filter["types"]) == {"m.room.message", "m.room.encrypted"}
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_stops_when_non_text_root_is_found(self) -> None:
         """Stop pagination once a non-text thread root has been seen."""
         client = AsyncMock()
