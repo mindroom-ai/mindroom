@@ -67,7 +67,7 @@ For dialects where database name and schema are distinct concepts, `db_url` is t
 
 ### Example
 
-```
+```yaml
 agents:
   analyst:
     tools:
@@ -76,7 +76,7 @@ agents:
           enable_run_sql_query: true
 ```
 
-```
+```python
 list_tables()
 describe_table("events")
 run_sql_query("SELECT * FROM events ORDER BY created_at DESC", limit=20)
@@ -113,7 +113,7 @@ The toolkit opens a Psycopg connection, sets `search_path` to `table_schema`, an
 
 ### Example
 
-```
+```yaml
 agents:
   warehouse:
     tools:
@@ -125,7 +125,7 @@ agents:
           table_schema: reporting
 ```
 
-```
+```python
 show_tables()
 describe_table("daily_revenue")
 inspect_query("SELECT * FROM daily_revenue WHERE day >= CURRENT_DATE - INTERVAL '7 days'")
@@ -172,7 +172,7 @@ When IAM auth is enabled, the toolkit can fall back to environment variables suc
 
 ### Example
 
-```
+```yaml
 agents:
   warehouse:
     tools:
@@ -185,7 +185,7 @@ agents:
           db_user: analyst
 ```
 
-```
+```python
 show_tables()
 describe_table("fact_orders")
 inspect_query("SELECT COUNT(*) FROM fact_orders WHERE created_at >= current_date - 30")
@@ -225,7 +225,7 @@ The individual enable flags let you expose schema discovery without allowing arb
 
 ### Example
 
-```
+```yaml
 agents:
   graph:
     tools:
@@ -236,7 +236,7 @@ agents:
           enable_run_cypher: true
 ```
 
-```
+```python
 list_labels()
 list_relationship_types()
 get_schema()
@@ -272,7 +272,7 @@ If `db_path` is unset, DuckDB runs in memory.
 
 ### Example
 
-```
+```yaml
 agents:
   analyst:
     tools:
@@ -281,7 +281,7 @@ agents:
           read_only: false
 ```
 
-```
+```python
 show_tables(True)
 create_table_from_path("/workspace/data/orders.parquet", table="orders", replace=True)
 inspect_query("SELECT customer_id, COUNT(*) FROM orders GROUP BY 1")
@@ -322,7 +322,7 @@ The toolkit works with a preconfigured list of CSV paths and exposes each one by
 
 ### Example
 
-```
+```yaml
 agents:
   analyst:
     tools:
@@ -330,7 +330,7 @@ agents:
           row_limit: 200
 ```
 
-```
+```python
 list_csv_files()
 read_csv_file("sales_2025", row_limit=50)
 get_columns("sales_2025")
@@ -364,14 +364,14 @@ Stored dataframes live in the current process memory only and are not persisted 
 
 ### Example
 
-```
+```yaml
 agents:
   analyst:
     tools:
       - pandas
 ```
 
-```
+```python
 create_pandas_dataframe(
     "sales",
     "read_csv",
@@ -413,7 +413,7 @@ MindRoom's metadata marks `dataset`, `project`, and `location` as required, even
 
 ### Example
 
-```
+```yaml
 agents:
   analyst:
     tools:
@@ -423,7 +423,7 @@ agents:
           location: US
 ```
 
-```
+```python
 list_tables()
 describe_table("events")
 run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER BY total DESC LIMIT 20")
@@ -458,7 +458,7 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
@@ -466,7 +466,7 @@ agents:
           max_read_size: 10485760
 ```
 
-```
+```python
 google_drive_list_files()
 google_drive_search_files("name contains 'budget'")
 google_drive_read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
@@ -503,7 +503,7 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 
 ### Example
 
-```
+```yaml
 agents:
   ops:
     worker_scope: shared
@@ -513,7 +513,7 @@ agents:
           spreadsheet_range: Sheet1!A1:G200
 ```
 
-```
+```python
 read_sheet()
 read_sheet(
     spreadsheet_id="1AbCdEfGhIjKlMnOpQrStUvWxYz",
@@ -554,7 +554,7 @@ You can selectively enable additional research functions without exposing the fu
 
 ### Example
 
-```
+```yaml
 agents:
   market:
     tools:
@@ -564,7 +564,7 @@ agents:
           enable_get_company_news: true
 ```
 
-```
+```python
 get_stock_price("AAPL,MSFT")
 search_company_symbol("Nvidia")
 get_company_news("AAPL", num_stories=5)
@@ -596,14 +596,14 @@ The optional `session` field is an advanced programmatic HTTP session hook for c
 
 ### Example
 
-```
+```yaml
 agents:
   market:
     tools:
       - yfinance
 ```
 
-```
+```python
 get_current_stock_price("AAPL")
 get_company_info("MSFT")
 get_historical_stock_prices("NVDA", period="6mo", interval="1d")
@@ -634,14 +634,14 @@ If `api_key` is unset, it falls back to `FINANCIAL_DATASETS_API_KEY`, and otherw
 
 ### Example
 
-```
+```yaml
 agents:
   market:
     tools:
       - financial_datasets_api
 ```
 
-```
+```python
 search_tickers("cloud software", limit=5)
 get_company_info("MSFT")
 get_stock_prices("AAPL", interval="1d", limit=30)

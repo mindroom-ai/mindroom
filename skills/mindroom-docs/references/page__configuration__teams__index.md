@@ -8,7 +8,7 @@ Teams allow multiple agents to collaborate on tasks. MindRoom supports two colla
 
 The team coordinator analyzes the task and delegates different subtasks to specific team members:
 
-```
+```yaml
 teams:
   dev_team:
     display_name: Dev Team
@@ -23,7 +23,7 @@ In coordinate mode, the coordinator analyzes the task and selects which agents s
 
 All agents work on the same task simultaneously and their outputs are synthesized:
 
-```
+```yaml
 teams:
   research_team:
     display_name: Research Team
@@ -36,7 +36,7 @@ In collaborate mode, the task is delegated to all team members simultaneously. E
 
 ## Full Configuration
 
-```
+```yaml
 teams:
   super_team:
     # Display name shown in Matrix

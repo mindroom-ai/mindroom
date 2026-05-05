@@ -8,7 +8,7 @@ Room access (joinability/discoverability) is configured separately through `matr
 
 Configure authorization in `config.yaml`:
 
-```
+```yaml
 authorization:
   # Users with access to all rooms
   global_users:
@@ -132,7 +132,7 @@ Authorization checks are performed in order:
 
 When using Matrix bridges (e.g., mautrix-telegram, mautrix-signal), messages from the bridged platform arrive with a different Matrix user ID. Use `aliases` to map these bridge-created IDs to a canonical user so they inherit the same permissions:
 
-```
+```yaml
 authorization:
   global_users:
     - "@alice:example.com"
@@ -165,7 +165,7 @@ Use `authorization.agent_reply_permissions` to restrict which users each agent c
 - Keys that do not match any configured agent, team, `router`, or `*` are rejected at config load time.
 - For voice messages, the permission check uses the original human sender, not the router that posted the transcription.
 
-```
+```yaml
 authorization:
   global_users:
     - "@alice:example.com"
@@ -190,7 +190,7 @@ In this example, `*` restricts all entities to Alice by default, `research` over
 
 The `bot_accounts` field is a **top-level** config option (not under `authorization:`). It lists Matrix user IDs of non-MindRoom bots — such as bridge bots for Telegram, Slack, or other platforms — that should be treated like agents for response logic. Bots in this list won't trigger the multi-human-thread mention requirement.
 
-```
+```yaml
 # Top-level config, not under authorization:
 bot_accounts:
   - "@telegram_bot:example.com"

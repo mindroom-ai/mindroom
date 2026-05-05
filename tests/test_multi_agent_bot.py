@@ -12650,6 +12650,7 @@ class TestMultiAgentOrchestrator:
         """Shutdown should settle approval sends that receive a card id during shutdown."""
         runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
         orchestrator._capture_runtime_loop()
 
         send_started = asyncio.Event()
@@ -13181,6 +13182,7 @@ class TestMultiAgentOrchestrator:
             ),
             tmp_path,
         )
+        orchestrator.config = old_config
 
         event_order: list[str] = []
         approval_ids: list[str] = []

@@ -60,7 +60,7 @@ Agents can use the optional `attachments` tool to interact with context-scoped a
 
 Add `attachments` to the agent's tool list:
 
-```
+```yaml
 agents:
   assistant:
     tools:

@@ -16,7 +16,7 @@ The entire flow happens within the thread where the original question was asked.
 
 Agents emit interactive questions by wrapping JSON in an `interactive` code block:
 
-````
+````markdown
 ```interactive
 {
     "question": "What approach would you prefer?",
@@ -25,7 +25,7 @@ Agents emit interactive questions by wrapping JSON in an `interactive` code bloc
         {"emoji": "🔍", "label": "Careful and manual", "value": "careful"}
     ]
 }
-````
+```
 
 ```
 
@@ -71,7 +71,7 @@ Agents don't need any special tools or configuration to use interactive question
 Any agent can include an `interactive` code block in its response text.
 You can guide agents to use this feature through their `instructions` or `role`:
 
-```
+```yaml
 
 agents: assistant: display_name: Assistant role: A helpful assistant instructions: - > When the user needs to choose between options, present them using an interactive code block with JSON containing question and options (each with emoji, label, and value fields).
 

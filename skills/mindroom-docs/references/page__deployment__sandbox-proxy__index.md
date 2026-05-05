@@ -47,7 +47,7 @@ Add a `sandbox-runner` service alongside MindRoom.
 Both use the same image.
 The runner just has a different entrypoint and no access to `.env` or the primary data volume.
 
-```
+```yaml
 services:
   mindroom:
     image: ghcr.io/mindroom-ai/mindroom:latest
@@ -116,7 +116,7 @@ The hosted instance worker-manager Role does not grant broad Secret API access i
 
 Use the instance Helm chart with values like:
 
-```
+```yaml
 workerBackend: kubernetes
 workerCleanupIntervalSeconds: 30
 storageAccessMode: ReadWriteMany
@@ -150,7 +150,7 @@ For the full Helm-side deployment guidance, see [Kubernetes Deployment](https://
 
 Run MindRoom directly on the host while isolating code-execution tools in a Docker container:
 
-```
+```bash
 # 1. Start the sandbox runner container
 docker run -d \
   --name mindroom-sandbox-runner \
@@ -173,7 +173,7 @@ mindroom run
 
 Or add the proxy variables to your `.env` file:
 
-```
+```bash
 MINDROOM_WORKER_BACKEND=static_runner
 MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
 MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token
@@ -305,7 +305,7 @@ Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` a
 
 Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`:
 
-```
+```bash
 export MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON='{"shell": ["github"], "python": ["openai"]}'
 ```
 
@@ -344,7 +344,7 @@ MindRoom owns the default local-versus-worker routing policy. You can override w
 
 Per-agent tool config overrides (inline `shell: {extra_env_passthrough: "DAWARICH_*"}` syntax in agent `tools` lists) are threaded through the sandbox proxy so workers receive the merged overrides alongside credentials and runtime overrides. See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full syntax.
 
-```
+```yaml
 defaults:
   worker_tools: [shell, file]        # route shell+file through the sandbox proxy for all agents by default
 
@@ -383,7 +383,7 @@ Additionally, `spotify` is a shared-only integration that requires `worker_scope
 
 You can set `worker_scope` per agent or in `defaults`:
 
-```
+```yaml
 defaults:
   worker_tools: [shell, file]
   worker_scope: user_agent

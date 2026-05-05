@@ -43,7 +43,7 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 memory:
   backend: file
 
@@ -53,7 +53,7 @@ agents:
       - memory
 ```
 
-```
+```python
 add_memory("The user prefers terse release notes.")
 search_memories("release notes", limit=3)
 list_memories(limit=20)
@@ -99,7 +99,7 @@ Operations need a `user_id`, either from tool config or from the run context, an
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
@@ -108,7 +108,7 @@ agents:
           infer: true
 ```
 
-```
+```python
 add_memory("The user prefers terse release notes.")
 search_memory("release notes")
 get_all_memories()
@@ -154,7 +154,7 @@ If `user_id` is provided but the user does not exist yet, the toolkit attempts t
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
@@ -163,7 +163,7 @@ agents:
           session_id: release-review
 ```
 
-```
+```python
 add_zep_message(role="user", content="The user prefers terse release notes.")
 get_zep_memory(memory_type="context")
 search_zep_memory(query="release notes", search_scope="edges")

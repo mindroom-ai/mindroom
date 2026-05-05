@@ -14,7 +14,7 @@ Data storage (`mindroom_data/`) is placed next to the config file by default.
 
 You can also validate a specific file directly:
 
-```
+```bash
 mindroom config validate --path /path/to/config.yaml
 ```
 
@@ -39,7 +39,7 @@ On startup, MindRoom attempts to mark recent unresolved approval cards sent by t
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 
-```
+```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
@@ -165,7 +165,7 @@ See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md
 
 ## Basic Structure
 
-```
+```yaml
 # Agent definitions (at least one recommended)
 agents:
   assistant:
@@ -461,7 +461,7 @@ Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path, or `MINDROOM_CREDENTIA
 Relative file paths resolve from the config directory.
 Credential fields can read from env vars, from files, or from literal values:
 
-```
+```json
 [
   {
     "service": "example_oauth_client",
@@ -491,7 +491,7 @@ MindRoom can generate managed avatars for agents, teams, rooms, and the optional
 Use the optional `avatars.prompts` block to override the built-in prompt styles without editing Python code.
 Every field is optional and falls back to MindRoom's built-in defaults when omitted.
 
-```
+```yaml
 avatars:
   prompts:
     character_style: "professional AI avatar portrait, abstract geometric silhouette"

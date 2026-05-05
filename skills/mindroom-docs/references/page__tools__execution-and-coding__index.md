@@ -37,7 +37,7 @@ No extra configuration is required beyond that workspace root, and `MINDROOM_TOO
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 That matters most here for `docker`, `file_generation`, and `visualization`, which depend on Docker access, `reportlab`, and `matplotlib`.
 
-```
+```yaml
 defaults:
   worker_scope: user_agent
 
@@ -97,7 +97,7 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 
 ### Example
 
-```
+```yaml
 agents:
   editor:
     tools:
@@ -106,7 +106,7 @@ agents:
           max_file_lines: 2000
 ```
 
-```
+```python
 read_file("README.md")
 read_file_chunk("src/mindroom/tools/file.py", 0, 80)
 replace_file_chunk("docs/notes.md", 10, 12, "Updated text")
@@ -148,7 +148,7 @@ MindRoom marks `shell` as worker-routed by default, so it usually executes in th
 
 ### Example
 
-```
+```yaml
 agents:
   ops:
     worker_scope: user_agent
@@ -162,7 +162,7 @@ agents:
             - /opt/custom/bin
 ```
 
-```
+```python
 run_shell_command(["git", "status", "--short"], tail=50)
 run_shell_command(["bash", "-lc", "sleep 300 && echo done"], timeout=2)
 check_shell_command("shell:abcd1234")
@@ -179,7 +179,7 @@ kill_shell_command("shell:abcd1234")
 - MindRoom-owned env names are reasserted after the hook and cannot be redirected from `.mindroom/worker-env.sh`: `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, and `VIRTUAL_ENV`.
 - Example:
 
-```
+```bash
 mkdir -p .mindroom .local/bin .cache/npm
 cat > .mindroom/worker-env.sh <<'EOF'
 export NPM_CONFIG_PREFIX="$PWD/.local"
@@ -211,7 +211,7 @@ MindRoom marks `python` as worker-routed by default, so sandbox execution is the
 
 ### Example
 
-```
+```yaml
 agents:
   analyst:
     tools:
@@ -219,7 +219,7 @@ agents:
           restrict_to_base_dir: true
 ```
 
-```
+```python
 run_python_code("total = sum(i * i for i in range(10))", variable_to_return="total")
 save_to_file_and_run("scripts/demo.py", "result = 6 * 7", variable_to_return="result")
 run_python_file_return_variable("scripts/demo.py", variable_to_return="result")
@@ -259,14 +259,14 @@ MindRoom marks `coding` as worker-routed by default.
 
 ### Example
 
-```
+```yaml
 agents:
   code:
     tools:
       - coding
 ```
 
-```
+```python
 read_file("src/mindroom/tools/shell.py", offset=1, limit=120)
 grep("default_execution_target", path="src/mindroom/tools")
 find_files("**/*.md", path="docs")
@@ -298,14 +298,14 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   platform:
     tools:
       - docker
 ```
 
-```
+```python
 list_containers()
 run_container("postgres:16", detach=True, environment={"POSTGRES_PASSWORD": "example"})
 get_container_logs("postgres", tail=50)
@@ -335,14 +335,14 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   math:
     tools:
       - calculator
 ```
 
-```
+```python
 add(2, 3)
 divide(22, 7)
 factorial(6)
@@ -382,7 +382,7 @@ These steps are intended for the agent's internal reasoning flow rather than use
 
 ### Example
 
-```
+```yaml
 agents:
   researcher:
     tools:
@@ -391,7 +391,7 @@ agents:
           add_few_shot: true
 ```
 
-```
+```python
 think(
     title="Plan the investigation",
     thought="I should inspect the config and then compare it with the runtime behavior.",
@@ -437,7 +437,7 @@ PDF generation is automatically disabled when `reportlab` is unavailable, even i
 
 ### Example
 
-```
+```yaml
 agents:
   reporter:
     tools:
@@ -446,7 +446,7 @@ agents:
           enable_pdf_generation: true
 ```
 
-```
+```python
 generate_json_file({"status": "ok", "items": 3}, filename="summary.json")
 generate_csv_file([{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}], filename="data.csv")
 generate_pdf_file("Quarterly summary", filename="report.pdf", title="Q1 Report")
@@ -484,7 +484,7 @@ Each chart function accepts dict-like data, list-based data, or JSON strings, no
 
 ### Example
 
-```
+```yaml
 agents:
   analyst:
     tools:
@@ -493,7 +493,7 @@ agents:
           enable_create_pie_chart: false
 ```
 
-```
+```python
 create_bar_chart({"Mon": 12, "Tue": 18, "Wed": 9}, title="Requests per day")
 create_line_chart({"Jan": 3, "Feb": 8, "Mar": 13}, title="Growth")
 create_scatter_plot(
@@ -528,14 +528,14 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### Example
 
-```
+```yaml
 agents:
   scheduler_helper:
     tools:
       - sleep
 ```
 
-```
+```python
 sleep(5)
 ```
 

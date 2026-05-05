@@ -33,7 +33,7 @@ For private personal-agent tools, use the generic [OAuth Framework](https://docs
 
 ### Hosted Matrix + local MindRoom (simplest)
 
-```
+```bash
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
 uvx mindroom config init --profile public
 $EDITOR ~/.mindroom/.env
@@ -48,7 +48,7 @@ See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matr
 
 ### Full Stack (recommended)
 
-```
+```bash
 git clone https://github.com/mindroom-ai/mindroom-stack
 cd mindroom-stack
 cp .env.example .env
@@ -63,7 +63,7 @@ If you access it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip
 
 ### Direct (Development)
 
-```
+```bash
 mindroom run --storage-path ./mindroom_data
 ```
 
@@ -71,14 +71,14 @@ The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to
 
 If you want local Matrix + Cinny with a host-installed MindRoom runtime (Linux/macOS), use:
 
-```
+```bash
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 mindroom run --storage-path ./mindroom_data
 ```
 
 ### Docker (single container)
 
-```
+```bash
 docker run -d \
   --name mindroom \
   -p 8765:8765 \
@@ -98,7 +98,7 @@ See the [Kubernetes deployment guide](https://docs.mindroom.chat/deployment/kube
 
 Full stack:
 
-```
+```bash
 # .env in the full stack repo
 OPENAI_API_KEY=sk-...
 # Add other providers as needed

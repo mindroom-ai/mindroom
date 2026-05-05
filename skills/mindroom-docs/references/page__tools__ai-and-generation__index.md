@@ -64,7 +64,7 @@ The current implementation handles both `gpt-image-*` style models and older DAL
 
 ### Example
 
-```
+```yaml
 agents:
   creator:
     tools:
@@ -74,7 +74,7 @@ agents:
           text_to_speech_voice: alloy
 ```
 
-```
+```python
 transcribe_audio("recordings/intro.wav")
 generate_image("A retro-futurist Matrix control room with warm lighting.")
 generate_speech("Status update complete.")
@@ -114,7 +114,7 @@ In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 
 ### Example
 
-```
+```yaml
 agents:
   studio:
     tools:
@@ -126,7 +126,7 @@ agents:
           video_generation_model: veo-2.0-generate-001
 ```
 
-```
+```python
 generate_image("A minimal poster for a Matrix developer conference.")
 generate_video("A slow cinematic flythrough of a neon data center.")
 ```
@@ -165,7 +165,7 @@ All three functions use the Groq SDK directly and require a Groq API key.
 
 ### Example
 
-```
+```yaml
 agents:
   audio:
     tools:
@@ -175,7 +175,7 @@ agents:
           tts_voice: Chip-PlayAI
 ```
 
-```
+```python
 transcribe_audio("samples/interview.mp3")
 translate_audio("https://example.com/spanish-briefing.mp3")
 generate_speech("Your transcript is ready.")
@@ -209,7 +209,7 @@ Generated artifacts are attached by remote URL rather than downloaded into MindR
 
 ### Example
 
-```
+```yaml
 agents:
   video:
     tools:
@@ -217,7 +217,7 @@ agents:
           model: minimax/video-01
 ```
 
-```
+```python
 generate_media("A short looping animation of code flowing across a terminal.")
 ```
 
@@ -250,7 +250,7 @@ The current implementation streams queue log messages to the MindRoom process lo
 
 ### Example
 
-```
+```yaml
 agents:
   visuals:
     tools:
@@ -259,7 +259,7 @@ agents:
           enable_image_to_image: true
 ```
 
-```
+```python
 generate_media("A cinematic drone shot over a rainy cyberpunk street.")
 image_to_image(
     "Turn this product photo into a watercolor illustration.",
@@ -297,7 +297,7 @@ It uses the OpenAI image API directly with the configured `model`, `n`, `size`, 
 
 ### Example
 
-```
+```yaml
 agents:
   illustrator:
     tools:
@@ -308,7 +308,7 @@ agents:
           style: vivid
 ```
 
-```
+```python
 create_image("A cover illustration for a Matrix automation handbook.")
 ```
 
@@ -344,7 +344,7 @@ The current implementation hardcodes MP3 output at 44.1 kHz and 128 kbps.
 
 ### Example
 
-```
+```yaml
 agents:
   voice:
     tools:
@@ -353,7 +353,7 @@ agents:
           enable_localize_voice: true
 ```
 
-```
+```python
 list_voices()
 localize_voice(
     name="French Support Voice",
@@ -398,7 +398,7 @@ If `target_directory` is set, the current implementation also saves generated au
 
 ### Example
 
-```
+```yaml
 agents:
   audio_fx:
     tools:
@@ -408,7 +408,7 @@ agents:
           target_directory: generated-audio
 ```
 
-```
+```python
 get_voices()
 generate_sound_effect("Mechanical keyboard typing in a quiet office.", duration_seconds=4)
 text_to_speech("The build succeeded.")
@@ -443,7 +443,7 @@ The default `voice_id` can be overridden per call.
 
 ### Example
 
-```
+```yaml
 agents:
   hindi_voice:
     tools:
@@ -451,7 +451,7 @@ agents:
           voice_id: f27d74e5-ea71-4697-be3e-f04bbd80c1a8
 ```
 
-```
+```python
 get_voices()
 text_to_speech("नमस्ते, आपकी रिपोर्ट तैयार है।")
 ```
@@ -488,7 +488,7 @@ If `wait_for_completion` is false, the current implementation returns `Async gen
 
 ### Example
 
-```
+```yaml
 agents:
   motion:
     tools:
@@ -497,7 +497,7 @@ agents:
           max_wait_time: 600
 ```
 
-```
+```python
 generate_video("A calm flythrough of a futuristic coworking space.", aspect_ratio="16:9")
 image_to_video(
     "Animate this concept art into a short reveal shot.",
@@ -536,7 +536,7 @@ If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint 
 
 ### Example
 
-```
+```yaml
 agents:
   generator:
     tools:
@@ -546,7 +546,7 @@ agents:
           max_wait_time: 90
 ```
 
-```
+```python
 generate_media("A looping animation of messages flowing through a Matrix bridge.")
 ```
 

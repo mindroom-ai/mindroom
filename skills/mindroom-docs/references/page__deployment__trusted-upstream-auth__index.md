@@ -16,7 +16,7 @@ It is not a hosted multi-user identity solution.
 
 Configure the header names that your access layer owns:
 
-```
+```bash
 MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true
 MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER=X-MindRoom-User-Id
 MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER=X-MindRoom-User-Email
@@ -41,7 +41,7 @@ Derived Matrix IDs must pass MindRoom's Matrix user ID parser.
 
 For the hosted instance chart, configure the equivalent values:
 
-```
+```yaml
 trustedUpstreamAuth:
   enabled: "true"
   userIdHeader: X-MindRoom-User-Id
@@ -55,7 +55,7 @@ The instance chart fails rendering when `trustedUpstreamAuth.emailToMatrixUserId
 The template value must contain exactly one `{localpart}` placeholder.
 When using the platform provisioner, configure the platform chart with matching provisioner values:
 
-```
+```yaml
 provisioner:
   trustedUpstreamAuth:
     enabled: "true"

@@ -53,7 +53,7 @@ The toolkit constructs a boto3 Lambda client at init time with `region_name`.
 
 ### Example
 
-```
+```yaml
 agents:
   automation:
     tools:
@@ -61,7 +61,7 @@ agents:
           region_name: us-west-2
 ```
 
-```
+```python
 list_functions()
 invoke_function("daily-report", payload='{"date": "2026-03-31"}')
 ```
@@ -95,7 +95,7 @@ The current wrapper does not add HTML email support, templates, attachments, or 
 
 ### Example
 
-```
+```yaml
 agents:
   notifications:
     tools:
@@ -105,7 +105,7 @@ agents:
           region_name: us-east-1
 ```
 
-```
+```python
 send_email(
     subject="Nightly sync complete",
     body="The nightly sync finished successfully.",
@@ -142,7 +142,7 @@ It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state,
 
 ### Example
 
-```
+```yaml
 agents:
   airflow_editor:
     tools:
@@ -150,7 +150,7 @@ agents:
           dags_dir: dags
 ```
 
-```
+```python
 read_dag_file("daily_reporting.py")
 save_dag_file("from airflow import DAG\n", "generated/new_job.py")
 ```
@@ -183,7 +183,7 @@ The media helpers operate on the most recent `run_python_code()` result, which i
 
 ### Example
 
-```
+```yaml
 agents:
   remote_exec:
     tools:
@@ -191,7 +191,7 @@ agents:
           timeout: 600
 ```
 
-```
+```python
 run_python_code("print('hello from e2b')")
 upload_file("data/report.csv", "workspace/report.csv")
 run_server("python -m http.server 8000", port=8000)
@@ -242,7 +242,7 @@ The bundled default instructions describe a code-write, execute, and show-result
 
 ### Example
 
-```
+```yaml
 agents:
   remote_dev:
     tools:
@@ -254,7 +254,7 @@ agents:
           add_instructions: true
 ```
 
-```
+```python
 run_code("print('hello from daytona')")
 run_shell_command("pwd && ls -la")
 change_directory("project")
@@ -302,7 +302,7 @@ MindRoom's current registry metadata on this branch documents the connection and
 
 ### Example
 
-```
+```yaml
 agents:
   integrations:
     tools:
@@ -348,7 +348,7 @@ Non-2xx responses still return a structured result object, with an added `"error
 
 ### Example
 
-```
+```yaml
 agents:
   api_bridge:
     tools:
@@ -358,7 +358,7 @@ agents:
           timeout: 20
 ```
 
-```
+```python
 make_request("health")
 make_request("users/42", method="GET")
 make_request("reports", method="POST", json_data={"range": "7d"})

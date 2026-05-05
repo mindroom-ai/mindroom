@@ -51,7 +51,7 @@ This tool works entirely on local files, so it is only useful when the agent run
 
 ### Example
 
-```
+```yaml
 agents:
   editor:
     tools:
@@ -59,7 +59,7 @@ agents:
           enable_embed_captions: true
 ```
 
-```
+```python
 extract_audio("clips/demo.mp4", "clips/demo.wav")
 create_srt(transcription_srt, "clips/demo.srt")
 embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_captioned.mp4")
@@ -93,7 +93,7 @@ Successful calls return a `ToolResult` with both plain-text URLs and attached im
 
 ### Example
 
-```
+```yaml
 agents:
   social:
     tools:
@@ -101,7 +101,7 @@ agents:
           limit: 3
 ```
 
-```
+```python
 search_gifs("matrix code review celebration")
 ```
 
@@ -136,7 +136,7 @@ It expects a specific YouTube URL and then fetches metadata or transcript-derive
 
 ### Example
 
-```
+```yaml
 agents:
   researcher:
     tools:
@@ -144,7 +144,7 @@ agents:
           languages: [en]
 ```
 
-```
+```python
 get_youtube_video_data("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 get_youtube_video_captions("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 get_video_timestamps("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
@@ -182,7 +182,7 @@ It triggers Unsplash's required download-tracking endpoint and returns the downl
 
 ### Example
 
-```
+```yaml
 agents:
   designer:
     tools:
@@ -190,7 +190,7 @@ agents:
           enable_download_photo: true
 ```
 
-```
+```python
 search_photos("conference stage lighting", per_page=5, orientation="landscape")
 get_random_photo(query="workspace desk", count=3)
 get_photo("abcd1234")
@@ -229,7 +229,7 @@ The two methods use different credentials.
 
 ### Example
 
-```
+```yaml
 agents:
   branding:
     tools:
@@ -238,7 +238,7 @@ agents:
           timeout: 10
 ```
 
-```
+```python
 search_by_identifier("openai.com")
 search_by_brand("OpenAI")
 ```
@@ -271,7 +271,7 @@ The upstream playlist and playback methods need additional Spotify scopes beyond
 
 ### Example
 
-```
+```yaml
 agents:
   dj:
     worker_scope: shared
@@ -280,7 +280,7 @@ agents:
           default_market: GB
 ```
 
-```
+```python
 search_tracks("ambient coding music", max_results=5)
 get_my_top_tracks(time_range="short_term", limit=10)
 create_playlist("MindRoom Picks", description="Tracks from this week's chat")

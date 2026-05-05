@@ -41,7 +41,7 @@ Notes:
 
 Example:
 
-```
+```yaml
 memory:
   backend: mem0
   embedder:
@@ -53,7 +53,7 @@ memory:
 
 Fully local embedder example:
 
-```
+```yaml
 memory:
   backend: mem0
   embedder:
@@ -66,7 +66,7 @@ MindRoom auto-installs the optional `sentence_transformers` extra the first time
 
 Ollama embedder example:
 
-```
+```yaml
 memory:
   backend: mem0
   embedder:
@@ -82,7 +82,7 @@ Supported embedder providers: `openai`, `ollama`, `huggingface`, `sentence_trans
 
 The memory system uses an LLM for extraction. Configure it with `memory.llm`:
 
-```
+```yaml
 memory:
   llm:
     provider: ollama    # ollama, openai, or anthropic
@@ -98,20 +98,20 @@ Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
 
 Global example:
 
-```
+```yaml
 memory:
   backend: none
 ```
 
 Shorthand example:
 
-```
+```yaml
 memory: none
 ```
 
 Per-agent stateless override:
 
-```
+```yaml
 memory:
   backend: mem0
 
@@ -131,7 +131,7 @@ Set `learning: false` separately if you also want to disable learning.
 
 Example:
 
-```
+```yaml
 memory:
   backend: file
   file:
@@ -144,7 +144,7 @@ It can affect team file memory when the resolution determines the configured pat
 
 Per-agent override example:
 
-```
+```yaml
 memory:
   backend: mem0
 
@@ -161,7 +161,7 @@ Use `private` when you need per-requester file-memory isolation.
 
 Private instance example:
 
-```
+```yaml
 agents:
   mind:
     display_name: Mind
@@ -198,7 +198,7 @@ Team file memory is mirrored under each participating agent's storage directory:
 
 When the effective backend is `file` for at least one agent, you can enable background auto-flush:
 
-```
+```yaml
 memory:
   backend: file
   auto_flush:
@@ -250,7 +250,7 @@ Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** ov
 
 For explicit agent-controlled memory operations, add the `memory` tool:
 
-```
+```yaml
 agents:
   assistant:
     tools: [memory]
@@ -265,7 +265,7 @@ Learning is separate from the memory backends above — it uses Agno's own SQLit
 
 ### Configuration
 
-```
+```yaml
 defaults:
   learning: true          # Enable learning for all agents (default: true)
   learning_mode: always   # "always" (extract after every turn) or "agentic" (agent decides via tool)
@@ -273,7 +273,7 @@ defaults:
 
 Per-agent override:
 
-```
+```yaml
 agents:
   assistant:
     learning: false       # Disable learning for this agent

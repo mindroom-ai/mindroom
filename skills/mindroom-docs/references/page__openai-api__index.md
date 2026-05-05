@@ -25,7 +25,7 @@ No Matrix auth dependency. You can run the OpenAI-compatible API standalone or a
 
 Add to your `.env`:
 
-```
+```bash
 # Option A: Set API keys (recommended for production)
 OPENAI_COMPAT_API_KEYS=sk-my-secret-key-1,sk-my-secret-key-2
 
@@ -37,7 +37,7 @@ Without either of these, the API returns 401 on all requests.
 
 ### 2. Start MindRoom
 
-```
+```bash
 # Full MindRoom runtime (Matrix bot + API server + dashboard)
 uv run mindroom run
 
@@ -51,7 +51,7 @@ The API is available at `http://localhost:8765/v1/`.
 
 ### 3. Verify
 
-```
+```bash
 # List available agents
 curl -H "Authorization: Bearer sk-my-secret-key-1" \
   http://localhost:8765/v1/models
@@ -75,7 +75,7 @@ curl -N -H "Authorization: Bearer sk-my-secret-key-1" \
 
 Add to your `librechat.yaml`:
 
-```
+```yaml
 endpoints:
   custom:
     - name: "MindRoom"

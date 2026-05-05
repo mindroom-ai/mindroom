@@ -44,7 +44,7 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     worker_scope: shared
@@ -54,7 +54,7 @@ agents:
           allow_update: true
 ```
 
-```
+```python
 list_events(limit=5)
 find_available_slots(start_date="2026-04-01", end_date="2026-04-03", duration_minutes=30)
 create_event(
@@ -99,7 +99,7 @@ The per-method enable flags let you narrow the exposed call surface when an agen
 
 ### Example
 
-```
+```yaml
 agents:
   scheduler_assistant:
     tools:
@@ -109,7 +109,7 @@ agents:
           enable_cancel_booking: false
 ```
 
-```
+```python
 get_available_slots(start_date="2026-04-01", end_date="2026-04-07")
 create_booking(
     start_time="2026-04-03T17:00:00+00:00",
@@ -145,14 +145,14 @@ This tool has no tool-specific inline configuration fields.
 
 ### Example
 
-```
+```yaml
 agents:
   assistant:
     tools:
       - scheduler
 ```
 
-```
+```python
 schedule("tomorrow at 9am @ops check the deployment")
 schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
 list_schedules()

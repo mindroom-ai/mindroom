@@ -4,7 +4,7 @@ The router is a built-in system component that handles intelligent message routi
 
 ## Configuration
 
-```
+```yaml
 router:
   # Model for routing decisions (defaults to "default")
   model: haiku
@@ -121,7 +121,7 @@ By default, any Matrix user that is not a MindRoom agent counts as a "human" for
 
 To prevent this, list those accounts in `bot_accounts`:
 
-```
+```yaml
 bot_accounts:
   - "@telegram:example.com"
   - "@slackbot:example.com"

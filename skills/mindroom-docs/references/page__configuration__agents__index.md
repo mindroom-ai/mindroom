@@ -4,7 +4,7 @@ Agents are the core building blocks of MindRoom. Each agent is a specialized AI 
 
 ## Basic Agent
 
-```
+```yaml
 agents:
   assistant:
     display_name: Assistant
@@ -15,7 +15,7 @@ agents:
 
 ## Full Configuration
 
-```
+```yaml
 agents:
   developer:
     # Display name shown in Matrix
@@ -202,7 +202,7 @@ Absolute paths and `..` traversal are rejected.
 Tools can be plain strings or single-key dicts with inline config overrides.
 This lets you customize tool behavior per agent without affecting other agents that use the same tool.
 
-```
+```yaml
 agents:
   code:
     tools:
@@ -239,7 +239,7 @@ Per-agent values win for overlapping keys, non-overlapping keys are kept from bo
 
 `defaults.tools` also accepts the single-key dict syntax for global overrides that apply to all agents:
 
-```
+```yaml
 defaults:
   tools:
     - scheduler
@@ -253,7 +253,7 @@ Use `__MINDROOM_INHERIT__` when an agent should keep the tool but stop inheritin
 
 Optional-field example:
 
-```
+```yaml
 defaults:
   tools:
     - shell:
@@ -273,7 +273,7 @@ Use `extra_env_passthrough` when a specific exported process env value must be v
 
 Required non-secret field example:
 
-```
+```yaml
 defaults:
   tools:
     - clickup:
@@ -308,7 +308,7 @@ MindRoom validates overrides at config load time and rejects unknown field names
 
 Existing configs with plain string tool lists work unchanged:
 
-```
+```yaml
 tools: [shell, file, duckduckgo]   # still valid
 ```
 
@@ -386,7 +386,7 @@ That restriction also applies transitively: a shared team member that reaches a 
 `private.per` chooses who gets a separate private instance of the agent's state.
 MindRoom then uses that same requester partition for worker execution, but that is an internal consequence of private execution, not the public meaning of `worker_scope`.
 
-```
+```yaml
 knowledge_bases:
   company_docs:
     path: ./company_docs
@@ -420,7 +420,7 @@ agents:
 
 Example template directory:
 
-```
+```text
 mind_template/
 ├── SOUL.md
 ├── AGENTS.md
@@ -523,7 +523,7 @@ Agents can delegate tasks to other agents using the `delegate_to` field. When co
 
 The delegated agent runs as a fresh, one-shot instance with no shared session or history. It executes the task and returns its response as the tool result.
 
-```
+```yaml
 agents:
   leader:
     display_name: Leader
@@ -571,7 +571,7 @@ When using these names, the built-in prompt replaces the `role` field and any cu
 
 The `defaults` section sets fallback values for all agents. Any agent that omits a setting inherits the value from here.
 
-```
+```yaml
 defaults:
   tools:                                # Tools added to every agent by default (set [] to disable)
     - scheduler
@@ -607,7 +607,7 @@ defaults:
 
 To opt out a specific agent:
 
-```
+```yaml
 agents:
   researcher:
     display_name: Researcher

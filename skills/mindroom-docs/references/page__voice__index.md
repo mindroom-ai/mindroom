@@ -22,7 +22,7 @@ When a voice message is received:
 
 Enable STT and voice-intelligence formatting in `config.yaml`:
 
-```
+```yaml
 voice:
   enabled: true
   visible_router_echo: false
@@ -47,7 +47,7 @@ MindRoom uses the OpenAI-compatible transcription API. Any service that implemen
 
 ### OpenAI Whisper (Cloud)
 
-```
+```yaml
 voice:
   enabled: true
   stt:
@@ -59,7 +59,7 @@ Requires `OPENAI_API_KEY` environment variable.
 
 ### Self-Hosted Whisper
 
-```
+```yaml
 voice:
   enabled: true
   stt:
@@ -76,7 +76,7 @@ Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server
 
 For self-hosted solutions that require authentication:
 
-```
+```yaml
 voice:
   enabled: true
   stt:
@@ -102,7 +102,7 @@ The intelligence component uses an AI model to analyze transcriptions and format
 
 The intelligence model processes raw transcriptions to recognize commands and agent names:
 
-```
+```yaml
 voice:
   intelligence:
     model: default  # Uses the default model from your models config

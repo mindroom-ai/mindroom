@@ -8,7 +8,7 @@ MindRoom uses per-service generic OAuth providers instead of a legacy all-Google
 Enable only the APIs your agents need.
 Add the matching tool to the agent config.
 
-```
+```yaml
 agents:
   personal:
     display_name: Personal
@@ -26,7 +26,7 @@ agents:
 Open Google Cloud Console and create an OAuth client.
 Add one redirect URI per provider you use.
 
-```
+```text
 http://localhost:8765/api/oauth/google_drive/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
@@ -37,7 +37,7 @@ http://localhost:8765/api/oauth/google_gmail/callback
 
 For a single personal OAuth client, store shared Google OAuth app client config under `google_oauth_client` through the dashboard credentials API or raw credentials editor:
 
-```
+```json
 {
   "client_id": "your-client-id.apps.googleusercontent.com",
   "client_secret": "your-client-secret"
