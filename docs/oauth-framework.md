@@ -5,7 +5,7 @@ icon: lucide/key-round
 # OAuth Integration Framework
 
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account.
-Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
+Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
 The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
@@ -47,6 +47,10 @@ Changing `client_id` requires submitting the matching new `client_secret`.
 First-time client config saves require both fields to be non-empty.
 Client config services cannot be copied through the generic copy route.
 Generic credentials endpoints do not return OAuth token fields and reject direct writes to OAuth token services.
+
+Providers that require PKCE should set `pkce_code_challenge_method="S256"`.
+MindRoom generates one verifier per OAuth flow, stores it in pending server-side state, adds the S256 challenge to the authorization URL, and passes the verifier into token exchange.
+Custom `token_exchanger` callbacks receive `(provider, code, client_config, runtime_paths, code_verifier)` so they can include the verifier in provider-specific exchange requests.
 
 Identity restrictions are provider settings, not MindRoom policy.
 Providers can enforce allowed email domains, allowed hosted-domain claims, and custom claim validators.

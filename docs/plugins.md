@@ -161,7 +161,7 @@ MindRoom instantiates the class when building agents.
 
 An OAuth module registers provider definitions without registering FastAPI routes.
 MindRoom core owns state generation, callback consumption, authenticated requester binding, scoped OAuth token writes, status checks, and disconnect handling.
-The provider module supplies only provider-specific details such as endpoint URLs, scopes, token credential service names, optional tool config service names, token parsing, optional claim validators, and display metadata.
+The provider module supplies only provider-specific details such as endpoint URLs, scopes, token credential service names, optional tool config service names, optional PKCE requirements, token parsing, optional claim validators, and display metadata.
 
 Declare the module in the manifest:
 
@@ -208,6 +208,8 @@ Conversation-issued links include an opaque connect token so the callback can ve
 The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester.
 The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes.
 If the tool also has editable dashboard settings, declare `tool_config_service` and store those settings separately through the normal credentials API.
+Set `pkce_code_challenge_method="S256"` when the upstream OAuth provider requires PKCE.
+MindRoom stores the verifier in pending state and passes it as the fifth argument to custom `token_exchanger` callbacks.
 For example, an Acme Drive provider can store OAuth tokens in `acme_drive_oauth` while the `acme_drive` tool settings document contains only options such as file-size limits or capability toggles.
 Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
 

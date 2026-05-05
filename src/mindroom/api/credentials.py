@@ -70,6 +70,7 @@ class _PendingOAuthState:
     execution_scope_override_provided: bool
     execution_scope_override: WorkerScope | None
     payload: dict[str, str] | None
+    code_verifier: str | None
     created_at: float
 
 
@@ -222,6 +223,7 @@ def issue_pending_oauth_state(
     agent_name: str | None = None,
     *,
     payload: dict[str, str] | None = None,
+    code_verifier: str | None = None,
 ) -> str:
     """Create an opaque OAuth state bound to the current user and target."""
     user_id = _require_auth_user_id(request)
@@ -238,6 +240,7 @@ def issue_pending_oauth_state(
             "execution_scope_override_provided": execution_scope_override_provided,
             "execution_scope_override": execution_scope_override or "",
             "payload": payload or {},
+            "code_verifier": code_verifier or "",
         },
     )
 
@@ -261,6 +264,7 @@ def _consume_pending_oauth_request(request: Request, service: str, state: str) -
     execution_scope_raw = data.get("execution_scope_override")
     execution_scope_override = execution_scope_raw if execution_scope_raw in {"shared", "user", "user_agent"} else None
     payload = data.get("payload")
+    code_verifier = data.get("code_verifier")
     return _PendingOAuthState(
         service=service,
         user_id=user_id,
@@ -268,6 +272,7 @@ def _consume_pending_oauth_request(request: Request, service: str, state: str) -
         execution_scope_override_provided=data.get("execution_scope_override_provided") is True,
         execution_scope_override=cast("WorkerScope | None", execution_scope_override),
         payload=payload if isinstance(payload, dict) else None,
+        code_verifier=code_verifier if isinstance(code_verifier, str) and code_verifier else None,
         created_at=0,
     )
 
