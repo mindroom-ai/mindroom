@@ -36,22 +36,22 @@ from mindroom.dispatch_handoff import (
     DispatchIngressMetadata,
     DispatchPayloadMetadata,
     PreparedTextEvent,
-    build_batch_dispatch_event,
+    _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
-    BatchMediaAttachmentResult,
     DispatchPayload,
     DispatchPayloadWithAttachmentsRequest,
+    _BatchMediaAttachmentResult,
 )
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.turn_controller import _PrecheckedEvent
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch
+from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -136,9 +136,9 @@ def test_coalescing_config_rejects_removed_enabled_flag(tmp_path: Path) -> None:
         )
 
 
-def _respond_dispatch_plan(action: object | None = None) -> DispatchPlan:
+def _respond_dispatch_plan(action: object | None = None) -> _DispatchPlan:
     """Return a plan that continues into the response executor path."""
-    return DispatchPlan(
+    return _DispatchPlan(
         kind="respond",
         response_action=action or MagicMock(kind="individual"),
     )
@@ -1417,7 +1417,7 @@ async def test_pending_dispatch_policy_controls_prepared_bypass_without_erasing_
 
     assert calls[0].source_kind == "voice"
     assert calls[0].dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
-    dispatch_event = build_batch_dispatch_event(calls[0])
+    dispatch_event = _build_batch_dispatch_event(calls[0])
     assert isinstance(dispatch_event, PreparedTextEvent)
     assert dispatch_event.source_kind_override == "voice"
 
@@ -3012,7 +3012,7 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
         latest_event_id="$img2",
     )
 
-    action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     dispatch.context.thread_history = [hydrated_msg]
     dispatch.context.replay_guard_history = []
 
@@ -3124,7 +3124,7 @@ def test_batch_dispatch_event_merges_mentions_across_events() -> None:
             PendingEvent(event=followup_event, room=room, source_kind="message"),
         ],
     )
-    dispatch_event = build_batch_dispatch_event(batch)
+    dispatch_event = _build_batch_dispatch_event(batch)
 
     assert isinstance(dispatch_event, PreparedTextEvent)
     content = dispatch_event.source.get("content", {})
@@ -3162,7 +3162,7 @@ def test_batch_dispatch_event_preserves_voice_fallback_metadata() -> None:
             PendingEvent(event=text_event, room=room, source_kind="message"),
         ],
     )
-    dispatch_event = build_batch_dispatch_event(batch)
+    dispatch_event = _build_batch_dispatch_event(batch)
 
     assert isinstance(dispatch_event, PreparedTextEvent)
     content = dispatch_event.source.get("content", {})
@@ -3192,7 +3192,7 @@ def test_single_prepared_batch_dispatch_event_preserves_source_kind() -> None:
         ],
     )
     handoff = build_dispatch_handoff(batch)
-    dispatch_event = build_batch_dispatch_event(batch)
+    dispatch_event = _build_batch_dispatch_event(batch)
 
     assert handoff.ingress.source_kind == "message"
     assert handoff.ingress.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
@@ -3217,7 +3217,7 @@ def test_single_text_batch_dispatch_event_preserves_bypass_source_kind() -> None
         ],
     )
     handoff = build_dispatch_handoff(batch)
-    dispatch_event = build_batch_dispatch_event(batch)
+    dispatch_event = _build_batch_dispatch_event(batch)
 
     assert handoff.ingress.source_kind == "message"
     assert handoff.ingress.dispatch_policy_source_kind == COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP
@@ -3258,7 +3258,7 @@ def test_batch_dispatch_event_preserves_original_sender() -> None:
             PendingEvent(event=followup, room=room, source_kind="message"),
         ],
     )
-    dispatch_event = build_batch_dispatch_event(batch)
+    dispatch_event = _build_batch_dispatch_event(batch)
 
     assert isinstance(dispatch_event, PreparedTextEvent)
     content = dispatch_event.source.get("content", {})
@@ -3310,7 +3310,7 @@ def test_batch_dispatch_event_preserves_attachment_ids() -> None:
             ),
         ],
     )
-    dispatch_event = build_batch_dispatch_event(batch)
+    dispatch_event = _build_batch_dispatch_event(batch)
 
     assert isinstance(dispatch_event, PreparedTextEvent)
     content = dispatch_event.source.get("content", {})
@@ -3832,7 +3832,7 @@ def test_batch_dispatch_event_preserves_formatted_body_mentions() -> None:
             PendingEvent(event=followup, room=room, source_kind="message"),
         ],
     )
-    dispatch_event = build_batch_dispatch_event(batch)
+    dispatch_event = _build_batch_dispatch_event(batch)
 
     assert isinstance(dispatch_event, PreparedTextEvent)
     content = dispatch_event.source.get("content", {})
@@ -3853,7 +3853,7 @@ async def _capture_gate_dispatches(
     media_batches: list[list[object]] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
+    async def record_plan(*args: object, **kwargs: object) -> _DispatchPlan:
         dispatch = cast("PreparedDispatch", args[2])
         envelopes.append(dispatch.envelope)
         media_batches.append(list(cast("list[object] | None", kwargs.get("media_events")) or []))
@@ -3881,7 +3881,7 @@ async def _capture_gate_dispatches(
         patch.object(
             bot._inbound_turn_normalizer,
             "register_batch_media_attachments",
-            new=AsyncMock(return_value=BatchMediaAttachmentResult(attachment_ids=[])),
+            new=AsyncMock(return_value=_BatchMediaAttachmentResult(attachment_ids=[])),
         ),
     ):
         for event, source_kind, dispatch_policy_source_kind, metadata in enqueued:
@@ -4454,7 +4454,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
     captured_extra_content: list[object] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
+    async def record_plan(*args: object, **kwargs: object) -> _DispatchPlan:
         dispatch = cast("PreparedDispatch", args[2])
         captured_envelopes.append(dispatch.envelope)
         captured_extra_content.append(kwargs.get("extra_content"))
@@ -4520,7 +4520,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     captured_envelopes: list[MessageEnvelope] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
+    async def record_plan(*args: object, **_kwargs: object) -> _DispatchPlan:
         dispatch = cast("PreparedDispatch", args[2])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
@@ -4583,7 +4583,7 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
     captured_envelopes: list[MessageEnvelope] = []
     captured_handled_turns: list[HandledTurnState] = []
 
-    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
+    async def record_plan(*args: object, **_kwargs: object) -> _DispatchPlan:
         dispatch = cast("PreparedDispatch", args[2])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()

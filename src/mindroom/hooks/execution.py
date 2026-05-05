@@ -45,9 +45,9 @@ _COLLECT_CONCURRENCY_LIMIT = 10
 _MAX_EMIT_DEPTH = 3
 _EMIT_DEPTH: ContextVar[int] = ContextVar("mindroom_hook_emit_depth", default=0)
 
-type HookExecutionContext = HookContext | ToolBeforeCallContext | ToolAfterCallContext
-type TransformContext = BeforeResponseContext | FinalResponseTransformContext
-type TransformDraft = ResponseDraft | FinalResponseDraft
+type _HookExecutionContext = HookContext | ToolBeforeCallContext | ToolAfterCallContext
+type _TransformContext = BeforeResponseContext | FinalResponseTransformContext
+type _TransformDraft = ResponseDraft | FinalResponseDraft
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +56,7 @@ class _HookInvocationResult:
     value: object | None = None
 
 
-def _scope_agent_name(context: HookExecutionContext) -> str | None:
+def _scope_agent_name(context: _HookExecutionContext) -> str | None:
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         return context.agent_name
     envelope = _context_scope_envelope(context)
@@ -71,7 +71,7 @@ def _scope_agent_name(context: HookExecutionContext) -> str | None:
     return None
 
 
-def _scope_room_ids(context: HookExecutionContext) -> tuple[str, ...]:  # noqa: PLR0911
+def _scope_room_ids(context: _HookExecutionContext) -> tuple[str, ...]:  # noqa: PLR0911
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         return (context.room_id,) if context.room_id else ()
     envelope = _context_scope_envelope(context)
@@ -90,7 +90,7 @@ def _scope_room_ids(context: HookExecutionContext) -> tuple[str, ...]:  # noqa: 
     return ()
 
 
-def _hook_in_scope(hook: RegisteredHook, context: HookExecutionContext) -> bool:
+def _hook_in_scope(hook: RegisteredHook, context: _HookExecutionContext) -> bool:
     if hook.agents is not None:
         agent_name = _scope_agent_name(context)
         if agent_name is None or agent_name not in hook.agents:
@@ -104,7 +104,7 @@ def _hook_in_scope(hook: RegisteredHook, context: HookExecutionContext) -> bool:
     return True
 
 
-def _context_scope_envelope(context: HookExecutionContext) -> MessageEnvelope | None:
+def _context_scope_envelope(context: _HookExecutionContext) -> MessageEnvelope | None:
     if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
         return context.envelope
     if isinstance(context, BeforeResponseContext | FinalResponseTransformContext):
@@ -162,7 +162,7 @@ def _snapshot_compaction_messages(messages: list[Message]) -> list[Message] | No
             return None
 
 
-def _bind_hook_context(hook: RegisteredHook, context: HookExecutionContext) -> HookExecutionContext | None:
+def _bind_hook_context(hook: RegisteredHook, context: _HookExecutionContext) -> _HookExecutionContext | None:
     replacement_kwargs: dict[str, object] = {
         "plugin_name": hook.plugin_name,
         "settings": dict(hook.settings),
@@ -184,8 +184,8 @@ def _bind_hook_context(hook: RegisteredHook, context: HookExecutionContext) -> H
 
 
 def _merge_observer_context_changes(
-    context: HookExecutionContext,
-    hook_context: HookExecutionContext,
+    context: _HookExecutionContext,
+    hook_context: _HookExecutionContext,
 ) -> None:
     """Propagate mutable observer fields back to the caller-visible context."""
     if isinstance(context, ToolBeforeCallContext) and isinstance(hook_context, ToolBeforeCallContext):
@@ -202,7 +202,7 @@ def _effective_timeout_ms(hook: RegisteredHook) -> int:
     return hook.timeout_ms if hook.timeout_ms is not None else default_timeout_ms_for_event(hook.event_name)
 
 
-async def _invoke_hook(hook: RegisteredHook, context: HookExecutionContext) -> _HookInvocationResult:
+async def _invoke_hook(hook: RegisteredHook, context: _HookExecutionContext) -> _HookInvocationResult:
     timeout_seconds = _effective_timeout_ms(hook) / 1000
     started_at = time.monotonic()
     try:
@@ -230,7 +230,7 @@ async def _invoke_hook(hook: RegisteredHook, context: HookExecutionContext) -> _
 def _eligible_hooks(
     registry: HookRegistry,
     event_name: str,
-    context: HookExecutionContext,
+    context: _HookExecutionContext,
 ) -> tuple[RegisteredHook, ...]:
     hooks = registry.hooks_for(event_name)
     if not hooks:
@@ -253,7 +253,7 @@ def _eligible_hooks(
 async def emit(
     registry: HookRegistry,
     event_name: str,
-    context: HookExecutionContext,
+    context: _HookExecutionContext,
     *,
     continue_on_cancelled: bool = False,
 ) -> None:
@@ -398,21 +398,21 @@ async def emit_final_response_transform(
     )
 
 
-def _copy_transform_draft(draft: TransformDraft) -> TransformDraft:
+def _copy_transform_draft(draft: _TransformDraft) -> _TransformDraft:
     return deepcopy(draft)
 
 
-def _transform_context_with_draft(context: TransformContext, draft: TransformDraft) -> TransformContext:
+def _transform_context_with_draft(context: _TransformContext, draft: _TransformDraft) -> _TransformContext:
     return replace(context, draft=draft)
 
 
 def _next_transform_draft(
-    current_draft: TransformDraft,
-    hook_context: TransformContext,
+    current_draft: _TransformDraft,
+    hook_context: _TransformContext,
     invocation: _HookInvocationResult,
     *,
     preserve_failed_draft: bool,
-) -> TransformDraft:
+) -> _TransformDraft:
     if not invocation.succeeded:
         return hook_context.draft if preserve_failed_draft else current_draft
     if isinstance(invocation.value, type(current_draft)):
@@ -423,19 +423,19 @@ def _next_transform_draft(
 async def _emit_serial_transform(
     registry: HookRegistry,
     event_name: str,
-    context: TransformContext,
+    context: _TransformContext,
     *,
     copy_on_write: bool,
     preserve_failed_draft: bool,
     continue_on_cancelled: bool,
-) -> TransformDraft:
+) -> _TransformDraft:
     current_draft = context.draft
     for hook in _eligible_hooks(registry, event_name, context):
         hook_draft = _copy_transform_draft(current_draft) if copy_on_write else current_draft
         bound_context = _bind_hook_context(hook, _transform_context_with_draft(context, hook_draft))
         if bound_context is None:
             return current_draft
-        hook_context = cast("TransformContext", bound_context)
+        hook_context = cast("_TransformContext", bound_context)
         try:
             invocation = await _invoke_hook(hook, hook_context)
         except asyncio.CancelledError:

@@ -52,7 +52,7 @@ class KnowledgeAvailabilityDetail:
 
 
 @dataclass(frozen=True)
-class KnowledgeResolution:
+class _KnowledgeResolution:
     """Resolved knowledge plus availability diagnostics for one agent."""
 
     knowledge: Knowledge | None
@@ -346,7 +346,7 @@ def resolve_agent_knowledge_access(
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> KnowledgeResolution:
+) -> _KnowledgeResolution:
     """Resolve configured knowledge base(s) with diagnostics for one agent."""
     resolved_knowledge: dict[str, tuple[Knowledge | None, KnowledgeAvailability]] = {}
 
@@ -379,7 +379,7 @@ def resolve_agent_knowledge_access(
 
     base_ids = config.get_agent_knowledge_base_ids(agent_name)
     if not base_ids:
-        return KnowledgeResolution(knowledge=None)
+        return _KnowledgeResolution(knowledge=None)
 
     missing_base_ids: list[str] = []
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
@@ -396,7 +396,7 @@ def resolve_agent_knowledge_access(
             continue
         knowledges.append(knowledge)
 
-    return KnowledgeResolution(
+    return _KnowledgeResolution(
         knowledge=_merge_knowledge(agent_name, knowledges),
         missing=tuple(missing_base_ids),
         unavailable=unavailable_bases,
@@ -481,7 +481,7 @@ class KnowledgeAccessSupport:
         agent_name: str,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-    ) -> KnowledgeResolution:
+    ) -> _KnowledgeResolution:
         """Return current knowledge and availability diagnostics for one agent."""
         orchestrator = self.runtime.orchestrator
         refresh_scheduler = orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
@@ -503,7 +503,7 @@ class KnowledgeAccessSupport:
 
 
 @dataclass
-class MultiKnowledgeVectorDb:
+class _MultiKnowledgeVectorDb:
     """Thin vector DB wrapper that queries multiple vector DBs and merges results.
 
     Duck-types the vector_db interface expected by agno's ``Knowledge.__post_init__``.
@@ -616,6 +616,6 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
         return None
     return Knowledge(
         name=f"{agent_name}_multi_knowledge",
-        vector_db=MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
+        vector_db=_MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
         max_results=max(knowledge.max_results for knowledge in knowledges),
     )

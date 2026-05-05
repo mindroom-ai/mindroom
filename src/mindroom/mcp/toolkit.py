@@ -27,7 +27,7 @@ def require_mcp_server_manager() -> MCPServerManager | None:
     return _ACTIVE_MCP_SERVER_MANAGER
 
 
-def normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | None:
+def _normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | None:
     """Normalize filter values passed from tool config and runtime overrides."""
     if value is None:
         return None
@@ -60,8 +60,8 @@ class MindRoomMCPToolkit(Toolkit):
         self.manager = manager
         self.catalog = catalog
         self.call_timeout_seconds = float(call_timeout_seconds) if call_timeout_seconds is not None else None
-        self.include_tools = normalize_tool_name_filter(include_tools)
-        self.exclude_tools = normalize_tool_name_filter(exclude_tools)
+        self.include_tools = _normalize_tool_name_filter(include_tools)
+        self.exclude_tools = _normalize_tool_name_filter(exclude_tools)
         if self.manager is None or self.catalog is None:
             return
         filtered_tools = self._filtered_tools()

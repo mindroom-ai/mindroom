@@ -96,10 +96,10 @@ _SECRET_ASSIGNMENT_PATTERN = re.compile(
 _TOOL_CALL_LOGGERS: dict[Path, logging.Logger] = {}
 _TOOL_CALL_LOGGER_LOCK = Lock()
 
-type JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+type _JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]
 
 
-class ToolCallRecordDict(TypedDict, total=False):
+class _ToolCallRecordDict(TypedDict, total=False):
     """JSON-serializable schema for one persisted tool-call record."""
 
     timestamp: str
@@ -113,16 +113,16 @@ class ToolCallRecordDict(TypedDict, total=False):
     session_id: str | None
     correlation_id: str
     duration_ms: float
-    arguments: JsonValue
+    arguments: _JsonValue
     success: bool
-    result: JsonValue
+    result: _JsonValue
     error_type: str
     error_message: str
     traceback: str
 
 
 @dataclass(frozen=True, slots=True)
-class ToolCallRecord:
+class _ToolCallRecord:
     """One sanitized tool-call record ready for warning logs and JSONL persistence."""
 
     timestamp: str
@@ -136,16 +136,16 @@ class ToolCallRecord:
     session_id: str | None
     correlation_id: str
     duration_ms: float
-    arguments: JsonValue
+    arguments: _JsonValue
     success: bool
-    result: JsonValue | None = None
+    result: _JsonValue | None = None
     error_type: str | None = None
     error_message: str | None = None
     traceback: str | None = None
 
-    def as_dict(self) -> ToolCallRecordDict:
+    def as_dict(self) -> _ToolCallRecordDict:
         """Return the record in JSON-serializable dictionary form."""
-        record: dict[str, JsonValue | str | float | bool | None] = {
+        record: dict[str, _JsonValue | str | float | bool | None] = {
             "timestamp": self.timestamp,
             "tool_name": self.tool_name,
             "reply_to_event_id": self.reply_to_event_id,
@@ -174,7 +174,7 @@ class ToolCallRecord:
             ("traceback", self.traceback),
         )
         record.update({key: value for key, value in optional_fields if value is not None})
-        return cast("ToolCallRecordDict", record)
+        return cast("_ToolCallRecordDict", record)
 
 
 def _unrepresentable_placeholder(value: object) -> str:
@@ -300,7 +300,7 @@ def sanitize_failure_text(value: str, *, max_length: int = _MAX_STRING_LENGTH) -
     return _truncate_text(sanitized, max_length)
 
 
-def sanitize_failure_value(value: object, *, depth: int = 0) -> JsonValue:  # noqa: PLR0911
+def sanitize_failure_value(value: object, *, depth: int = 0) -> _JsonValue:  # noqa: PLR0911
     """Recursively redact and bound one arbitrary value for durable failure logging."""
     if depth >= _MAX_REDACTION_DEPTH:
         return _TRUNCATED
@@ -311,7 +311,7 @@ def sanitize_failure_value(value: object, *, depth: int = 0) -> JsonValue:  # no
     if isinstance(value, str):
         return sanitize_failure_text(value)
     if isinstance(value, dict):
-        sanitized: dict[str, JsonValue] = {}
+        sanitized: dict[str, _JsonValue] = {}
         for index, (key, item) in enumerate(value.items()):
             if index >= _MAX_COLLECTION_ITEMS:
                 sanitized["__truncated__"] = f"{len(value) - _MAX_COLLECTION_ITEMS} more items"
@@ -346,7 +346,7 @@ def _safe_traceback(error: BaseException) -> str:
     return sanitize_failure_text(formatted_traceback, max_length=_MAX_TRACEBACK_LENGTH)
 
 
-def build_tool_failure_record(
+def _build_tool_failure_record(
     *,
     tool_name: str,
     arguments: dict[str, object],
@@ -360,9 +360,9 @@ def build_tool_failure_record(
     requester_id: str | None,
     session_id: str | None,
     correlation_id: str,
-) -> ToolCallRecord:
+) -> _ToolCallRecord:
     """Build one sanitized durable record for a failing tool call."""
-    return ToolCallRecord(
+    return _ToolCallRecord(
         timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         tool_name=tool_name,
         agent_name=agent_name,
@@ -382,7 +382,7 @@ def build_tool_failure_record(
     )
 
 
-def build_tool_success_record(
+def _build_tool_success_record(
     *,
     tool_name: str,
     arguments: dict[str, object],
@@ -396,9 +396,9 @@ def build_tool_success_record(
     requester_id: str | None,
     session_id: str | None,
     correlation_id: str,
-) -> ToolCallRecord:
+) -> _ToolCallRecord:
     """Build one sanitized durable record for a successful tool call."""
-    return ToolCallRecord(
+    return _ToolCallRecord(
         timestamp=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         tool_name=tool_name,
         agent_name=agent_name,
@@ -442,7 +442,7 @@ def _tool_call_logger(path: Path) -> logging.Logger:
         return tool_call_logger
 
 
-def _append_tool_call_record(record: ToolCallRecord, runtime_paths: RuntimePaths) -> None:
+def _append_tool_call_record(record: _ToolCallRecord, runtime_paths: RuntimePaths) -> None:
     _tool_call_logger(_tool_call_log_path(runtime_paths)).info(
         json.dumps(record.as_dict(), sort_keys=True, allow_nan=False),
     )
@@ -463,9 +463,9 @@ def record_tool_failure(
     correlation_id: str,
     execution_identity: ToolExecutionIdentity | None,
     runtime_paths: RuntimePaths | None,
-) -> ToolCallRecord:
+) -> _ToolCallRecord:
     """Persist one sanitized tool failure record when runtime paths are available."""
-    record = build_tool_failure_record(
+    record = _build_tool_failure_record(
         tool_name=tool_name,
         arguments=arguments,
         error=error,
@@ -512,9 +512,9 @@ def record_tool_success(
     correlation_id: str,
     execution_identity: ToolExecutionIdentity | None,
     runtime_paths: RuntimePaths | None,
-) -> ToolCallRecord:
+) -> _ToolCallRecord:
     """Persist one sanitized tool success record when runtime paths are available."""
-    record = build_tool_success_record(
+    record = _build_tool_success_record(
         tool_name=tool_name,
         arguments=arguments,
         result=result,

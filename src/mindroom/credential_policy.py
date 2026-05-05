@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-WorkerScope = Literal["shared", "user", "user_agent"]
+_WorkerScope = Literal["shared", "user", "user_agent"]
 
 OAUTH_CREDENTIAL_FIELDS = frozenset(
     {
@@ -29,9 +29,9 @@ OAUTH_CREDENTIAL_FIELDS = frozenset(
     },
 )
 
-OAUTH_CLIENT_CONFIG_SERVICE_SUFFIX = "_oauth_client"
+_OAUTH_CLIENT_CONFIG_SERVICE_SUFFIX = "_oauth_client"
 
-LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
+_LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
         "google_calendar",
         "google_calendar_oauth",
@@ -46,7 +46,7 @@ LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     },
 )
 
-UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
+_UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
         "google_vertex_adc",
         "google_calendar_oauth",
@@ -58,11 +58,11 @@ UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class CredentialServicePolicy:
+class _CredentialServicePolicy:
     """Credential placement decisions for one service in one worker scope."""
 
     service: str
-    worker_scope: WorkerScope | None
+    worker_scope: _WorkerScope | None
     is_local_only_shared_service: bool
     uses_local_shared_credentials: bool
     uses_primary_runtime_global_credentials: bool
@@ -70,11 +70,11 @@ class CredentialServicePolicy:
     worker_grantable_supported: bool
 
 
-def credential_service_policy(service: str, worker_scope: WorkerScope | None) -> CredentialServicePolicy:
+def credential_service_policy(service: str, worker_scope: _WorkerScope | None) -> _CredentialServicePolicy:
     """Return credential placement policy for one service in one worker scope."""
-    is_local_only = service in LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
+    is_local_only = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
     is_primary_runtime_global = is_oauth_client_config_service(service)
-    return CredentialServicePolicy(
+    return _CredentialServicePolicy(
         service=service,
         worker_scope=worker_scope,
         is_local_only_shared_service=is_local_only,
@@ -84,13 +84,13 @@ def credential_service_policy(service: str, worker_scope: WorkerScope | None) ->
             worker_scope in {"user", "user_agent"} and is_local_only and not is_primary_runtime_global
         ),
         worker_grantable_supported=not is_primary_runtime_global
-        and service not in UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
+        and service not in _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     )
 
 
 def is_oauth_client_config_service(service: str) -> bool:
     """Return whether a service name follows the OAuth client config naming contract."""
-    return service.endswith(OAUTH_CLIENT_CONFIG_SERVICE_SUFFIX)
+    return service.endswith(_OAUTH_CLIENT_CONFIG_SERVICE_SUFFIX)
 
 
 def dashboard_may_edit_oauth_service(*, token_service: bool, tool_config_service: bool) -> bool:

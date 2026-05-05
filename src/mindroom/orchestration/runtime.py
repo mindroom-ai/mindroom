@@ -147,7 +147,7 @@ async def cancel_logged_task(task: asyncio.Task | None) -> None:
         return
 
 
-class MatrixSyncStalledError(RuntimeError):
+class _MatrixSyncStalledError(RuntimeError):
     """Raised when the watchdog detects a stalled Matrix sync loop."""
 
 
@@ -205,7 +205,7 @@ class _SyncIteration:
             with suppress(asyncio.CancelledError):
                 await sync_task
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
-            raise MatrixSyncStalledError(msg)
+            raise _MatrixSyncStalledError(msg)
 
     @classmethod
     def start(cls, bot: AgentBot | TeamBot) -> _SyncIteration:
@@ -267,7 +267,7 @@ class _SyncIteration:
                 task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, MatrixSyncStalledError):
+            except (asyncio.CancelledError, _MatrixSyncStalledError):
                 pass
             except Exception:
                 logger.warning("Suppressed error during sync iteration cleanup", exc_info=True)
@@ -484,7 +484,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             # Task cancellation is part of normal shutdown.
             logger.info("sync_task_cancelled", agent=bot.agent_name)
             break
-        except MatrixSyncStalledError:
+        except _MatrixSyncStalledError:
             retry_count += 1
             logger.warning("restarting_stalled_sync_loop", agent=bot.agent_name, retry_count=retry_count)
         except Exception:

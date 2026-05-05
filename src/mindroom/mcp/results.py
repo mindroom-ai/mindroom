@@ -90,7 +90,7 @@ def _audio_artifacts_from_blocks(content_blocks: Iterable[object]) -> list[Audio
     return audios
 
 
-def raise_for_mcp_call_error(server_id: str, result: CallToolResult) -> None:
+def _raise_for_mcp_call_error(server_id: str, result: CallToolResult) -> None:
     """Raise a structured tool error when the server reports failure."""
     if not result.isError:
         return
@@ -104,7 +104,7 @@ def raise_for_mcp_call_error(server_id: str, result: CallToolResult) -> None:
 
 def tool_result_from_call_result(server_id: str, result: CallToolResult) -> ToolResult:
     """Convert one MCP call result into an Agno tool result."""
-    raise_for_mcp_call_error(server_id, result)
+    _raise_for_mcp_call_error(server_id, result)
     lines = _text_lines_from_blocks(result.content)
     structured = _compact_structured_content(result)
     if structured and (not lines or structured not in lines):

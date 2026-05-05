@@ -43,7 +43,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
-from mindroom.turn_store import LoadedTurnRecord
+from mindroom.turn_store import _LoadedTurnRecord
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -446,7 +446,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         patch.object(
             turn_store,
             "load_turn",
-            return_value=LoadedTurnRecord(
+            return_value=_LoadedTurnRecord(
                 record=turn_record,
                 recorded_turn_context_available=True,
                 response_owner_missing=False,

@@ -12,7 +12,7 @@ import pytest
 
 from mindroom.api import sandbox_exec
 from mindroom.api.sandbox_exec import (
-    WORKSPACE_ENV_HOOK_RELATIVE_PATH,
+    _WORKSPACE_ENV_HOOK_RELATIVE_PATH,
     WorkspaceEnvHookError,
     resolve_workspace_env_hook_path,
     source_workspace_env_hook,
@@ -283,7 +283,7 @@ def test_source_workspace_env_hook_raises_on_timeout(
     workspace.mkdir()
     hook_path = _write_hook(workspace, "sleep 1\nexport FOO=bar\n")
 
-    monkeypatch.setattr(sandbox_exec, "WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(sandbox_exec, "_WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS", 0.01)
 
     with pytest.raises(WorkspaceEnvHookError, match="timed out"):
         source_workspace_env_hook(
@@ -404,4 +404,4 @@ def test_source_workspace_env_hook_ignores_script_stdout_before_marker(tmp_path:
 
 def test_workspace_env_hook_relative_path_value() -> None:
     """The exposed relative path constant matches the documented filename."""
-    assert Path(".mindroom") / "worker-env.sh" == WORKSPACE_ENV_HOOK_RELATIVE_PATH
+    assert Path(".mindroom") / "worker-env.sh" == _WORKSPACE_ENV_HOOK_RELATIVE_PATH

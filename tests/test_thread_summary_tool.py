@@ -14,7 +14,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_summary import ThreadSummaryTools
-from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH, ThreadSummaryWriteError, ThreadSummaryWriteResult
+from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH, ThreadSummaryWriteError, _ThreadSummaryWriteResult
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
@@ -53,8 +53,8 @@ def _write_result(
     event_id: str = "$summary-event:localhost",
     message_count: int = 3,
     summary: str = "done",
-) -> ThreadSummaryWriteResult:
-    return ThreadSummaryWriteResult(
+) -> _ThreadSummaryWriteResult:
+    return _ThreadSummaryWriteResult(
         event_id=event_id,
         message_count=message_count,
         summary=summary,

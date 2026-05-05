@@ -20,11 +20,11 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.compaction import (
+    _estimate_static_tokens,
+    _estimate_tool_definition_tokens,
     compute_prompt_token_breakdown,
-    estimate_static_tokens,
-    estimate_tool_definition_tokens,
 )
 from mindroom.history.policy import classify_compaction_decision
 from mindroom.history.runtime import create_scope_session_storage
@@ -300,7 +300,7 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     config, runtime_paths = _make_prepare_config(tmp_path)
     live_agent = _make_agent(role="", instructions=[])
 
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="x" * 248),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -493,21 +493,21 @@ class TestEstimateStaticTokens:
 
     def test_basic_estimation(self) -> None:
         agent = _make_agent(role="x" * 40, instructions=["y" * 20])
-        tokens = estimate_static_tokens(agent, "z" * 80)
+        tokens = _estimate_static_tokens(agent, "z" * 80)
         # (40 + 20 + 80) / 4 = 35, no tools → + 0
         assert tokens == 35
 
     def test_string_instructions(self) -> None:
         agent = _make_agent(role="x" * 40)
         agent.instructions = "y" * 60
-        tokens = estimate_static_tokens(agent, "z" * 100)
+        tokens = _estimate_static_tokens(agent, "z" * 100)
         # (40 + 60 + 100) / 4 = 50, no tools → + 0
         assert tokens == 50
 
     def test_none_role(self) -> None:
         agent = _make_agent()
         agent.role = None
-        tokens = estimate_static_tokens(agent, "hello")
+        tokens = _estimate_static_tokens(agent, "hello")
         assert tokens == len("hello") // 4
 
 
@@ -516,7 +516,7 @@ class TestEstimateToolDefinitionTokens:
 
     def test_no_tools(self) -> None:
         agent = _make_agent()
-        assert estimate_tool_definition_tokens(agent) == 0
+        assert _estimate_tool_definition_tokens(agent) == 0
 
     def test_with_toolkit(self) -> None:
         func = Function(
@@ -528,7 +528,7 @@ class TestEstimateToolDefinitionTokens:
         toolkit.functions = {"test_func": func}
         agent = _make_agent()
         agent.tools = [toolkit]
-        tokens = estimate_tool_definition_tokens(agent)
+        tokens = _estimate_tool_definition_tokens(agent)
         assert tokens > 0
 
     def test_with_function(self) -> None:
@@ -539,7 +539,7 @@ class TestEstimateToolDefinitionTokens:
         )
         agent = _make_agent()
         agent.tools = [func]
-        tokens = estimate_tool_definition_tokens(agent)
+        tokens = _estimate_tool_definition_tokens(agent)
         assert tokens > 0
 
 

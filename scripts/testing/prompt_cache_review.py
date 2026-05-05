@@ -31,8 +31,8 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_path  # noqa: E402
-from mindroom.vertex_claude_prompt_cache import (  # noqa: E402
-    copy_messages_with_vertex_prompt_cache_breakpoint,
+from mindroom.vertex_claude_prompt_cache import (  # noqa: E402  # noqa: E402
+    _copy_messages_with_vertex_prompt_cache_breakpoint,
     install_vertex_claude_prompt_cache_hook,
 )
 
@@ -559,7 +559,7 @@ def apply_vertex_cache_breakpoint_if_needed(
         cache_system_prompt=True,
         extended_cache_time=model_params_dict.get("extended_cache_time") is True,
     )
-    return copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+    return _copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
 
 
 def is_claude_request(model_id: str) -> bool:

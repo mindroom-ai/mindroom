@@ -99,7 +99,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-type MatrixEventId = str
+type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳)?\s*$")
@@ -331,7 +331,7 @@ class PostLockRequestPreparationError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class TeamResponseRequest:
+class _TeamResponseRequest:
     """Typed carrier for one team response request plus team-specific inputs."""
 
     request: ResponseRequest
@@ -836,7 +836,7 @@ class ResponseRunner:
         reason_prefix: str = "Team request",
     ) -> str | None:
         """Generate a team response with lifecycle locking and queued-message state."""
-        team_request = TeamResponseRequest(
+        team_request = _TeamResponseRequest(
             request=request,
             team_agents=tuple(team_agents),
             team_mode=team_mode,
@@ -868,7 +868,7 @@ class ResponseRunner:
 
     async def generate_team_response_helper_locked(  # noqa: C901, PLR0912, PLR0915
         self,
-        team_request: TeamResponseRequest,
+        team_request: _TeamResponseRequest,
         *,
         resolved_target: MessageTarget,
     ) -> str | None:
@@ -1408,7 +1408,7 @@ class ResponseRunner:
         target: MessageTarget | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
         on_cancelled: Callable[[str], None] | None = None,
-    ) -> MatrixEventId | None:
+    ) -> _MatrixEventId | None:
         """Run one response generation function with cancellation support."""
         resolved_target = target or self.deps.resolver.build_message_target(
             room_id=room_id,

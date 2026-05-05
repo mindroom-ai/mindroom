@@ -224,7 +224,7 @@ class CredentialsManager:
         self.save_credentials(service, credentials)
 
 
-def credentials_base_path(storage_root: Path) -> Path:
+def _credentials_base_path(storage_root: Path) -> Path:
     """Return the credentials directory under one explicit storage root."""
     return Path(storage_root).expanduser().resolve() / "credentials"
 
@@ -258,7 +258,7 @@ _credentials_manager: CredentialsManager | None = None
 _credentials_manager_signature: tuple[Path, Path, str | None, Path | None] | None = None
 
 
-def get_credentials_manager(*, storage_root: Path) -> CredentialsManager:
+def _get_credentials_manager(*, storage_root: Path) -> CredentialsManager:
     """Get the global credentials manager instance.
 
     Returns:
@@ -267,7 +267,7 @@ def get_credentials_manager(*, storage_root: Path) -> CredentialsManager:
     """
     global _credentials_manager, _credentials_manager_signature
 
-    base_path = credentials_base_path(storage_root)
+    base_path = _credentials_base_path(storage_root)
     shared_base_path = _default_shared_credentials_base_path(base_path)
     current_signature = (
         base_path,
@@ -286,7 +286,7 @@ def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsM
     """Return the global credentials manager for one explicit runtime context."""
     global _credentials_manager, _credentials_manager_signature
 
-    base_path = credentials_base_path(runtime_paths.storage_root)
+    base_path = _credentials_base_path(runtime_paths.storage_root)
     shared_base_path = _runtime_shared_credentials_base_path(runtime_paths, base_path)
     current_signature = (
         base_path,
@@ -306,7 +306,7 @@ def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsM
     return _credentials_manager
 
 
-def shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:
+def _shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:
     """Return the shared credential layer for one execution context."""
     if credentials_manager.shared_base_path == credentials_manager.base_path:
         return credentials_manager
@@ -315,7 +315,7 @@ def shared_credentials_manager(credentials_manager: CredentialsManager) -> Crede
 
 def get_runtime_shared_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
     """Return the shared credential layer for one explicit runtime context."""
-    return shared_credentials_manager(get_runtime_credentials_manager(runtime_paths))
+    return _shared_credentials_manager(get_runtime_credentials_manager(runtime_paths))
 
 
 def _resolve_worker_credentials_manager(
@@ -409,7 +409,7 @@ def list_worker_grantable_shared_services(
     )
 
 
-def merge_scoped_credentials(
+def _merge_scoped_credentials(
     service: str,
     *,
     base_manager: CredentialsManager,
@@ -435,7 +435,7 @@ def sync_shared_credentials_to_worker(
     """
     manager = credentials_manager
     worker_shared_manager = manager.for_worker(worker_key).shared_manager()
-    source_manager = shared_credentials_manager(manager)
+    source_manager = _shared_credentials_manager(manager)
     mirrored_services = set(worker_shared_manager.list_services())
     copied_services: set[str] = set()
     logger.debug(
@@ -492,7 +492,7 @@ def load_scoped_credentials(
 ) -> dict[str, Any] | None:
     """Load credentials for a service, resolving worker-scoped overrides when available."""
     manager = credentials_manager
-    shared_manager = shared_credentials_manager(manager)
+    shared_manager = _shared_credentials_manager(manager)
     if worker_target is None or worker_target.worker_scope is None:
         if manager.shared_base_path != manager.base_path:
             return _merge_unscoped_credentials(

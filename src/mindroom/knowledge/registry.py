@@ -85,7 +85,7 @@ class PublishedIndexState:
 
 
 @dataclass(frozen=True)
-class PublishedIndexHandle:
+class _PublishedIndexHandle:
     """Read handle for the published knowledge index."""
 
     key: PublishedIndexKey
@@ -99,7 +99,7 @@ class PublishedIndexResolution:
     """Result of resolving the published index for one knowledge base."""
 
     key: PublishedIndexKey
-    index: PublishedIndexHandle | None
+    index: _PublishedIndexHandle | None
     state: PublishedIndexState | None
     availability: KnowledgeAvailability
     schedule_refresh_on_access: bool = False
@@ -114,7 +114,7 @@ class _PublishedIndexVectorDb(Protocol):
         ...
 
 
-_published_indexes: dict[PublishedIndexKey, PublishedIndexHandle] = {}
+_published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
 _PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
 _MAX_PRIVATE_PUBLISHED_INDEXES = 128
 _P = ParamSpec("_P")
@@ -236,7 +236,7 @@ def resolve_refresh_target(
     )
 
 
-def published_index_storage_path(key: PublishedIndexKey) -> Path:
+def _published_index_storage_path(key: PublishedIndexKey) -> Path:
     """Return the storage directory for one resolved knowledge base."""
     knowledge_path = Path(key.knowledge_path)
     return (
@@ -246,7 +246,7 @@ def published_index_storage_path(key: PublishedIndexKey) -> Path:
 
 def published_index_metadata_path(key: PublishedIndexKey) -> Path:
     """Return the single persisted state file for one knowledge base."""
-    return published_index_storage_path(key) / "indexing_settings.json"
+    return _published_index_storage_path(key) / "indexing_settings.json"
 
 
 def _coerce_nonnegative_int(value: object) -> int | None:
@@ -480,7 +480,7 @@ def _build_published_index_vector_db(
         "_PublishedIndexVectorDb",
         manager_module.ChromaDb(
             collection=_state_collection_name(state),
-            path=str(published_index_storage_path(key)),
+            path=str(_published_index_storage_path(key)),
             persistent_client=True,
             embedder=manager_module._create_embedder(config, runtime_paths),
         ),
@@ -504,7 +504,7 @@ def published_index_collection_exists_for_state(key: PublishedIndexKey, state: P
     if state.status != "complete" or state.collection is None:
         return False
     try:
-        return manager_module.chroma_collection_exists(published_index_storage_path(key), state.collection)
+        return manager_module.chroma_collection_exists(_published_index_storage_path(key), state.collection)
     except Exception:
         logger.warning(
             "Published knowledge collection existence check failed",
@@ -515,7 +515,7 @@ def published_index_collection_exists_for_state(key: PublishedIndexKey, state: P
         return False
 
 
-def indexing_settings_query_compatible(
+def _indexing_settings_query_compatible(
     published_settings: tuple[str, ...],
     current_settings: tuple[str, ...],
 ) -> bool:
@@ -526,7 +526,7 @@ def indexing_settings_query_compatible(
     return published_settings[:prefix_length] == current_settings[:prefix_length]
 
 
-def indexing_settings_corpus_compatible(
+def _indexing_settings_corpus_compatible(
     published_settings: tuple[str, ...],
     current_settings: tuple[str, ...],
 ) -> bool:
@@ -550,10 +550,10 @@ def published_index_settings_compatible(
     current_settings: tuple[str, ...],
 ) -> bool:
     """Return whether a published index can be queried under the current config."""
-    return indexing_settings_query_compatible(
+    return _indexing_settings_query_compatible(
         published_settings,
         current_settings,
-    ) and indexing_settings_corpus_compatible(published_settings, current_settings)
+    ) and _indexing_settings_corpus_compatible(published_settings, current_settings)
 
 
 def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
@@ -609,7 +609,7 @@ def published_index_availability_for_state(
     )
 
 
-def _cached_index_still_queryable(index: PublishedIndexHandle) -> bool:
+def _cached_index_still_queryable(index: _PublishedIndexHandle) -> bool:
     if not _published_index_state_queryable(index.key, index.state):
         return False
     vector_db = cast("_PublishedIndexVectorDb | None", index.knowledge.vector_db)
@@ -617,7 +617,7 @@ def _cached_index_still_queryable(index: PublishedIndexHandle) -> bool:
 
 
 def _cached_index_matches_persisted_state(
-    index: PublishedIndexHandle,
+    index: _PublishedIndexHandle,
     state: PublishedIndexState,
 ) -> bool:
     """Return whether a process-local handle still points at persisted metadata."""
@@ -719,7 +719,7 @@ def get_published_index(
             schedule_refresh_on_access=binding.incremental_sync_on_access,
         )
 
-    index = PublishedIndexHandle(
+    index = _PublishedIndexHandle(
         key=key,
         knowledge=knowledge,
         state=state,
@@ -735,16 +735,16 @@ def get_published_index(
     )
 
 
-def publish_knowledge_index(
+def _publish_knowledge_index(
     key: PublishedIndexKey,
     *,
     knowledge: Knowledge,
     state: PublishedIndexState,
     metadata_path: Path | None = None,
-) -> PublishedIndexHandle:
+) -> _PublishedIndexHandle:
     """Publish a read handle in this process."""
     _evict_published_indexes_for_refresh_target(refresh_target_for_published_index_key(key))
-    index = PublishedIndexHandle(
+    index = _PublishedIndexHandle(
         key=key,
         knowledge=knowledge,
         state=state,
@@ -761,15 +761,15 @@ def publish_knowledge_index_from_state(
     config: Config,
     runtime_paths: RuntimePaths,
     metadata_path: Path | None = None,
-) -> PublishedIndexHandle | None:
+) -> _PublishedIndexHandle | None:
     """Publish a read handle rebuilt from persisted metadata."""
     knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
     if knowledge is None:
         return None
-    return publish_knowledge_index(key, knowledge=knowledge, state=state, metadata_path=metadata_path)
+    return _publish_knowledge_index(key, knowledge=knowledge, state=state, metadata_path=metadata_path)
 
 
-def published_indexed_count(index: PublishedIndexHandle) -> int:
+def _published_indexed_count(index: _PublishedIndexHandle) -> int:
     """Return the persisted indexed source file count."""
     return index.state.indexed_count or 0
 
@@ -797,7 +797,7 @@ def prune_private_index_bookkeeping() -> None:
         _published_indexes.pop(key, None)
 
 
-def _cache_published_index(index: PublishedIndexHandle) -> None:
+def _cache_published_index(index: _PublishedIndexHandle) -> None:
     _published_indexes[index.key] = index
     prune_private_index_bookkeeping()
 
@@ -853,7 +853,7 @@ def _mark_published_index_key_stale_on_disk(matching_key: PublishedIndexKey, *, 
     return True
 
 
-def mark_knowledge_source_changed(
+def _mark_knowledge_source_changed(
     base_id: str,
     *,
     config: Config,
@@ -883,7 +883,7 @@ async def mark_knowledge_source_changed_async(
 ) -> tuple[str, ...]:
     """Async stale marker that keeps metadata I/O off the event loop."""
     return await _run_to_thread_to_completion_on_cancel(
-        mark_knowledge_source_changed,
+        _mark_knowledge_source_changed,
         base_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -892,6 +892,6 @@ async def mark_knowledge_source_changed_async(
     )
 
 
-def clear_published_indexes() -> None:
+def _clear_published_indexes() -> None:
     """Clear process-local read handles."""
     _published_indexes.clear()

@@ -21,7 +21,7 @@ from agno.session.team import TeamSession
 
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
-    QUEUED_MESSAGE_NOTICE_TEXT,
+    _QUEUED_MESSAGE_NOTICE_TEXT,
     cleanup_queued_notice_state,
     install_queued_message_notice_hook,
     queued_message_signal_context,
@@ -52,7 +52,7 @@ from mindroom.post_response_effects import (
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -219,13 +219,13 @@ def _queued_notice_metadata(reservation: _ReservationLike) -> tuple[PendingDispa
 
 
 def _notice_count(messages: list[Message]) -> int:
-    return sum(1 for message in messages if message.content == QUEUED_MESSAGE_NOTICE_TEXT)
+    return sum(1 for message in messages if message.content == _QUEUED_MESSAGE_NOTICE_TEXT)
 
 
 def _queued_notice_message() -> Message:
     return Message(
         role="user",
-        content=QUEUED_MESSAGE_NOTICE_TEXT,
+        content=_QUEUED_MESSAGE_NOTICE_TEXT,
         provider_data={"mindroom_queued_message_notice": True},
     )
 
@@ -1215,7 +1215,7 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
-                new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
+                new=AsyncMock(return_value=_DispatchPlan(kind="ignore")),
             ),
         ):
             await bot._turn_controller._dispatch_text_message(
@@ -1243,7 +1243,7 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
-                new=AsyncMock(return_value=DispatchPlan(kind="route", router_message="route this")),
+                new=AsyncMock(return_value=_DispatchPlan(kind="route", router_message="route this")),
             ),
             patch.object(bot._turn_controller, "_execute_router_relay", new=AsyncMock()) as mock_route,
         ):
@@ -1274,7 +1274,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(
-                    return_value=DispatchPlan(
+                    return_value=_DispatchPlan(
                         kind="respond",
                         response_action=ResponseAction(kind="individual"),
                     ),
@@ -1313,7 +1313,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
                 new=AsyncMock(
-                    return_value=DispatchPlan(
+                    return_value=_DispatchPlan(
                         kind="respond",
                         response_action=ResponseAction(kind="individual"),
                     ),
@@ -1604,7 +1604,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
         patch.object(
             bot._turn_policy,
             "plan_turn",
-            new=AsyncMock(return_value=DispatchPlan(kind="ignore")),
+            new=AsyncMock(return_value=_DispatchPlan(kind="ignore")),
         ) as mock_plan,
     ):
         await bot._turn_controller._dispatch_text_message(
@@ -1658,9 +1658,9 @@ def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call()
         )
 
     assert _notice_count(queued_messages) == 1
-    assert queued_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+    assert queued_messages[-1].content == _QUEUED_MESSAGE_NOTICE_TEXT
     assert _notice_count(next_turn_messages) == 1
-    assert next_turn_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+    assert next_turn_messages[-1].content == _QUEUED_MESSAGE_NOTICE_TEXT
     assert _notice_count(stop_after_messages) == 0
 
 
@@ -1678,7 +1678,7 @@ def test_notice_reinjects_at_end_across_multiple_tool_rounds() -> None:
             )
 
             assert _notice_count(messages) == 1
-            assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+            assert messages[-1].content == _QUEUED_MESSAGE_NOTICE_TEXT
 
 
 def test_stop_after_tool_call_strips_stale_notice_without_readding() -> None:
@@ -1726,7 +1726,7 @@ def test_notice_reinjects_after_media_follow_up_message() -> None:
 
     assert _notice_count(messages) == 1
     assert messages[-2].content == "Take note of the following content"
-    assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+    assert messages[-1].content == _QUEUED_MESSAGE_NOTICE_TEXT
 
 
 def test_notice_hook_still_installs_when_media_handler_is_missing() -> None:
@@ -1742,7 +1742,7 @@ def test_notice_hook_still_installs_when_media_handler_is_missing() -> None:
         )
 
     assert _notice_count(messages) == 1
-    assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+    assert messages[-1].content == _QUEUED_MESSAGE_NOTICE_TEXT
 
 
 @pytest.mark.asyncio

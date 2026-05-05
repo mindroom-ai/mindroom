@@ -331,7 +331,7 @@ def test_pending_oauth_state_binds_agent_name_and_user(tmp_path: Path) -> None:
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
         request.scope["auth_user"] = {"user_id": user_id}
-        return {"agent_name": credentials_api.consume_pending_oauth_request(request, service, state).agent_name}
+        return {"agent_name": credentials_api._consume_pending_oauth_request(request, service, state).agent_name}
 
     client = TestClient(app)
     issue_response = client.post("/issue/google?user_id=alice&agent_name=general")
@@ -355,7 +355,7 @@ def test_pending_oauth_state_rejects_different_user(tmp_path: Path) -> None:
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
         request.scope["auth_user"] = {"user_id": user_id}
-        return {"agent_name": credentials_api.consume_pending_oauth_request(request, service, state).agent_name}
+        return {"agent_name": credentials_api._consume_pending_oauth_request(request, service, state).agent_name}
 
     client = TestClient(app)
     issue_response = client.post("/issue/google?user_id=alice&agent_name=general")
@@ -389,7 +389,7 @@ def test_pending_oauth_request_preserves_payload(tmp_path: Path) -> None:
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str) -> dict[str, str | dict[str, str] | None]:
         request.scope["auth_user"] = {"user_id": "alice"}
-        pending = credentials_api.consume_pending_oauth_request(request, service, state)
+        pending = credentials_api._consume_pending_oauth_request(request, service, state)
         return {
             "agent_name": pending.agent_name,
             "payload": pending.payload,

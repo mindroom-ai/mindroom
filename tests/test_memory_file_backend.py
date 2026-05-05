@@ -162,7 +162,7 @@ async def delete_agent_memory(
     )
 
 
-async def build_memory_enhanced_prompt(
+async def _build_memory_enhanced_prompt(
     prompt: str,
     agent_name: str,
     storage_path: Path,
@@ -299,11 +299,11 @@ async def test_file_backend_user_scoped_workers_share_agent_memory_across_reques
     with tool_execution_identity(alice_identity):
         await add_agent_memory("Alice-authored shared agent memory", "general", storage_path, config)
         alice_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
-        alice_prompt = await build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
+        alice_prompt = await _build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
 
     with tool_execution_identity(bob_identity):
         bob_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
-        bob_prompt = await build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
+        bob_prompt = await _build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
 
     assert any(result.get("memory") == "Alice-authored shared agent memory" for result in alice_results)
     assert any(result.get("memory") == "Alice-authored shared agent memory" for result in bob_results)
@@ -336,7 +336,7 @@ async def test_file_backend_worker_scope_prompt_reads_daily_memory_from_base_sto
 
     with tool_execution_identity(alice_identity):
         append_agent_daily_memory("Worker daily note", "general", storage_path, config)
-        prompt = await build_memory_enhanced_prompt("daily note", "general", storage_path, config)
+        prompt = await _build_memory_enhanced_prompt("daily note", "general", storage_path, config)
 
     assert "Worker daily note" in prompt
 
@@ -479,7 +479,7 @@ async def test_private_template_file_memory_is_visible_on_first_prompt(
     )
 
     with tool_execution_identity(identity):
-        prompt = await build_memory_enhanced_prompt(
+        prompt = await _build_memory_enhanced_prompt(
             "What do you remember?",
             "general",
             storage_path,
@@ -541,7 +541,7 @@ async def test_private_file_memory_only_reads_memory_files(
         soul_results = await search_agent_memories("Template soul", "general", storage_path, config, limit=5)
         runbook_results = await search_agent_memories("Runbook secret", "general", storage_path, config, limit=5)
         note_results = await search_agent_memories("Private note", "general", storage_path, config, limit=5)
-        prompt = await build_memory_enhanced_prompt(
+        prompt = await _build_memory_enhanced_prompt(
             "What should I remember about the runbook and private note?",
             "general",
             storage_path,
@@ -790,7 +790,7 @@ async def test_file_backend_prompt_includes_entrypoint(storage_path: Path, confi
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nKey facts:\n- Project uses FastAPI.\n", encoding="utf-8")
 
-    enhanced = await build_memory_enhanced_prompt("How do we build the API?", "general", storage_path, config)
+    enhanced = await _build_memory_enhanced_prompt("How do we build the API?", "general", storage_path, config)
     assert "[File memory entrypoint (agent)]" in enhanced
     assert "Project uses FastAPI." in enhanced
     assert "How do we build the API?" in enhanced
@@ -830,7 +830,7 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nCurated fact.\n- [id=m1] Structured fact.\n", encoding="utf-8")
 
-    enhanced = await build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
+    enhanced = await _build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
     assert "Curated fact." in enhanced
     assert "- [id=m1] Structured fact." in enhanced
 
@@ -848,7 +848,7 @@ async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: P
         encoding="utf-8",
     )
 
-    enhanced = await build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
+    enhanced = await _build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
     assert "# Memory\nCurated fact." in enhanced
     assert "Structured fact." not in enhanced
     assert "Trailing fact." not in enhanced
@@ -1146,7 +1146,7 @@ async def test_worker_scoped_file_memory_uses_canonical_agent_workspace(
 
     with tool_execution_identity(alice_identity):
         await add_agent_memory("New worker memory", "general", storage_path, config)
-        prompt = await build_memory_enhanced_prompt("worker memory", "general", storage_path, config)
+        prompt = await _build_memory_enhanced_prompt("worker memory", "general", storage_path, config)
 
     content = (canonical_workspace / "MEMORY.md").read_text(encoding="utf-8")
 
@@ -1165,7 +1165,7 @@ async def test_workspace_entrypoint_loaded_in_prompt(storage_path: Path, config:
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
 
-    enhanced = await build_memory_enhanced_prompt("What language?", "general", storage_path, config)
+    enhanced = await _build_memory_enhanced_prompt("What language?", "general", storage_path, config)
     assert "I prefer Python over JavaScript." in enhanced
     assert (workspace / "MEMORY.md").read_text(encoding="utf-8").startswith("# Memory")
 

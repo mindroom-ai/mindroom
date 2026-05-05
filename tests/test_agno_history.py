@@ -27,7 +27,7 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 from agno.team import Team
-from agno.team._tools import _determine_tools_for_model as determine_team_tools_for_model
+from agno.team._tools import _determine_tools_for_model
 from agno.tools import Toolkit
 from agno.tools.function import Function
 from defusedxml.ElementTree import fromstring
@@ -47,37 +47,38 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.execution_preparation import (
-    PreparedExecutionContext,
-    build_matrix_prompt_with_thread_history,
+    _build_matrix_prompt_with_thread_history,
+    _prepare_bound_team_execution_context,
+    _PreparedExecutionContext,
     prepare_agent_execution_context,
-    prepare_bound_team_execution_context,
     prepare_bound_team_run_context,
 )
-from mindroom.history import PreparedHistoryState, prepare_history_for_run
+from mindroom.history import PreparedHistoryState
 from mindroom.history.compaction import (
     _build_summary_input,
+    _effective_summary_input_budget_tokens,
     _emit_compaction_hook,
+    _estimate_history_messages_tokens,
+    _estimate_static_tokens,
+    _estimate_tool_definition_tokens,
     _generate_compaction_summary,
     _persist_compaction_progress,
     _rewrite_working_session_for_compaction,
     _strip_stale_anthropic_replay_fields,
     compact_scope_history,
-    effective_summary_input_budget_tokens,
     estimate_agent_static_tokens,
-    estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
-    estimate_static_tokens,
-    estimate_tool_definition_tokens,
 )
 from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
 from mindroom.history.runtime import (
+    _plan_replay_that_fits,
+    _prepare_history_for_run,
     apply_replay_plan,
     estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
     open_bound_scope_session_context,
     open_scope_session_context,
-    plan_replay_that_fits,
     prepare_bound_scope_history,
     prepare_scope_history,
 )
@@ -109,7 +110,7 @@ from mindroom.hooks import (
     build_hook_matrix_admin,
     hook,
 )
-from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.memory import MemoryPromptParts
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.thread_utils import create_session_id
@@ -122,7 +123,7 @@ _DEFAULT_TEST_COMPACTION = CompactionConfig()
 
 def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:
     assert "execution_identity" not in inspect.signature(prepare_agent_execution_context).parameters
-    assert "execution_identity" not in inspect.signature(prepare_bound_team_execution_context).parameters
+    assert "execution_identity" not in inspect.signature(_prepare_bound_team_execution_context).parameters
     assert "execution_identity" not in inspect.signature(prepare_bound_team_run_context).parameters
     assert "execution_identity" not in inspect.signature(prepare_bound_scope_history).parameters
     assert "execution_identity" not in inspect.signature(prepare_scope_history).parameters
@@ -493,14 +494,14 @@ def test_estimate_static_tokens_includes_tool_definitions() -> None:
             "parameters": expected_export_tool.parameters,
         },
     ]
-    tool_tokens = estimate_tool_definition_tokens(agent_with_tools)
+    tool_tokens = _estimate_tool_definition_tokens(agent_with_tools)
     assert tool_tokens == (
         len(stable_serialize(expected_payloads)) // 4
         + estimate_text_tokens("Always cite the relevant document section when using search_docs.")
     )
-    assert estimate_tool_definition_tokens(baseline_agent) == 0
-    assert estimate_static_tokens(agent_with_tools, "Current prompt") == (
-        estimate_static_tokens(baseline_agent, "Current prompt") + tool_tokens
+    assert _estimate_tool_definition_tokens(baseline_agent) == 0
+    assert _estimate_static_tokens(agent_with_tools, "Current prompt") == (
+        _estimate_static_tokens(baseline_agent, "Current prompt") + tool_tokens
     )
 
 
@@ -542,7 +543,7 @@ def test_estimate_agent_static_tokens_uses_real_system_message_builder() -> None
 
     expected_tokens = estimate_text_tokens("Current prompt") + estimate_text_tokens(str(system_message.content))
     assert estimate_agent_static_tokens(agent, "Current prompt") == expected_tokens
-    assert estimate_agent_static_tokens(agent, "Current prompt") > estimate_static_tokens(agent, "Current prompt")
+    assert estimate_agent_static_tokens(agent, "Current prompt") > _estimate_static_tokens(agent, "Current prompt")
 
 
 def test_estimate_tool_definition_tokens_processes_functions_with_custom_parameters() -> None:
@@ -573,7 +574,7 @@ def test_estimate_tool_definition_tokens_processes_functions_with_custom_paramet
     assert expected_tool.description == "Sync the current event draft into the shared calendar."
     assert expected_tool.parameters["additionalProperties"] is False
     assert (
-        estimate_tool_definition_tokens(agent)
+        _estimate_tool_definition_tokens(agent)
         == len(
             stable_serialize(
                 [
@@ -593,7 +594,7 @@ def test_estimate_tool_definition_tokens_ignores_empty_toolkit() -> None:
     agent = _agent()
     agent.tools = [Toolkit(name="empty")]
 
-    assert estimate_tool_definition_tokens(agent) == 0
+    assert _estimate_tool_definition_tokens(agent) == 0
 
 
 def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None:
@@ -668,7 +669,7 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
         )
         scope_context.storage.upsert_session(session)
 
-    prepared = await prepare_history_for_run(
+    prepared = await _prepare_history_for_run(
         agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
@@ -719,7 +720,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
             ),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -785,7 +786,7 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
             new=AsyncMock(side_effect=_summary_after_notice),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -831,7 +832,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
     lifecycle = RecordingCompactionLifecycle()
 
     with patch("mindroom.model_loading.get_model_instance", side_effect=ValueError("bad summary model")):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -888,7 +889,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_ca
         patch("mindroom.history.runtime._run_scope_compaction", new=AsyncMock(side_effect=asyncio.CancelledError)),
         pytest.raises(asyncio.CancelledError),
     ):
-        await prepare_history_for_run(
+        await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -939,7 +940,7 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
         ),
         patch("mindroom.history.compaction._generate_compaction_summary", new=AsyncMock(side_effect=TimeoutError)),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1070,11 +1071,11 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
 
 
 def test_effective_summary_input_budget_caps_per_chunk() -> None:
-    assert effective_summary_input_budget_tokens(100_000, 256_000) == 32_000
-    assert effective_summary_input_budget_tokens(10_000, 256_000) == 10_000
-    assert effective_summary_input_budget_tokens(100_000, 12_000) == 3_000
-    assert effective_summary_input_budget_tokens(1_500, 1_000) == 1_500
-    assert effective_summary_input_budget_tokens(100_000, None) == 100_000
+    assert _effective_summary_input_budget_tokens(100_000, 256_000) == 32_000
+    assert _effective_summary_input_budget_tokens(10_000, 256_000) == 10_000
+    assert _effective_summary_input_budget_tokens(100_000, 12_000) == 3_000
+    assert _effective_summary_input_budget_tokens(1_500, 1_000) == 1_500
+    assert _effective_summary_input_budget_tokens(100_000, None) == 100_000
 
 
 @pytest.mark.asyncio
@@ -1336,7 +1337,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
         ),
         patch("mindroom.history.compaction.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1366,7 +1367,8 @@ def test_compaction_hook_events_are_registered() -> None:
     assert EVENT_COMPACTION_AFTER in BUILTIN_EVENT_NAMES
     assert validate_event_name(EVENT_COMPACTION_BEFORE) == EVENT_COMPACTION_BEFORE
     assert validate_event_name(EVENT_COMPACTION_AFTER) == EVENT_COMPACTION_AFTER
-    assert "compaction" in RESERVED_EVENT_NAMESPACES
+    with pytest.raises(ValueError, match="reserved namespace"):
+        validate_event_name("compaction:custom")
     assert default_timeout_ms_for_event(EVENT_COMPACTION_BEFORE) == 15000
     assert default_timeout_ms_for_event(EVENT_COMPACTION_AFTER) == 5000
 
@@ -1445,7 +1447,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1622,7 +1624,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_
     lifecycle = RecordingCompactionLifecycle()
 
     with tool_runtime_context(runtime_context):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1671,7 +1673,7 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
             side_effect=AssertionError("compaction messages should not be collected without hooks"),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1726,7 +1728,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
             new=AsyncMock(return_value=None),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1799,7 +1801,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1913,7 +1915,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1969,7 +1971,7 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path) -> 
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1993,7 +1995,7 @@ async def test_prepare_history_for_run_uses_provided_storage_without_reopening_s
     storage.upsert_session(session)
 
     with patch("mindroom.history.runtime.open_scope_session_context") as mock_open_scope_context:
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -2056,7 +2058,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
             ),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -2202,7 +2204,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
             new=summary_mock,
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -2326,7 +2328,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
             new=summary_mock,
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -2464,7 +2466,7 @@ async def test_prepare_history_for_run_auto_compaction_stops_when_history_fits(
             new=summary_mock,
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -2602,7 +2604,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
             new=summary_mock,
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -2684,7 +2686,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             new=summary_mock,
         ),
     ):
-        first_prepared = await prepare_history_for_run(
+        first_prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -2698,7 +2700,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
         )
         persisted_before_second = get_agent_session(storage, "session-1")
         assert persisted_before_second is not None
-        second_prepared = await prepare_history_for_run(
+        second_prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -2756,7 +2758,7 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
     )
     storage.upsert_session(session)
     agent = _agent(db=storage)
-    prepared = await prepare_history_for_run(
+    prepared = await _prepare_history_for_run(
         agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
@@ -2809,7 +2811,7 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
     storage.upsert_session(session)
     agent = _agent(db=storage)
 
-    prepared = await prepare_history_for_run(
+    prepared = await _prepare_history_for_run(
         agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
@@ -2866,7 +2868,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
             new=AsyncMock(side_effect=RuntimeError("summary failed")),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -2910,7 +2912,7 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
     )
     storage.upsert_session(session)
 
-    prepared = await prepare_history_for_run(
+    prepared = await _prepare_history_for_run(
         agent=_agent(db=storage),
         agent_name="test_agent",
         full_prompt="Current prompt",
@@ -2962,7 +2964,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
     storage.upsert_session(session)
 
     agent = _agent(db=storage)
-    prepared = await prepare_history_for_run(
+    prepared = await _prepare_history_for_run(
         agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
@@ -3001,7 +3003,7 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
     storage.upsert_session(session)
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -3040,7 +3042,7 @@ async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_sk
     storage.upsert_session(session)
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -3079,7 +3081,7 @@ async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_un
     storage.upsert_session(session)
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
-        await prepare_history_for_run(
+        await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -3256,7 +3258,7 @@ def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selectio
         Message(role="user", content="new user"),
         Message(role="assistant", content="new assistant"),
     ]
-    assert estimated_tokens == estimate_history_messages_tokens(expected_messages)
+    assert estimated_tokens == _estimate_history_messages_tokens(expected_messages)
 
 
 def test_estimate_prompt_visible_history_tokens_honors_custom_system_message_role() -> None:
@@ -3297,7 +3299,7 @@ def test_estimate_prompt_visible_history_tokens_honors_custom_system_message_rol
         Message(role="user", content="new user"),
         Message(role="assistant", content="new assistant"),
     ]
-    assert estimated_tokens == estimate_history_messages_tokens(expected_messages)
+    assert estimated_tokens == _estimate_history_messages_tokens(expected_messages)
 
 
 def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_removes_all_runs() -> None:
@@ -3833,7 +3835,7 @@ async def test_prepare_bound_agents_for_run_prepares_team_scope_once(tmp_path: P
         get_member_information_tool=True,
     )
 
-    prepared_tools = determine_team_tools_for_model(
+    prepared_tools = _determine_tools_for_model(
         team,
         model=team.model,
         run_response=TeamRunOutput(
@@ -3925,7 +3927,7 @@ def test_estimate_preparation_static_tokens_for_team_includes_agentic_state_tool
     )
     budget_session_id = "history-budget"
     session = TeamSession(session_id=budget_session_id, team_id=team.id)
-    prepared_tools = determine_team_tools_for_model(
+    prepared_tools = _determine_tools_for_model(
         team,
         model=team.model,
         run_response=TeamRunOutput(
@@ -4634,7 +4636,7 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: P
         ],
     )
 
-    replay_plan = plan_replay_that_fits(
+    replay_plan = _plan_replay_that_fits(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=ResolvedHistorySettings(
@@ -4657,7 +4659,7 @@ def test_build_matrix_prompt_with_thread_history_preserves_verbatim_bodies_in_cd
         ),
     ]
 
-    prompt = build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_thread_history(
         "Follow-up",
         thread_history,
         current_sender="@bob:localhost",
@@ -4701,7 +4703,7 @@ def test_build_matrix_prompt_with_thread_history_ignores_tool_trace_events() -> 
         ),
     ]
 
-    prompt = build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_thread_history(
         "Follow-up",
         thread_history,
         current_sender="@bob:localhost",
@@ -4720,7 +4722,7 @@ def test_build_matrix_prompt_with_thread_history_ignores_tool_trace_events() -> 
 def test_build_matrix_prompt_with_thread_history_without_tool_trace_is_unchanged() -> None:
     thread_history = [make_visible_message(sender="@alice:localhost", body="Earlier context")]
 
-    prompt = build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_thread_history(
         "Follow-up",
         thread_history,
         current_sender="@bob:localhost",
@@ -5118,7 +5120,7 @@ async def test_prepare_agent_and_prompt_syncs_enriched_compaction_outcomes_back_
 
     original_outcome = _make_test_compaction_outcome()
     collector = [original_outcome]
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -5166,7 +5168,7 @@ async def test_prepare_agent_and_prompt_populates_empty_collector_with_enriched_
 
     original_outcome = _make_test_compaction_outcome()
     collector: list[CompactionOutcome] = []
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -5214,7 +5216,7 @@ async def test_prepare_agent_and_prompt_enriches_compaction_outcomes_without_col
     live_agent.tools = [Function.from_callable(search_docs)]
 
     original_outcome = _make_test_compaction_outcome()
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -5257,7 +5259,7 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     live_agent.tools = None
 
     original_outcome = _make_test_compaction_outcome()
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="x" * 248),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -5299,7 +5301,7 @@ async def test_prepare_agent_and_prompt_keeps_empty_collector_when_no_compaction
     config, runtime_paths = _make_config(tmp_path)
     live_agent = _agent()
     collector: list[CompactionOutcome] = []
-    prepared_execution = PreparedExecutionContext(
+    prepared_execution = _PreparedExecutionContext(
         messages=(Message(role="user", content="Current prompt"),),
         replay_plan=None,
         unseen_event_ids=[],
@@ -5347,7 +5349,7 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
     storage.upsert_session(session)
 
-    prepared = await prepare_history_for_run(
+    prepared = await _prepare_history_for_run(
         agent=_agent(db=storage),
         agent_name="test_agent",
         full_prompt="Current prompt",
@@ -5384,7 +5386,7 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
     )
     storage.upsert_session(session)
 
-    prepared = await prepare_history_for_run(
+    prepared = await _prepare_history_for_run(
         agent=_agent(db=storage, num_history_runs=2),
         agent_name="test_agent",
         full_prompt="Current prompt",
@@ -5444,7 +5446,7 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
     )
     storage.upsert_session(session)
 
-    prepared = await prepare_history_for_run(
+    prepared = await _prepare_history_for_run(
         agent=_agent(db=storage, num_history_runs=2),
         agent_name="test_agent",
         full_prompt="Current prompt",
@@ -5507,7 +5509,7 @@ async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_whe
             ),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -5553,7 +5555,7 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
         ],
     )
 
-    replay_plan = plan_replay_that_fits(
+    replay_plan = _plan_replay_that_fits(
         session=session,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         history_settings=ResolvedHistorySettings(
@@ -5753,7 +5755,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
             ),
         ),
     ):
-        await prepare_history_for_run(
+        await _prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",

@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 _SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
 
 
-def should_skip_mentions(event_source: dict[str, Any]) -> bool:
+def _should_skip_mentions(event_source: dict[str, Any]) -> bool:
     """Return whether mentions in this message should be ignored."""
     content = event_source.get("content", {})
     if not isinstance(content, dict):
@@ -532,7 +532,7 @@ class ConversationResolver:
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
         config = self.deps.runtime.config
 
-        if should_skip_mentions(resolved_event_source):
+        if _should_skip_mentions(resolved_event_source):
             mentioned_agents: list[MatrixID] = []
             am_i_mentioned = False
             has_non_agent_mentions = False
@@ -604,7 +604,7 @@ class ConversationResolver:
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
         config = self.deps.runtime.config
 
-        if should_skip_mentions(resolved_event_source):
+        if _should_skip_mentions(resolved_event_source):
             mentioned_agents: list[MatrixID] = []
             am_i_mentioned = False
             has_non_agent_mentions = False

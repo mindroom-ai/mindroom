@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
-class ThreadHistoryFetcher(typing.Protocol):
+class _ThreadHistoryFetcher(typing.Protocol):
     """Client-backed thread-history fetcher with refresh diagnostics metadata."""
 
     def __call__(
@@ -46,10 +46,10 @@ class ThreadReadPolicy:
         *,
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
-        fetch_thread_history_from_client: ThreadHistoryFetcher,
-        fetch_thread_snapshot_from_client: ThreadHistoryFetcher,
-        fetch_dispatch_thread_history_from_client: ThreadHistoryFetcher,
-        fetch_dispatch_thread_snapshot_from_client: ThreadHistoryFetcher,
+        fetch_thread_history_from_client: _ThreadHistoryFetcher,
+        fetch_thread_snapshot_from_client: _ThreadHistoryFetcher,
+        fetch_dispatch_thread_history_from_client: _ThreadHistoryFetcher,
+        fetch_dispatch_thread_snapshot_from_client: _ThreadHistoryFetcher,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
@@ -93,7 +93,7 @@ class ThreadReadPolicy:
         room_id: str,
         thread_id: str,
         *,
-        fetcher: ThreadHistoryFetcher,
+        fetcher: _ThreadHistoryFetcher,
         name: str,
         full_history: bool,
         caller_label: str,

@@ -114,7 +114,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
 
-type DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
+type _DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 
@@ -1204,7 +1204,7 @@ class TurnController:
         event: DispatchEvent,
         dispatch: PreparedDispatch,
         action: ResponseAction,
-        payload_builder: DispatchPayloadBuilder,
+        payload_builder: _DispatchPayloadBuilder,
         *,
         processing_log: str,
         dispatch_started_at: float,

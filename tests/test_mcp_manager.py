@@ -16,7 +16,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.errors import MCPProtocolError, MCPTimeoutError, MCPToolCallError
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.mcp.transports import MCPTransportHandle
+from mindroom.mcp.transports import _MCPTransportHandle
 
 if TYPE_CHECKING:
     from datetime import timedelta
@@ -166,8 +166,8 @@ def _patch_manager(monkeypatch: pytest.MonkeyPatch) -> None:
         _server_id: str,
         server_config: MCPServerConfig,
         _runtime_paths: RuntimePaths,
-    ) -> MCPTransportHandle:
-        return MCPTransportHandle(
+    ) -> _MCPTransportHandle:
+        return _MCPTransportHandle(
             transport=server_config.transport,
             opener=lambda: _fake_transport(),
         )

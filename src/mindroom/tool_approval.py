@@ -338,10 +338,10 @@ async def expire_orphaned_approval_cards_on_startup(*, lookback_hours: int) -> i
 
 async def shutdown_approval_runtime(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
     """Expire live approvals, drop runtime state, and clear approval script state."""
-    await shutdown_approval_store(reason=reason)
+    await _shutdown_approval_store(reason=reason)
 
 
-async def shutdown_approval_store(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
+async def _shutdown_approval_store(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
     """Expire pending approvals, drop the manager, and clear script state."""
     try:
         await approval_manager.shutdown_approval_manager(reason=reason)

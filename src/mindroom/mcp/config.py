@@ -10,10 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 MCPTransport = Literal["stdio", "sse", "streamable-http"]
 _MCP_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 _MCP_FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-MAX_MCP_FUNCTION_NAME_LENGTH = 64
+_MAX_MCP_FUNCTION_NAME_LENGTH = 64
 
 
-def validate_mcp_identifier(value: str, *, subject: str) -> str:
+def _validate_mcp_identifier(value: str, *, subject: str) -> str:
     """Validate one MCP config identifier used in tool and function names."""
     normalized = value.strip()
     if not normalized:
@@ -30,8 +30,8 @@ def validate_mcp_function_name(value: str, *, subject: str) -> str:
     if not value:
         msg = f"{subject} must not be empty"
         raise ValueError(msg)
-    if len(value) > MAX_MCP_FUNCTION_NAME_LENGTH:
-        msg = f"{subject} must be at most {MAX_MCP_FUNCTION_NAME_LENGTH} characters"
+    if len(value) > _MAX_MCP_FUNCTION_NAME_LENGTH:
+        msg = f"{subject} must be at most {_MAX_MCP_FUNCTION_NAME_LENGTH} characters"
         raise ValueError(msg)
     if not _MCP_FUNCTION_NAME_PATTERN.fullmatch(value):
         msg = f"{subject} must contain only letters, numbers, underscores, and dashes"
@@ -41,7 +41,7 @@ def validate_mcp_function_name(value: str, *, subject: str) -> str:
 
 def normalize_mcp_server_id(server_id: str) -> str:
     """Validate and normalize one MCP server id."""
-    return validate_mcp_identifier(server_id, subject="MCP server id")
+    return _validate_mcp_identifier(server_id, subject="MCP server id")
 
 
 class MCPServerConfig(BaseModel):
@@ -129,11 +129,11 @@ class MCPServerConfig(BaseModel):
             self._validate_remote_transport()
 
         if self.tool_prefix is not None:
-            validate_mcp_identifier(self.tool_prefix, subject="MCP tool_prefix")
+            _validate_mcp_identifier(self.tool_prefix, subject="MCP tool_prefix")
         return self
 
 
 def resolved_mcp_tool_prefix(server_id: str, server_config: MCPServerConfig) -> str:
     """Return the effective tool prefix for one server."""
     prefix = server_config.tool_prefix if server_config.tool_prefix is not None else normalize_mcp_server_id(server_id)
-    return validate_mcp_identifier(prefix, subject="MCP tool_prefix")
+    return _validate_mcp_identifier(prefix, subject="MCP tool_prefix")

@@ -13,7 +13,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.config_updates import build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -77,7 +77,7 @@ def test_config_update_plan_restarts_only_entities_using_changed_mcp_server(tmp_
 @pytest.mark.asyncio
 async def test_start_entities_marks_mcp_blocked_entities_retryable(tmp_path: Path) -> None:
     """Treat MCP discovery outages as retryable startup failures, not permanent disablement."""
-    orchestrator = MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     orchestrator.config = _config(tmp_path)
     orchestrator.agent_bots = {"code": MagicMock(spec=AgentBot)}
 
@@ -97,7 +97,7 @@ async def test_start_entities_marks_mcp_blocked_entities_retryable(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: Path) -> None:
     """Restart only MCP-dependent entities and keep retry scheduling intact."""
-    orchestrator = MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     orchestrator.config = _config(tmp_path)
     orchestrator.running = True
 
@@ -127,7 +127,7 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
 async def test_handle_mcp_catalog_change_serializes_overlapping_restarts(tmp_path: Path) -> None:
     """Do not run overlapping restart cycles when multiple MCP servers hit the same entity."""
     runtime_paths = _runtime_paths(tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = Config.validate_with_runtime(
         {
             "mcp_servers": {
@@ -190,7 +190,7 @@ async def test_handle_mcp_catalog_change_serializes_overlapping_restarts(tmp_pat
 @pytest.mark.asyncio
 async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path: Path) -> None:
     """Stop bots that depend on changed MCP servers before manager sync removes those servers."""
-    orchestrator = MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     orchestrator.config = _config(tmp_path)
     orchestrator.agent_bots = {"code": MagicMock(spec=AgentBot)}
     updated_config = Config.validate_with_runtime(

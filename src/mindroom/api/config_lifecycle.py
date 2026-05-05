@@ -39,7 +39,7 @@ CONFIG_GENERATION_HEADER = "x-mindroom-config-generation"
 _REGISTERED_API_APPS: weakref.WeakSet[FastAPI] = weakref.WeakSet()
 _REGISTERED_API_APPS_LOCK = threading.Lock()
 
-type WatchFileFn = Callable[
+type _WatchFileFn = Callable[
     [Path | str, Callable[[], Awaitable[None]], asyncio.Event | None],
     Awaitable[None],
 ]
@@ -75,7 +75,7 @@ class ApiState:
 
 
 @dataclass
-class MindroomAppState:
+class _MindroomAppState:
     """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
 
     api_state: ApiState | None = None
@@ -85,20 +85,20 @@ class MindroomAppState:
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
 
 
-def ensure_app_state(api_app: FastAPI) -> MindroomAppState:
+def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:
     """Bind (or return) the :class:`MindroomAppState` for ``api_app``."""
     existing = getattr(api_app.state, "mindroom_app_state", None)
-    if isinstance(existing, MindroomAppState):
+    if isinstance(existing, _MindroomAppState):
         return existing
-    state = MindroomAppState()
+    state = _MindroomAppState()
     api_app.state.mindroom_app_state = state
     return state
 
 
-def app_state(api_app: FastAPI) -> MindroomAppState:
+def app_state(api_app: FastAPI) -> _MindroomAppState:
     """Return the :class:`MindroomAppState` bound to ``api_app``."""
     state = getattr(api_app.state, "mindroom_app_state", None)
-    if not isinstance(state, MindroomAppState):
+    if not isinstance(state, _MindroomAppState):
         msg = "MindRoom app state is not initialized"
         raise TypeError(msg)
     return state
@@ -157,7 +157,7 @@ def _load_config_result(
         return ConfigLoadResult(success=True), validated_payload, runtime_config
 
 
-def load_runtime_config(runtime_paths: constants.RuntimePaths) -> tuple[Config, constants.RuntimePaths]:
+def _load_runtime_config(runtime_paths: constants.RuntimePaths) -> tuple[Config, constants.RuntimePaths]:
     """Load the current runtime config and raise HTTPException on user-facing failures."""
     try:
         return (
@@ -591,7 +591,7 @@ def _build_and_commit_raw_replacement(
         raise HTTPException(status_code=500, detail=f"{error_prefix}: {exc!s}") from exc
 
 
-def load_config_from_file(
+def _load_config_from_file(
     runtime_paths: constants.RuntimePaths,
     *,
     config_data: dict[str, Any],
@@ -630,7 +630,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
     return result.success
 
 
-def read_app_committed_config[T](
+def _read_app_committed_config[T](
     api_app: FastAPI,
     reader: Callable[[dict[str, Any]], T],
 ) -> T:
@@ -644,7 +644,7 @@ def read_app_committed_config[T](
         return reader(snapshot.config_data)
 
 
-def read_app_committed_config_and_runtime[T](
+def _read_app_committed_config_and_runtime[T](
     api_app: FastAPI,
     reader: Callable[[dict[str, Any]], T],
 ) -> tuple[T, constants.RuntimePaths]:
@@ -727,7 +727,7 @@ def write_committed_config[T](
     )
 
 
-def write_app_committed_config[T](
+def _write_app_committed_config[T](
     api_app: FastAPI,
     mutate: Callable[[dict[str, Any]], T],
     *,
@@ -754,7 +754,7 @@ def replace_committed_config(
     )
 
 
-def replace_app_committed_config(
+def _replace_app_committed_config(
     api_app: FastAPI,
     new_config: dict[str, Any],
     *,
@@ -792,12 +792,12 @@ def replace_raw_config_source(
     )
 
 
-async def watch_config(
+async def _watch_config(
     stop_event: asyncio.Event,
     runtime_paths: constants.RuntimePaths,
     on_config_change: Callable[[], bool],
     *,
-    watch_file_impl: WatchFileFn = watch_file,
+    watch_file_impl: _WatchFileFn = watch_file,
 ) -> None:
     """Watch the runtime config file and reload the in-memory cache when it changes."""
 

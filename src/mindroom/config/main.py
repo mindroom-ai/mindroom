@@ -157,7 +157,7 @@ class ResolvedRuntimeModel:
 
 
 @dataclass(frozen=True)
-class AuthoredOptionalModel:
+class _AuthoredOptionalModel:
     """Static authored semantics for an optional model override field."""
 
     kind: Literal["unset", "clear", "value"]
@@ -165,12 +165,12 @@ class AuthoredOptionalModel:
 
 
 @dataclass(frozen=True)
-class StaticCompactionConfigSemantics:
+class _StaticCompactionConfigSemantics:
     """Static compaction semantics for one config scope."""
 
     scope_label: str
     effective_enabled: bool
-    authored_model: AuthoredOptionalModel
+    authored_model: _AuthoredOptionalModel
 
 
 class AvatarPromptsConfig(BaseModel):
@@ -230,13 +230,13 @@ def _normalized_config_data(data: object) -> object:
     return normalized_data
 
 
-def _authored_optional_model(model_name: str | None, *, field_is_set: bool) -> AuthoredOptionalModel:
+def _authored_optional_model(model_name: str | None, *, field_is_set: bool) -> _AuthoredOptionalModel:
     """Return the authored tri-state semantics for one optional model field."""
     if not field_is_set:
-        return AuthoredOptionalModel(kind="unset")
+        return _AuthoredOptionalModel(kind="unset")
     if model_name is None:
-        return AuthoredOptionalModel(kind="clear")
-    return AuthoredOptionalModel(kind="value", value=model_name)
+        return _AuthoredOptionalModel(kind="clear")
+    return _AuthoredOptionalModel(kind="value", value=model_name)
 
 
 def _strip_empty_root_sections(payload: dict[str, Any]) -> dict[str, Any]:
@@ -258,7 +258,7 @@ def _effective_static_compaction_enabled(
     defaults_enabled: bool,
     override_enabled: bool | None,
     override_fields_set: set[str],
-    authored_model: AuthoredOptionalModel,
+    authored_model: _AuthoredOptionalModel,
 ) -> bool:
     """Resolve whether one authored override block is statically enabled."""
     if "enabled" in override_fields_set:
@@ -276,7 +276,7 @@ def _relative_paths_overlap(left: Path, right: Path) -> bool:
 
 
 @dataclass(frozen=True)
-class KnowledgeBaseSourceSemantics:
+class _KnowledgeBaseSourceSemantics:
     """Source ownership semantics that must match for exact duplicate roots."""
 
     git_enabled: bool
@@ -316,10 +316,10 @@ def _credential_free_repo_url_for_config_validation(repo_url: str) -> str:
     )
 
 
-def _knowledge_base_source_semantics(base_config: KnowledgeBaseConfig) -> KnowledgeBaseSourceSemantics:
+def _knowledge_base_source_semantics(base_config: KnowledgeBaseConfig) -> _KnowledgeBaseSourceSemantics:
     """Return the source semantics for duplicate-path compatibility checks."""
     git_config = base_config.git
-    return KnowledgeBaseSourceSemantics(
+    return _KnowledgeBaseSourceSemantics(
         git_enabled=git_config is not None,
         git_repo_identity=_credential_free_repo_url_for_config_validation(git_config.repo_url)
         if git_config is not None
@@ -537,9 +537,9 @@ class Config(BaseModel):
 
         return invalid_references
 
-    def _static_compaction_semantics(self) -> list[StaticCompactionConfigSemantics]:
+    def _static_compaction_semantics(self) -> list[_StaticCompactionConfigSemantics]:
         """Return static compaction semantics for defaults, agents, and teams."""
-        semantics: list[StaticCompactionConfigSemantics] = []
+        semantics: list[_StaticCompactionConfigSemantics] = []
         defaults_compaction = self.defaults.compaction
         defaults_enabled = defaults_compaction.enabled if defaults_compaction is not None else False
 
@@ -549,7 +549,7 @@ class Config(BaseModel):
                 field_is_set="model" in defaults_compaction.model_fields_set,
             )
             semantics.append(
-                StaticCompactionConfigSemantics(
+                _StaticCompactionConfigSemantics(
                     scope_label="defaults",
                     effective_enabled=defaults_enabled,
                     authored_model=authored_model,
@@ -565,7 +565,7 @@ class Config(BaseModel):
                 field_is_set="model" in override.model_fields_set,
             )
             semantics.append(
-                StaticCompactionConfigSemantics(
+                _StaticCompactionConfigSemantics(
                     scope_label=f"agents.{agent_name}",
                     effective_enabled=_effective_static_compaction_enabled(
                         defaults_enabled=defaults_enabled,
@@ -586,7 +586,7 @@ class Config(BaseModel):
                 field_is_set="model" in override.model_fields_set,
             )
             semantics.append(
-                StaticCompactionConfigSemantics(
+                _StaticCompactionConfigSemantics(
                     scope_label=f"teams.{team_name}",
                     effective_enabled=_effective_static_compaction_enabled(
                         defaults_enabled=defaults_enabled,

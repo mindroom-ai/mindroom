@@ -169,7 +169,7 @@ def get_allowed_memory_user_ids(caller_context: str | list[str], config: Config)
     return allowed_user_ids
 
 
-def file_memory_resolution_from_paths(
+def _file_memory_resolution_from_paths(
     *,
     original_storage_path: Path,
     resolved_storage_path: Path,
@@ -187,14 +187,14 @@ def file_memory_resolution_from_paths(
     return FileMemoryResolution(
         storage_path=resolved_storage_path,
         runtime_paths=runtime_paths,
-        use_configured_path=storage_paths_match(
+        use_configured_path=_storage_paths_match(
             original_storage_path,
             resolved_storage_path,
         ),
     )
 
 
-def storage_paths_match(original_storage_path: Path, resolved_storage_path: Path) -> bool:
+def _storage_paths_match(original_storage_path: Path, resolved_storage_path: Path) -> bool:
     """Return whether two storage roots resolve to the same canonical path."""
     return original_storage_path.expanduser().resolve() == resolved_storage_path.expanduser().resolve()
 
@@ -224,7 +224,7 @@ def resolve_file_memory_resolution(
         )
         resolved_storage_path = agent_runtime.state_root
         agent_memory_scope_path = agent_runtime.file_memory_root
-    resolution = file_memory_resolution_from_paths(
+    resolution = _file_memory_resolution_from_paths(
         original_storage_path=base_storage_path,
         resolved_storage_path=resolved_storage_path,
         runtime_paths=runtime_paths,

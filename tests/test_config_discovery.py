@@ -362,7 +362,7 @@ class TestFindConfig:
         home_config = tmp_path / ".mindroom" / "config.yaml"
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
-        result = constants_mod.find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
         assert result == home_config
 
     def test_returns_home_config_when_cwd_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -373,7 +373,7 @@ class TestFindConfig:
         home_config.write_text("agents: {}")
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
-        result = constants_mod.find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
         assert result == home_config
 
     def test_prefers_cwd_over_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -385,7 +385,7 @@ class TestFindConfig:
         home_config.write_text("agents: {}")
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
-        result = constants_mod.find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
         assert result == cwd_config
 
     def test_env_var_overrides_filesystem_search(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -399,7 +399,7 @@ class TestFindConfig:
             search_paths=[cwd_config],
         )
 
-        result = constants_mod.find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
         assert result == env_config
 
     def test_env_var_expands_tilde(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,7 +408,7 @@ class TestFindConfig:
 
         _patch_config_globals(monkeypatch, env="~/my_config.yaml")
 
-        result = constants_mod.find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
         assert result == Path("~/my_config.yaml").expanduser()
         assert "~" not in str(result)
 
@@ -800,7 +800,7 @@ class TestResolveConfigRelativePath:
             storage_path=storage_path,
         )
 
-        assert constants_mod.find_config(process_env=constants_mod.exported_process_env()) == Path("config.yaml")
+        assert constants_mod._find_config(process_env=constants_mod.exported_process_env()) == Path("config.yaml")
         assert constants_mod.resolve_primary_runtime_paths().config_path == Path("config.yaml").resolve()
         assert runtime_paths.config_path == config_path.resolve()
         assert runtime_paths.storage_root == storage_path.resolve()
@@ -864,7 +864,7 @@ class TestResolveAvatarPath:
             storage_path=storage_dir,
         )
 
-        resolved = constants_mod.avatars_dir(runtime_paths=runtime_paths)
+        resolved = constants_mod._avatars_dir(runtime_paths=runtime_paths)
 
         assert resolved == storage_dir / "avatars"
 
@@ -880,7 +880,7 @@ class TestResolveAvatarPath:
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
         constants_mod.resolve_primary_runtime_paths(config_path=active_config, storage_path=storage_dir)
 
-        resolved = constants_mod.avatars_dir(constants_mod.resolve_runtime_paths(config_path=explicit_config))
+        resolved = constants_mod._avatars_dir(constants_mod.resolve_runtime_paths(config_path=explicit_config))
 
         assert resolved == explicit_config.parent / "avatars"
 
@@ -891,8 +891,8 @@ class TestResolveAvatarPath:
         workspace_avatar = workspace_dir / "agents" / "general.png"
         workspace_avatar.parent.mkdir(parents=True)
         workspace_avatar.write_bytes(b"workspace")
-        monkeypatch.setattr(constants_mod, "avatars_dir", lambda _runtime_paths: workspace_dir)
-        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
+        monkeypatch.setattr(constants_mod, "_avatars_dir", lambda _runtime_paths: workspace_dir)
+        monkeypatch.setattr(constants_mod, "_bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("agents", "general", constants_mod.resolve_runtime_paths())
 
@@ -909,8 +909,8 @@ class TestResolveAvatarPath:
         bundled_avatar = bundled_dir / "rooms" / "lobby.png"
         bundled_avatar.parent.mkdir(parents=True)
         bundled_avatar.write_bytes(b"bundled")
-        monkeypatch.setattr(constants_mod, "avatars_dir", lambda _runtime_paths: workspace_dir)
-        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
+        monkeypatch.setattr(constants_mod, "_avatars_dir", lambda _runtime_paths: workspace_dir)
+        monkeypatch.setattr(constants_mod, "_bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("rooms", "lobby", constants_mod.resolve_runtime_paths())
 
@@ -924,8 +924,8 @@ class TestResolveAvatarPath:
         """Missing avatars should resolve to the workspace location generation writes to."""
         workspace_dir = tmp_path / "workspace"
         bundled_dir = tmp_path / "bundled"
-        monkeypatch.setattr(constants_mod, "avatars_dir", lambda _runtime_paths: workspace_dir)
-        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
+        monkeypatch.setattr(constants_mod, "_avatars_dir", lambda _runtime_paths: workspace_dir)
+        monkeypatch.setattr(constants_mod, "_bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent", constants_mod.resolve_runtime_paths())
 
@@ -945,7 +945,7 @@ class TestResolveAvatarPath:
             config_path=active_config,
             storage_path=storage_dir,
         )
-        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
+        monkeypatch.setattr(constants_mod, "_bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent", runtime_paths)
 

@@ -13,7 +13,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 if TYPE_CHECKING:
@@ -155,7 +155,7 @@ class TestUserAccountManagement:
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
             runtime_paths = _runtime_paths(tmp_path)
-            orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
             _config = Config(
                 mindroom_user={"username": DEFAULT_INTERNAL_USERNAME, "display_name": DEFAULT_INTERNAL_DISPLAY_NAME},
             )
@@ -194,7 +194,7 @@ class TestUserAccountManagement:
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
-            orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
             _config = Config(
                 mindroom_user={
                     "username": DEFAULT_INTERNAL_USERNAME,
@@ -232,7 +232,7 @@ class TestUserAccountManagement:
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
-            orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
             _config = Config(
                 mindroom_user={
                     "username": DEFAULT_INTERNAL_USERNAME,
@@ -274,7 +274,7 @@ class TestUserAccountManagement:
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
             runtime_paths = _runtime_paths(tmp_path)
-            orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
             await orchestrator._ensure_user_account(custom_config)
 
             state = MatrixState.load(runtime_paths=runtime_paths)
@@ -303,7 +303,7 @@ class TestUserAccountManagement:
         runtime_paths = _runtime_paths(tmp_path)
         state.save(runtime_paths=runtime_paths)
         with patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"):
-            orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
 
             with pytest.raises(ValueError, match="cannot be changed"):
                 await orchestrator._ensure_user_account(custom_config)

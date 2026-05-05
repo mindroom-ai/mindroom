@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
+_RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
 
 
 class SandboxSubprocessEnvelope(BaseModel):
@@ -38,14 +38,14 @@ def parse_subprocess_envelope(payload: str) -> SandboxSubprocessEnvelope:
 
 def response_marker_payload(response_json: str) -> str:
     """Prefix one response payload with the stderr marker."""
-    return RESPONSE_MARKER + response_json
+    return _RESPONSE_MARKER + response_json
 
 
 def extract_response_json(stderr: str) -> str | None:
     """Extract the trailing marked JSON response from subprocess stderr."""
-    marker_pos = stderr.rfind(RESPONSE_MARKER)
+    marker_pos = stderr.rfind(_RESPONSE_MARKER)
     if marker_pos == -1:
         return None
 
-    response_json = stderr[marker_pos + len(RESPONSE_MARKER) :].strip()
+    response_json = stderr[marker_pos + len(_RESPONSE_MARKER) :].strip()
     return response_json or None

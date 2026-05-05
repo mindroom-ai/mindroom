@@ -122,7 +122,7 @@ def is_coalescing_exempt_source_kind(
     return _effective_source_kind(event, fallback_source_kind) in _COALESCING_EXEMPT_SOURCE_KINDS
 
 
-def is_command_event(
+def _is_command_event(
     event: DispatchEvent,
     *,
     fallback_source_kind: str | None = None,
@@ -301,7 +301,7 @@ class CoalescingGate:
             return _QueueKind.BYPASS
         if is_coalescing_exempt_source_kind(pending_event.event, pending_event.source_kind):
             return _QueueKind.BYPASS
-        if is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
+        if _is_command_event(pending_event.event, fallback_source_kind=pending_event.source_kind):
             return _QueueKind.COMMAND
         return _QueueKind.NORMAL
 

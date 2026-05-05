@@ -34,7 +34,7 @@ from starlette.requests import ClientDisconnect
 from mindroom import constants
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
-from mindroom.ai_runtime import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.ai_runtime import _QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_compat import (
@@ -48,19 +48,20 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import (
     CompactionDecision,
     HistoryScope,
     ResolvedReplayPlan,
 )
-from mindroom.knowledge import KnowledgeAvailability, KnowledgeResolution
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
-from mindroom.tool_approval import shutdown_approval_store
+from mindroom.tool_approval import _shutdown_approval_store
 from mindroom.tool_system.tool_calls import record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -130,7 +131,7 @@ def _prepared_team_execution_context(
     messages: list[Message] | None = None,
     prepared_context_tokens: int | None = None,
 ) -> SimpleNamespace:
-    prepared_context = PreparedExecutionContext(
+    prepared_context = _PreparedExecutionContext(
         messages=tuple(messages or [Message(role="user", content=final_prompt)]),
         replay_plan=replay_plan,
         unseen_event_ids=[],
@@ -160,9 +161,9 @@ def _prepared_team_execution_context(
 @pytest.fixture(autouse=True)
 def reset_approval_store() -> Iterator[None]:
     """Keep the module-level approval store isolated per test."""
-    asyncio.run(shutdown_approval_store())
+    asyncio.run(_shutdown_approval_store())
     yield
-    asyncio.run(shutdown_approval_store())
+    asyncio.run(_shutdown_approval_store())
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -2661,7 +2662,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2694,7 +2695,6 @@ class TestTeamCompletion:
 
     def test_team_non_streaming_unready_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
         """Non-streaming team completions should prepend the degraded knowledge notice."""
-        from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail  # noqa: PLC0415
         from mindroom.team_exact_members import ResolvedExactTeamMembers  # noqa: PLC0415
 
         scheduled_base_ids: list[str] = []
@@ -2829,7 +2829,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new=AsyncMock(side_effect=mock_prepare_team_execution),
             ),
         ):
@@ -2873,7 +2873,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2906,7 +2906,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2938,7 +2938,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2975,7 +2975,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3092,7 +3092,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new=AsyncMock(side_effect=mock_prepare_team_execution),
             ),
         ):
@@ -3132,7 +3132,6 @@ class TestTeamCompletion:
 
     def test_team_streaming_config_mismatch_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
         """Streaming team completions should prepend the stale-knowledge notice."""
-        from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail  # noqa: PLC0415
         from mindroom.team_exact_members import ResolvedExactTeamMembers  # noqa: PLC0415
 
         scheduled_base_ids: list[str] = []
@@ -3220,7 +3219,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3260,7 +3259,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3478,7 +3477,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3795,7 +3794,7 @@ class TestTeamCompletion:
         """Configured team failures should surface the user-facing materialization error."""
         with (
             patch("mindroom.model_loading.get_model_instance", return_value=MagicMock()),
-            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
             patch(
                 "mindroom.teams.create_agent",
                 side_effect=[_make_test_agent("GeneralAgent"), RuntimeError("boom")],
@@ -4089,7 +4088,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -4144,7 +4143,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                "mindroom.api.openai_compat._prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -4205,7 +4204,7 @@ class TestTeamCompletion:
                     messages=[
                         Message(
                             role="user",
-                            content=QUEUED_MESSAGE_NOTICE_TEXT,
+                            content=_QUEUED_MESSAGE_NOTICE_TEXT,
                             provider_data={"mindroom_queued_message_notice": True},
                         ),
                     ],
@@ -4216,7 +4215,7 @@ class TestTeamCompletion:
                             messages=[
                                 Message(
                                     role="user",
-                                    content=QUEUED_MESSAGE_NOTICE_TEXT,
+                                    content=_QUEUED_MESSAGE_NOTICE_TEXT,
                                     provider_data={"mindroom_queued_message_notice": True},
                                 ),
                             ],
@@ -4266,7 +4265,7 @@ class TestTeamCompletion:
 
             with (
                 patch(
-                    "mindroom.execution_preparation.prepare_bound_team_execution_context",
+                    "mindroom.execution_preparation._prepare_bound_team_execution_context",
                     new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
                 ),
                 patch(
@@ -4524,7 +4523,7 @@ class TestTeamCompletion:
             patch("mindroom.model_loading.get_model_instance"),
             patch(
                 "mindroom.teams.resolve_agent_knowledge_access",
-                return_value=KnowledgeResolution(knowledge=mock_knowledge),
+                return_value=_KnowledgeResolution(knowledge=mock_knowledge),
             ),
             patch("agno.team.Team.__init__", return_value=None),
         ):
@@ -4825,9 +4824,9 @@ class TestKnowledgeIntegration:
         knowledge_arg = mock_ai.call_args.kwargs["knowledge"]
         assert knowledge_arg is not None
         # Should be a merged Knowledge with MultiKnowledgeVectorDb
-        from mindroom.knowledge.utils import MultiKnowledgeVectorDb  # noqa: PLC0415
+        from mindroom.knowledge.utils import _MultiKnowledgeVectorDb  # noqa: PLC0415
 
-        assert isinstance(knowledge_arg.vector_db, MultiKnowledgeVectorDb)
+        assert isinstance(knowledge_arg.vector_db, _MultiKnowledgeVectorDb)
         assert knowledge_arg.max_results == 10  # max(5, 10)
 
     def test_knowledge_resolution_failure_graceful_fallback(self, knowledge_app_client: TestClient) -> None:

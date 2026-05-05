@@ -28,11 +28,11 @@ if TYPE_CHECKING:
     from .event_cache import ThreadCacheState
 
 
-POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 1
+_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 1
 _LOCK_WAIT_LOG_THRESHOLD_SECONDS = 0.1
 _MAX_CACHED_ROOM_LOCKS = 256
 _MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
-T = TypeVar("T")
+_T = TypeVar("_T")
 
 logger = get_logger(__name__)
 
@@ -132,7 +132,7 @@ async def _close_postgres_connection_best_effort(
         )
 
 
-async def initialize_postgres_event_cache_db(
+async def _initialize_postgres_event_cache_db(
     database_url: str,
     *,
     namespace: str,
@@ -140,8 +140,8 @@ async def initialize_postgres_event_cache_db(
     """Open the PostgreSQL database and ensure the event-cache schema exists."""
     db = await psycopg.AsyncConnection.connect(database_url)
     try:
-        await create_postgres_event_cache_schema(db)
-        await validate_postgres_event_cache_schema(db)
+        await _create_postgres_event_cache_schema(db)
+        await _validate_postgres_event_cache_schema(db)
         await db.commit()
     except BaseException:
         await _rollback_postgres_connection_best_effort(db, namespace=namespace, operation="initialize")
@@ -150,7 +150,7 @@ async def initialize_postgres_event_cache_db(
     return db
 
 
-async def create_postgres_event_cache_schema(db: AsyncConnection) -> None:
+async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
     """Create the current PostgreSQL cache schema in one connection."""
     await db.execute("CREATE SEQUENCE IF NOT EXISTS mindroom_event_cache_write_seq")
     await db.execute(
@@ -289,7 +289,7 @@ async def create_postgres_event_cache_schema(db: AsyncConnection) -> None:
     )
 
 
-async def postgres_schema_version(db: AsyncConnection) -> int | None:
+async def _postgres_schema_version(db: AsyncConnection) -> int | None:
     """Return the current PostgreSQL schema version for this cache."""
     cursor = await db.execute(
         """
@@ -305,9 +305,9 @@ async def postgres_schema_version(db: AsyncConnection) -> int | None:
     return None if row is None else int(row[0])
 
 
-async def validate_postgres_event_cache_schema(db: AsyncConnection) -> None:
+async def _validate_postgres_event_cache_schema(db: AsyncConnection) -> None:
     """Store or validate the PostgreSQL cache schema version."""
-    current_schema_version = await postgres_schema_version(db)
+    current_schema_version = await _postgres_schema_version(db)
     if current_schema_version is None:
         await db.execute(
             """
@@ -315,18 +315,18 @@ async def validate_postgres_event_cache_schema(db: AsyncConnection) -> None:
             VALUES ('schema_version', %s)
             ON CONFLICT(key) DO NOTHING
             """,
-            (str(POSTGRES_EVENT_CACHE_SCHEMA_VERSION),),
+            (str(_POSTGRES_EVENT_CACHE_SCHEMA_VERSION),),
         )
-        current_schema_version = await postgres_schema_version(db)
+        current_schema_version = await _postgres_schema_version(db)
         if current_schema_version is None:
             msg = "PostgreSQL Matrix event cache schema version was not initialized"
             raise RuntimeError(msg)
-    if current_schema_version == POSTGRES_EVENT_CACHE_SCHEMA_VERSION:
+    if current_schema_version == _POSTGRES_EVENT_CACHE_SCHEMA_VERSION:
         return
     msg = (
         "PostgreSQL Matrix event cache schema version "
         f"{current_schema_version} is not compatible with expected version "
-        f"{POSTGRES_EVENT_CACHE_SCHEMA_VERSION}"
+        f"{_POSTGRES_EVENT_CACHE_SCHEMA_VERSION}"
     )
     raise RuntimeError(msg)
 
@@ -446,7 +446,7 @@ class _PostgresEventCacheRuntime:
             had_previous_connection = self._db is not None
             await self._close_db_locked(operation="initialize")
             try:
-                self._db = await initialize_postgres_event_cache_db(self._database_url, namespace=self._namespace)
+                self._db = await _initialize_postgres_event_cache_db(self._database_url, namespace=self._namespace)
             except Exception as exc:
                 if _is_transient_postgres_failure(exc):
                     self._transient_failure_count += 1
@@ -655,10 +655,6 @@ class _PostgresEventCacheRuntime:
             self._room_locks.pop(evicted_room_id, None)
 
 
-RoomLockEntry = _RoomLockEntry
-PostgresEventCacheRuntime = _PostgresEventCacheRuntime
-
-
 class PostgresEventCache:
     """PostgreSQL-backed ConversationEventCache implementation."""
 
@@ -723,9 +719,9 @@ class PostgresEventCache:
         room_id: str,
         *,
         operation: str,
-        disabled_result: T,
-        reader: Callable[[psycopg.AsyncConnection], Awaitable[T]],
-    ) -> T:
+        disabled_result: _T,
+        reader: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
+    ) -> _T:
         return await self._operation(
             room_id,
             operation=operation,
@@ -738,9 +734,9 @@ class PostgresEventCache:
         room_id: str,
         *,
         operation: str,
-        disabled_result: T,
-        writer: Callable[[psycopg.AsyncConnection], Awaitable[T]],
-    ) -> T:
+        disabled_result: _T,
+        writer: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
+    ) -> _T:
         return await self._operation(
             room_id,
             operation=operation,
@@ -753,9 +749,9 @@ class PostgresEventCache:
         room_id: str,
         *,
         operation: str,
-        disabled_result: T,
-        callback: Callable[[psycopg.AsyncConnection], Awaitable[T]],
-    ) -> T:
+        disabled_result: _T,
+        callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
+    ) -> _T:
         """Run one cache operation, flushing pending stale markers first even for reads."""
         if self._runtime.is_disabled:
             return disabled_result

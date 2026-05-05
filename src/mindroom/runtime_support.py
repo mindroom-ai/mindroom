@@ -46,7 +46,7 @@ class StartupThreadPrewarmRegistry:
 
 
 @dataclass(frozen=True, slots=True)
-class EventCacheRuntimeIdentity:
+class _EventCacheRuntimeIdentity:
     """Comparable runtime identity for one event-cache backend binding."""
 
     backend: str
@@ -68,20 +68,20 @@ class OwnedRuntimeSupport:
     event_cache: ConversationEventCache
     event_cache_write_coordinator: _EventCacheWriteCoordinator
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry
-    event_cache_identity: EventCacheRuntimeIdentity
+    event_cache_identity: _EventCacheRuntimeIdentity
 
 
-def event_cache_runtime_identity(
+def _event_cache_runtime_identity(
     cache_config: CacheConfig,
     runtime_paths: RuntimePaths,
-) -> EventCacheRuntimeIdentity:
+) -> _EventCacheRuntimeIdentity:
     """Return the concrete event-cache runtime identity implied by config."""
     if cache_config.backend != "postgres":
-        return EventCacheRuntimeIdentity(
+        return _EventCacheRuntimeIdentity(
             backend="sqlite",
             location=str(cache_config.resolve_db_path(runtime_paths)),
         )
-    return EventCacheRuntimeIdentity(
+    return _EventCacheRuntimeIdentity(
         backend="postgres",
         location=cache_config.resolve_postgres_database_url(runtime_paths),
         namespace=cache_config.resolve_namespace(runtime_paths),
@@ -95,7 +95,7 @@ def _load_postgres_event_cache_class(runtime_paths: RuntimePaths) -> type[Postgr
     return cast("type[PostgresEventCache]", postgres_module.PostgresEventCache)
 
 
-def build_event_cache(
+def _build_event_cache(
     cache_config: CacheConfig,
     runtime_paths: RuntimePaths,
 ) -> ConversationEventCache:
@@ -133,9 +133,9 @@ def build_owned_runtime_support(
             env_path=db_path.parent / ".env",
             storage_root=db_path.parent,
         )
-    cache_identity = event_cache_runtime_identity(cache_config, runtime_paths)
+    cache_identity = _event_cache_runtime_identity(cache_config, runtime_paths)
     return OwnedRuntimeSupport(
-        event_cache=build_event_cache(cache_config, runtime_paths),
+        event_cache=_build_event_cache(cache_config, runtime_paths),
         event_cache_write_coordinator=_EventCacheWriteCoordinator(
             logger=logger,
             background_task_owner=background_task_owner,
@@ -145,7 +145,7 @@ def build_owned_runtime_support(
     )
 
 
-async def initialize_event_cache_best_effort(
+async def _initialize_event_cache_best_effort(
     support: OwnedRuntimeSupport,
     *,
     logger: structlog.stdlib.BoundLogger,
@@ -202,7 +202,7 @@ async def sync_owned_runtime_support(
             env_path=db_path.parent / ".env",
             storage_root=db_path.parent,
         )
-    target_identity = event_cache_runtime_identity(cache_config, runtime_paths)
+    target_identity = _event_cache_runtime_identity(cache_config, runtime_paths)
     if support is None:
         support = build_owned_runtime_support(
             cache_config=cache_config,
@@ -230,7 +230,7 @@ async def sync_owned_runtime_support(
                 configured_namespace=target_identity.namespace,
             )
 
-    await initialize_event_cache_best_effort(
+    await _initialize_event_cache_best_effort(
         support,
         logger=logger,
         init_failure_reason_prefix=init_failure_reason_prefix,

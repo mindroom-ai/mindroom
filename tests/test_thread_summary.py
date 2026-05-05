@@ -27,17 +27,17 @@ from mindroom.thread_summary import (
     _generate_summary,
     _is_thread_summary_message,
     _last_summary_counts,
+    _next_thread_summary_threshold,
     _next_threshold,
     _recover_last_summary_count,
     _thread_locks,
+    _thread_summary_cache_key,
     _ThreadSummary,
     maybe_generate_thread_summary,
-    next_thread_summary_threshold,
     normalize_thread_summary_text,
     send_thread_summary_event,
     set_manual_thread_summary,
     should_queue_thread_summary,
-    thread_summary_cache_key,
     thread_summary_message_count_hint,
     update_last_summary_count,
 )
@@ -151,7 +151,7 @@ class TestUpdateLastSummaryCount:
         update_last_summary_count("!room:x", "$thread1", 12)
         update_last_summary_count("!room:x", "$thread1", 7)
 
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 12
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
 
 
 # -- _recover_last_summary_count --
@@ -442,7 +442,7 @@ class TestShouldQueueThreadSummary:
         update_last_summary_count("!room:x", "$thread1", 5)
         config = _mock_config()
 
-        assert next_thread_summary_threshold("!room:x", "$thread1", config) == 15
+        assert _next_thread_summary_threshold("!room:x", "$thread1", config) == 15
         assert not should_queue_thread_summary(
             "!room:x",
             "$thread1",
@@ -560,7 +560,7 @@ class TestMaybeGenerateThreadSummary:
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     @pytest.mark.parametrize(
         ("message_count", "should_generate"),
@@ -678,7 +678,7 @@ class TestMaybeGenerateThreadSummary:
             self.conversation_cache,
             config=config,
         )
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_auto_generated_summary_strips_markdown_before_send(self) -> None:
         """Auto summaries should be converted to plain text before the Matrix event is sent."""
@@ -716,7 +716,7 @@ class TestMaybeGenerateThreadSummary:
             self.conversation_cache,
             config=config,
         )
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_stale_below_threshold_hint_still_fetches_live_thread_history(self) -> None:
         """A stale low hint must not suppress a fetch when concurrent posts crossed the threshold."""
@@ -797,7 +797,7 @@ class TestMaybeGenerateThreadSummary:
             await self._maybe_generate(client, config, rp)
 
         client.room_send.assert_awaited_once()
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 15
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 15
 
     async def test_first_threshold_one_triggers_on_first_message(self) -> None:
         """A configured first threshold of 1 should summarize the first thread message."""
@@ -824,7 +824,7 @@ class TestMaybeGenerateThreadSummary:
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 1
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 1
 
     async def test_custom_subsequent_interval_controls_next_threshold(self) -> None:
         """A custom interval should defer the next summary until the configured count is reached."""
@@ -861,7 +861,7 @@ class TestMaybeGenerateThreadSummary:
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 7
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 7
 
     async def test_manual_summary_below_first_threshold_delays_next_auto_summary(self) -> None:
         """A manual summary below the first threshold should suppress auto-summary until the interval is reached."""
@@ -911,7 +911,7 @@ class TestMaybeGenerateThreadSummary:
 
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 13
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 13
 
     async def test_existing_summary_notice_does_not_advance_threshold(self) -> None:
         """Existing thread summary notices must not count toward the next automatic threshold."""
@@ -962,7 +962,7 @@ class TestMaybeGenerateThreadSummary:
 
         client.room_send.assert_not_awaited()
         # Count is recorded to prevent retry storms
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_generation_exception_records_count(self) -> None:
         """Exception in _generate_summary records count to prevent retry storms."""
@@ -988,7 +988,7 @@ class TestMaybeGenerateThreadSummary:
 
         client.room_send.assert_not_awaited()
         # Count is recorded to prevent retry storms
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_send_failure_still_records_count(self) -> None:
         """When _send_summary_event fails (returns None), count is still recorded to prevent cost amplification."""
@@ -1016,7 +1016,7 @@ class TestMaybeGenerateThreadSummary:
         mock_gen.assert_awaited_once()
         client.room_send.assert_awaited_once()
         # Count must be recorded even though send failed
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 5
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
     async def test_recovery_seeds_cache_on_restart(self) -> None:
         """On cache miss, recovery from existing events seeds _last_summary_counts."""
@@ -1041,7 +1041,7 @@ class TestMaybeGenerateThreadSummary:
 
         # Recovered count 10 → next threshold 20 → 12 messages < 20 → skip
         mock_gen.assert_not_awaited()
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$thread1")] == 10
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 10
 
     async def test_concurrent_calls_generate_one_summary_per_thread(self) -> None:
         """Concurrent summary checks should serialize on the per-thread critical section."""
@@ -1296,7 +1296,7 @@ class TestSetManualThreadSummary:
             conversation_cache,
             config=config,
         )
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$root1")] == 3
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$root1")] == 3
 
     async def test_send_failure_raises_and_leaves_cache_unchanged(self) -> None:
         """A failed manual summary send should not advance the cached threshold baseline."""
@@ -1322,7 +1322,7 @@ class TestSetManualThreadSummary:
                 conversation_cache=conversation_cache,
             )
 
-        assert _last_summary_counts[thread_summary_cache_key("!room:x", "$root1")] == 2
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$root1")] == 2
 
     async def test_fetch_failure_raises_before_send(self) -> None:
         """A failed history fetch should raise the shared manual-summary fetch error."""

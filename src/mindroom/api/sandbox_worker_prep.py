@@ -34,12 +34,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-MAX_LEASE_TTL_SECONDS = 3600
+_MAX_LEASE_TTL_SECONDS = 3600
 DEFAULT_LEASE_TTL_SECONDS = 60
 
 
 @dataclass
-class CredentialLease:
+class _CredentialLease:
     """In-memory lease for short-lived credential overrides."""
 
     lease_id: str
@@ -52,7 +52,7 @@ class CredentialLease:
 
 # NOTE: In-process dict — leases are not shared across multiple uvicorn workers.
 # The sandbox runner must be deployed with a single worker for lease correctness.
-_LEASES_BY_ID: dict[str, CredentialLease] = {}
+_LEASES_BY_ID: dict[str, _CredentialLease] = {}
 _LEASES_LOCK = threading.Lock()
 
 
@@ -78,17 +78,17 @@ class WorkerRequestPreparationError(ValueError):
         self.failure_kind = failure_kind
 
 
-def bounded_ttl_seconds(raw_ttl_seconds: int) -> int:
+def _bounded_ttl_seconds(raw_ttl_seconds: int) -> int:
     """Clamp a requested lease TTL to the supported range."""
-    return max(1, min(MAX_LEASE_TTL_SECONDS, raw_ttl_seconds))
+    return max(1, min(_MAX_LEASE_TTL_SECONDS, raw_ttl_seconds))
 
 
-def bounded_max_uses(raw_max_uses: int) -> int:
+def _bounded_max_uses(raw_max_uses: int) -> int:
     """Clamp a requested lease usage count to the supported range."""
     return max(1, min(10, raw_max_uses))
 
 
-def cleanup_expired_leases(now: float) -> None:
+def _cleanup_expired_leases(now: float) -> None:
     """Remove expired in-memory credential leases."""
     expired_ids = [lease_id for lease_id, lease in _LEASES_BY_ID.items() if lease.expires_at <= now]
     for lease_id in expired_ids:
@@ -102,19 +102,19 @@ def create_credential_lease(
     credential_overrides: dict[str, Any],
     ttl_seconds: int,
     max_uses: int,
-) -> CredentialLease:
+) -> _CredentialLease:
     """Create and store one bounded short-lived credential lease."""
     now = time.time()
-    lease = CredentialLease(
+    lease = _CredentialLease(
         lease_id=secrets.token_urlsafe(24),
         tool_name=tool_name,
         function_name=function_name,
         credential_overrides=dict(credential_overrides),
-        expires_at=now + bounded_ttl_seconds(ttl_seconds),
-        uses_remaining=bounded_max_uses(max_uses),
+        expires_at=now + _bounded_ttl_seconds(ttl_seconds),
+        uses_remaining=_bounded_max_uses(max_uses),
     )
     with _LEASES_LOCK:
-        cleanup_expired_leases(now)
+        _cleanup_expired_leases(now)
         _LEASES_BY_ID[lease.lease_id] = lease
     return lease
 
@@ -128,7 +128,7 @@ def consume_credential_lease(
     """Consume one lease use and return its credential overrides."""
     now = time.time()
     with _LEASES_LOCK:
-        cleanup_expired_leases(now)
+        _cleanup_expired_leases(now)
         lease = _LEASES_BY_ID.get(lease_id)
         if lease is None:
             raise HTTPException(status_code=400, detail="Credential lease is invalid or expired.")
@@ -142,7 +142,7 @@ def consume_credential_lease(
     return dict(lease.credential_overrides)
 
 
-def prepare_worker(
+def _prepare_worker(
     worker_key: str,
     runtime_paths: RuntimePaths,
     *,
@@ -194,7 +194,7 @@ def normalize_request_worker_key(
     return sandbox_exec.runner_dedicated_worker_key(runtime_paths)
 
 
-def resolve_worker_base_dir(
+def _resolve_worker_base_dir(
     paths: LocalWorkerStatePaths,
     storage_root: Path,
     worker_key: str,
@@ -269,7 +269,7 @@ def prepare_worker_request(
         raise WorkerRequestPreparationError(msg, failure_kind="request")
 
     try:
-        worker_handle = prepare_worker(worker_key, runtime_paths, runner_token=runner_token)
+        worker_handle = _prepare_worker(worker_key, runtime_paths, runner_token=runner_token)
     except WorkerBackendError as exc:
         logger.warning("sandbox_worker_initialization_failed", worker_key=worker_key, exc_info=True)
         dedicated_worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
@@ -281,7 +281,7 @@ def prepare_worker_request(
     try:
         paths = local_worker_state_paths_from_handle(worker_handle)
         runtime_overrides: dict[str, object] = {
-            "base_dir": resolve_worker_base_dir(
+            "base_dir": _resolve_worker_base_dir(
                 paths,
                 sandbox_exec.runner_storage_root(runtime_paths),
                 worker_key,

@@ -22,7 +22,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
-from agno.team._tools import _determine_tools_for_model as determine_team_tools_for_model
+from agno.team._tools import _determine_tools_for_model
 from agno.tools import Toolkit
 from agno.tools.function import Function
 from agno.utils.message import filter_tool_calls
@@ -176,7 +176,7 @@ class _ExcerptBlock:
 
 
 @dataclass(frozen=True)
-class ResolvedCompactionRuntime:
+class _ResolvedCompactionRuntime:
     """Resolved model/window inputs needed for one compaction attempt."""
 
     model_name: str
@@ -454,7 +454,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     all_compacted_run_ids: set[str] = set()
     compacted_messages: list[Message] = []
     pending_selected_run_ids: set[str] | None = None
-    per_call_summary_input_budget = effective_summary_input_budget_tokens(
+    per_call_summary_input_budget = _effective_summary_input_budget_tokens(
         summary_input_budget,
         compaction_context_window,
     )
@@ -692,7 +692,7 @@ def _sync_remaining_runs_from_working(
     return synced_runs
 
 
-def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
+def _estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
     """Estimate system and current-user prompt tokens outside persisted replay."""
     static_chars = len(agent.role or "")
     instructions = agent.instructions
@@ -702,7 +702,7 @@ def estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
         for instruction in instructions:
             static_chars += len(str(instruction))
     static_chars += len(full_prompt)
-    return (static_chars // 4) + estimate_tool_definition_tokens(agent)
+    return (static_chars // 4) + _estimate_tool_definition_tokens(agent)
 
 
 def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
@@ -724,7 +724,7 @@ def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
     return static_tokens + _estimate_prepared_tool_definition_tokens(prepared_tools)
 
 
-def estimate_tool_definition_tokens(agent: Agent) -> int:
+def _estimate_tool_definition_tokens(agent: Agent) -> int:
     """Estimate the model-visible tool schema and tool instructions for one agent."""
     prepared_tools, tool_instructions = _prepare_tools_for_estimation(agent.tools)
     return _estimate_prepared_tool_definition_tokens(
@@ -912,7 +912,7 @@ def _prepare_team_prompt_inputs_for_estimation(
     )
     model = team.model
     assert model is not None
-    prepared_tools = determine_team_tools_for_model(
+    prepared_tools = _determine_tools_for_model(
         team=team,
         model=model,
         run_response=run_response,
@@ -998,7 +998,7 @@ def normalize_compaction_budget_tokens(tokens: int, context_window: int | None) 
     return min(tokens, context_window // 2)
 
 
-def effective_summary_input_budget_tokens(summary_input_budget: int, compaction_context_window: int | None) -> int:
+def _effective_summary_input_budget_tokens(summary_input_budget: int, compaction_context_window: int | None) -> int:
     """Return the conservative per-call summary input budget."""
     if compaction_context_window is None or compaction_context_window <= 0:
         return summary_input_budget
@@ -1012,16 +1012,16 @@ def resolve_compaction_runtime_settings(
     compaction_config: CompactionConfig,
     active_model_name: str,
     active_context_window: int | None,
-) -> ResolvedCompactionRuntime:
+) -> _ResolvedCompactionRuntime:
     """Resolve the effective compaction model name and usable window for one run."""
     model_name = compaction_config.model or active_model_name
     model_context_window = config.get_model_context_window(model_name)
     if compaction_config.model is not None:
-        return ResolvedCompactionRuntime(
+        return _ResolvedCompactionRuntime(
             model_name=model_name,
             context_window=model_context_window,
         )
-    return ResolvedCompactionRuntime(
+    return _ResolvedCompactionRuntime(
         model_name=model_name,
         context_window=model_context_window or active_context_window,
     )
@@ -1507,7 +1507,7 @@ def estimate_prompt_visible_history_tokens(
         scope=scope,
         history_settings=history_settings,
     )
-    return summary_tokens + estimate_history_messages_tokens(history_messages)
+    return summary_tokens + _estimate_history_messages_tokens(history_messages)
 
 
 def estimate_session_summary_tokens(summary_text: str | None) -> int:
@@ -1528,7 +1528,7 @@ def estimate_session_summary_tokens(summary_text: str | None) -> int:
     return estimate_text_tokens(wrapper)
 
 
-def estimate_history_messages_tokens(messages: list[Message]) -> int:
+def _estimate_history_messages_tokens(messages: list[Message]) -> int:
     """Estimate the token count of materialized history messages."""
     if not messages:
         return 0
@@ -1764,7 +1764,7 @@ def compute_prompt_token_breakdown(
 
     tool_tokens = 0
     if agent is not None:
-        tool_tokens = estimate_tool_definition_tokens(agent)
+        tool_tokens = _estimate_tool_definition_tokens(agent)
     elif team is not None:
         prepared_tools, _tool_instructions = _prepare_tools_for_estimation(team.tools)
         tool_tokens = _estimate_prepared_tool_definition_tokens(prepared_tools)

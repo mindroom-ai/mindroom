@@ -16,19 +16,19 @@ logger = get_logger(__name__)
 
 type ImageMessageEvent = nio.RoomMessageImage | nio.RoomEncryptedImage
 type FileMessageEvent = nio.RoomMessageFile | nio.RoomEncryptedFile
-type VideoMessageEvent = nio.RoomMessageVideo | nio.RoomEncryptedVideo
-type FileOrVideoMessageEvent = FileMessageEvent | VideoMessageEvent
+type _VideoMessageEvent = nio.RoomMessageVideo | nio.RoomEncryptedVideo
+type FileOrVideoMessageEvent = FileMessageEvent | _VideoMessageEvent
 type AudioMessageEvent = nio.RoomMessageAudio | nio.RoomEncryptedAudio
 type MatrixMediaDispatchEvent = ImageMessageEvent | FileOrVideoMessageEvent
 type MatrixMediaEvent = MatrixMediaDispatchEvent | AudioMessageEvent
 
-IMAGE_MESSAGE_EVENT_TYPES = (nio.RoomMessageImage, nio.RoomEncryptedImage)
-FILE_MESSAGE_EVENT_TYPES = (nio.RoomMessageFile, nio.RoomEncryptedFile)
-VIDEO_MESSAGE_EVENT_TYPES = (nio.RoomMessageVideo, nio.RoomEncryptedVideo)
-FILE_OR_VIDEO_MESSAGE_EVENT_TYPES = (*FILE_MESSAGE_EVENT_TYPES, *VIDEO_MESSAGE_EVENT_TYPES)
-AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
-MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*IMAGE_MESSAGE_EVENT_TYPES, *FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
-MATRIX_MEDIA_EVENT_TYPES = (*MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *AUDIO_MESSAGE_EVENT_TYPES)
+_IMAGE_MESSAGE_EVENT_TYPES = (nio.RoomMessageImage, nio.RoomEncryptedImage)
+_FILE_MESSAGE_EVENT_TYPES = (nio.RoomMessageFile, nio.RoomEncryptedFile)
+_VIDEO_MESSAGE_EVENT_TYPES = (nio.RoomMessageVideo, nio.RoomEncryptedVideo)
+_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES = (*_FILE_MESSAGE_EVENT_TYPES, *_VIDEO_MESSAGE_EVENT_TYPES)
+_AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
+_MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
+MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
 
 
 @dataclass(frozen=True)
@@ -43,17 +43,17 @@ class _ImageMimeResolution:
 
 def is_image_message_event(event: object) -> TypeGuard[ImageMessageEvent]:
     """Return whether *event* is a Matrix image message."""
-    return isinstance(event, IMAGE_MESSAGE_EVENT_TYPES)
+    return isinstance(event, _IMAGE_MESSAGE_EVENT_TYPES)
 
 
 def is_file_message_event(event: object) -> TypeGuard[FileMessageEvent]:
     """Return whether *event* is a Matrix file message."""
-    return isinstance(event, FILE_MESSAGE_EVENT_TYPES)
+    return isinstance(event, _FILE_MESSAGE_EVENT_TYPES)
 
 
-def is_video_message_event(event: object) -> TypeGuard[VideoMessageEvent]:
+def is_video_message_event(event: object) -> TypeGuard[_VideoMessageEvent]:
     """Return whether *event* is a Matrix video message."""
-    return isinstance(event, VIDEO_MESSAGE_EVENT_TYPES)
+    return isinstance(event, _VIDEO_MESSAGE_EVENT_TYPES)
 
 
 def is_file_or_video_message_event(event: object) -> TypeGuard[FileOrVideoMessageEvent]:
@@ -63,7 +63,7 @@ def is_file_or_video_message_event(event: object) -> TypeGuard[FileOrVideoMessag
 
 def is_audio_message_event(event: object) -> TypeGuard[AudioMessageEvent]:
     """Return whether *event* is a Matrix audio message."""
-    return isinstance(event, AUDIO_MESSAGE_EVENT_TYPES)
+    return isinstance(event, _AUDIO_MESSAGE_EVENT_TYPES)
 
 
 def is_matrix_media_dispatch_event(event: object) -> TypeGuard[MatrixMediaDispatchEvent]:

@@ -46,7 +46,7 @@ def mcp_server_id_from_tool_name(tool_name: str) -> str | None:
     return server_id or None
 
 
-def mcp_registry_tool_names() -> set[str]:
+def _mcp_registry_tool_names() -> set[str]:
     """Return all active dynamic MCP tool names."""
     return set(_MCP_TOOL_NAMES)
 
@@ -163,7 +163,7 @@ def _tool_factory(server_id: str) -> Callable[[], type[Toolkit]]:
     return factory
 
 
-def register_mcp_tool(server_id: str, server_config: MCPServerConfig) -> None:
+def _register_mcp_tool(server_id: str, server_config: MCPServerConfig) -> None:
     """Register one dynamic MCP tool entry."""
     tool_name = mcp_tool_name(server_id)
     if tool_name not in _registered_mcp_tool_names() and (tool_name in TOOL_METADATA or tool_name in _TOOL_REGISTRY):
@@ -174,7 +174,7 @@ def register_mcp_tool(server_id: str, server_config: MCPServerConfig) -> None:
     _MCP_TOOL_NAMES.add(tool_name)
 
 
-def unregister_mcp_tool(tool_name: str) -> None:
+def _unregister_mcp_tool(tool_name: str) -> None:
     """Remove one dynamic MCP tool entry."""
     TOOL_METADATA.pop(tool_name, None)
     _TOOL_REGISTRY.pop(tool_name, None)
@@ -201,7 +201,7 @@ def sync_mcp_tool_registry(config: Config | None) -> None:
         raise ValueError(msg)
 
     for tool_name in sorted(registered_mcp_tool_names - desired_tool_names):
-        unregister_mcp_tool(tool_name)
+        _unregister_mcp_tool(tool_name)
 
     for tool_name in desired_tool_names:
         TOOL_METADATA[tool_name] = desired_metadata[tool_name]

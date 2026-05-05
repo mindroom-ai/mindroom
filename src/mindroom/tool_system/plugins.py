@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tokenize
 from dataclasses import dataclass
 from importlib import util
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-PluginValidationError = plugin_imports.PluginValidationError
+_PluginValidationError = plugin_imports.PluginValidationError
 _CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE = 128
 
 
@@ -75,7 +76,7 @@ class PluginReloadResult:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedPluginReload:
+class _PreparedPluginReload:
     """Prepared plugin runtime state that is safe to apply later."""
 
     hook_registry: HookRegistry
@@ -182,7 +183,7 @@ def get_configured_plugin_roots(
             continue
         try:
             roots.append(plugin_imports._resolve_plugin_root(plugin_entry.path, runtime_paths))
-        except PluginValidationError:
+        except _PluginValidationError:
             continue
     configured_roots = tuple(dict.fromkeys(roots))
     if len(_CONFIGURED_PLUGIN_ROOT_CACHE) >= _CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE:
@@ -221,7 +222,7 @@ def prepare_plugin_reload(
     runtime_paths: RuntimePaths,
     *,
     skip_broken_plugins: bool = False,
-) -> PreparedPluginReload:
+) -> _PreparedPluginReload:
     """Build one fresh plugin snapshot without mutating the live runtime."""
     with _locked_tool_registry_state():
         package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
@@ -231,7 +232,7 @@ def prepare_plugin_reload(
             _clear_plugin_reload_caches()
             _evict_synthetic_plugin_subtrees(package_roots)
             plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
-            return PreparedPluginReload(
+            return _PreparedPluginReload(
                 hook_registry=HookRegistry.from_plugins(plugins),
                 active_plugin_names=tuple(plugin.name for plugin in plugins),
                 tool_registry_snapshot=_capture_tool_registry_snapshot(),
@@ -243,7 +244,7 @@ def prepare_plugin_reload(
 
 
 def apply_prepared_plugin_reload(
-    prepared_reload: PreparedPluginReload,
+    prepared_reload: _PreparedPluginReload,
     *,
     cancelled_task_count: int = 0,
     cancel_existing_tasks: bool = False,
@@ -411,7 +412,7 @@ def _load_plugin_module(
     except OSError as exc:
         msg = f"Failed to stat plugin {kind} module {module_path}: {exc}"
         logger.exception("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
-        raise PluginValidationError(msg) from exc
+        raise _PluginValidationError(msg) from exc
 
     module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path)
     cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_path)
@@ -432,16 +433,16 @@ def _load_plugin_module(
         plugin_imports._restore_plugin_package_chain(previous_packages)
         msg = f"Failed to load plugin {kind} module: {module_path}"
         logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
-        raise PluginValidationError(msg)
+        raise _PluginValidationError(msg)
 
     module = util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
         if kind == "tools":
             with _scoped_plugin_registration_owner(module_name):
-                spec.loader.exec_module(module)
+                _exec_plugin_source(module_path, module)
         else:
-            spec.loader.exec_module(module)
+            _exec_plugin_source(module_path, module)
     except Exception as exc:
         if kind == "tools":
             _restore_failed_plugin_tool_module_reload(
@@ -460,7 +461,7 @@ def _load_plugin_module(
         plugin_imports._restore_plugin_package_chain(previous_packages)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
-        raise PluginValidationError(msg) from exc
+        raise _PluginValidationError(msg) from exc
 
     plugin_imports._MODULE_IMPORT_CACHE[module_path] = plugin_imports._ModuleCacheEntry(
         mtime=mtime,
@@ -468,3 +469,10 @@ def _load_plugin_module(
         module=module,
     )
     return module
+
+
+def _exec_plugin_source(module_path: Path, module: ModuleType) -> None:
+    with tokenize.open(str(module_path)) as source_file:
+        source = source_file.read()
+    code = compile(source, str(module_path), "exec", dont_inherit=True)
+    exec(code, module.__dict__)  # noqa: S102 - configured plugin modules are intentionally executable code.

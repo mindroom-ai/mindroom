@@ -125,18 +125,18 @@ _TEXT_LIKE_EXTENSIONS = {
     ".proto",
 }
 _FileSignature = tuple[int, int, str]
-INDEXING_SETTINGS_BASE_ID_INDEX = 0
-INDEXING_SETTINGS_STORAGE_ROOT_INDEX = 1
-INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX = 2
+_INDEXING_SETTINGS_BASE_ID_INDEX = 0
+_INDEXING_SETTINGS_STORAGE_ROOT_INDEX = 1
+_INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX = 2
 INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH = 7
-INDEXING_SETTINGS_CHUNK_SIZE_INDEX = 7
-INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX = 8
-INDEXING_SETTINGS_REPO_IDENTITY_INDEX = 9
+_INDEXING_SETTINGS_CHUNK_SIZE_INDEX = 7
+_INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX = 8
+_INDEXING_SETTINGS_REPO_IDENTITY_INDEX = 9
 INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES = (
-    INDEXING_SETTINGS_BASE_ID_INDEX,
-    INDEXING_SETTINGS_STORAGE_ROOT_INDEX,
-    INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX,
-    INDEXING_SETTINGS_REPO_IDENTITY_INDEX,
+    _INDEXING_SETTINGS_BASE_ID_INDEX,
+    _INDEXING_SETTINGS_STORAGE_ROOT_INDEX,
+    _INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX,
+    _INDEXING_SETTINGS_REPO_IDENTITY_INDEX,
     10,
     11,
     12,
@@ -145,7 +145,7 @@ INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES = (
     15,
     16,
 )
-INDEXING_SETTINGS_LAYOUT_LENGTH = 17
+_INDEXING_SETTINGS_LAYOUT_LENGTH = 17
 
 
 @runtime_checkable
@@ -308,7 +308,7 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
         str(tuple(base_config.include_extensions)) if base_config.include_extensions is not None else "",
         str(tuple(base_config.exclude_extensions)),
     )
-    if len(settings) != INDEXING_SETTINGS_LAYOUT_LENGTH:
+    if len(settings) != _INDEXING_SETTINGS_LAYOUT_LENGTH:
         msg = "Knowledge indexing settings layout constants must match _indexing_settings_key"
         raise AssertionError(msg)
     return settings
@@ -556,7 +556,7 @@ def _is_hidden_relative_path(relative_path: Path) -> bool:
     return any(part.startswith(".") for part in relative_path.parts)
 
 
-def include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
+def _include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
     """Return whether a relative path is managed by the base path filters."""
     path_obj = Path(relative_path)
     if path_obj.is_absolute() or ".." in path_obj.parts:
@@ -580,7 +580,7 @@ def include_knowledge_relative_path(config: Config, base_id: str, relative_path:
 
 def include_semantic_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
     """Return whether a relative path is semantically indexable for one base."""
-    if not include_knowledge_relative_path(config, base_id, relative_path):
+    if not _include_knowledge_relative_path(config, base_id, relative_path):
         return False
 
     base_config = config.get_knowledge_base_config(base_id)
@@ -608,7 +608,7 @@ def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
     return False
 
 
-def include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, file_path: Path) -> bool:
+def _include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, file_path: Path) -> bool:
     """Return whether a file belongs to the managed semantic file set."""
     root = knowledge_root.resolve()
     candidate = file_path if file_path.is_absolute() else root / file_path
@@ -641,7 +641,7 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
         dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
         for filename in filenames:
             path = current_dir / filename
-            if include_knowledge_file(config, base_id, root, path):
+            if _include_knowledge_file(config, base_id, root, path):
                 files.append(path)
     return sorted(files)
 
@@ -656,7 +656,7 @@ def _semantic_file_paths_from_relative_paths(
     files: list[Path] = []
     for relative_path in sorted(set(relative_paths)):
         path = root / relative_path
-        if include_knowledge_file(config, base_id, root, path):
+        if _include_knowledge_file(config, base_id, root, path):
             files.append(path)
     return files
 
@@ -1028,7 +1028,7 @@ class KnowledgeManager:
         return include_semantic_knowledge_relative_path(self.config, self.base_id, relative_path)
 
     def _include_relative_path(self, relative_path: str) -> bool:
-        return include_knowledge_relative_path(self.config, self.base_id, relative_path)
+        return _include_knowledge_relative_path(self.config, self.base_id, relative_path)
 
     async def _run_git(
         self,

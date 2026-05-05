@@ -14,7 +14,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.conversation_resolver import should_skip_mentions
+from mindroom.conversation_resolver import _should_skip_mentions
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
@@ -52,7 +52,7 @@ def test_should_skip_mentions_with_metadata() -> None:
             "com.mindroom.skip_mentions": True,
         },
     }
-    assert should_skip_mentions(event_source) is True
+    assert _should_skip_mentions(event_source) is True
 
 
 def test_should_skip_mentions_without_metadata() -> None:
@@ -63,7 +63,7 @@ def test_should_skip_mentions_without_metadata() -> None:
             "body": "Regular message @email_agent",
         },
     }
-    assert should_skip_mentions(event_source) is False
+    assert _should_skip_mentions(event_source) is False
 
 
 def test_should_skip_mentions_explicit_false() -> None:
@@ -74,7 +74,7 @@ def test_should_skip_mentions_explicit_false() -> None:
             "com.mindroom.skip_mentions": False,
         },
     }
-    assert should_skip_mentions(event_source) is False
+    assert _should_skip_mentions(event_source) is False
 
 
 def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:

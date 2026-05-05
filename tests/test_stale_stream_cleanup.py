@@ -23,7 +23,7 @@ from mindroom.matrix.stale_stream_cleanup import (
     cleanup_stale_streaming_messages,
 )
 from mindroom.matrix.thread_projection import latest_visible_thread_event_id_by_thread
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.streaming import build_restart_interrupted_body
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 from tests.conftest import (
@@ -2016,7 +2016,7 @@ async def test_orchestrator_runs_cleanup_and_resume_before_sync_loops(tmp_path: 
     """Startup should clean stale streams and queue resumes before sync loops begin."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     orchestrator.config = config
 
     router_bot = MagicMock()
@@ -2084,7 +2084,7 @@ async def test_orchestrator_auto_resume_uses_router_client(tmp_path: Path) -> No
     """Auto-resume should post visible relays from the router, not the internal user."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     orchestrator.config = config
 
     router_client = AsyncMock(spec=nio.AsyncClient)

@@ -58,7 +58,7 @@ class OAuthConnectTarget:
     requester_id: str | None
 
 
-def issue_oauth_connect_token(
+def _issue_oauth_connect_token(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     worker_target: ResolvedWorkerTarget | None,
@@ -80,7 +80,7 @@ def issue_oauth_connect_token(
         runtime_paths,
         kind=_OAUTH_CONNECT_TOKEN_KIND,
         ttl_seconds=_OAUTH_CONNECT_TOKEN_TTL_SECONDS,
-        data=oauth_connect_target_payload(connect_target),
+        data=_oauth_connect_target_payload(connect_target),
     )
 
 
@@ -136,7 +136,7 @@ def consume_oauth_connect_token(
     return connect_target
 
 
-def oauth_connect_target_payload(connect_target: OAuthConnectTarget) -> dict[str, str]:
+def _oauth_connect_target_payload(connect_target: OAuthConnectTarget) -> dict[str, str]:
     """Return serializable OAuth state payload for one connect target."""
     return {
         "provider": connect_target.provider_id,
@@ -148,7 +148,7 @@ def oauth_connect_target_payload(connect_target: OAuthConnectTarget) -> dict[str
     }
 
 
-def mindroom_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvider | None = None) -> str:
+def _mindroom_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvider | None = None) -> str:
     """Return the public MindRoom origin used for user-facing OAuth links."""
     configured = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or runtime_paths.env_value("MINDROOM_BASE_URL")
     if configured:
@@ -167,7 +167,7 @@ def mindroom_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvide
 
 def oauth_success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str:
     """Return the post-callback browser destination for one provider."""
-    base_url = mindroom_public_base_url(runtime_paths, provider)
+    base_url = _mindroom_public_base_url(runtime_paths, provider)
     return f"{base_url}/api/oauth/{provider.id}/success"
 
 
@@ -272,7 +272,7 @@ def oauth_credentials_satisfy_identity_policy(
     return True
 
 
-def build_oauth_authorize_url(
+def _build_oauth_authorize_url(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     *,
@@ -281,7 +281,7 @@ def build_oauth_authorize_url(
     connect_token: str | None = None,
 ) -> str:
     """Build an authenticated MindRoom URL that starts a provider OAuth flow."""
-    base_url = mindroom_public_base_url(runtime_paths, provider)
+    base_url = _mindroom_public_base_url(runtime_paths, provider)
     params: dict[str, str] = {}
     if connect_token:
         params["connect_token"] = connect_token
@@ -302,8 +302,8 @@ def oauth_connect_url(
     """Return a browser-openable MindRoom OAuth link for one credential scope."""
     agent_name = worker_target.routing_agent_name if worker_target is not None else None
     execution_scope = worker_target.worker_scope if worker_target is not None else None
-    connect_token = issue_oauth_connect_token(provider, runtime_paths, worker_target)
-    return build_oauth_authorize_url(
+    connect_token = _issue_oauth_connect_token(provider, runtime_paths, worker_target)
+    return _build_oauth_authorize_url(
         provider,
         runtime_paths,
         agent_name=agent_name,
@@ -312,7 +312,7 @@ def oauth_connect_url(
     )
 
 
-def build_oauth_connect_instruction(
+def _build_oauth_connect_instruction(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     *,

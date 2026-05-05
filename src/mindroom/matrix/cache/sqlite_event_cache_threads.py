@@ -79,7 +79,7 @@ async def load_recent_room_thread_ids(
     return [str(row[0]) for row in rows]
 
 
-async def load_thread_cache_state_row(
+async def _load_thread_cache_state_row(
     db: aiosqlite.Connection,
     *,
     room_id: str,
@@ -123,7 +123,7 @@ async def load_thread_cache_state(
     thread_id: str,
 ) -> ThreadCacheState | None:
     """Return one thread cache state object joined with room invalidation state."""
-    row = await load_thread_cache_state_row(
+    row = await _load_thread_cache_state_row(
         db,
         room_id=room_id,
         thread_id=thread_id,
@@ -139,7 +139,7 @@ async def load_thread_cache_state(
     )
 
 
-async def store_thread_events_locked(
+async def _store_thread_events_locked(
     db: aiosqlite.Connection,
     *,
     room_id: str,
@@ -248,7 +248,7 @@ async def replace_thread_locked(
             room_id,
             event_ids=existing_event_ids,
         )
-    await store_thread_events_locked(
+    await _store_thread_events_locked(
         db,
         room_id=room_id,
         thread_id=thread_id,
@@ -282,7 +282,7 @@ async def replace_thread_locked_if_not_newer(
     validated_at: float,
 ) -> bool:
     """Replace one thread snapshot only when nothing newer touched this room after the fetch began."""
-    cache_state_row = await load_thread_cache_state_row(
+    cache_state_row = await _load_thread_cache_state_row(
         db,
         room_id=room_id,
         thread_id=thread_id,
@@ -422,7 +422,7 @@ async def revalidate_thread_after_incremental_update_locked(
     thread_id: str,
 ) -> bool:
     """Mark one thread cache fresh after a safe incremental update."""
-    row = await load_thread_cache_state_row(
+    row = await _load_thread_cache_state_row(
         db,
         room_id=room_id,
         thread_id=thread_id,

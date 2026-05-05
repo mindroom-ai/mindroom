@@ -17,9 +17,9 @@ from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     _MAX_REMEMBERED_TERMINAL_CARD_IDS,
     ApprovalDecision,
-    ApprovalManager,
     PendingApproval,
     SentApprovalEvent,
+    _ApprovalManager,
     _build_event_arguments_preview,
     _LiveApprovalWaiter,
     get_approval_store,
@@ -30,17 +30,17 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.logging_config import get_logger
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
     MatrixApprovalAction,
     ToolApprovalCall,
     ToolApprovalScriptError,
+    _shutdown_approval_store,
     evaluate_tool_approval,
     handle_matrix_approval_action,
     is_process_approval_card,
     request_tool_approval_for_call,
     resolve_tool_approval_approver,
-    shutdown_approval_store,
 )
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -102,9 +102,9 @@ class FakeEventCache:
 
 @pytest.fixture(autouse=True)
 def reset_approval_store() -> Generator[None, None, None]:
-    asyncio.run(shutdown_approval_store())
+    asyncio.run(_shutdown_approval_store())
     yield
-    asyncio.run(shutdown_approval_store())
+    asyncio.run(_shutdown_approval_store())
 
 
 def _config(tmp_path: Path) -> Config:
@@ -216,7 +216,7 @@ def _approval_edit(
 
 
 async def _wait_for_pending(
-    store: ApprovalManager,
+    store: _ApprovalManager,
     *,
     room_id: str = "!room:localhost",
     approval_id: str | None = None,
@@ -739,7 +739,7 @@ async def test_handle_card_response_orphan_approval_falls_through_until_startup_
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -1052,7 +1052,7 @@ async def test_shutdown_waits_for_cancelled_send_background_cleanup(tmp_path: Pa
         await asyncio.wait_for(task, timeout=1)
     assert store._post_cancel_cleanup_tasks
 
-    shutdown_task = asyncio.create_task(shutdown_approval_store())
+    shutdown_task = asyncio.create_task(_shutdown_approval_store())
     await asyncio.sleep(0)
     assert not shutdown_task.done()
 
@@ -1094,7 +1094,7 @@ async def test_shutdown_bounds_cancelled_send_cleanup_wait(tmp_path: Path, monke
         await asyncio.wait_for(task, timeout=1)
     assert store._post_cancel_cleanup_tasks
 
-    await asyncio.wait_for(shutdown_approval_store(), timeout=1)
+    await asyncio.wait_for(_shutdown_approval_store(), timeout=1)
 
     assert not store._post_cancel_cleanup_tasks
 
@@ -1102,7 +1102,7 @@ async def test_shutdown_bounds_cancelled_send_cleanup_wait(tmp_path: Path, monke
 @pytest.mark.asyncio
 async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_room_send(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
     cache_started = asyncio.Event()
@@ -1155,7 +1155,7 @@ async def test_request_approval_cleans_up_when_cache_write_is_cancelled_after_ro
 @pytest.mark.asyncio
 async def test_approval_transport_returns_event_after_successful_send_without_sender_user_id(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
 
@@ -1184,7 +1184,7 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
 @pytest.mark.asyncio
 async def test_approval_notice_replies_to_room_mode_card(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
 
@@ -1211,7 +1211,7 @@ async def test_approval_notice_replies_to_room_mode_card(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
     sent_contents: list[dict[str, Any]] = []
@@ -1287,7 +1287,7 @@ async def test_approval_transport_refuses_encrypted_room_without_e2ee(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
     monkeypatch.setattr("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False)
@@ -1351,7 +1351,7 @@ async def test_shutdown_expires_approval_send_that_finishes_after_shutdown_start
     )
     await asyncio.wait_for(send_started.wait(), timeout=1)
 
-    shutdown_task = asyncio.create_task(shutdown_approval_store())
+    shutdown_task = asyncio.create_task(_shutdown_approval_store())
     await asyncio.sleep(0)
     assert shutdown_task.done() is False
 
@@ -1382,7 +1382,7 @@ async def test_shutdown_approval_store_clears_script_cache_when_manager_shutdown
 
     try:
         with pytest.raises(RuntimeError, match="shutdown failed"):
-            await shutdown_approval_store()
+            await _shutdown_approval_store()
     finally:
         monkeypatch.setattr(approval_module.approval_manager, "shutdown_approval_manager", original_shutdown)
 
@@ -1573,7 +1573,7 @@ async def test_get_pending_approval_returns_none_for_resolved_card(tmp_path: Pat
             },
         },
     )
-    store = ApprovalManager(test_runtime_paths(tmp_path), event_cache=cache)
+    store = _ApprovalManager(test_runtime_paths(tmp_path), event_cache=cache)
 
     assert await store.get_pending_approval("!room:localhost", "approval-1") is None
 
@@ -1584,7 +1584,7 @@ async def test_card_response_for_cached_approval_is_not_consumed_without_live_wa
     card = _approval_card()
     await cache.store_event("$approval", "!room:localhost", card)
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -1609,7 +1609,7 @@ async def test_get_pending_approval_ignores_cached_card_after_live_waiter_is_gon
     cache = FakeEventCache()
     card = _approval_card()
     await cache.store_event("$approval", "!room:localhost", card)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         event_cache=cache,
         transport_sender=lambda: "@mindroom_router:localhost",
@@ -1626,7 +1626,7 @@ async def test_startup_discard_ignores_cached_terminal_edit_from_different_sende
     await cache.store_event("$approval", "!room:localhost", card)
     await cache.store_event("$fake-edit", "!room:localhost", fake_edit)
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -1651,7 +1651,7 @@ async def test_startup_discard_uses_trusted_cached_terminal_edit_despite_newer_u
     await cache.store_event("$trusted-edit", "!room:localhost", trusted_edit)
     await cache.store_event("$fake-edit", "!room:localhost", fake_edit)
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -1667,7 +1667,7 @@ async def test_startup_discard_uses_trusted_cached_terminal_edit_despite_newer_u
 async def test_get_pending_approval_does_not_scan_history_when_event_missing(
     tmp_path: Path,
 ) -> None:
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         transport_sender=lambda: "@mindroom_router:localhost",
     )
@@ -1685,7 +1685,7 @@ async def test_get_pending_approval_returns_none_for_cross_router_cached_pending
         "!room:localhost",
         _approval_card(sender="@other_router:localhost"),
     )
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         event_cache=cache,
         transport_sender=lambda: "@mindroom_router:localhost",
@@ -1697,7 +1697,7 @@ async def test_get_pending_approval_returns_none_for_cross_router_cached_pending
 @pytest.mark.asyncio
 async def test_response_for_unknown_card_does_not_emit_terminal_edit(tmp_path: Path) -> None:
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         transport_sender=lambda: "@mindroom_router:localhost",
@@ -1721,7 +1721,7 @@ async def test_response_for_unknown_card_does_not_read_cache(tmp_path: Path) -> 
     cache = MagicMock()
     cache.get_event = AsyncMock(side_effect=RuntimeError("cache should not run"))
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -1747,7 +1747,7 @@ async def test_card_response_ignores_same_router_cached_pending_without_history_
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -1772,7 +1772,7 @@ async def test_card_response_ignores_cross_router_matrix_only_card(tmp_path: Pat
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card(sender="@router_a:localhost"))
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -1804,7 +1804,7 @@ async def test_concurrent_cached_response_events_fall_through_without_terminal_e
         edit_count += 1
         return True
 
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         event_cache=cache,
         editor=editor,
@@ -1858,7 +1858,7 @@ async def test_failed_terminal_edit_keeps_card_terminal_in_process(tmp_path: Pat
 
     sender_mock = AsyncMock(side_effect=sender)
     editor = AsyncMock(side_effect=[False, True])
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         sender=sender_mock,
         editor=editor,
@@ -1965,7 +1965,7 @@ async def test_discard_pending_on_startup_emits_replace_for_each_unresolved_card
         )
         return True
 
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -1989,7 +1989,7 @@ async def test_discard_pending_on_startup_uses_cached_cards_without_history_scan
     cached_card = _approval_card(approval_id="cached-approval", event_id="$cached-approval")
     await cache.store_event("$cached-approval", "!room:localhost", cached_card)
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -2016,7 +2016,7 @@ async def test_discard_pending_on_startup_scans_more_than_500_cached_cards(tmp_p
             ),
         )
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -2035,7 +2035,7 @@ async def test_discard_pending_on_startup_expires_same_router_cached_cards(
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -2057,7 +2057,7 @@ async def test_discard_pending_on_startup_preserves_same_router_cache_hit(
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -2076,7 +2076,7 @@ async def test_discard_pending_on_startup_skips_cross_router_cached_cards(
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card(sender="@other_router:localhost"))
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -2097,7 +2097,7 @@ async def test_discard_pending_on_startup_skips_same_router_cached_terminal_edit
     await cache.store_event("$approval", "!room:localhost", card)
     await cache.store_event("$approval-edit", "!room:localhost", _approval_edit(card, status="approved"))
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -2114,7 +2114,7 @@ async def test_discard_pending_on_startup_skips_other_routers_cards(tmp_path: Pa
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card(sender="@other_router:localhost"))
     editor = AsyncMock(return_value=True)
-    store = ApprovalManager(
+    store = _ApprovalManager(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -2150,7 +2150,7 @@ def test_approval_arguments_preview_marks_sanitizer_truncation() -> None:
     assert preview["__truncated__"] == "5 more items"
     assert truncated is True
 
-    card = ApprovalManager._pending_event_content(
+    card = _ApprovalManager._pending_event_content(
         approval_id="approval-1",
         tool_name="read_file",
         arguments=preview,
@@ -2238,7 +2238,7 @@ def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -
 
 
 def test_terminal_approval_card_ids_are_bounded(tmp_path: Path) -> None:
-    store = ApprovalManager(test_runtime_paths(tmp_path))
+    store = _ApprovalManager(test_runtime_paths(tmp_path))
 
     for index in range(_MAX_REMEMBERED_TERMINAL_CARD_IDS + 1):
         store._remember_resolved_card_event_id(f"$approval-{index}")
@@ -2249,7 +2249,7 @@ def test_terminal_approval_card_ids_are_bounded(tmp_path: Path) -> None:
 
 
 def test_terminal_approval_card_ids_drop_discarded_entries(tmp_path: Path) -> None:
-    store = ApprovalManager(test_runtime_paths(tmp_path))
+    store = _ApprovalManager(test_runtime_paths(tmp_path))
 
     for index in range(_MAX_REMEMBERED_TERMINAL_CARD_IDS + 1):
         card_event_id = f"$approval-{index}"
@@ -2261,7 +2261,7 @@ def test_terminal_approval_card_ids_drop_discarded_entries(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_cancelled_fast_path_moves_card_to_resolved_memory(tmp_path: Path) -> None:
-    store = ApprovalManager(test_runtime_paths(tmp_path), editor=AsyncMock())
+    store = _ApprovalManager(test_runtime_paths(tmp_path), editor=AsyncMock())
     waiter = _LiveApprovalWaiter(
         approval_id="approval-1",
         card_event_id="$approval",

@@ -26,7 +26,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents
 from mindroom.orchestration.plugin_watch import watch_plugins_task
 from mindroom.orchestration.runtime import create_logged_task
-from mindroom.orchestrator import MultiAgentOrchestrator, _ConfigReloadDrainState, _watch_skills_task
+from mindroom.orchestrator import _ConfigReloadDrainState, _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.tool_system.plugins import PluginReloadResult
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import (
@@ -138,7 +138,7 @@ def _write_plugin_removal_test_config(tmp_path: Path, *, with_plugin: bool) -> N
 
 
 async def _noop_prepare_user_account(
-    self: MultiAgentOrchestrator,
+    self: _MultiAgentOrchestrator,
     config: Config,
     *,
     update_runtime_state: bool,
@@ -147,7 +147,7 @@ async def _noop_prepare_user_account(
 
 
 async def _noop_sync_mcp_manager(
-    self: MultiAgentOrchestrator,
+    self: _MultiAgentOrchestrator,
     config: Config,
 ) -> set[str]:
     del self, config
@@ -155,14 +155,14 @@ async def _noop_sync_mcp_manager(
 
 
 async def _noop_sync_event_cache_service(
-    self: MultiAgentOrchestrator,
+    self: _MultiAgentOrchestrator,
     config: Config,
 ) -> None:
     del self, config
 
 
 async def _noop_sync_runtime_support_services(
-    self: MultiAgentOrchestrator,
+    self: _MultiAgentOrchestrator,
     config: Config,
     *,
     start_watcher: bool,
@@ -171,14 +171,14 @@ async def _noop_sync_runtime_support_services(
 
 
 async def _noop_setup_rooms_and_memberships(
-    self: MultiAgentOrchestrator,
+    self: _MultiAgentOrchestrator,
     bots: list[AgentBot],
 ) -> None:
     del self, bots
 
 
 async def _noop_emit_config_reloaded(
-    self: MultiAgentOrchestrator,
+    self: _MultiAgentOrchestrator,
     *,
     new_config: Config,
     changed_entities: set[str],
@@ -190,7 +190,7 @@ async def _noop_emit_config_reloaded(
 
 
 def _noop_start_sync_task(
-    self: MultiAgentOrchestrator,
+    self: _MultiAgentOrchestrator,
     entity_name: str,
     bot: AgentBot,
 ) -> None:
@@ -210,31 +210,31 @@ async def _noop_stop(self: AgentBot, reason: str = "shutdown") -> None:
 def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch bot and orchestrator runtime helpers unrelated to plugin teardown."""
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._prepare_user_account",
+        "mindroom.orchestrator._MultiAgentOrchestrator._prepare_user_account",
         _noop_prepare_user_account,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._sync_mcp_manager",
+        "mindroom.orchestrator._MultiAgentOrchestrator._sync_mcp_manager",
         _noop_sync_mcp_manager,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._sync_event_cache_service",
+        "mindroom.orchestrator._MultiAgentOrchestrator._sync_event_cache_service",
         _noop_sync_event_cache_service,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._sync_runtime_support_services",
+        "mindroom.orchestrator._MultiAgentOrchestrator._sync_runtime_support_services",
         _noop_sync_runtime_support_services,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships",
+        "mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships",
         _noop_setup_rooms_and_memberships,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._emit_config_reloaded",
+        "mindroom.orchestrator._MultiAgentOrchestrator._emit_config_reloaded",
         _noop_emit_config_reloaded,
     )
     monkeypatch.setattr(
-        "mindroom.orchestrator.MultiAgentOrchestrator._start_sync_task",
+        "mindroom.orchestrator._MultiAgentOrchestrator._start_sync_task",
         _noop_start_sync_task,
     )
     monkeypatch.setattr("mindroom.bot.AgentBot.try_start", _noop_try_start)
@@ -320,7 +320,7 @@ async def test_plugin_watcher_debounces_changes_and_ignores_unconfigured_roots(
     (ignored_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
 
@@ -377,7 +377,7 @@ async def test_plugin_watcher_tracks_configured_absolute_root_outside_config_dir
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=[str(external_plugin_root)]), runtime_root)
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
 
@@ -425,7 +425,7 @@ async def test_plugin_watcher_catches_first_save_after_startup(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
 
@@ -479,7 +479,7 @@ async def test_plugin_watcher_catches_first_save_after_config_switch(
 
     first_config = _runtime_bound_config(Config(plugins=["./plugins/first"]), tmp_path)
     second_config = _runtime_bound_config(Config(plugins=["./plugins/second"]), tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(first_config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(first_config))
     orchestrator.config = first_config
     orchestrator.running = True
 
@@ -539,7 +539,7 @@ async def test_plugin_watcher_does_not_reload_on_config_switch_without_plugin_ed
 
     first_config = _runtime_bound_config(Config(plugins=["./plugins/first"]), tmp_path)
     second_config = _runtime_bound_config(Config(plugins=["./plugins/second"]), tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(first_config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(first_config))
     orchestrator.config = first_config
     orchestrator.running = True
 
@@ -583,7 +583,7 @@ async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
 
@@ -649,7 +649,7 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
 
@@ -717,7 +717,7 @@ async def test_plugin_watcher_does_not_retry_failed_reload_without_new_change(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
 
@@ -776,7 +776,7 @@ async def test_reload_plugins_now_deactivates_broken_plugin_after_failure(tmp_pa
         encoding="utf-8",
     )
     config = _runtime_bound_config(Config(plugins=["./plugins/broken-reload"]), tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
 
@@ -858,7 +858,7 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
     )
 
     config = _runtime_bound_config(Config(plugins=["./plugins/first", "./plugins/second"]), tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
 
@@ -911,7 +911,7 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
     try:
         _write_plugin_removal_test_config(tmp_path, with_plugin=True)
         _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         await orchestrator.initialize()
 
         hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
@@ -982,7 +982,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         tmp_path,
     )
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths_for(current_config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
     orchestrator.config = current_config
     orchestrator.running = True
 
@@ -1096,7 +1096,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         ),
     )
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.running = True
     orchestrator.agent_bots["agent1"] = bot
     orchestrator.update_config = AsyncMock(return_value=True)
@@ -1142,7 +1142,7 @@ async def test_queued_config_reload_surfaces_stuck_drain_and_forces_reload(
     logger_mock = MagicMock()
     monkeypatch.setattr("mindroom.orchestrator.logger", logger_mock)
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
@@ -1179,7 +1179,7 @@ async def test_queued_config_reload_resets_drain_window_for_new_change(
     monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS", 1.0)
     monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS", 0.12)
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
@@ -1219,7 +1219,7 @@ async def test_request_config_reload_ignores_changes_while_startup_is_in_progres
     logger_mock = MagicMock()
     monkeypatch.setattr("mindroom.orchestrator.logger", logger_mock)
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.update_config = AsyncMock(return_value=True)
 
     orchestrator.request_config_reload()
@@ -1251,7 +1251,7 @@ async def test_detached_task_cancel_logs_exception_instead_of_suppressing_silent
     logger_mock = MagicMock()
     monkeypatch.setattr("mindroom.orchestration.runtime.logger", logger_mock)
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     started = asyncio.Event()
 
     async def fail_during_cancel() -> None:
@@ -1294,7 +1294,7 @@ async def test_queued_config_reload_coalesces_rapid_changes(
     monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.05)
     monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
@@ -1876,10 +1876,10 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
     monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
-    monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
-    monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
+    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     # Initialize with initial config
     await orchestrator.initialize()
@@ -2254,7 +2254,7 @@ async def test_failed_update_config_does_not_strand_queued_reload(
     monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
@@ -2292,7 +2292,7 @@ async def test_config_change_during_update_config_triggers_second_reload(
     monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
@@ -2327,7 +2327,7 @@ async def test_shutdown_during_active_drain_cancels_reload(
     monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestrator._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)

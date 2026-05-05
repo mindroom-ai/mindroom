@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 
 type ThreadReadResult = ThreadHistoryResult
 type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
-type ThreadReadCacheKey = tuple[str, str, bool, bool]
+type _ThreadReadCacheKey = tuple[str, str, bool, bool]
 
 logger = get_logger(__name__)
 
@@ -78,7 +78,7 @@ __all__ = [
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
 _STARTUP_PREWARM_THREAD_CONCURRENCY = 32
-type StartupThreadPrewarmOutcome = Literal["warmed", "failed", "aborted"]
+type _StartupThreadPrewarmOutcome = Literal["warmed", "failed", "aborted"]
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -360,7 +360,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
     _turn_event_cache: ContextVar[dict[tuple[str, str], _TurnEventLookup] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
-    _turn_thread_read_cache: ContextVar[dict[ThreadReadCacheKey, ThreadReadResult] | None] = field(
+    _turn_thread_read_cache: ContextVar[dict[_ThreadReadCacheKey, ThreadReadResult] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_thread_read_cache", default=None),
     )
     _reads: ThreadReadPolicy = field(init=False, repr=False)
@@ -452,7 +452,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str,
     ) -> ThreadReadResult:
         """Resolve one thread read through per-turn memoization."""
-        cache_key: ThreadReadCacheKey = (room_id, thread_id, full_history, dispatch_safe)
+        cache_key: _ThreadReadCacheKey = (room_id, thread_id, full_history, dispatch_safe)
         turn_cache = self._turn_thread_read_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
             return self._copy_thread_read_result(turn_cache[cache_key])
@@ -758,7 +758,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_id: str,
         *,
         is_shutting_down: Callable[[], bool],
-    ) -> StartupThreadPrewarmOutcome:
+    ) -> _StartupThreadPrewarmOutcome:
         """Refresh one startup thread snapshot and return its room-level prewarm outcome."""
         if is_shutting_down():
             return "aborted"

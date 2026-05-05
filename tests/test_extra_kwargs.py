@@ -15,9 +15,9 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude, strip_vertex_claude_tool_strict
+from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
 from mindroom.vertex_claude_prompt_cache import (
-    copy_messages_with_vertex_prompt_cache_breakpoint,
+    _copy_messages_with_vertex_prompt_cache_breakpoint,
     install_vertex_claude_prompt_cache_hook,
 )
 
@@ -316,7 +316,7 @@ def test_vertexai_prompt_cache_breakpoint_marks_last_user_block() -> None:
         Message(role="user", content=[{"type": "text", "text": "Current turn"}, {"type": "image", "source": "x"}]),
     ]
 
-    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+    prepared = _copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
 
     assert messages[-1].content == [{"type": "text", "text": "Current turn"}, {"type": "image", "source": "x"}]
     assert prepared[-1].content == [
@@ -349,7 +349,7 @@ def test_strip_vertex_claude_tool_strict_preserves_schema_and_input() -> None:
     """Vertex Claude rejects provider-level strict, but schema fields named strict are valid."""
     tool = _strict_tool_definition()
 
-    sanitized = strip_vertex_claude_tool_strict([tool])
+    sanitized = _strip_vertex_claude_tool_strict([tool])
 
     assert sanitized is not None
     assert "strict" not in sanitized[0]["function"]
@@ -418,7 +418,7 @@ def test_vertex_prompt_cache_does_not_poison_plain_string_tool_content() -> None
     model = _vertex_claude_model()
     messages = _tool_turn_messages("ok")
 
-    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+    prepared = _copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
 
     assert prepared[-1].content == "ok"
     assert messages[-1].content == "ok"
@@ -430,7 +430,7 @@ def test_vertex_prompt_cache_does_not_mark_list_shaped_tool_content() -> None:
     model = _vertex_claude_model()
     messages = _tool_turn_messages([{"type": "tool_result", "content": "ok"}])
 
-    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
+    prepared = _copy_messages_with_vertex_prompt_cache_breakpoint(messages, model)
 
     assert isinstance(prepared[-1].content, list)
     for block in prepared[-1].content:
@@ -440,7 +440,7 @@ def test_vertex_prompt_cache_does_not_mark_list_shaped_tool_content() -> None:
 def test_vertex_prompt_cache_wire_format_has_no_cache_control_in_tool_results() -> None:
     """Agno wire tool_result payloads must not contain cache-control text."""
     model = _vertex_claude_model()
-    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(_tool_turn_messages("ok"), model)
+    prepared = _copy_messages_with_vertex_prompt_cache_breakpoint(_tool_turn_messages("ok"), model)
 
     chat_messages, _system_message = format_messages(prepared, compress_tool_results=True)
 
@@ -453,7 +453,7 @@ def test_vertex_prompt_cache_wire_format_has_no_cache_control_in_tool_results() 
 def test_vertex_prompt_cache_marks_prior_user_when_tail_is_tool() -> None:
     """A trailing tool message should move the cache marker to the prior user turn."""
     model = _vertex_claude_model()
-    prepared = copy_messages_with_vertex_prompt_cache_breakpoint(_tool_turn_messages("ok"), model)
+    prepared = _copy_messages_with_vertex_prompt_cache_breakpoint(_tool_turn_messages("ok"), model)
 
     user_message = prepared[1]
     assert isinstance(user_message.content, list)

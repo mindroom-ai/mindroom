@@ -64,7 +64,7 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
                 last_change_at = None
                 watch_state_revision = orchestrator._plugin_watch_state_revision
             pending_changes = _filter_pending_plugin_changes(pending_changes, configured_roots)
-            changed_paths = collect_plugin_root_changes(configured_roots, last_snapshot_by_root)
+            changed_paths = _collect_plugin_root_changes(configured_roots, last_snapshot_by_root)
 
             if changed_paths:
                 pending_changes.update(changed_paths)
@@ -95,7 +95,7 @@ def _filter_pending_plugin_changes(
     return {path for path in pending_changes if _path_is_under_any_root(path, configured_roots)}
 
 
-def collect_plugin_root_changes(
+def _collect_plugin_root_changes(
     configured_roots: tuple[Path, ...],
     last_snapshot_by_root: dict[Path, dict[Path, int]],
 ) -> set[Path]:

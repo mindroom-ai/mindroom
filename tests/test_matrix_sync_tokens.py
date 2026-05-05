@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
-from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token, load_sync_token_record, save_sync_token
+from mindroom.matrix.sync_tokens import _load_sync_token, clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -69,7 +69,7 @@ def _certification_path(tmp_path: Path, *, agent_name: str = "code") -> Path:
 
 def test_load_sync_token_returns_none_when_missing(tmp_path: Path) -> None:
     """First-run agents should have no saved sync token."""
-    assert load_sync_token(tmp_path, "code") is None
+    assert _load_sync_token(tmp_path, "code") is None
 
 
 def test_load_sync_token_returns_none_for_whitespace_only_file(tmp_path: Path) -> None:
@@ -78,7 +78,7 @@ def test_load_sync_token_returns_none_for_whitespace_only_file(tmp_path: Path) -
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(" \n\t ", encoding="utf-8")
 
-    assert load_sync_token(tmp_path, "code") is None
+    assert _load_sync_token(tmp_path, "code") is None
 
 
 def test_save_sync_token_round_trip(tmp_path: Path) -> None:
@@ -91,7 +91,7 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
         "version": "mindroom-sync-token-v1",
     }
     assert not _certification_path(tmp_path).exists()
-    assert load_sync_token(tmp_path, "code") == "s12345"
+    assert _load_sync_token(tmp_path, "code") == "s12345"
     token_record = load_sync_token_record(tmp_path, "code")
     assert token_record is not None
     assert token_record.certified is True
@@ -120,7 +120,7 @@ def test_clear_sync_token_removes_saved_token(tmp_path: Path) -> None:
 
     clear_sync_token(tmp_path, "code")
 
-    assert load_sync_token(tmp_path, "code") is None
+    assert _load_sync_token(tmp_path, "code") is None
     assert not _token_path(tmp_path).exists()
     assert not _certification_path(tmp_path).exists()
 
@@ -129,7 +129,7 @@ def test_clear_sync_token_is_idempotent(tmp_path: Path) -> None:
     """Clearing a missing token should be a no-op."""
     clear_sync_token(tmp_path, "code")
 
-    assert load_sync_token(tmp_path, "code") is None
+    assert _load_sync_token(tmp_path, "code") is None
 
 
 @pytest.mark.asyncio
@@ -218,7 +218,7 @@ async def test_unknown_pos_first_sync_clears_client_and_saved_token(tmp_path: Pa
     await bot._on_sync_error(sync_error)
 
     assert bot.client.next_batch is None
-    assert load_sync_token(tmp_path, bot.agent_name) is None
+    assert _load_sync_token(tmp_path, bot.agent_name) is None
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
 
 
@@ -262,7 +262,7 @@ async def test_unknown_pos_after_first_sync_clears_client_and_saved_token(tmp_pa
     await bot._on_sync_error(sync_error)
 
     assert bot.client.next_batch is None
-    assert load_sync_token(tmp_path, bot.agent_name) is None
+    assert _load_sync_token(tmp_path, bot.agent_name) is None
     assert bot._sync_trust_state is SyncTrustState.UNCERTAIN
 
 
@@ -304,7 +304,7 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await bot._on_sync_response(response)
 
-    assert load_sync_token(tmp_path, bot.agent_name) == "s_latest"
+    assert _load_sync_token(tmp_path, bot.agent_name) == "s_latest"
     token_record = load_sync_token_record(tmp_path, bot.agent_name)
     assert token_record is not None
     assert token_record.checkpoint == SyncCheckpoint("s_latest")
@@ -322,7 +322,7 @@ async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Pat
 
     await bot.prepare_for_sync_shutdown()
 
-    assert load_sync_token(tmp_path, bot.agent_name) == "s_shutdown"
+    assert _load_sync_token(tmp_path, bot.agent_name) == "s_shutdown"
     token_record = load_sync_token_record(tmp_path, bot.agent_name)
     assert token_record is not None
     assert token_record.checkpoint == SyncCheckpoint("s_shutdown")
@@ -342,4 +342,4 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
 
     await bot.prepare_for_sync_shutdown()
 
-    assert load_sync_token(tmp_path, bot.agent_name) == "s_before_precallback"
+    assert _load_sync_token(tmp_path, bot.agent_name) == "s_before_precallback"

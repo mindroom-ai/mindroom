@@ -9,7 +9,7 @@ from mindroom.oauth.google import (
 )
 from mindroom.oauth.providers import OAuthProvider
 
-GOOGLE_CALENDAR_OAUTH_SCOPES = (
+_GOOGLE_CALENDAR_OAUTH_SCOPES = (
     *GOOGLE_IDENTITY_SCOPES,
     "https://www.googleapis.com/auth/calendar",
 )
@@ -22,7 +22,7 @@ def google_calendar_oauth_provider() -> OAuthProvider:
         display_name="Google Calendar",
         authorization_url="https://accounts.google.com/o/oauth2/v2/auth",
         token_url="https://oauth2.googleapis.com/token",  # noqa: S106
-        scopes=GOOGLE_CALENDAR_OAUTH_SCOPES,
+        scopes=_GOOGLE_CALENDAR_OAUTH_SCOPES,
         credential_service="google_calendar_oauth",
         tool_config_service="google_calendar",
         client_config_services=("google_calendar_oauth_client",),

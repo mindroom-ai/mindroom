@@ -58,16 +58,16 @@ from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint
-from mindroom.matrix.sync_tokens import load_sync_token, load_sync_token_record, save_sync_token
+from mindroom.matrix.sync_tokens import _load_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadRootProof,
+    _resolve_related_event_thread_id,
+    _snapshot_thread_membership_access,
     resolve_event_thread_id,
-    resolve_related_event_thread_id,
     resolve_related_event_thread_id_best_effort,
     room_scan_thread_membership_access,
-    snapshot_thread_membership_access,
 )
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.users import AgentMatrixUser
@@ -2023,9 +2023,9 @@ class TestThreadingBehavior:
             try:
                 await asyncio.wait_for(cache_started.wait(), timeout=1.0)
 
-                assert load_sync_token(bot.storage_path, bot.agent_name) is None
+                assert _load_sync_token(bot.storage_path, bot.agent_name) is None
                 await bot.prepare_for_sync_shutdown()
-                assert load_sync_token(bot.storage_path, bot.agent_name) is None
+                assert _load_sync_token(bot.storage_path, bot.agent_name) is None
 
                 allow_cache_finish.set()
                 await asyncio.wait_for(response_task, timeout=1.0)
@@ -2033,7 +2033,7 @@ class TestThreadingBehavior:
                 allow_cache_finish.set()
                 await asyncio.gather(response_task, return_exceptions=True)
 
-        assert load_sync_token(bot.storage_path, bot.agent_name) == "s_after_delayed_cache"
+        assert _load_sync_token(bot.storage_path, bot.agent_name) == "s_after_delayed_cache"
 
     @pytest.mark.asyncio
     async def test_restored_first_sync_success_updates_checkpoint(self, bot: AgentBot) -> None:
@@ -2064,7 +2064,7 @@ class TestThreadingBehavior:
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
         assert bot.client.next_batch is None
-        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+        assert _load_sync_token(bot.storage_path, bot.agent_name) is None
 
     @pytest.mark.asyncio
     async def test_cache_failure_clears_token_then_later_success_saves_checkpoint(
@@ -2086,7 +2086,7 @@ class TestThreadingBehavior:
         ):
             await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
 
-        assert load_sync_token(bot.storage_path, bot.agent_name) is None
+        assert _load_sync_token(bot.storage_path, bot.agent_name) is None
 
         bot.client.next_batch = "s_after_recovery"
         with patch.object(
@@ -4289,7 +4289,7 @@ class TestThreadingBehavior:
                 {"event_id": "$child:localhost"},
             ], True
 
-        resolved_thread_id = await resolve_related_event_thread_id(
+        resolved_thread_id = await _resolve_related_event_thread_id(
             room_id,
             thread_root_id,
             access=room_scan_thread_membership_access(
@@ -4435,10 +4435,10 @@ class TestThreadingBehavior:
                 SnapshotMessage(event_id="$child:localhost"),
             ]
 
-        resolved_thread_id = await resolve_related_event_thread_id(
+        resolved_thread_id = await _resolve_related_event_thread_id(
             room_id,
             thread_root_id,
-            access=snapshot_thread_membership_access(
+            access=_snapshot_thread_membership_access(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 fetch_thread_snapshot=fetch_thread_snapshot,
@@ -4479,10 +4479,10 @@ class TestThreadingBehavior:
             raise RuntimeError(msg)
 
         with pytest.raises(RuntimeError, match="snapshot unavailable"):
-            await resolve_related_event_thread_id(
+            await _resolve_related_event_thread_id(
                 room_id,
                 thread_root_id,
-                access=snapshot_thread_membership_access(
+                access=_snapshot_thread_membership_access(
                     lookup_thread_id=lookup_thread_id,
                     fetch_event_info=fetch_event_info,
                     fetch_thread_snapshot=fetch_thread_snapshot,
@@ -4508,7 +4508,7 @@ class TestThreadingBehavior:
             return ThreadRootProof.not_a_thread_root()
 
         with pytest.raises(RuntimeError, match="lookup unavailable"):
-            await resolve_related_event_thread_id(
+            await _resolve_related_event_thread_id(
                 room_id,
                 related_event_id,
                 access=ThreadMembershipAccess(
@@ -4582,7 +4582,7 @@ class TestThreadingBehavior:
         resolved_thread_id = await resolve_related_event_thread_id_best_effort(
             room_id,
             thread_root_id,
-            access=snapshot_thread_membership_access(
+            access=_snapshot_thread_membership_access(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 fetch_thread_snapshot=fetch_thread_snapshot,

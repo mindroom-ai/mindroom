@@ -53,7 +53,7 @@ logger = get_logger(__name__)
 
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
 _TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "text", "url"})
-AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
+_AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
 _VALIDATION_PLUGIN_MODULE_SUFFIX = "__validation__"
 _OMIT_TOOL_CONFIG_ARG = object()
 
@@ -73,9 +73,9 @@ class ToolAuthoredOverrideValidator(str, Enum):
     MCP = "mcp"
 
 
-def is_authored_override_inherit(value: object) -> bool:
+def _is_authored_override_inherit(value: object) -> bool:
     """Return whether an authored override value clears an inherited higher-level override."""
-    return value == AUTHORED_OVERRIDE_INHERIT
+    return value == _AUTHORED_OVERRIDE_INHERIT
 
 
 def apply_authored_overrides(
@@ -88,7 +88,7 @@ def apply_authored_overrides(
         return resolved
 
     for field_name, value in overrides.items():
-        if is_authored_override_inherit(value):
+        if _is_authored_override_inherit(value):
             resolved.pop(field_name, None)
         else:
             resolved[field_name] = value
@@ -181,7 +181,7 @@ def _validate_authored_override_value(
     tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> object:
     """Validate one authored override value against its declared config field type."""
-    if is_authored_override_inherit(value):
+    if _is_authored_override_inherit(value):
         return value
 
     if value is None:
@@ -214,7 +214,7 @@ def _validate_authored_override_value(
     return value
 
 
-def validate_authored_overrides(
+def _validate_authored_overrides(
     tool_name: str,
     overrides: dict[str, object] | None,
     *,
@@ -286,7 +286,7 @@ def validate_authored_tool_entry_overrides(
     tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
 ) -> dict[str, object]:
     """Validate authored overrides, including any tool-specific validation mode."""
-    validated_overrides = validate_authored_overrides(
+    validated_overrides = _validate_authored_overrides(
         tool_name,
         overrides,
         config_path_prefix=config_path_prefix,
@@ -399,7 +399,7 @@ def _apply_tool_config_init_values(
         if field.name not in values:
             continue
         value = values[field.name]
-        if skip_inherited and is_authored_override_inherit(value):
+        if skip_inherited and _is_authored_override_inherit(value):
             continue
         _set_tool_config_init_kwarg(
             init_kwargs,
@@ -912,7 +912,7 @@ def _execute_validation_plugin_module(
     return validation_module_name
 
 
-def resolved_tool_state_for_runtime(
+def _resolved_tool_state_for_runtime(
     runtime_paths: RuntimePaths,
     config: Config,
     *,
@@ -1021,7 +1021,7 @@ def resolved_tool_metadata_for_runtime(
     tolerate_plugin_load_errors: bool = False,
 ) -> dict[str, ToolMetadata]:
     """Return tool metadata visible for one runtime config without mutating global state."""
-    _, desired_metadata = resolved_tool_state_for_runtime(
+    _, desired_metadata = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
@@ -1029,7 +1029,7 @@ def resolved_tool_metadata_for_runtime(
     return desired_metadata
 
 
-def tool_validation_snapshot_from_state(
+def _tool_validation_snapshot_from_state(
     tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
     tool_metadata: Mapping[str, ToolMetadata],
 ) -> dict[str, ToolValidationInfo]:
@@ -1053,12 +1053,12 @@ def resolved_tool_validation_snapshot_for_runtime(
     tolerate_plugin_load_errors: bool = False,
 ) -> dict[str, ToolValidationInfo]:
     """Return validation-only tool state visible for one runtime config."""
-    tool_registry, desired_metadata = resolved_tool_state_for_runtime(
+    tool_registry, desired_metadata = _resolved_tool_state_for_runtime(
         runtime_paths,
         config,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
-    return tool_validation_snapshot_from_state(tool_registry, desired_metadata)
+    return _tool_validation_snapshot_from_state(tool_registry, desired_metadata)
 
 
 def serialize_tool_validation_snapshot(

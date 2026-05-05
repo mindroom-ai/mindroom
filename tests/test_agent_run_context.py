@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment, prepend_knowledge_availability_notice
 from mindroom.hooks import EnrichmentItem
-from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 
 
 def test_append_knowledge_availability_enrichment_adds_volatile_notice() -> None:

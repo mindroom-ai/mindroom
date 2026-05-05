@@ -19,9 +19,9 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import create_agent
 from mindroom.approval_manager import (
-    ApprovalManager,
     PendingApproval,
     SentApprovalEvent,
+    _ApprovalManager,
     get_approval_store,
     initialize_approval_store,
 )
@@ -43,13 +43,13 @@ from mindroom.hooks import (
     emit_gate,
     hook,
 )
-from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
-from mindroom.tool_approval import shutdown_approval_store
+from mindroom.tool_approval import _shutdown_approval_store
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -162,7 +162,7 @@ def _initialize_router_approval_store(
     room_send: AsyncMock | None = None,
     editor: AsyncMock | None = None,
 ) -> tuple[MagicMock, AsyncMock]:
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
 
@@ -291,7 +291,7 @@ def _initialize_test_approval_store(runtime_paths: RuntimePaths) -> tuple[AsyncM
 
 
 async def _wait_for_sent_pending(
-    store: ApprovalManager,
+    store: _ApprovalManager,
     sender: AsyncMock | MagicMock,
     *,
     room_id: str = "!room:localhost",
@@ -319,9 +319,9 @@ def _first_function(toolkit: Toolkit) -> Function:
 @pytest.fixture(autouse=True)
 def reset_approval_store() -> Generator[None, None, None]:
     """Keep the module-level approval store isolated per test."""
-    asyncio.run(shutdown_approval_store())
+    asyncio.run(_shutdown_approval_store())
     yield
-    asyncio.run(shutdown_approval_store())
+    asyncio.run(_shutdown_approval_store())
 
 
 def test_tool_events_are_registered_with_expected_timeouts() -> None:
@@ -330,7 +330,8 @@ def test_tool_events_are_registered_with_expected_timeouts() -> None:
     assert EVENT_TOOL_AFTER_CALL in BUILTIN_EVENT_NAMES
     assert validate_event_name(EVENT_TOOL_BEFORE_CALL) == EVENT_TOOL_BEFORE_CALL
     assert validate_event_name(EVENT_TOOL_AFTER_CALL) == EVENT_TOOL_AFTER_CALL
-    assert "tool" in RESERVED_EVENT_NAMESPACES
+    with pytest.raises(ValueError, match="reserved namespace"):
+        validate_event_name("tool:custom")
     assert default_timeout_ms_for_event(EVENT_MESSAGE_RECEIVED) == 15000
     assert default_timeout_ms_for_event(EVENT_TOOL_BEFORE_CALL) == 200
     assert default_timeout_ms_for_event(EVENT_TOOL_AFTER_CALL) == 300
@@ -1192,7 +1193,7 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
         servers=["localhost"],
     )
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     orchestrator.agent_bots = {"router": router_bot, "code": bot}
     bot.orchestrator = orchestrator
 
@@ -1313,7 +1314,7 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     router_bot.client.rooms = {}
     router_bot.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Router Lobby"})
     router_bot.client.room_put_state.return_value = object()
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     orchestrator.agent_bots = {"router": router_bot, "code": bot}
     bot.orchestrator = orchestrator
 

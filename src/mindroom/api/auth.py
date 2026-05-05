@@ -59,7 +59,7 @@ class _SupabaseClientProtocol(Protocol):
 
 
 @dataclass(frozen=True)
-class TrustedUpstreamAuthSettings:
+class _TrustedUpstreamAuthSettings:
     """Trusted reverse-proxy/browser identity settings for hosted deployments."""
 
     enabled: bool = False
@@ -70,7 +70,7 @@ class TrustedUpstreamAuthSettings:
 
 
 @dataclass(frozen=True)
-class ApiAuthSettings:
+class _ApiAuthSettings:
     """Dashboard authentication settings for one runtime."""
 
     platform_login_url: str | None
@@ -78,7 +78,7 @@ class ApiAuthSettings:
     supabase_anon_key: str | None
     account_id: str | None
     mindroom_api_key: str | None
-    trusted_upstream: TrustedUpstreamAuthSettings = field(default_factory=TrustedUpstreamAuthSettings)
+    trusted_upstream: _TrustedUpstreamAuthSettings = field(default_factory=_TrustedUpstreamAuthSettings)
 
 
 @dataclass(frozen=True)
@@ -86,19 +86,19 @@ class ApiAuthState:
     """Cached authentication client state for one runtime."""
 
     runtime_paths: RuntimePaths
-    settings: ApiAuthSettings
+    settings: _ApiAuthSettings
     supabase_auth: _SupabaseClientProtocol | None
 
 
-def build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> ApiAuthSettings:
+def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> _ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
-    return ApiAuthSettings(
+    return _ApiAuthSettings(
         platform_login_url=runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL"),
         supabase_url=runtime_paths.env_value("SUPABASE_URL"),
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
         account_id=account_id,
         mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
-        trusted_upstream=build_trusted_upstream_auth_settings(runtime_paths),
+        trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
     )
 
 
@@ -110,9 +110,9 @@ def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
     return stripped or None
 
 
-def build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> TrustedUpstreamAuthSettings:
+def _build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> _TrustedUpstreamAuthSettings:
     """Read trusted-upstream auth settings from one runtime context."""
-    return TrustedUpstreamAuthSettings(
+    return _TrustedUpstreamAuthSettings(
         enabled=runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"),
         user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER"),
         email_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER"),
@@ -124,7 +124,7 @@ def build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> Trusted
     )
 
 
-def app_auth_state(api_app: FastAPI) -> ApiAuthState:
+def _app_auth_state(api_app: FastAPI) -> ApiAuthState:
     """Return the committed auth state for one API app instance."""
     app_state = config_lifecycle.app_state(api_app)
     api_state = config_lifecycle.require_api_state(api_app)
@@ -133,7 +133,7 @@ def app_auth_state(api_app: FastAPI) -> ApiAuthState:
         state = cast("ApiAuthState | None", snapshot.auth_state)
         if state is not None and state.runtime_paths == snapshot.runtime_paths:
             return state
-        settings = build_auth_settings(snapshot.runtime_paths, account_id=app_state.api_auth_account_id)
+        settings = _build_auth_settings(snapshot.runtime_paths, account_id=app_state.api_auth_account_id)
         state = ApiAuthState(
             runtime_paths=snapshot.runtime_paths,
             settings=settings,
@@ -227,7 +227,7 @@ def _trusted_upstream_email_localpart(email: str) -> str | None:
 
 
 def _validated_trusted_upstream_email_to_matrix_template(
-    settings: TrustedUpstreamAuthSettings,
+    settings: _TrustedUpstreamAuthSettings,
 ) -> str | None:
     """Return the configured email-to-Matrix template after validating it."""
     template = settings.email_to_matrix_user_id_template
@@ -249,7 +249,7 @@ def _validated_trusted_upstream_email_to_matrix_template(
 
 
 def _derive_trusted_upstream_matrix_user_id(
-    settings: TrustedUpstreamAuthSettings,
+    settings: _TrustedUpstreamAuthSettings,
     email: str | None,
     template: str | None,
 ) -> str | None:
@@ -273,7 +273,7 @@ def _derive_trusted_upstream_matrix_user_id(
 
 def _trusted_upstream_auth_user(
     request: Request,
-    settings: TrustedUpstreamAuthSettings,
+    settings: _TrustedUpstreamAuthSettings,
 ) -> dict[str, Any] | None:
     """Return the trusted-upstream auth user for this request when configured."""
     if not settings.enabled:
@@ -331,7 +331,7 @@ def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseU
     return response.user
 
 
-def bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
+def _bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
     """Bind one coherent auth/runtime/config snapshot to the request."""
     existing = request_api_snapshot(request)
     bound_auth_state = cast("ApiAuthState | None", existing.auth_state) if existing is not None else None
@@ -348,7 +348,7 @@ def bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
         current = api_state.snapshot
         auth_state = cast("ApiAuthState | None", current.auth_state)
         if auth_state is None or auth_state.runtime_paths != current.runtime_paths:
-            settings = build_auth_settings(current.runtime_paths, account_id=app_state.api_auth_account_id)
+            settings = _build_auth_settings(current.runtime_paths, account_id=app_state.api_auth_account_id)
             auth_state = ApiAuthState(
                 runtime_paths=current.runtime_paths,
                 settings=settings,
@@ -363,21 +363,21 @@ def bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
         return store_request_api_snapshot(request, current)
 
 
-def request_auth_state(request: Request) -> ApiAuthState:
+def _request_auth_state(request: Request) -> ApiAuthState:
     """Return the request-bound auth state when available."""
     snapshot = request_api_snapshot(request)
     if snapshot is None:
-        return app_auth_state(request.app)
+        return _app_auth_state(request.app)
     auth_state = cast("ApiAuthState | None", snapshot.auth_state)
     if auth_state is None or auth_state.runtime_paths != snapshot.runtime_paths:
-        return cast("ApiAuthState", bind_authenticated_request_snapshot(request).auth_state)
+        return cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     return auth_state
 
 
 def request_has_frontend_access(request: Request) -> bool:
     """Return whether the current request may load the dashboard UI."""
     authorization = request.headers.get("authorization")
-    auth_state = cast("ApiAuthState", bind_authenticated_request_snapshot(request).auth_state)
+    auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
     try:
         trusted_auth_user = _trusted_upstream_auth_user(request, auth_state.settings.trusted_upstream)
@@ -423,7 +423,7 @@ def _request_path_with_query(request: Request) -> str:
 
 def login_redirect_for_request(request: Request, *, next_path: str | None = None) -> RedirectResponse | None:
     """Return the dashboard login redirect for one browser request when configured."""
-    auth_settings = request_auth_state(request).settings
+    auth_settings = _request_auth_state(request).settings
     if auth_settings.trusted_upstream.enabled:
         return None
     if auth_settings.supabase_url and auth_settings.supabase_anon_key and auth_settings.platform_login_url:
@@ -555,7 +555,7 @@ async def verify_user(
     allow_public_paths: bool = True,
 ) -> dict[str, Any]:
     """Validate bearer or cookie auth and enforce owner if ACCOUNT_ID is set."""
-    snapshot = bind_authenticated_request_snapshot(request)
+    snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
     trusted_auth_user = _trusted_upstream_auth_user(request, auth_state.settings.trusted_upstream)
@@ -606,7 +606,7 @@ async def verify_user(
 @router.post("/api/auth/session", include_in_schema=False)
 async def create_auth_session(request: Request, payload: _AuthSessionRequest, response: Response) -> dict[str, bool]:
     """Set a same-origin cookie for standalone dashboard auth."""
-    mindroom_api_key = app_auth_state(request.app).settings.mindroom_api_key
+    mindroom_api_key = _app_auth_state(request.app).settings.mindroom_api_key
     if not mindroom_api_key:
         raise HTTPException(status_code=404, detail="Dashboard auth is not enabled")
 
@@ -634,7 +634,7 @@ async def clear_auth_session(response: Response) -> dict[str, bool]:
 @router.get("/login", include_in_schema=False)
 async def standalone_login(request: Request, next: str = "/") -> Response:  # noqa: A002
     """Render the standalone dashboard login form when API-key auth is enabled."""
-    if not cast("ApiAuthState", bind_authenticated_request_snapshot(request).auth_state).settings.mindroom_api_key:
+    if not cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state).settings.mindroom_api_key:
         raise HTTPException(status_code=404, detail="Not found")
 
     next_path = sanitize_next_path(next)

@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
-class ThreadCacheStateLike(Protocol):
+class _ThreadCacheStateLike(Protocol):
     """Structural contract for durable thread cache trust state."""
 
     validated_at: float | None
@@ -28,7 +28,7 @@ def latest_visible_thread_event_id(history: Sequence[ResolvedVisibleMessage]) ->
 
 
 def thread_cache_rejection_reason(
-    cache_state: ThreadCacheStateLike | None,
+    cache_state: _ThreadCacheStateLike | None,
 ) -> str | None:
     """Return why one durable thread snapshot must be rejected, if at all."""
     rejection_reason: str | None = None
@@ -43,8 +43,8 @@ def thread_cache_rejection_reason(
     return rejection_reason
 
 
-def thread_cache_state_is_usable(
-    cache_state: ThreadCacheStateLike | None,
+def _thread_cache_state_is_usable(
+    cache_state: _ThreadCacheStateLike | None,
 ) -> bool:
     """Return whether one durable thread snapshot is safe to reuse."""
     return thread_cache_rejection_reason(cache_state) is None

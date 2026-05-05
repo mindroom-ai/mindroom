@@ -223,7 +223,7 @@ def initialize_sandbox_runner_app(
 ) -> None:
     """Attach one explicit runtime context to a sandbox-runner app instance."""
     committed_config = config or _runtime_config_or_empty(runtime_paths)
-    ensure_registry_loaded_with_config(runtime_paths, committed_config)
+    _ensure_registry_loaded_with_config(runtime_paths, committed_config)
     api_app.state.sandbox_runner_context = _SandboxRunnerContext(
         runtime_paths=runtime_paths,
         config=committed_config,
@@ -232,7 +232,7 @@ def initialize_sandbox_runner_app(
     )
 
 
-def ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
+def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
     """Load config from env and ensure the tool registry is populated.
 
     Used by both the FastAPI startup and the subprocess worker so that
@@ -437,17 +437,17 @@ def _app_runner_token(app: FastAPI) -> str | None:
     return runner_token
 
 
-def sandbox_runner_runtime_paths(request: Request) -> RuntimePaths:
+def _sandbox_runner_runtime_paths(request: Request) -> RuntimePaths:
     """Return the committed runtime paths for one sandbox runner request."""
     return _app_runtime_paths(request.app)
 
 
-def sandbox_runner_runtime_config(request: Request) -> Config:
+def _sandbox_runner_runtime_config(request: Request) -> Config:
     """Return the committed validated config for one sandbox runner request."""
     return _app_runtime_config(request.app)
 
 
-def sandbox_runner_tool_metadata(request: Request) -> dict[str, Any]:
+def _sandbox_runner_tool_metadata(request: Request) -> dict[str, Any]:
     """Return the committed tool metadata snapshot for one sandbox runner request."""
     return _app_tool_metadata(request.app)
 
@@ -543,7 +543,7 @@ def _resolve_entrypoint(
     private_agent_names: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
-    ensure_registry_loaded_with_config(runtime_paths, config)
+    _ensure_registry_loaded_with_config(runtime_paths, config)
     worker_target = build_worker_target_from_runtime_env(
         worker_scope,
         routing_agent_name,
@@ -1291,7 +1291,7 @@ async def create_credential_lease(
 @router.get("/workers", response_model=SandboxWorkerListResponse)
 async def list_workers(request: Request, include_idle: bool = True) -> SandboxWorkerListResponse:
     """List known workers and their current lifecycle status."""
-    runtime_paths = sandbox_runner_runtime_paths(request)
+    runtime_paths = _sandbox_runner_runtime_paths(request)
     workers = [
         _serialize_worker(worker)
         for worker in get_local_worker_manager(runtime_paths).list_workers(include_idle=include_idle)
@@ -1302,7 +1302,7 @@ async def list_workers(request: Request, include_idle: bool = True) -> SandboxWo
 @router.post("/workers/cleanup", response_model=SandboxWorkerCleanupResponse)
 async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse:
     """Mark idle workers inactive while retaining their persisted state."""
-    runtime_paths = sandbox_runner_runtime_paths(request)
+    runtime_paths = _sandbox_runner_runtime_paths(request)
     worker_manager = get_local_worker_manager(runtime_paths)
     cleaned_workers = [_serialize_worker(worker) for worker in worker_manager.cleanup_idle_workers()]
     return SandboxWorkerCleanupResponse(
@@ -1380,8 +1380,8 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     payload: SandboxRunnerSaveAttachmentRequest,
 ) -> SandboxRunnerSaveAttachmentResponse:
     """Save one context-authorized attachment into the prepared worker workspace."""
-    runtime_paths = sandbox_runner_runtime_paths(request)
-    config = sandbox_runner_runtime_config(request)
+    runtime_paths = _sandbox_runner_runtime_paths(request)
+    config = _sandbox_runner_runtime_config(request)
     runner_token = _app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
 
@@ -1473,9 +1473,9 @@ async def execute_tool_call(
     payload: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
-    runtime_paths = sandbox_runner_runtime_paths(request)
-    config = sandbox_runner_runtime_config(request)
-    tool_metadata = sandbox_runner_tool_metadata(request)
+    runtime_paths = _sandbox_runner_runtime_paths(request)
+    config = _sandbox_runner_runtime_config(request)
+    tool_metadata = _sandbox_runner_tool_metadata(request)
     runner_token = _app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     _validate_execute_request_payload(payload, tool_metadata=tool_metadata)

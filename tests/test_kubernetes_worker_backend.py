@@ -34,9 +34,9 @@ from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.backends.kubernetes_resources import (
-    ANNOTATION_RUNNER_TOKEN_HASH,
-    ANNOTATION_STARTUP_MANIFEST_HASH,
-    ANNOTATION_TEMPLATE_HASH,
+    _ANNOTATION_RUNNER_TOKEN_HASH,
+    _ANNOTATION_STARTUP_MANIFEST_HASH,
+    _ANNOTATION_TEMPLATE_HASH,
     ANNOTATION_WORKER_KEY,
     worker_auth_token,
 )
@@ -542,8 +542,8 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     assert auth_secret["metadata"]["name"] == handle.worker_id
     assert auth_secret["stringData"] == {"MINDROOM_SANDBOX_PROXY_TOKEN": handle.auth_token}
     assert handle.auth_token not in json.dumps(deployment)
-    assert deployment["spec"]["template"]["metadata"]["annotations"][ANNOTATION_RUNNER_TOKEN_HASH]
-    assert deployment["spec"]["template"]["metadata"]["annotations"][ANNOTATION_RUNNER_TOKEN_HASH] != handle.auth_token
+    assert deployment["spec"]["template"]["metadata"]["annotations"][_ANNOTATION_RUNNER_TOKEN_HASH]
+    assert deployment["spec"]["template"]["metadata"]["annotations"][_ANNOTATION_RUNNER_TOKEN_HASH] != handle.auth_token
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
     manifest_path = env_values["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"]
@@ -590,16 +590,16 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     assert auth_secret["metadata"]["ownerReferences"] == core_api.created_bodies[0]["metadata"]["ownerReferences"]
     template_annotations = deployment["spec"]["template"]["metadata"]["annotations"]
     assert set(template_annotations) == {
-        ANNOTATION_RUNNER_TOKEN_HASH,
-        ANNOTATION_STARTUP_MANIFEST_HASH,
+        _ANNOTATION_RUNNER_TOKEN_HASH,
+        _ANNOTATION_STARTUP_MANIFEST_HASH,
         ANNOTATION_WORKER_KEY,
     }
     assert template_annotations[ANNOTATION_WORKER_KEY] == worker_key
-    assert template_annotations[ANNOTATION_RUNNER_TOKEN_HASH] == kubernetes_resources_module.worker_auth_token_hash(
+    assert template_annotations[_ANNOTATION_RUNNER_TOKEN_HASH] == kubernetes_resources_module._worker_auth_token_hash(
         _TEST_AUTH_TOKEN,
         worker_key,
     )
-    assert template_annotations[ANNOTATION_STARTUP_MANIFEST_HASH] == startup_manifest_sha256(
+    assert template_annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] == startup_manifest_sha256(
         committed_runtime,
         tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
     )
@@ -717,7 +717,7 @@ def test_kubernetes_backend_recreate_failure_removes_orphaned_tenant_auth_secret
     backend, apps_api, core_api = _backend(runtime_paths=runtime_paths, auth_secret_name=auth_secret_name)
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
     deployment = apps_api.deployments[handle.worker_id]
-    deployment.metadata.annotations[ANNOTATION_TEMPLATE_HASH] = "stale"
+    deployment.metadata.annotations[_ANNOTATION_TEMPLATE_HASH] = "stale"
 
     def recreate_with_failure(deployment_name: str, _manifest: dict[str, object], *, timeout_seconds: float) -> None:
         _ = timeout_seconds
@@ -777,7 +777,7 @@ def test_kubernetes_backend_recreates_worker_when_startup_manifest_changes(tmp_p
 
     initial_deployment = apps_api.created_bodies[0]
     initial_manifest_hash = initial_deployment["spec"]["template"]["metadata"]["annotations"][
-        ANNOTATION_STARTUP_MANIFEST_HASH
+        _ANNOTATION_STARTUP_MANIFEST_HASH
     ]
 
     updated_backend, _, _ = _backend(
@@ -795,7 +795,7 @@ def test_kubernetes_backend_recreates_worker_when_startup_manifest_changes(tmp_p
     assert len(apps_api.created_bodies) == 2
     updated_deployment = apps_api.created_bodies[1]
     updated_manifest_hash = updated_deployment["spec"]["template"]["metadata"]["annotations"][
-        ANNOTATION_STARTUP_MANIFEST_HASH
+        _ANNOTATION_STARTUP_MANIFEST_HASH
     ]
     assert updated_manifest_hash != initial_manifest_hash
 
@@ -1150,7 +1150,7 @@ def test_kubernetes_backend_renders_configured_annotations_on_worker_pod_templat
         extra_annotations={
             "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
             ANNOTATION_WORKER_KEY: "user-supplied-value",
-            ANNOTATION_STARTUP_MANIFEST_HASH: "user-supplied-value",
+            _ANNOTATION_STARTUP_MANIFEST_HASH: "user-supplied-value",
         },
     )
 
@@ -1161,12 +1161,12 @@ def test_kubernetes_backend_renders_configured_annotations_on_worker_pod_templat
     committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
     assert annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] == "false"
     assert annotations[ANNOTATION_WORKER_KEY] == _TEST_SCOPED_WORKER_KEY_A
-    assert annotations[ANNOTATION_STARTUP_MANIFEST_HASH] == startup_manifest_sha256(
+    assert annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] == startup_manifest_sha256(
         committed_runtime,
         tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
     )
     assert annotations[ANNOTATION_WORKER_KEY] != "user-supplied-value"
-    assert annotations[ANNOTATION_STARTUP_MANIFEST_HASH] != "user-supplied-value"
+    assert annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] != "user-supplied-value"
 
 
 def test_kubernetes_backend_rejects_unknown_worker_keys_for_scoped_mounts() -> None:

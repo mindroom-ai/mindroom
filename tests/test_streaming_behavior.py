@@ -37,7 +37,7 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
-    render_interrupted_replay_content,
+    _render_interrupted_replay_content,
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -50,9 +50,9 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import (
-    CANCELLED_RESPONSE_NOTE,
-    INTERRUPTED_RESPONSE_NOTE,
-    PROGRESS_PLACEHOLDER,
+    _CANCELLED_RESPONSE_NOTE,
+    _INTERRUPTED_RESPONSE_NOTE,
+    _PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
@@ -96,7 +96,7 @@ async def _aiter(*events: object) -> AsyncIterator[object]:
 
 
 def _render_cleaned_interrupted_replay(body: str) -> str:
-    return render_interrupted_replay_content(
+    return _render_interrupted_replay_content(
         InterruptedReplaySnapshot(
             user_message="",
             partial_text=clean_partial_reply_text(body),
@@ -708,29 +708,29 @@ class TestStreamingBehavior:
 
     def test_is_interrupted_partial_reply_detects_terminal_markers(self) -> None:
         """Interrupted partial-reply detection should recognize shared cancelled/error notes."""
-        assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}")
         assert is_interrupted_partial_reply("Draft answer\n\n**[Response interrupted by an error: boom]**")
         assert not is_interrupted_partial_reply("Finished answer")
         assert not is_interrupted_partial_reply(None)
 
     def test_is_interrupted_partial_reply_recognises_all_three_variants(self) -> None:
         """Interrupted partial-reply detection should recognize every live cancel note."""
-        assert is_interrupted_partial_reply(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}")
-        assert is_interrupted_partial_reply(f"Draft answer\n\n{INTERRUPTED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}")
+        assert is_interrupted_partial_reply(f"Draft answer\n\n{_INTERRUPTED_RESPONSE_NOTE}")
         assert is_interrupted_partial_reply(build_restart_interrupted_body("Draft answer"))
 
     def test_clean_partial_reply_text_strips_shared_markers(self) -> None:
         """Shared partial-reply cleanup should normalize cancelled/error/placeholder bodies."""
-        assert clean_partial_reply_text(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == "Draft answer"
+        assert clean_partial_reply_text(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}") == "Draft answer"
         assert (
             clean_partial_reply_text("Draft answer\n\n**[Response interrupted by an error: boom]**") == "Draft answer"
         )
-        assert clean_partial_reply_text(PROGRESS_PLACEHOLDER) == ""
+        assert clean_partial_reply_text(_PROGRESS_PLACEHOLDER) == ""
         assert clean_partial_reply_text("...") == ""
 
     def test_clean_partial_reply_text_normalises_user_stop_label_to_interrupted_marker(self) -> None:
         """User-stop labels should collapse to the canonical interrupted replay marker."""
-        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == (
+        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}") == (
             f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
         )
 
@@ -742,7 +742,7 @@ class TestStreamingBehavior:
 
     def test_clean_partial_reply_text_normalises_new_interrupted_label_to_interrupted_marker(self) -> None:
         """Generic interruption labels should collapse to the canonical interrupted replay marker."""
-        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{INTERRUPTED_RESPONSE_NOTE}") == (
+        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{_INTERRUPTED_RESPONSE_NOTE}") == (
             f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
         )
 
@@ -1792,7 +1792,7 @@ class TestStreamingBehavior:
                 new=AsyncMock(
                     return_value=DeliveredMatrixEvent(
                         event_id="$existing_event",
-                        content_sent={"body": PROGRESS_PLACEHOLDER},
+                        content_sent={"body": _PROGRESS_PLACEHOLDER},
                     ),
                 ),
             ) as mock_edit,
@@ -1801,7 +1801,7 @@ class TestStreamingBehavior:
 
         assert mock_edit.await_count == 1
         edit_args = mock_edit.await_args.args
-        assert edit_args[3]["body"].startswith(PROGRESS_PLACEHOLDER)
+        assert edit_args[3]["body"].startswith(_PROGRESS_PLACEHOLDER)
         assert IN_PROGRESS_MARKER not in edit_args[3]["body"]
 
     @pytest.mark.asyncio
@@ -1833,7 +1833,7 @@ class TestStreamingBehavior:
         assert mock_client.room_send.call_count == 1
         assert streaming.event_id == "$cold_start_1"
         sent_content = mock_client.room_send.call_args[1]["content"]
-        assert sent_content["body"].startswith(PROGRESS_PLACEHOLDER)
+        assert sent_content["body"].startswith(_PROGRESS_PLACEHOLDER)
         assert IN_PROGRESS_MARKER not in sent_content["body"]
 
     @pytest.mark.asyncio
@@ -1906,7 +1906,7 @@ class TestStreamingBehavior:
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$placeholder_msg",
-                    content_sent={"body": PROGRESS_PLACEHOLDER},
+                    content_sent={"body": _PROGRESS_PLACEHOLDER},
                 ),
             ),
         ) as mock_edit:
@@ -1914,7 +1914,7 @@ class TestStreamingBehavior:
 
         assert mock_edit.await_count == 1
         final_body = mock_edit.await_args.args[3]["body"]
-        assert final_body == PROGRESS_PLACEHOLDER
+        assert final_body == _PROGRESS_PLACEHOLDER
         assert IN_PROGRESS_MARKER not in final_body
 
     @pytest.mark.asyncio
@@ -1938,7 +1938,7 @@ class TestStreamingBehavior:
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$existing_msg",
-                    content_sent={"body": PROGRESS_PLACEHOLDER},
+                    content_sent={"body": _PROGRESS_PLACEHOLDER},
                 ),
             ),
         ) as mock_edit:
@@ -1991,8 +1991,8 @@ class TestStreamingBehavior:
         assert accumulated is not None
         assert len(edited_contents) == 1
         final_content, final_text = edited_contents[0]
-        assert final_text == PROGRESS_PLACEHOLDER
-        assert final_content["body"] == PROGRESS_PLACEHOLDER
+        assert final_text == _PROGRESS_PLACEHOLDER
+        assert final_content["body"] == _PROGRESS_PLACEHOLDER
         assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
         assert final_content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$original_123"}}
 
@@ -2438,7 +2438,7 @@ class TestStreamingBehavior:
 
         assert len(edited_texts) == 2
         assert IN_PROGRESS_MARKER not in edited_texts[0]
-        assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
+        assert edited_texts[-1] == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
         assert exc_info.value.transport_outcome.terminal_status == "cancelled"
         assert exc_info.value.transport_outcome.failure_reason == "cancelled_by_user"
 
@@ -2483,7 +2483,7 @@ class TestStreamingBehavior:
             )
 
         assert len(edited_texts) == 2
-        assert edited_texts[-1] == f"Partial answer\n\n{INTERRUPTED_RESPONSE_NOTE}"
+        assert edited_texts[-1] == f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}"
 
     @pytest.mark.asyncio
     async def test_cancelled_stream_reports_existing_event_id_to_callback(self) -> None:
@@ -3772,7 +3772,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("terminal_kind", "expected_final_text"),
-        [("cancel", INTERRUPTED_RESPONSE_NOTE), ("complete", PROGRESS_PLACEHOLDER)],
+        [("cancel", _INTERRUPTED_RESPONSE_NOTE), ("complete", _PROGRESS_PLACEHOLDER)],
     )
     async def test_send_streaming_response_terminal_update_ignores_late_progress(
         self,

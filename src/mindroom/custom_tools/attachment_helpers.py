@@ -78,7 +78,7 @@ def resolve_context_thread_id(
 
 
 @dataclass(frozen=True)
-class CanonicalToolThreadTarget:
+class _CanonicalToolThreadTarget:
     """Shared tool-facing thread-target normalization result."""
 
     requested_thread_id: str | None
@@ -95,7 +95,7 @@ async def resolve_canonical_tool_thread_target(
     allow_context_fallback: bool = True,
     fail_closed_on_normalization_error: bool = False,
     room_timeline_sentinel: str | None = None,
-) -> CanonicalToolThreadTarget:
+) -> _CanonicalToolThreadTarget:
     """Resolve one tool thread target into the canonical thread root or a stable error."""
     requested_thread_id = resolve_context_thread_id(
         context,
@@ -105,7 +105,7 @@ async def resolve_canonical_tool_thread_target(
         room_timeline_sentinel=room_timeline_sentinel,
     )
     if requested_thread_id is None:
-        return CanonicalToolThreadTarget(
+        return _CanonicalToolThreadTarget(
             requested_thread_id=None,
             canonical_thread_id=None,
             error="thread_id is required when no active thread context is available for the target room.",
@@ -118,13 +118,13 @@ async def resolve_canonical_tool_thread_target(
             raise
         canonical_thread_id = None
     if canonical_thread_id is None:
-        return CanonicalToolThreadTarget(
+        return _CanonicalToolThreadTarget(
             requested_thread_id=requested_thread_id,
             canonical_thread_id=None,
             error="Failed to resolve a canonical thread root for the target event.",
         )
 
-    return CanonicalToolThreadTarget(
+    return _CanonicalToolThreadTarget(
         requested_thread_id=requested_thread_id,
         canonical_thread_id=canonical_thread_id,
     )

@@ -1,7 +1,7 @@
 """Rich prompts for agents - like prompts.py but for agents instead of tools."""
 
 # Universal identity context template for all agents
-AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
+_AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
 You are {display_name} (Matrix ID: {matrix_id}), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).
 You are powered by the {model_provider} model: {model_id}.
 When working in teams with other agents, you should identify yourself as {display_name} and leverage your specific expertise.
@@ -11,7 +11,7 @@ In Matrix chat contexts, conversation history may be provided inside a `<convers
 
 """
 
-OPENAI_COMPAT_HISTORY_GUIDANCE = (
+_OPENAI_COMPAT_HISTORY_GUIDANCE = (
     "In OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines. "
     "Always use the sender or role labels exactly as provided in the prompt.\n"
 )
@@ -26,12 +26,12 @@ def build_agent_identity_context(
     include_openai_compat_guidance: bool = False,
 ) -> str:
     """Render the shared identity prompt with optional OpenAI-compatible guidance."""
-    return AGENT_IDENTITY_CONTEXT_TEMPLATE.format(
+    return _AGENT_IDENTITY_CONTEXT_TEMPLATE.format(
         display_name=display_name,
         matrix_id=matrix_id,
         model_provider=model_provider,
         model_id=model_id,
-        openai_compat_history_guidance=(OPENAI_COMPAT_HISTORY_GUIDANCE if include_openai_compat_guidance else ""),
+        openai_compat_history_guidance=(_OPENAI_COMPAT_HISTORY_GUIDANCE if include_openai_compat_guidance else ""),
     )
 
 

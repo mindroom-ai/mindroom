@@ -252,7 +252,7 @@ class ResponseLifecycleCoordinator:
 
 
 @dataclass(frozen=True)
-class SessionStartedWatch:
+class _SessionStartedWatch:
     """Pre-computed session:started eligibility and emission arguments."""
 
     should_watch: bool
@@ -285,7 +285,7 @@ def _session_exists(
     return get_agent_session(storage, session_id) is not None
 
 
-def response_outcome_label(final_delivery_outcome: FinalDeliveryOutcome | None) -> str:
+def _response_outcome_label(final_delivery_outcome: FinalDeliveryOutcome | None) -> str:
     """Return one pipeline outcome label for the canonical final delivery outcome."""
     if final_delivery_outcome is not None and final_delivery_outcome.suppressed:
         return "suppressed"
@@ -376,9 +376,9 @@ class ResponseLifecycle:
         room_id: str,
         thread_id: str | None,
         create_storage: Callable[[], BaseDb],
-    ) -> SessionStartedWatch:
+    ) -> _SessionStartedWatch:
         """Pre-compute session:started eligibility for one response path."""
-        return SessionStartedWatch(
+        return _SessionStartedWatch(
             should_watch=self._session_started_watch_is_needed(
                 tool_context=tool_context,
                 session_id=session_id,
@@ -395,7 +395,7 @@ class ResponseLifecycle:
             create_storage=create_storage,
         )
 
-    async def _maybe_emit_session_started(self, watch: SessionStartedWatch) -> None:
+    async def _maybe_emit_session_started(self, watch: _SessionStartedWatch) -> None:
         if watch.tool_context is None or not watch.should_watch:
             return
         storage = watch.create_storage()
@@ -426,7 +426,7 @@ class ResponseLifecycle:
         )
         await emit(watch.tool_context.hook_registry, EVENT_SESSION_STARTED, context)
 
-    async def emit_session_started(self, watch: SessionStartedWatch) -> None:
+    async def emit_session_started(self, watch: _SessionStartedWatch) -> None:
         """Emit session:started without aborting delivery on ordinary failures."""
         try:
             await self._maybe_emit_session_started(watch)
@@ -494,7 +494,7 @@ class ResponseLifecycle:
             post_response_deps=post_response_deps,
         )
         if self.pipeline_timing is not None:
-            self.pipeline_timing.emit_summary(self.deps.logger, outcome=response_outcome_label(final_delivery_outcome))
+            self.pipeline_timing.emit_summary(self.deps.logger, outcome=_response_outcome_label(final_delivery_outcome))
         return final_delivery_outcome
 
     async def apply_effects_safely(

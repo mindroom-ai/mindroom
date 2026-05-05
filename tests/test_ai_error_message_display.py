@@ -24,12 +24,12 @@ from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history import HistoryScope, PreparedHistoryState
 from mindroom.hooks import HookRegistry
-from mindroom.knowledge import KnowledgeResolution
+from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
-from mindroom.streaming import CANCELLED_RESPONSE_NOTE, INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
+from mindroom.streaming import _CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -101,7 +101,7 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
 def _knowledge_access_support() -> SimpleNamespace:
     return SimpleNamespace(
         for_agent=MagicMock(return_value=None),
-        resolve_for_agent=MagicMock(return_value=KnowledgeResolution(knowledge=None)),
+        resolve_for_agent=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
     )
 
 
@@ -277,7 +277,7 @@ class TestAIErrorDisplay:
             assert len(edited_messages) == 1
             event_id, text = edited_messages[0]
             assert event_id == "$thinking_msg"
-            assert text == INTERRUPTED_RESPONSE_NOTE
+            assert text == _INTERRUPTED_RESPONSE_NOTE
 
     @pytest.mark.asyncio
     async def test_user_stop_edits_thinking_message_with_user_cancel_note(self, tmp_path: Path) -> None:
@@ -314,7 +314,7 @@ class TestAIErrorDisplay:
         assert len(edited_messages) == 1
         event_id, text = edited_messages[0]
         assert event_id == "$thinking_msg"
-        assert text == CANCELLED_RESPONSE_NOTE
+        assert text == _CANCELLED_RESPONSE_NOTE
         assert outcome.terminal_status == "cancelled"
         assert outcome.failure_reason == "cancelled_by_user"
 
@@ -377,7 +377,7 @@ class TestAIErrorDisplay:
         assert len(edited_messages) == 1
         event_id, text = edited_messages[0]
         assert event_id == "$thinking_msg"
-        assert text == CANCELLED_RESPONSE_NOTE
+        assert text == _CANCELLED_RESPONSE_NOTE
         assert outcome.terminal_status == "cancelled"
         assert outcome.failure_reason == "cancelled_by_user"
 
@@ -437,7 +437,7 @@ class TestAIErrorDisplay:
         assert len(edited_messages) == 2
         event_id, text = edited_messages[-1]
         assert event_id == "$thinking_msg"
-        assert text == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
+        assert text == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
         assert outcome.terminal_status == "cancelled"
         assert outcome.failure_reason == "cancelled_by_user"
 

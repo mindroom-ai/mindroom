@@ -18,20 +18,20 @@ from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
-    AUTHORED_OVERRIDE_INHERIT,
+    _AUTHORED_OVERRIDE_INHERIT,
     ConfigField,
     ToolAuthoredOverrideValidator,
     ToolCategory,
     ToolConfigOverrideError,
     ToolManagedInitArg,
     _execute_validation_plugin_module,
+    _validate_authored_overrides,
     deserialize_tool_validation_snapshot,
     export_tools_metadata,
     get_tool_by_name,
     register_tool_with_metadata,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
-    validate_authored_overrides,
 )
 from mindroom.tool_system.registry_state import (
     _PLUGIN_MODULE_PREFIX,
@@ -395,7 +395,7 @@ def test_validate_authored_overrides_accepts_declared_field_types_and_nulls() ->
         return _FakeToolkit
 
     try:
-        assert validate_authored_overrides(
+        assert _validate_authored_overrides(
             tool_name,
             {
                 "enabled": True,
@@ -436,11 +436,11 @@ def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_field
         return _FakeToolkit
 
     try:
-        assert validate_authored_overrides(
+        assert _validate_authored_overrides(
             tool_name,
-            {"workspace_id": AUTHORED_OVERRIDE_INHERIT},
+            {"workspace_id": _AUTHORED_OVERRIDE_INHERIT},
             config_path_prefix="agents.code.tools[0]",
-        ) == {"workspace_id": AUTHORED_OVERRIDE_INHERIT}
+        ) == {"workspace_id": _AUTHORED_OVERRIDE_INHERIT}
     finally:
         _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
@@ -470,7 +470,7 @@ def test_validate_authored_overrides_accepts_string_lists_for_text_fields_with_a
         return _FakeToolkit
 
     try:
-        assert validate_authored_overrides(
+        assert _validate_authored_overrides(
             tool_name,
             {"patterns": ["GITEA_*", "WHISPER_URL"]},
             config_path_prefix="agents.code.tools[0]",
@@ -507,28 +507,28 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
             ToolConfigOverrideError,
             match=r"agents.code.tools\[0\].test_authored_override_errors.flag",
         ):
-            validate_authored_overrides(
+            _validate_authored_overrides(
                 tool_name,
                 {"flag": "yes"},
                 config_path_prefix="agents.code.tools[0]",
             )
 
         with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed for this field"):
-            validate_authored_overrides(
+            _validate_authored_overrides(
                 tool_name,
                 {"base_dir": "/workspace"},
                 config_path_prefix="agents.code.tools[0]",
             )
 
         with pytest.raises(ToolConfigOverrideError, match="password fields"):
-            validate_authored_overrides(
+            _validate_authored_overrides(
                 tool_name,
                 {"api_key": "sk-test"},
                 config_path_prefix="agents.code.tools[0]",
             )
 
         with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
-            validate_authored_overrides(
+            _validate_authored_overrides(
                 tool_name,
                 {"missing": True},
                 config_path_prefix="agents.code.tools[0]",

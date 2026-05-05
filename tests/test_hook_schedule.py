@@ -288,7 +288,7 @@ async def test_schedule_hook_send_message_inherits_context_thread_id(tmp_path: P
 
     with (
         patch(
-            "mindroom.hooks.sender.send_message_result",
+            "mindroom.hooks.sender._send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$hook-event")),
         ) as mock_hook_send,
         patch(
@@ -332,7 +332,7 @@ async def test_schedule_hook_send_message_allows_explicit_room_level_opt_out(tmp
 
     with (
         patch(
-            "mindroom.hooks.sender.send_message_result",
+            "mindroom.hooks.sender._send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$hook-event")),
         ) as mock_hook_send,
         patch(
@@ -438,7 +438,7 @@ async def test_schedule_hook_send_message_can_trigger_dispatch(tmp_path: Path) -
 
     with (
         patch(
-            "mindroom.hooks.sender.send_message_result",
+            "mindroom.hooks.sender._send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$hook-event")),
         ) as mock_hook_send,
         patch(

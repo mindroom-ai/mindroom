@@ -30,8 +30,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache.event_cache import ConversationEventCache
 
-ApprovalStatus = Literal["approved", "denied", "expired"]
-ResolutionStatus = Literal["approved", "denied"]
+_ApprovalStatus = Literal["approved", "denied", "expired"]
+_ResolutionStatus = Literal["approved", "denied"]
 MatrixEventSender = Callable[[str, str | None, dict[str, Any]], Awaitable["SentApprovalEvent | None"]]
 MatrixEventEditor = Callable[[str, str, dict[str, Any]], Awaitable[bool]]
 ApprovalRoomProvider = Callable[[], set[str]]
@@ -58,7 +58,7 @@ _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request wa
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
-_MANAGER: ApprovalManager | None = None
+_MANAGER: _ApprovalManager | None = None
 logger = get_logger(__name__)
 
 
@@ -180,7 +180,7 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
 class ApprovalDecision:
     """One resolved approval outcome."""
 
-    status: ApprovalStatus
+    status: _ApprovalStatus
     reason: str | None
     resolved_by: str | None
     resolved_at: datetime
@@ -227,7 +227,7 @@ class _ActiveApprovalSend:
     send_task: asyncio.Future[SentApprovalEvent | None]
 
 
-class ApprovalManager:
+class _ApprovalManager:
     """Coordinate live approval waiters against Matrix approval cards.
 
     Cached approval cards are only a startup cleanup index; they never make an
@@ -338,7 +338,7 @@ class ApprovalManager:
         *,
         card_event_id: str,
         room_id: str,
-        status: ResolutionStatus,
+        status: _ResolutionStatus,
         reason: str | None = None,
         resolved_by: str | None = None,
     ) -> ApprovalActionResult:
@@ -402,7 +402,7 @@ class ApprovalManager:
         room_id: str,
         sender_id: str,
         card_event_id: str,
-        status: ResolutionStatus,
+        status: _ResolutionStatus,
         reason: str | None,
     ) -> ApprovalActionResult:
         """Resolve one approval action anchored to a Matrix approval-card event id."""
@@ -425,7 +425,7 @@ class ApprovalManager:
         room_id: str,
         sender_id: str,
         approval_id: str,
-        status: ResolutionStatus,
+        status: _ResolutionStatus,
         reason: str | None,
     ) -> ApprovalActionResult:
         """Resolve one custom client action by in-memory approval id only."""
@@ -449,7 +449,7 @@ class ApprovalManager:
         live_waiter: _LiveApprovalWaiter,
         room_id: str,
         sender_id: str,
-        status: ResolutionStatus,
+        status: _ResolutionStatus,
         reason: str | None,
     ) -> ApprovalActionResult:
         if live_waiter.room_id != room_id:
@@ -696,7 +696,7 @@ class ApprovalManager:
         self,
         *,
         pending: PendingApproval,
-        status: ResolutionStatus,
+        status: _ResolutionStatus,
         reason: str | None,
         resolved_by: str | None,
     ) -> ApprovalActionResult:
@@ -712,7 +712,7 @@ class ApprovalManager:
             await self._yield_to_queued_cancellation()
             cancelled = self._cancelled_card_event_ids_contains(pending.card_event_id)
             if cancelled:
-                resolved_status: ApprovalStatus = "expired"
+                resolved_status: _ApprovalStatus = "expired"
                 resolved_reason = _DEFAULT_CANCELLED_REASON
                 resolution_was_truncated = False
             else:
@@ -802,7 +802,7 @@ class ApprovalManager:
         self,
         pending: PendingApproval,
         *,
-        status: ApprovalStatus,
+        status: _ApprovalStatus,
         reason: str | None,
         resolved_by: str | None,
     ) -> bool:
@@ -1120,7 +1120,7 @@ class ApprovalManager:
     ) -> dict[str, Any]:
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
-            "body": ApprovalManager._event_body(tool_name, status),
+            "body": _ApprovalManager._event_body(tool_name, status),
             "tool_name": tool_name,
             "tool_call_id": approval_id,
             "arguments": arguments,
@@ -1143,7 +1143,7 @@ class ApprovalManager:
     def _resolved_event_content(
         pending: PendingApproval,
         *,
-        status: ApprovalStatus,
+        status: _ApprovalStatus,
         reason: str | None,
         resolved_by: str | None,
         resolved_at: datetime,
@@ -1155,7 +1155,7 @@ class ApprovalManager:
         expires_at = _parse_datetime(pending.expires_at) or requested_at + timedelta(seconds=pending.timeout_seconds)
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
-            "body": ApprovalManager._event_body(pending.tool_name, status),
+            "body": _ApprovalManager._event_body(pending.tool_name, status),
             "tool_name": pending.tool_name,
             "tool_call_id": pending.approval_id,
             "arguments": pending.arguments_preview,
@@ -1193,9 +1193,9 @@ class ApprovalManager:
         cls,
         pending: PendingApproval,
         *,
-        status: ResolutionStatus,
+        status: _ResolutionStatus,
         reason: str | None,
-    ) -> tuple[ApprovalStatus, str | None, bool]:
+    ) -> tuple[_ApprovalStatus, str | None, bool]:
         if status == "approved" and pending.arguments_preview_truncated:
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True
         return status, reason, False
@@ -1203,7 +1203,7 @@ class ApprovalManager:
     @staticmethod
     def _new_decision(
         *,
-        status: ApprovalStatus,
+        status: _ApprovalStatus,
         reason: str | None,
         resolved_by: str | None,
     ) -> ApprovalDecision:
@@ -1219,7 +1219,7 @@ def _lookback_cutoff_ms(lookback_hours: int) -> int:
     return int((time.time() - max(lookback_hours, 0) * 3600) * 1000)
 
 
-def get_approval_store() -> ApprovalManager | None:
+def get_approval_store() -> _ApprovalManager | None:
     """Return the module-level approval manager when initialized."""
     return _MANAGER
 
@@ -1232,7 +1232,7 @@ def initialize_approval_store(
     event_cache: ConversationEventCache | None = None,
     approval_room_ids: ApprovalRoomProvider | None = None,
     transport_sender: TransportSenderProvider | None = None,
-) -> ApprovalManager:
+) -> _ApprovalManager:
     """Initialize the module-level approval manager for one runtime context."""
     global _MANAGER
 
@@ -1250,7 +1250,7 @@ def initialize_approval_store(
         msg = "Cannot reinitialize approval store with pending live approvals; shut it down first."
         raise RuntimeError(msg)
 
-    _MANAGER = ApprovalManager(
+    _MANAGER = _ApprovalManager(
         runtime_paths,
         sender=sender,
         editor=editor,

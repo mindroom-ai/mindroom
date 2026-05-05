@@ -13,10 +13,10 @@ import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 THREAD_TAGS_EVENT_TYPE = "com.mindroom.thread.tags"
-POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
-DEFAULT_STATE_EVENT_POWER_LEVEL = 50
-DEFAULT_USER_POWER_LEVEL = 0
-MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
+_POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
+_DEFAULT_STATE_EVENT_POWER_LEVEL = 50
+_DEFAULT_USER_POWER_LEVEL = 0
+_MAX_THREAD_TAG_WRITE_ATTEMPTS = 3
 _TAG_NAME_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _PRIORITY_LEVELS = frozenset({"high", "medium", "low"})
 
@@ -522,7 +522,7 @@ def _required_state_event_power_level(
     state_default = _parse_power_level(power_levels_content.get("state_default"))
     if state_default is not None:
         return state_default
-    return DEFAULT_STATE_EVENT_POWER_LEVEL
+    return _DEFAULT_STATE_EVENT_POWER_LEVEL
 
 
 def _user_power_level(
@@ -541,7 +541,7 @@ def _user_power_level(
     users_default = _parse_power_level(power_levels_content.get("users_default"))
     if users_default is not None:
         return users_default
-    return DEFAULT_USER_POWER_LEVEL
+    return _DEFAULT_USER_POWER_LEVEL
 
 
 def _raise_insufficient_power_level(
@@ -640,7 +640,7 @@ async def _get_room_thread_tags_states(
     )
 
 
-def list_tagged_threads_from_state_map(
+def _list_tagged_threads_from_state_map(
     room_id: str,
     room_state: Mapping[object, object],
     *,
@@ -684,7 +684,7 @@ async def _assert_thread_tags_write_allowed(
     actor_user_id = _require_non_empty_string(client.user_id, field_name="client.user_id")
     response = await client.room_get_state_event(
         room_id=room_id,
-        event_type=POWER_LEVELS_EVENT_TYPE,
+        event_type=_POWER_LEVELS_EVENT_TYPE,
     )
     if not isinstance(response, nio.RoomGetStateEventResponse):
         msg = f"Failed to fetch Matrix power levels for {room_id}: {response}"
@@ -775,7 +775,7 @@ async def set_thread_tag(
         requester_user_id=normalized_set_by,
     )
 
-    for _ in range(MAX_THREAD_TAG_WRITE_ATTEMPTS):
+    for _ in range(_MAX_THREAD_TAG_WRITE_ATTEMPTS):
         expected_record = ThreadTagRecord(
             set_by=normalized_set_by,
             set_at=datetime.now(UTC),
@@ -807,7 +807,7 @@ async def set_thread_tag(
 
     msg = (
         f"Failed to preserve thread tag {normalized_tag!r} for {normalized_thread_root_id} in {room_id} "
-        f"after {MAX_THREAD_TAG_WRITE_ATTEMPTS} concurrent-write attempts."
+        f"after {_MAX_THREAD_TAG_WRITE_ATTEMPTS} concurrent-write attempts."
     )
     raise ThreadTagsError(msg)
 
@@ -834,7 +834,7 @@ async def remove_thread_tag(
     )
 
     remove_written = False
-    for _ in range(MAX_THREAD_TAG_WRITE_ATTEMPTS):
+    for _ in range(_MAX_THREAD_TAG_WRITE_ATTEMPTS):
         existing_state = await get_thread_tags(
             client,
             room_id,
@@ -876,7 +876,7 @@ async def remove_thread_tag(
 
     msg = (
         f"Failed to remove thread tag {normalized_tag!r} for {normalized_thread_root_id} in {room_id} "
-        f"after {MAX_THREAD_TAG_WRITE_ATTEMPTS} concurrent-write attempts."
+        f"after {_MAX_THREAD_TAG_WRITE_ATTEMPTS} concurrent-write attempts."
     )
     raise ThreadTagsError(msg)
 
@@ -897,10 +897,10 @@ async def _get_thread_tags_via_room_state(
         msg = f"Failed to fetch room state for thread tags in {room_id}."
         raise ThreadTagsError(msg)
 
-    return list_tagged_threads_from_state_map(room_id, room_state).get(thread_root_id)
+    return _list_tagged_threads_from_state_map(room_id, room_state).get(thread_root_id)
 
 
-async def remove_thread_tag_via_room_state(
+async def _remove_thread_tag_via_room_state(
     room_id: str,
     thread_root_id: str,
     tag: str,
@@ -918,7 +918,7 @@ async def remove_thread_tag_via_room_state(
     state_key = _thread_tag_state_key(normalized_thread_root_id, normalized_tag)
 
     remove_written = False
-    for _ in range(MAX_THREAD_TAG_WRITE_ATTEMPTS):
+    for _ in range(_MAX_THREAD_TAG_WRITE_ATTEMPTS):
         existing_state = await _get_thread_tags_via_room_state(
             room_id,
             normalized_thread_root_id,
@@ -966,7 +966,7 @@ async def remove_thread_tag_via_room_state(
 
     msg = (
         f"Failed to remove thread tag {normalized_tag!r} for {normalized_thread_root_id} in {room_id} "
-        f"after {MAX_THREAD_TAG_WRITE_ATTEMPTS} concurrent-write attempts."
+        f"after {_MAX_THREAD_TAG_WRITE_ATTEMPTS} concurrent-write attempts."
     )
     raise ThreadTagsError(msg)
 

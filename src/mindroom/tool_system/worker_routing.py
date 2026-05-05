@@ -23,13 +23,13 @@ _ExecutionChannel = Literal["matrix", "openai_compat"]
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
-SHARED_ONLY_INTEGRATION_NAMES = frozenset(
+_SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
         "spotify",
         "homeassistant",
     },
 )
-LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
+_LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
     {
         "attachments",
         "gmail",
@@ -216,7 +216,7 @@ def resolve_worker_execution_scope(
     account_id: str | None = None,
 ) -> _ResolvedWorkerExecution:
     """Resolve worker execution identity and key from explicit scope inputs."""
-    resolved_execution_identity = resolve_execution_identity_for_worker_scope(
+    resolved_execution_identity = _resolve_execution_identity_for_worker_scope(
         worker_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
@@ -314,7 +314,7 @@ def requires_shared_only_integration_scope(
     configured_mcp_server_ids: Collection[str] | None = None,
 ) -> bool:
     """Return whether a tool or dashboard integration is restricted to shared scope."""
-    if name in SHARED_ONLY_INTEGRATION_NAMES:
+    if name in _SHARED_ONLY_INTEGRATION_NAMES:
         return True
 
     from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name  # noqa: PLC0415
@@ -354,7 +354,7 @@ def unsupported_shared_only_integration_names(
 
 def tool_stays_local(name: str) -> bool:
     """Return whether one integration tool always stays in the primary runtime."""
-    return name in LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES
+    return name in _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES
 
 
 def unsupported_shared_only_integration_message(
@@ -448,7 +448,7 @@ def require_worker_key_for_scope(
     return worker_key
 
 
-def is_unscoped_worker_key(worker_key: str) -> bool:
+def _is_unscoped_worker_key(worker_key: str) -> bool:
     """Return whether a worker key uses the unscoped backend worker form."""
     parts = worker_key.split(":")
     return len(parts) >= 4 and parts[0] == "v1" and parts[2] == "unscoped"
@@ -465,7 +465,7 @@ def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
     return cast("ResolvedWorkerKeyScope", scope)
 
 
-def worker_key_agent_name(worker_key: str) -> str | None:
+def _worker_key_agent_name(worker_key: str) -> str | None:
     """Return the encoded agent name for one resolved worker key, when present."""
     scope = resolved_worker_key_scope(worker_key)
     if scope is None or scope == "user":
@@ -483,7 +483,7 @@ def worker_key_agent_name(worker_key: str) -> str | None:
     return parts[3] if scope in {"shared", "unscoped"} else parts[-1]
 
 
-def resolve_execution_identity_for_worker_scope(
+def _resolve_execution_identity_for_worker_scope(
     worker_scope: WorkerScope | None,
     execution_identity: ToolExecutionIdentity | None = None,
     *,
@@ -618,7 +618,7 @@ def visible_state_roots_for_worker_key(
             private_instance_scope_root_path(base_storage_path, worker_key),
         )
 
-    agent_name = worker_key_agent_name(worker_key)
+    agent_name = _worker_key_agent_name(worker_key)
     if agent_name is None:
         return ()
     if scope == "user_agent" and agent_name in private_agent_names:

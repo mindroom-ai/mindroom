@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
 _ROOM_HISTORY_MESSAGE_TYPES = ("m.room.message", "m.room.encrypted")
-type ThreadHistoryDiagnosticValue = str | int | float | bool | None
+type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
 @dataclass(slots=True)
@@ -89,7 +89,7 @@ def _log_thread_history_refresh(
     thread_id: str,
     caller_label: str,
     mode: str,
-    diagnostics: Mapping[str, ThreadHistoryDiagnosticValue],
+    diagnostics: Mapping[str, _ThreadHistoryDiagnosticValue],
     coordinator_queue_wait_ms: float,
 ) -> None:
     """Emit one structured INFO line for a completed thread read."""

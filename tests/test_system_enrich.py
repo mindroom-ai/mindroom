@@ -24,7 +24,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.execution_preparation import PreparedExecutionContext
+from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -37,7 +37,7 @@ from mindroom.hooks import (
     hook,
     render_system_enrichment_block,
 )
-from mindroom.hooks.types import RESERVED_EVENT_NAMESPACES, default_timeout_ms_for_event, validate_event_name
+from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.memory import MemoryPromptParts
@@ -191,7 +191,8 @@ def test_system_enrich_event_and_context_helpers(tmp_path: Path) -> None:
 
     assert EVENT_SYSTEM_ENRICH in BUILTIN_EVENT_NAMES
     assert validate_event_name(EVENT_SYSTEM_ENRICH) == EVENT_SYSTEM_ENRICH
-    assert "system" in RESERVED_EVENT_NAMESPACES
+    with pytest.raises(ValueError, match="reserved namespace"):
+        validate_event_name("system:custom")
     assert default_timeout_ms_for_event(EVENT_SYSTEM_ENRICH) == 2000
     assert context._items == [EnrichmentItem(key="team_state", text="Delegate to research", cache_policy="stable")]
 
@@ -317,11 +318,11 @@ async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_addit
     rendered = render_system_enrichment_block(system_items)
     prepared_agent = _agent("code", "CodeAgent")
 
-    async def fake_prepare_agent_execution_context(**kwargs: object) -> PreparedExecutionContext:
+    async def fake_prepare_agent_execution_context(**kwargs: object) -> _PreparedExecutionContext:
         agent = kwargs["agent"]
         assert isinstance(agent, Agent)
         assert agent.additional_context == rendered
-        return PreparedExecutionContext(
+        return _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared prompt"),),
             replay_plan=None,
             unseen_event_ids=[],
@@ -384,13 +385,13 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
     )
     rendered = render_system_enrichment_block(system_items)
 
-    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> PreparedExecutionContext:
+    async def fake_prepare_bound_team_execution_context(**kwargs: object) -> _PreparedExecutionContext:
         team = kwargs["team"]
         agents = kwargs["agents"]
         assert isinstance(team, Team)
         assert team.additional_context == rendered
         assert all(agent.additional_context == rendered for agent in agents)
-        return PreparedExecutionContext(
+        return _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared team prompt"),),
             replay_plan=None,
             unseen_event_ids=[],
@@ -466,8 +467,8 @@ async def test_prepare_materialized_team_execution_returns_prompt_helpers(tmp_pa
         failed_agent_names=[],
     )
 
-    async def fake_prepare_bound_team_execution_context(**_kwargs: object) -> PreparedExecutionContext:
-        return PreparedExecutionContext(
+    async def fake_prepare_bound_team_execution_context(**_kwargs: object) -> _PreparedExecutionContext:
+        return _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared team prompt"),),
             replay_plan=None,
             unseen_event_ids=[],

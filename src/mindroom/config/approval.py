@@ -6,9 +6,9 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-ApprovalAction = Literal["auto_approve", "require_approval"]
+_ApprovalAction = Literal["auto_approve", "require_approval"]
 _MAX_TIMEOUT_DAYS = 36500.0
-TimeoutDays = Annotated[float, Field(gt=0, le=_MAX_TIMEOUT_DAYS, allow_inf_nan=False)]
+_TimeoutDays = Annotated[float, Field(gt=0, le=_MAX_TIMEOUT_DAYS, allow_inf_nan=False)]
 
 
 class ApprovalRuleConfig(BaseModel):
@@ -17,9 +17,9 @@ class ApprovalRuleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     match: str
-    action: ApprovalAction | None = None
+    action: _ApprovalAction | None = None
     script: str | None = None
-    timeout_days: TimeoutDays | None = None
+    timeout_days: _TimeoutDays | None = None
 
     @field_validator("match")
     @classmethod
@@ -64,8 +64,8 @@ class ToolApprovalConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    default: ApprovalAction = Field(default="auto_approve")
-    timeout_days: TimeoutDays = Field(default=7.0)
+    default: _ApprovalAction = Field(default="auto_approve")
+    timeout_days: _TimeoutDays = Field(default=7.0)
     rules: list[ApprovalRuleConfig] = Field(default_factory=list)
 
     @field_validator("timeout_days", mode="before")

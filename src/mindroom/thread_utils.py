@@ -135,7 +135,7 @@ def _agents_from_user_ids(
     return agents
 
 
-def has_user_responded_after_message(
+def _has_user_responded_after_message(
     thread_history: Sequence[ResolvedVisibleMessage],
     target_event_id: str,
     user_id: MatrixID,

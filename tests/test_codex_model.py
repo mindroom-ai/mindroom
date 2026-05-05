@@ -17,7 +17,7 @@ from agno.models.message import Message
 from agno.models.response import ModelResponse
 
 from mindroom import codex_model
-from mindroom.codex_model import CODEX_BASE_URL, CodexResponses, borrow_codex_key
+from mindroom.codex_model import _CODEX_BASE_URL, CodexResponses, _borrow_codex_key
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -55,7 +55,7 @@ def test_borrow_codex_key_uses_unexpired_chatgpt_access_token(tmp_path: Path) ->
     codex_home = tmp_path / ".codex"
     _write_codex_auth(codex_home, access_token, "refresh-value")
 
-    token, account_id = borrow_codex_key(codex_home=codex_home)
+    token, account_id = _borrow_codex_key(codex_home=codex_home)
 
     assert token == access_token
     assert account_id == "acct_123"
@@ -77,7 +77,7 @@ def test_borrow_codex_key_refreshes_expired_access_token(tmp_path: Path) -> None
             "refresh_token": new_refresh_value,
         },
     ):
-        token, account_id = borrow_codex_key(codex_home=codex_home)
+        token, account_id = _borrow_codex_key(codex_home=codex_home)
 
     auth = json.loads((codex_home / "auth.json").read_text(encoding="utf-8"))
     assert token == refreshed_token
@@ -141,7 +141,7 @@ def test_borrow_codex_key_serializes_concurrent_refreshes(
 
     def borrow_key() -> None:
         try:
-            results.append(borrow_codex_key(codex_home=codex_home))
+            results.append(_borrow_codex_key(codex_home=codex_home))
         except BaseException as exc:
             errors.append(exc)
 
@@ -175,7 +175,7 @@ def test_codex_responses_client_params_use_codex_endpoint_and_account_header(tmp
     params = model._get_client_params()
 
     assert params["api_key"] == access_token
-    assert params["base_url"] == CODEX_BASE_URL
+    assert params["base_url"] == _CODEX_BASE_URL
     assert params["default_headers"] == {
         "X-Test": "1",
         "ChatGPT-Account-ID": "acct_123",
@@ -378,4 +378,4 @@ def test_get_model_instance_supports_codex_provider(tmp_path: Path) -> None:
     assert isinstance(model, CodexResponses)
     assert model.id == "gpt-5.5"
     assert model.store is False
-    assert str(model.base_url) == CODEX_BASE_URL
+    assert str(model.base_url) == _CODEX_BASE_URL

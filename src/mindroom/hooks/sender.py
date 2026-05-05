@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 
 
-async def send_message_result(
+async def _send_message_result(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
@@ -25,12 +25,12 @@ async def send_message_result(
 ) -> DeliveredMatrixEvent | None:
     """Late-bind Matrix delivery to avoid the hooks facade import cycle."""
     # why-lazy: client_delivery imports config through Matrix formatting helpers during facade startup.
-    from mindroom.matrix.client_delivery import send_message_result as _send_message_result  # noqa: PLC0415
+    from mindroom.matrix.client_delivery import send_message_result  # noqa: PLC0415
 
-    return await _send_message_result(client, room_id, content, config=config)
+    return await send_message_result(client, room_id, content, config=config)
 
 
-def resolve_hook_sender_domain(
+def _resolve_hook_sender_domain(
     client: nio.AsyncClient,
     *,
     sender_domain: str | None = None,
@@ -65,7 +65,7 @@ async def send_hook_message(
     # why-lazy: mentions imports config during hooks facade startup.
     from mindroom.matrix.mentions import format_message_with_mentions  # noqa: PLC0415
 
-    resolved_sender_domain = resolve_hook_sender_domain(client, sender_domain=sender_domain)
+    resolved_sender_domain = _resolve_hook_sender_domain(client, sender_domain=sender_domain)
     if resolved_sender_domain is None:
         return None
 
@@ -87,7 +87,7 @@ async def send_hook_message(
         latest_thread_event_id=latest_thread_event_id,
         extra_content=content_extra,
     )
-    delivered = await send_message_result(client, room_id, content, config=config)
+    delivered = await _send_message_result(client, room_id, content, config=config)
     if delivered is not None:
         conversation_cache.notify_outbound_message(room_id, delivered.event_id, delivered.content_sent)
         return delivered.event_id
@@ -103,7 +103,7 @@ def build_hook_message_sender(
     conversation_cache: ConversationCacheProtocol,
 ) -> HookMessageSender | None:
     """Return a sender bound to one Matrix client, if enough identity is available."""
-    resolved_sender_domain = resolve_hook_sender_domain(client, sender_domain=sender_domain)
+    resolved_sender_domain = _resolve_hook_sender_domain(client, sender_domain=sender_domain)
     if resolved_sender_domain is None:
         return None
 

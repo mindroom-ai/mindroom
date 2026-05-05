@@ -14,7 +14,7 @@ from mindroom.config.main import Config
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.thread_utils import should_agent_respond
 from tests.conftest import (
     TEST_PASSWORD,
@@ -297,7 +297,7 @@ class TestDMIntegration:
     async def test_dm_response_flow(self, tmp_path: Path) -> None:
         """Test the complete flow of responding in a DM."""
         # This is a more complex integration test
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
         config = _config(tmp_path)
         config.agents = {"researcher": MagicMock()}
@@ -343,7 +343,7 @@ class TestDMIntegration:
             patch.object(bot._conversation_resolver, "fetch_thread_history", return_value=[]),
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
-            patch("mindroom.conversation_resolver.should_skip_mentions", return_value=False),
+            patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User is not an agent
             patch("mindroom.turn_controller.is_dm_room", return_value=True),  # This is a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
@@ -437,7 +437,7 @@ class TestDMIntegration:
             patch.object(bot._conversation_resolver, "fetch_thread_history", return_value=[]),
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
-            patch("mindroom.conversation_resolver.should_skip_mentions", return_value=False),
+            patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),
             patch("mindroom.turn_controller.is_dm_room", return_value=True),  # This is a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),

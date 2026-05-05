@@ -15,11 +15,11 @@ from agno.tools import Toolkit
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.dependencies import (
     _PIP_TO_IMPORT,
+    _auto_install_optional_extra,
     _install_optional_extras,
     _install_via_uv_sync,
     _pip_name_to_import,
     auto_install_enabled,
-    auto_install_optional_extra,
     check_deps_installed,
     install_command_for_current_python,
 )
@@ -400,7 +400,7 @@ def test_auto_install_optional_extra_supports_non_tool_groups(monkeypatch: pytes
         lambda extras, *, quiet=False: extras == ["sentence_transformers"] and quiet,
     )
 
-    assert auto_install_optional_extra("sentence_transformers", TEST_RUNTIME_PATHS)
+    assert _auto_install_optional_extra("sentence_transformers", TEST_RUNTIME_PATHS)
 
 
 def test_auto_install_optional_extra_matches_installed_metadata_names(
@@ -417,7 +417,7 @@ def test_auto_install_optional_extra_matches_installed_metadata_names(
         lambda extras, *, quiet=False: extras == ["sentence-transformers"] and quiet,
     )
 
-    assert auto_install_optional_extra("sentence_transformers", TEST_RUNTIME_PATHS)
+    assert _auto_install_optional_extra("sentence_transformers", TEST_RUNTIME_PATHS)
 
 
 def test_auto_install_enabled_uses_runtime_env(tmp_path: Path) -> None:

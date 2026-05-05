@@ -66,9 +66,9 @@ _NON_API_MESSAGE_FIELDS = {
     "references",
     "temporary",
 }
-type JSONScalar = str | int | float | bool | None
-type JSONValue = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
-_REQUEST_CONTEXT = ContextVar[dict[str, JSONValue] | None]("mindroom_llm_request_log_context", default=None)
+type _JSONScalar = str | int | float | bool | None
+type _JSONValue = _JSONScalar | list["_JSONValue"] | dict[str, "_JSONValue"]
+_REQUEST_CONTEXT = ContextVar[dict[str, _JSONValue] | None]("mindroom_llm_request_log_context", default=None)
 
 
 def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -> Path:
@@ -83,10 +83,10 @@ def _system_prompt(messages: Sequence[Message], model: Model) -> str:
     return model.system_prompt or ""
 
 
-def _model_params(model: Model) -> dict[str, JSONValue]:
+def _model_params(model: Model) -> dict[str, _JSONValue]:
     if not is_dataclass(model):
         return {}
-    payload: dict[str, JSONValue] = {}
+    payload: dict[str, _JSONValue] = {}
     for field in fields(model):
         if field.name in _SKIP_MODEL_PARAM_NAMES:
             continue
@@ -101,14 +101,14 @@ def _model_params(model: Model) -> dict[str, JSONValue]:
     return payload
 
 
-def _write_jsonl_line(path: Path, payload: dict[str, JSONValue]) -> None:
+def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload))
         handle.write("\n")
 
 
-def _json_safe(value: object) -> JSONValue:
+def _json_safe(value: object) -> _JSONValue:
     normalized: object = value
     if isinstance(normalized, BaseModel):
         normalized = normalized.model_dump(mode="python", exclude_none=True)
@@ -131,15 +131,15 @@ def _json_safe(value: object) -> JSONValue:
     return repr(normalized)
 
 
-def _request_message_payloads(messages: Sequence[Message]) -> list[dict[str, JSONValue]]:
-    payloads: list[dict[str, JSONValue]] = []
+def _request_message_payloads(messages: Sequence[Message]) -> list[dict[str, _JSONValue]]:
+    payloads: list[dict[str, _JSONValue]] = []
     for message in messages:
         payload = message.model_dump(
             mode="python",
             exclude_none=True,
             exclude=_NON_API_MESSAGE_FIELDS,
         )
-        payloads.append(cast("dict[str, JSONValue]", _json_safe(payload)))
+        payloads.append(cast("dict[str, _JSONValue]", _json_safe(payload)))
     return payloads
 
 
@@ -149,9 +149,9 @@ def _request_messages(value: object) -> list[Message] | None:
     return None
 
 
-def _request_tools(value: object) -> list[dict[str, JSONValue]] | None:
+def _request_tools(value: object) -> list[dict[str, _JSONValue]] | None:
     if isinstance(value, list) and all(isinstance(tool, dict) for tool in value):
-        return cast("list[dict[str, JSONValue]]", value)
+        return cast("list[dict[str, _JSONValue]]", value)
     return None
 
 
@@ -165,17 +165,17 @@ def _normalized_string_list(values: object) -> list[str]:
     return normalized
 
 
-def _snapshot_request_log_context() -> dict[str, JSONValue]:
+def _snapshot_request_log_context() -> dict[str, _JSONValue]:
     """Return one detached copy of the currently bound request log context."""
-    return cast("dict[str, JSONValue]", _json_safe(_REQUEST_CONTEXT.get() or {}))
+    return cast("dict[str, _JSONValue]", _json_safe(_REQUEST_CONTEXT.get() or {}))
 
 
-def current_llm_request_log_context() -> dict[str, JSONValue]:
+def current_llm_request_log_context() -> dict[str, _JSONValue]:
     """Return the current detached request-log context for cross-sink correlation."""
     return _snapshot_request_log_context()
 
 
-def model_params_payload(model: Model) -> dict[str, JSONValue]:
+def model_params_payload(model: Model) -> dict[str, _JSONValue]:
     """Return JSON-safe model parameters suitable for durable request metadata."""
     return _model_params(model)
 
@@ -276,15 +276,15 @@ async def stream_with_llm_request_log_context[StreamEventT](
                 await stream.aclose()
 
 
-async def write_llm_request_log(
+async def _write_llm_request_log(
     *,
     model: Model,
     agent_name: str,
     messages: Sequence[Message],
-    tools: list[dict[str, JSONValue]] | None,
+    tools: list[dict[str, _JSONValue]] | None,
     log_dir: str | None,
     default_log_dir: Path,
-    request_context: dict[str, JSONValue] | None = None,
+    request_context: dict[str, _JSONValue] | None = None,
 ) -> None:
     """Persist one request record for an LLM invocation."""
     now = datetime.now().astimezone()
@@ -314,13 +314,13 @@ async def _write_llm_request_log_if_present(
     kwargs: dict[str, object],
     log_dir: str | None,
     default_log_dir: Path,
-    request_context: dict[str, JSONValue],
+    request_context: dict[str, _JSONValue],
 ) -> None:
     """Write one request log entry when provider kwargs include API request messages."""
     messages = _request_messages(kwargs.get("messages"))
     if messages is None:
         return
-    await write_llm_request_log(
+    await _write_llm_request_log(
         model=model,
         agent_name=agent_name,
         messages=messages,

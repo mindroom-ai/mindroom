@@ -9,15 +9,15 @@ if TYPE_CHECKING:
     from mindroom.interactive import InteractiveMetadata
     from mindroom.tool_system.events import ToolTraceEntry
 
-TerminalStatus = Literal["completed", "cancelled", "error"]
+_TerminalStatus = Literal["completed", "cancelled", "error"]
 VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
-VisibleDeliveryKind = Literal["sent", "edited"]
+_VisibleDeliveryKind = Literal["sent", "edited"]
 
 
 @dataclass(frozen=True)
 class StreamTransportOutcome:  # noqa: D101
     last_physical_stream_event_id: str | None
-    terminal_status: TerminalStatus
+    terminal_status: _TerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
     canonical_final_body_candidate: str | None = None
@@ -35,11 +35,11 @@ class StreamTransportOutcome:  # noqa: D101
 
 @dataclass(frozen=True)
 class FinalDeliveryOutcome:  # noqa: D101
-    terminal_status: TerminalStatus
+    terminal_status: _TerminalStatus
     event_id: str | None
     is_visible_response: bool = False
     final_visible_body: str | None = None
-    delivery_kind: VisibleDeliveryKind | None = None
+    delivery_kind: _VisibleDeliveryKind | None = None
     failure_reason: str | None = None
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()

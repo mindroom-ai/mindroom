@@ -22,7 +22,7 @@ from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -780,7 +780,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
     router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
     router_bot.join_configured_rooms = AsyncMock()
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = config
     orchestrator.agent_bots = {"agent1": bot, ROUTER_AGENT_NAME: router_bot}
     bot.orchestrator = orchestrator

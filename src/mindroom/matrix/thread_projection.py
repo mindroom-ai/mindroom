@@ -11,10 +11,10 @@ from mindroom.matrix.thread_membership import map_backed_thread_membership_acces
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
-TThreadItem = TypeVar("TThreadItem")
+_TThreadItem = TypeVar("_TThreadItem")
 
 
-class SupportsThreadMessageOrdering(Protocol):
+class _SupportsThreadMessageOrdering(Protocol):
     """Minimal protocol for timestamped thread messages ordered by event id."""
 
     event_id: str
@@ -118,12 +118,12 @@ def _topologically_sort_same_timestamp_event_ids(
 
 
 def _sort_same_timestamp_group(
-    items: list[TThreadItem],
+    items: list[_TThreadItem],
     *,
-    event_id_getter: Callable[[TThreadItem], str],
+    event_id_getter: Callable[[_TThreadItem], str],
     related_event_id_by_event_id: Mapping[str, str],
     input_order_by_event_id: Mapping[str, int] | None,
-) -> list[TThreadItem]:
+) -> list[_TThreadItem]:
     """Keep same-timestamp parents ahead of descendants when relation ancestry is known."""
     if len(items) < 2:
         return items
@@ -140,12 +140,12 @@ def _sort_same_timestamp_group(
     return [items_by_event_id[event_id] for event_id in ordered_event_ids]
 
 
-def sort_thread_items_root_first(
-    items: list[TThreadItem],
+def _sort_thread_items_root_first(
+    items: list[_TThreadItem],
     *,
     thread_id: str,
-    event_id_getter: Callable[[TThreadItem], str],
-    timestamp_getter: Callable[[TThreadItem], int],
+    event_id_getter: Callable[[_TThreadItem], str],
+    timestamp_getter: Callable[[_TThreadItem], int],
     input_order_by_event_id: Mapping[str, int] | None = None,
     related_event_id_by_event_id: Mapping[str, str] | None = None,
 ) -> None:
@@ -158,7 +158,7 @@ def sort_thread_items_root_first(
         ),
     )
     if related_event_id_by_event_id is not None:
-        grouped_items: list[TThreadItem] = []
+        grouped_items: list[_TThreadItem] = []
         index = 0
         while index < len(items):
             group_end = index + 1
@@ -183,7 +183,7 @@ def sort_thread_items_root_first(
         items.insert(0, items.pop(root_index))
 
 
-def sort_thread_messages_root_first[TThreadMessageOrdering: SupportsThreadMessageOrdering](
+def sort_thread_messages_root_first[TThreadMessageOrdering: _SupportsThreadMessageOrdering](
     messages: list[TThreadMessageOrdering],
     *,
     thread_id: str,
@@ -191,7 +191,7 @@ def sort_thread_messages_root_first[TThreadMessageOrdering: SupportsThreadMessag
     related_event_id_by_event_id: Mapping[str, str] | None = None,
 ) -> None:
     """Keep the thread root first, then order the remaining messages chronologically."""
-    sort_thread_items_root_first(
+    _sort_thread_items_root_first(
         messages,
         thread_id=thread_id,
         event_id_getter=lambda message: message.event_id,
@@ -225,7 +225,7 @@ def sort_thread_event_sources_root_first(
             related_event_id_by_event_id[event_id] = related_event_id
 
     sorted_sources = list(event_sources)
-    sort_thread_items_root_first(
+    _sort_thread_items_root_first(
         sorted_sources,
         thread_id=thread_id,
         event_id_getter=lambda source: _event_id_from_source(source) or "",
@@ -325,7 +325,7 @@ def latest_visible_thread_event_id_by_thread(
     latest_visible_event_ids: dict[str, str] = {}
     for thread_key, thread_messages in messages_by_thread.items():
         ordered_messages = list(thread_messages)
-        sort_thread_items_root_first(
+        _sort_thread_items_root_first(
             ordered_messages,
             thread_id=thread_key,
             event_id_getter=lambda message: message.visible_event_id,

@@ -48,7 +48,7 @@ def _published_snapshot(
     )
 
 
-def reload_api_runtime_config(
+def _reload_api_runtime_config(
     api_app: FastAPI,
     runtime_paths: constants.RuntimePaths,
     *,

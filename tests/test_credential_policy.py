@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from mindroom.credential_policy import (
+    _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     OAUTH_CREDENTIAL_FIELDS,
-    UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     credential_service_policy,
     dashboard_may_edit_oauth_service,
     filter_oauth_credential_fields,
@@ -56,7 +56,7 @@ def test_local_shared_service_policy(service: str, worker_scope: str, expected: 
 )
 def test_worker_grantable_policy_rejects_sensitive_google_services(service: str) -> None:
     """Sensitive Google credential services should stay unsupported for worker mirroring."""
-    assert service in UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+    assert service in _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 
 
 def test_credential_service_policy_classifies_google_oauth_user_scope() -> None:

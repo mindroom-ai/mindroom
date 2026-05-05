@@ -12,9 +12,9 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.worker_routing import WorkerScope
 
-PrivateWorkerScope = Literal["user", "user_agent"]
-AgentPolicySource = Literal["private.per", "agent.worker_scope", "defaults.worker_scope", "unscoped"]
-DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
+_PrivateWorkerScope = Literal["user", "user_agent"]
+_AgentPolicySource = Literal["private.per", "agent.worker_scope", "defaults.worker_scope", "unscoped"]
+_DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,7 @@ class AgentPolicySeed:
     agent_name: str
     delegate_to: tuple[str, ...]
     is_private: bool
-    private_scope: PrivateWorkerScope | None
+    private_scope: _PrivateWorkerScope | None
     worker_scope: WorkerScope | None
     default_worker_scope: WorkerScope | None
     private_knowledge_enabled: bool
@@ -38,7 +38,7 @@ class ResolvedAgentPolicy:
     is_private: bool
     effective_execution_scope: WorkerScope | None
     scope_label: str
-    scope_source: AgentPolicySource
+    scope_source: _AgentPolicySource
     dashboard_credentials_supported: bool
     team_eligibility_reason: str | None
     private_knowledge_base_id: str | None
@@ -61,9 +61,9 @@ def _coerce_worker_scope(value: object) -> WorkerScope | None:
     return None
 
 
-def _coerce_private_scope(value: object) -> PrivateWorkerScope | None:
+def _coerce_private_scope(value: object) -> _PrivateWorkerScope | None:
     if value in {"user", "user_agent"}:
-        return cast("PrivateWorkerScope", value)
+        return cast("_PrivateWorkerScope", value)
     return None
 
 
@@ -133,7 +133,7 @@ def build_agent_policy_seeds(
     }
 
 
-def _resolved_scope_and_source(seed: AgentPolicySeed) -> tuple[WorkerScope | None, str, AgentPolicySource]:
+def _resolved_scope_and_source(seed: AgentPolicySeed) -> tuple[WorkerScope | None, str, _AgentPolicySource]:
     if seed.private_scope is not None:
         return seed.private_scope, f"private.per={seed.private_scope}", "private.per"
     if seed.worker_scope is not None:
@@ -152,7 +152,7 @@ def _resolve_agent_policy(
     seed: AgentPolicySeed,
     *,
     team_eligibility_reason: str | None = None,
-    private_knowledge_base_id_prefix: str = DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+    private_knowledge_base_id_prefix: str = _DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
 ) -> ResolvedAgentPolicy:
     """Resolve one canonical agent policy from one authored seed."""
     execution_scope, scope_label, scope_source = _resolved_scope_and_source(seed)
@@ -184,7 +184,7 @@ def resolve_agent_policy_from_data(
     *,
     default_worker_scope: WorkerScope | None,
     team_eligibility_reason: str | None = None,
-    private_knowledge_base_id_prefix: str = DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+    private_knowledge_base_id_prefix: str = _DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
 ) -> ResolvedAgentPolicy:
     """Resolve one canonical agent policy from typed config or draft payload data."""
     return _resolve_agent_policy(
@@ -316,7 +316,7 @@ def unsupported_team_agent_message(
 def resolve_agent_policy_index(
     seeds: Mapping[str, AgentPolicySeed],
     *,
-    private_knowledge_base_id_prefix: str = DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+    private_knowledge_base_id_prefix: str = _DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
 ) -> ResolvedAgentPolicyIndex:
     """Resolve canonical policies for all agents from one shared seed set."""
     closure_cache: dict[str, frozenset[str]] = {}
@@ -350,7 +350,7 @@ def resolve_private_knowledge_base_agent(
     base_id: str,
     seeds: Mapping[str, AgentPolicySeed],
     *,
-    private_knowledge_base_id_prefix: str = DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+    private_knowledge_base_id_prefix: str = _DEFAULT_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
 ) -> str | None:
     """Return the owning agent for one synthetic private knowledge base ID."""
     if not base_id.startswith(private_knowledge_base_id_prefix):

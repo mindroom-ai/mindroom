@@ -92,7 +92,9 @@ def _module_name_from_path(py_file: Path, src_dir: Path) -> str | None:
     return ".".join(parts)
 
 
-def _package_parts(module_name: str) -> tuple[str, ...]:
+def _package_parts(module_name: str, *, is_package_init: bool = False) -> tuple[str, ...]:
+    if is_package_init:
+        return tuple(module_name.split("."))
     parts = module_name.rsplit(".", 1)
     if len(parts) == 1:
         return ()
@@ -137,7 +139,7 @@ def collect_modules(src_dir: Path) -> dict[str, Module]:  # noqa: C901, PLR0912
         mod = Module(
             name=mod_name,
             path=py_file,
-            package_parts=_package_parts(mod_name),
+            package_parts=_package_parts(mod_name, is_package_init=py_file.name == "__init__.py"),
             tree=tree,
         )
 
@@ -583,6 +585,27 @@ def _collect_external_entrypoints(project_root: Path) -> set[tuple[str, str]]:
     return pairs
 
 
+def _load_tach_interface_exports(project_root: Path) -> set[tuple[str, str]]:
+    tach_path = project_root / "tach.toml"
+    if not tach_path.exists():
+        return set()
+
+    data = tomllib.loads(tach_path.read_text(encoding="utf-8"))
+    pairs: set[tuple[str, str]] = set()
+    for interface in data.get("interfaces", []):
+        source_modules = interface.get("from", [])
+        exposed_names = interface.get("expose", [])
+        if not isinstance(source_modules, list) or not isinstance(exposed_names, list):
+            continue
+        for module_name in source_modules:
+            if not isinstance(module_name, str):
+                continue
+            for symbol_name in exposed_names:
+                if isinstance(symbol_name, str):
+                    pairs.add((module_name, symbol_name))
+    return pairs
+
+
 def _collect_privacy_findings(project_root: Path) -> tuple[list[Symbol], list[PrivateModuleImport]]:
     """Collect public-symbol and private-module boundary findings."""
     src_dir = _find_src_dir(project_root)
@@ -593,12 +616,15 @@ def _collect_privacy_findings(project_root: Path) -> tuple[list[Symbol], list[Pr
     modules = collect_modules(src_dir)
     cross_imports = find_cross_imports(modules)
     external_entrypoints = _collect_external_entrypoints(project_root)
+    public_interface_exports = _load_tach_interface_exports(project_root)
 
     candidates = [
         sym
         for mod in modules.values()
         for sym in mod.symbols
-        if (sym.module, sym.name) not in cross_imports and (sym.module, sym.name) not in external_entrypoints
+        if (sym.module, sym.name) not in cross_imports
+        and (sym.module, sym.name) not in external_entrypoints
+        and (sym.module, sym.name) not in public_interface_exports
     ]
     candidates.sort(key=lambda s: (str(s.path), s.lineno))
     private_module_imports = collect_private_module_imports(modules)
