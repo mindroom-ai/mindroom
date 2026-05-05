@@ -15,6 +15,7 @@ from mindroom.attachments import (
     parse_attachment_ids_from_thread_history,
     register_file_or_video_attachment,
     register_image_attachment,
+    register_thread_history_media_attachments,
     resolve_thread_attachment_ids,
 )
 from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedTextEvent
@@ -357,10 +358,18 @@ class InboundTurnNormalizer:
             else []
         )
         history_attachment_ids = parse_attachment_ids_from_thread_history(request.thread_history)
+        history_media_attachment_ids = await register_thread_history_media_attachments(
+            self._client(),
+            self.deps.storage_path,
+            room_id=request.room_id,
+            thread_id=request.media_thread_id,
+            thread_history=request.thread_history,
+        )
         attachment_ids = merge_attachment_ids(
             request.current_attachment_ids,
             thread_attachment_ids,
             history_attachment_ids,
+            history_media_attachment_ids,
         )
         resolved_attachment_ids, attachment_audio, attachment_images, attachment_files, attachment_videos = (
             resolve_attachment_media(

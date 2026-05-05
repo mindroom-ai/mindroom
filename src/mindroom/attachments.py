@@ -115,6 +115,12 @@ def parse_attachment_ids_from_thread_history(thread_history: Sequence[ResolvedVi
     return attachment_ids
 
 
+def _thread_history_message_in_scope(message: ResolvedVisibleMessage, thread_id: str | None) -> bool:
+    if thread_id is None:
+        return message.thread_id is None
+    return thread_id in (message.thread_id, message.event_id)
+
+
 def merge_attachment_ids(*attachment_id_lists: list[str]) -> list[str]:
     """Merge attachment IDs preserving first-seen order."""
     merged: list[str] = []
@@ -649,6 +655,108 @@ def filter_attachments_for_context(
         else:
             rejected_attachment_ids.append(record.attachment_id)
     return allowed_records, rejected_attachment_ids
+
+
+def _media_event_from_thread_history_message(
+    room_id: str,
+    message: ResolvedVisibleMessage,
+) -> _FileOrVideoEvent | _ImageEvent | None:
+    msgtype = message.content.get("msgtype")
+    if msgtype not in {"m.file", "m.image", "m.video"}:
+        return None
+
+    content = {key: value for key, value in message.content.items() if isinstance(key, str)}
+    event_source = {
+        "content": content,
+        "event_id": message.event_id,
+        "origin_server_ts": message.timestamp,
+        "room_id": room_id,
+        "sender": message.sender,
+        "type": "m.room.message",
+    }
+    parsed_event = (
+        nio.RoomMessage.parse_decrypted_event(event_source)
+        if "file" in content
+        else nio.RoomMessage.parse_event(event_source)
+    )
+    if isinstance(
+        parsed_event,
+        nio.RoomMessageFile
+        | nio.RoomEncryptedFile
+        | nio.RoomMessageVideo
+        | nio.RoomEncryptedVideo
+        | nio.RoomMessageImage
+        | nio.RoomEncryptedImage,
+    ):
+        return parsed_event
+    return None
+
+
+async def _register_thread_history_media_attachment(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    event: _FileOrVideoEvent | _ImageEvent,
+) -> AttachmentRecord | None:
+    attachment_id = _attachment_id_for_event(event.event_id)
+    existing_record = load_attachment(storage_path, attachment_id)
+    if (
+        existing_record is not None
+        and existing_record.room_id == room_id
+        and existing_record.thread_id == thread_id
+        and existing_record.local_path.is_file()
+    ):
+        return existing_record
+
+    if isinstance(event, nio.RoomMessageImage | nio.RoomEncryptedImage):
+        return await register_image_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
+
+    return await register_file_or_video_attachment(
+        client,
+        storage_path,
+        room_id=room_id,
+        thread_id=thread_id,
+        event=event,
+    )
+
+
+async def register_thread_history_media_attachments(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> list[str]:
+    """Register unannotated image/file/video events visible in thread history."""
+    attachment_ids: list[str] = []
+    seen_attachment_ids: set[str] = set()
+    for message in thread_history:
+        if not _thread_history_message_in_scope(message, thread_id):
+            continue
+        event = _media_event_from_thread_history_message(room_id, message)
+        if event is None:
+            continue
+        attachment_record = await _register_thread_history_media_attachment(
+            client,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event=event,
+        )
+        if attachment_record is None or attachment_record.attachment_id in seen_attachment_ids:
+            continue
+        seen_attachment_ids.add(attachment_record.attachment_id)
+        attachment_ids.append(attachment_record.attachment_id)
+    return attachment_ids
 
 
 async def resolve_thread_attachment_ids(

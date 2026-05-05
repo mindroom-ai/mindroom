@@ -12,6 +12,7 @@ import nio
 import pytest
 from pydantic import ValidationError
 
+from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.coalescing import (
     COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
@@ -2298,6 +2299,50 @@ async def test_register_batch_media_attachments_emits_payload_timing_on_failure(
         "attachment_count": 0,
         "fallback_image_count": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_dispatch_payload_registers_unregistered_image_from_thread_history(tmp_path: Path) -> None:
+    """Prior thread images without MindRoom metadata should become context attachments."""
+    bot = _make_bot(tmp_path)
+    image_event = _image_event(event_id="$img-history", thread_id="$thread")
+    image_content = image_event.source["content"]
+    assert isinstance(image_content, dict)
+    history_image = ResolvedVisibleMessage(
+        sender=image_event.sender,
+        body=image_event.body,
+        timestamp=1000,
+        event_id=image_event.event_id,
+        content=image_content,
+        thread_id="$thread",
+        latest_event_id=image_event.event_id,
+    )
+    download_response = MagicMock(spec=nio.DownloadResponse)
+    download_response.body = b"\x89PNG\r\n\x1a\npayload"
+    bot.client.download = AsyncMock(return_value=download_response)
+
+    with patch("mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids", new=AsyncMock(return_value=[])):
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!room:localhost",
+                prompt="@test_agent see above",
+                current_attachment_ids=[],
+                thread_id="$thread",
+                media_thread_id="$thread",
+                thread_history=[history_image],
+            ),
+        )
+
+    attachment_id = _attachment_id_for_event("$img-history")
+    assert payload.attachment_ids == [attachment_id]
+    assert payload.model_prompt == (
+        f"Available attachment IDs: {attachment_id}. Use tool calls to inspect or process them."
+    )
+    assert len(payload.media.images) == 1
+    record = load_attachment(tmp_path, attachment_id)
+    assert record is not None
+    assert record.source_event_id == "$img-history"
+    assert record.thread_id == "$thread"
 
 
 @pytest.mark.asyncio
