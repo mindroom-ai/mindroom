@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -644,6 +647,50 @@ def test_connect_uses_stored_oauth_client_config(tmp_path: Path) -> None:
     assert params["client_id"] == ["stored-client-id"]
 
 
+def test_connect_generates_pkce_challenge_for_pkce_provider(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    base_provider = _fake_provider()
+    provider = OAuthProvider(
+        id=base_provider.id,
+        display_name=base_provider.display_name,
+        authorization_url=base_provider.authorization_url,
+        token_url=base_provider.token_url,
+        scopes=base_provider.scopes,
+        credential_service=base_provider.credential_service,
+        client_config_services=base_provider.client_config_services,
+        pkce_code_challenge_method="S256",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app) as client:
+            _login(client)
+            response = client.post(f"/api/oauth/{provider.id}/connect?agent_name=general")
+
+    assert response.status_code == 200
+    params = parse_qs(urlparse(response.json()["auth_url"]).query)
+    verifier_state = params["state"][0]
+    assert params["code_challenge_method"] == ["S256"]
+    code_challenge = params["code_challenge"][0]
+
+    state_store = runtime_paths.storage_root / "oauth_state" / "oauth_state.json"
+    stored = json.loads(state_store.read_text(encoding="utf-8"))
+    code_verifier = stored["states"][verifier_state]["data"]["oauth_code_verifier"]
+    assert 43 <= len(code_verifier) <= 128
+    expected_challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
+    )
+    assert code_challenge == expected_challenge
+    assert code_verifier not in response.json()["auth_url"]
+
+
 def test_provider_exchange_and_refresh_use_oauth_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -729,6 +776,58 @@ def test_provider_exchange_and_refresh_use_oauth_client(
     assert "_id_token" not in refreshed
     assert "id_token" not in refreshed
     assert "client_secret" not in refreshed
+
+
+def test_pkce_provider_exchange_sends_code_verifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"TEST_OAUTH_CLIENT_ID": "client-id", "TEST_OAUTH_CLIENT_SECRET": "client-secret"},
+    )
+    provider = OAuthProvider(
+        id="test_drive",
+        display_name="Test Drive",
+        authorization_url="https://auth.example.test/test_drive/authorize",
+        token_url="https://auth.example.test/test_drive/token",
+        scopes=("scope.read",),
+        credential_service="test_drive",
+        client_config_services=("test_drive_oauth_client",),
+        pkce_code_challenge_method="S256",
+    )
+    seen: dict[str, Any] = {}
+
+    class FakeOAuth2Client:
+        def __init__(self, **kwargs: object) -> None:
+            seen["init_kwargs"] = kwargs
+
+        async def __aenter__(self) -> FakeOAuth2Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def fetch_token(self, url: str, **kwargs: object) -> dict[str, Any]:
+            seen["fetch"] = {"url": url, **kwargs}
+            return {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "token_type": "Bearer",
+                "scope": "scope.read",
+            }
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
+
+    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths, code_verifier="pkce-verifier"))
+
+    assert seen["fetch"] == {
+        "url": provider.token_url,
+        "code": "auth-code",
+        "grant_type": "authorization_code",
+        "code_verifier": "pkce-verifier",
+    }
+    assert result.token_data["token"] == "access-token"
 
 
 def test_custom_token_exchanger_metadata_is_stamped_by_core(tmp_path: Path) -> None:

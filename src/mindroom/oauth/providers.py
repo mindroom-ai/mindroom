@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import secrets
 import time
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
@@ -30,6 +32,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
 _TOKEN_ENDPOINT_AUTH_METHOD = "client_secret_post"  # noqa: S105
+PKCECodeChallengeMethod = Literal["S256"]
 
 
 class OAuthProviderError(RuntimeError):
@@ -231,6 +234,17 @@ def oauth_expires_at_from_response(token_response: Mapping[str, Any]) -> float |
     return None
 
 
+def generate_pkce_code_verifier() -> str:
+    """Return one high-entropy PKCE verifier."""
+    return secrets.token_urlsafe(64)
+
+
+def pkce_s256_code_challenge(code_verifier: str) -> str:
+    """Return the RFC 7636 S256 challenge for one verifier."""
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
 @dataclass(frozen=True, slots=True)
 class OAuthProvider:
     """Provider definition registered by core or a plugin."""
@@ -246,6 +260,7 @@ class OAuthProvider:
     shared_client_config_services: tuple[str, ...] = ()
     default_redirect_path: str | None = None
     extra_auth_params: Mapping[str, str] = field(default_factory=dict)
+    pkce_code_challenge_method: PKCECodeChallengeMethod | None = None
     allowed_email_domains: tuple[str, ...] = ()
     allowed_hosted_domains: tuple[str, ...] = ()
     allowed_email_domains_env: str | Sequence[str] | None = None
@@ -283,6 +298,9 @@ class OAuthProvider:
             raise ValueError(msg)
         if not self.scopes:
             msg = f"OAuth provider '{self.id}' must declare at least one scope"
+            raise ValueError(msg)
+        if self.pkce_code_challenge_method not in {None, "S256"}:
+            msg = f"OAuth provider '{self.id}' supports only S256 PKCE"
             raise ValueError(msg)
         redirect_path = self.redirect_path
         if not redirect_path.startswith("/"):
@@ -359,7 +377,19 @@ class OAuthProvider:
             return f"{configured_origin.rstrip('/')}{self.redirect_path}"
         return f"http://localhost:{_runtime_port(runtime_paths)}{self.redirect_path}"
 
-    def authorization_uri(self, runtime_paths: RuntimePaths, *, state: str) -> str:
+    def issue_pkce_code_verifier(self) -> str | None:
+        """Return a new PKCE verifier when this provider requires PKCE."""
+        if self.pkce_code_challenge_method is None:
+            return None
+        return generate_pkce_code_verifier()
+
+    def authorization_uri(
+        self,
+        runtime_paths: RuntimePaths,
+        *,
+        state: str,
+        code_verifier: str | None = None,
+    ) -> str:
         """Build the provider authorization URL for one state token."""
         client_config = self.require_client_config(runtime_paths)
         client = OAuth2Session(
@@ -369,17 +399,30 @@ class OAuthProvider:
             redirect_uri=client_config.redirect_uri,
             token_endpoint_auth_method=_TOKEN_ENDPOINT_AUTH_METHOD,
         )
+        auth_params = dict(self.extra_auth_params)
+        if self.pkce_code_challenge_method == "S256":
+            if not code_verifier:
+                msg = "OAuth provider requires a PKCE code verifier"
+                raise OAuthProviderError(msg)
+            auth_params["code_challenge"] = pkce_s256_code_challenge(code_verifier)
+            auth_params["code_challenge_method"] = self.pkce_code_challenge_method
         try:
             authorization_url, _ = client.create_authorization_url(
                 self.authorization_url,
                 state=state,
-                **dict(self.extra_auth_params),
+                **auth_params,
             )
         finally:
             client.close()
         return authorization_url
 
-    async def exchange_code(self, code: str, runtime_paths: RuntimePaths) -> OAuthTokenResult:
+    async def exchange_code(
+        self,
+        code: str,
+        runtime_paths: RuntimePaths,
+        *,
+        code_verifier: str | None = None,
+    ) -> OAuthTokenResult:
         """Exchange an authorization code for normalized credentials."""
         client_config = self.require_client_config(runtime_paths)
         if self.token_exchanger is not None:
@@ -401,10 +444,18 @@ class OAuthProvider:
             timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
         ) as client:
             try:
+                fetch_kwargs: dict[str, Any] = {
+                    "code": code,
+                    "grant_type": "authorization_code",
+                }
+                if self.pkce_code_challenge_method is not None:
+                    if not code_verifier:
+                        msg = "OAuth provider requires a PKCE code verifier"
+                        raise OAuthProviderError(msg)
+                    fetch_kwargs["code_verifier"] = code_verifier
                 token_response = await client.fetch_token(
                     self.token_url,
-                    code=code,
-                    grant_type="authorization_code",
+                    **fetch_kwargs,
                 )
             except (AuthlibBaseError, HTTPError) as exc:
                 msg = "OAuth token exchange failed"
