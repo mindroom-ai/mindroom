@@ -6,9 +6,7 @@ from defusedxml.ElementTree import fromstring
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.execution_preparation import (
-    _build_matrix_prompt_with_thread_history as build_matrix_prompt_with_thread_history,
-)
-from mindroom.execution_preparation import (
+    _build_matrix_prompt_with_thread_history,
     _build_unseen_context_messages,
     _collect_history_messages,
 )
@@ -101,7 +99,7 @@ def test_build_matrix_prompt_with_thread_history_truncates_visible_body_to_max_l
         ),
     ]
 
-    prompt = build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_thread_history(
         "Follow-up",
         thread_history,
         max_message_length=200,

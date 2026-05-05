@@ -68,7 +68,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.local import _local_worker_state_paths_for_root as local_worker_state_paths_for_root
+from mindroom.workers.backends.local import _local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
 from tests.conftest import FakeCredentialsManager, make_conversation_cache_mock, make_event_cache_mock, requires_linux
@@ -711,7 +711,7 @@ async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path:
         session_id="session-1",
     )
     worker_key = resolve_worker_key("shared", execution_identity, agent_name="general")
-    worker_paths = local_worker_state_paths_for_root(tmp_path / "worker-scratch")
+    worker_paths = _local_worker_state_paths_for_root(tmp_path / "worker-scratch")
     worker_paths.workspace.mkdir(parents=True, exist_ok=True)
     prepared_worker = sandbox_runner_module.sandbox_worker_prep.PreparedWorkerRequest(
         handle=WorkerHandle(

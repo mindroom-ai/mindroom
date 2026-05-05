@@ -17,7 +17,7 @@ from mindroom.hooks import HookContext, HookContextSupport
 from mindroom.hooks.registry import HookRegistry, HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import AgentMessageSnapshot
-from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -277,7 +277,7 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
         Config(models={"default": ModelConfig(provider="test", id="test-model")}),
         runtime_paths,
     )
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = config
     orchestrator.hook_registry = MagicMock()
     orchestrator.hook_registry.has_hooks.return_value = True

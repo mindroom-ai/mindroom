@@ -19,10 +19,10 @@ from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
 from mindroom.credential_policy import (
-    _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS as UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
+    _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
 )
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
-from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT as AUTHORED_OVERRIDE_INHERIT
+from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
 
@@ -585,7 +585,7 @@ class TestConsolidatedConfigManager:
                     "code": {
                         "display_name": "Code",
                         "tools": [
-                            {"clickup": {"master_space_id": AUTHORED_OVERRIDE_INHERIT}},
+                            {"clickup": {"master_space_id": _AUTHORED_OVERRIDE_INHERIT}},
                         ],
                     },
                 },
@@ -1215,7 +1215,7 @@ class TestWorkerGrantableCredentials:
         with pytest.raises(ValidationError, match="google_oauth_client"):
             DefaultsConfig(worker_grantable_credentials=["google_oauth_client"])
 
-    @pytest.mark.parametrize("service", sorted(UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS))
+    @pytest.mark.parametrize("service", sorted(_UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS))
     def test_worker_grantable_credentials_reject_unsupported_services(self, service: str) -> None:
         """Worker credential mirroring should reject every unsupported credential service."""
         with pytest.raises(ValidationError, match=service):

@@ -14,6 +14,7 @@ import pytest
 from mindroom.attachment_media import resolve_attachment_media
 from mindroom.attachments import (
     _attachment_id_for_event,
+    _register_image_attachment,
     filter_attachments_for_context,
     load_attachment,
     merge_attachment_ids,
@@ -22,9 +23,6 @@ from mindroom.attachments import (
     register_local_attachment,
     resolve_attachments,
     resolve_thread_attachment_ids,
-)
-from mindroom.attachments import (
-    _register_image_attachment as register_image_attachment,
 )
 from tests.conftest import make_visible_message
 
@@ -137,7 +135,7 @@ async def test_register_image_attachment_uses_detected_mime_type(tmp_path: Path)
         },
     }
 
-    record = await register_image_attachment(
+    record = await _register_image_attachment(
         AsyncMock(),
         tmp_path,
         room_id="!room:localhost",

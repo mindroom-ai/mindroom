@@ -45,10 +45,9 @@ from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.turn_controller import _PrecheckedEvent
-from mindroom.turn_policy import PreparedDispatch, ResponseAction
-from mindroom.turn_policy import _DispatchPlan as DispatchPlan
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -839,7 +838,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._turn_policy.plan_turn = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+    bot._turn_policy.plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
 
     await bot._turn_controller._dispatch_text_message(
         room,
@@ -958,7 +957,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._turn_policy.plan_turn = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+    bot._turn_policy.plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
 
     await bot._turn_controller._dispatch_text_message(
         room,
@@ -1115,7 +1114,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     turn_store.is_handled = MagicMock(return_value=False)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
     bot._turn_policy.plan_turn = AsyncMock(
-        return_value=DispatchPlan(
+        return_value=_DispatchPlan(
             kind="respond",
             response_action=ResponseAction(kind="individual"),
         ),
@@ -1168,7 +1167,7 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
     """Agent lifecycle hooks should receive a bound sender directly on the context."""
     bot = _hook_bot(tmp_path)
     bot.client = AsyncMock()
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": bot}
     bot.orchestrator = orchestrator
 
@@ -1222,7 +1221,7 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
     async def started(ctx: AgentLifecycleContext) -> None:
         await ctx.send_message("!room:localhost", "dispatch me", trigger_dispatch=True)
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": bot}
     bot.orchestrator = orchestrator
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
@@ -1626,7 +1625,7 @@ async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_p
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._turn_policy.plan_turn = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+    bot._turn_policy.plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
 
     await bot._turn_controller._dispatch_text_message(
         room,
@@ -1794,7 +1793,7 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
         is_synthetic=True,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=_dispatch_context(bot))
-    bot._turn_policy.plan_turn = AsyncMock(return_value=DispatchPlan(kind="ignore"))
+    bot._turn_policy.plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
 
     await bot._turn_controller._dispatch_text_message(
         room,

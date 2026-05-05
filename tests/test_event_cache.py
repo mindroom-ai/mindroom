@@ -23,7 +23,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client_thread_history import fetch_thread_history
-from mindroom.matrix.conversation_cache import _cached_room_get_event as cached_room_get_event
+from mindroom.matrix.conversation_cache import _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.timing import DispatchPipelineTiming
@@ -900,7 +900,7 @@ async def test_cached_room_get_event_cache_hit_avoids_network_call(event_cache: 
 
     try:
         await cache.store_event("$reply", "!room:localhost", _cache_source(reply_event))
-        response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 
@@ -948,7 +948,7 @@ async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(
                 ("$reply_edit", "!room:localhost", _cache_source(edit_event)),
             ],
         )
-        response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 
@@ -1122,7 +1122,7 @@ async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(
 
     try:
         await cache.store_event("$reply_edit", "!room:localhost", _cache_source(edit_event))
-        response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 
@@ -1177,9 +1177,9 @@ async def test_redacting_latest_edit_falls_back_to_previous_cached_edit(event_ca
                 ("$reply_edit_2", "!room:localhost", _cache_source(newer_edit)),
             ],
         )
-        latest_response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        latest_response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
         redacted = await cache.redact_event("!room:localhost", "$reply_edit_2")
-        fallback_response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        fallback_response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 
@@ -1351,7 +1351,7 @@ async def test_invalidate_thread_preserves_separately_cached_latest_edit(
         await cache.invalidate_thread("!room:localhost", "$thread_root")
 
         latest_edit = await cache.get_latest_edit("!room:localhost", "$reply")
-        response, _ = await cached_room_get_event(client, cache, "!room:localhost", "$reply")
+        response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
 

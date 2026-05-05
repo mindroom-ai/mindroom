@@ -20,15 +20,9 @@ from mindroom.custom_tools.browser import (
     _BrowserProfileState,
     _BrowserTabState,
     _clean_str,
-)
-from mindroom.custom_tools.browser import (
-    _clear_stale_singleton_locks as clear_stale_singleton_locks,
-)
-from mindroom.custom_tools.browser import (
-    _persistent_launch_kwargs as persistent_launch_kwargs,
-)
-from mindroom.custom_tools.browser import (
-    _profile_dir as profile_dir,
+    _clear_stale_singleton_locks,
+    _persistent_launch_kwargs,
+    _profile_dir,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
@@ -60,8 +54,8 @@ def test_profile_dir_distinct_names_yield_distinct_paths(tmp_path: Path) -> None
         process_env={},
     )
 
-    mindroom_dir = profile_dir(runtime_paths, "mindroom")
-    chrome_dir = profile_dir(runtime_paths, "chrome")
+    mindroom_dir = _profile_dir(runtime_paths, "mindroom")
+    chrome_dir = _profile_dir(runtime_paths, "chrome")
     profiles_root = (runtime_paths.storage_root / "browser-profiles").resolve()
 
     assert mindroom_dir != chrome_dir
@@ -80,7 +74,7 @@ def test_profile_dir_clamps_existing_dir_to_0700(tmp_path: Path) -> None:
     target.mkdir(parents=True)
     target.chmod(0o755)
 
-    result = profile_dir(runtime_paths, "mindroom")
+    result = _profile_dir(runtime_paths, "mindroom")
 
     assert result == target.resolve()
     assert stat.S_IMODE(target.stat().st_mode) == 0o700
@@ -88,37 +82,37 @@ def test_profile_dir_clamps_existing_dir_to_0700(tmp_path: Path) -> None:
 
 def test_clear_stale_singleton_locks_unlinks_stale_symlink(tmp_path: Path) -> None:
     """Stale Chromium singleton lock symlinks should be removed."""
-    profile_dir = tmp_path / "profile"
-    profile_dir.mkdir()
-    lock = profile_dir / "SingletonLock"
+    _profile_dir = tmp_path / "profile"
+    _profile_dir.mkdir()
+    lock = _profile_dir / "SingletonLock"
     lock.symlink_to("mindroom-999999999")
 
-    clear_stale_singleton_locks(profile_dir)
+    _clear_stale_singleton_locks(_profile_dir)
 
     assert not lock.is_symlink()
 
 
 def test_clear_stale_singleton_locks_keeps_live_pid_symlink(tmp_path: Path) -> None:
     """Live Chromium singleton lock symlinks should be left in place."""
-    profile_dir = tmp_path / "profile"
-    profile_dir.mkdir()
-    lock = profile_dir / "SingletonLock"
+    _profile_dir = tmp_path / "profile"
+    _profile_dir.mkdir()
+    lock = _profile_dir / "SingletonLock"
     lock.symlink_to(f"mindroom-{os.getpid()}")
 
-    clear_stale_singleton_locks(profile_dir)
+    _clear_stale_singleton_locks(_profile_dir)
 
     assert lock.is_symlink()
 
 
 def test_clear_stale_singleton_locks_is_idempotent_for_empty_dir(tmp_path: Path) -> None:
     """The exported singleton-lock cleanup helper should be safe for empty profiles."""
-    profile_dir = tmp_path / "profile"
-    profile_dir.mkdir()
+    _profile_dir = tmp_path / "profile"
+    _profile_dir.mkdir()
 
-    clear_stale_singleton_locks(profile_dir)
-    clear_stale_singleton_locks(profile_dir)
+    _clear_stale_singleton_locks(_profile_dir)
+    _clear_stale_singleton_locks(_profile_dir)
 
-    assert list(profile_dir.iterdir()) == []
+    assert list(_profile_dir.iterdir()) == []
 
 
 def test_persistent_launch_kwargs_runtime_env_wins_over_shell(
@@ -133,7 +127,7 @@ def test_persistent_launch_kwargs_runtime_env_wins_over_shell(
         process_env={"BROWSER_EXECUTABLE_PATH": "/right"},
     )
 
-    launch_kwargs = persistent_launch_kwargs(runtime_paths, "mindroom", headless=True)
+    launch_kwargs = _persistent_launch_kwargs(runtime_paths, "mindroom", headless=True)
 
     assert launch_kwargs["executable_path"] == "/right"
 

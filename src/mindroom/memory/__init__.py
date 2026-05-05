@@ -10,7 +10,6 @@ from mindroom.memory.auto_flush import (
 from mindroom.memory.functions import (
     MemoryPromptParts,
     add_agent_memory,
-    build_memory_enhanced_prompt,
     build_memory_prompt_parts,
     delete_agent_memory,
     get_agent_memory,
@@ -25,7 +24,6 @@ __all__ = [
     "MemoryPromptParts",
     "add_agent_memory",
     "auto_flush_enabled",
-    "build_memory_enhanced_prompt",
     "build_memory_prompt_parts",
     "delete_agent_memory",
     "get_agent_memory",

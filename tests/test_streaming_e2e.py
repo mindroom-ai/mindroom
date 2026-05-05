@@ -18,7 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
@@ -340,7 +340,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 
     # Create orchestrator with specific room configuration
     orchestrator_runtime = orchestrator_runtime_paths(tmp_path)
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime)
 
     # Patch the config loading to assign rooms
     with patch("mindroom.config.main.Config.from_yaml") as mock_config:

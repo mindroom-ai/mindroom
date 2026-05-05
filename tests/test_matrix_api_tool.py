@@ -13,8 +13,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.custom_tools.matrix_api import MatrixApiTools
-from mindroom.custom_tools.matrix_api import _MatrixSearchResponse as MatrixSearchResponse
+from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchResponse
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -174,7 +173,7 @@ def test_matrix_api_tool_registered_and_instantiates() -> None:
 
 def test_matrix_search_response_zero_results_without_results_key() -> None:
     """Matrix search should accept homeserver responses that omit results for zero matches."""
-    response = MatrixSearchResponse.from_dict(
+    response = _MatrixSearchResponse.from_dict(
         {
             "search_categories": {
                 "room_events": {
@@ -185,7 +184,7 @@ def test_matrix_search_response_zero_results_without_results_key() -> None:
         },
     )
 
-    assert isinstance(response, MatrixSearchResponse)
+    assert isinstance(response, _MatrixSearchResponse)
     assert response.count == 0
     assert response.next_batch is None
     assert response.results == []
@@ -971,7 +970,7 @@ async def test_matrix_api_search_happy_path() -> None:
     """Search should call the Matrix search endpoint and normalize results."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.client._send.return_value = MatrixSearchResponse(
+    ctx.client._send.return_value = _MatrixSearchResponse(
         count=1,
         next_batch=None,
         results=[
@@ -1009,7 +1008,7 @@ async def test_matrix_api_search_happy_path() -> None:
     }
     ctx.client._send.assert_awaited_once()
     response_class, method, path, data = ctx.client._send.await_args.args
-    assert response_class is MatrixSearchResponse
+    assert response_class is _MatrixSearchResponse
     assert method == "POST"
     assert path == "/_matrix/client/v3/search"
     assert json.loads(data) == {
@@ -1028,7 +1027,7 @@ async def test_matrix_api_search_omits_keys_when_not_supplied() -> None:
     """Search should let the homeserver default keys apply when caller omits keys."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.client._send.return_value = MatrixSearchResponse(count=0, next_batch=None, results=[])
+    ctx.client._send.return_value = _MatrixSearchResponse(count=0, next_batch=None, results=[])
 
     with tool_runtime_context(ctx):
         await tool.matrix_api(action="search", search_term="needle")
@@ -1042,7 +1041,7 @@ async def test_matrix_api_search_explicit_keys_pass_through() -> None:
     """Search should pass through validated explicit keys when caller narrows them."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.client._send.return_value = MatrixSearchResponse(count=0, next_batch=None, results=[])
+    ctx.client._send.return_value = _MatrixSearchResponse(count=0, next_batch=None, results=[])
 
     with tool_runtime_context(ctx):
         await tool.matrix_api(
@@ -1060,7 +1059,7 @@ async def test_matrix_api_search_snippet_falls_back_to_topic() -> None:
     """Search should use topic text for snippet when body is absent."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.client._send.return_value = MatrixSearchResponse(
+    ctx.client._send.return_value = _MatrixSearchResponse(
         count=1,
         next_batch=None,
         results=[
@@ -1103,7 +1102,7 @@ async def test_matrix_api_search_pagination_round_trips_next_batch() -> None:
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client._send.side_effect = [
-        MatrixSearchResponse(
+        _MatrixSearchResponse(
             count=3,
             next_batch="batch-1",
             results=[
@@ -1116,7 +1115,7 @@ async def test_matrix_api_search_pagination_round_trips_next_batch() -> None:
                 ),
             ],
         ),
-        MatrixSearchResponse(
+        _MatrixSearchResponse(
             count=3,
             next_batch=None,
             results=[
@@ -1179,7 +1178,7 @@ async def test_matrix_api_search_event_context_preserves_profile_info() -> None:
     """Search should preserve profile_info when include_profile is requested."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.client._send.return_value = MatrixSearchResponse(
+    ctx.client._send.return_value = _MatrixSearchResponse(
         count=1,
         next_batch=None,
         results=[
@@ -1224,7 +1223,7 @@ async def test_matrix_api_search_room_scoping_uses_target_room_id() -> None:
     """Search should scope the Matrix request body to the explicitly requested room."""
     tool = MatrixApiTools()
     ctx = _make_context()
-    ctx.client._send.return_value = MatrixSearchResponse(
+    ctx.client._send.return_value = _MatrixSearchResponse(
         count=1,
         next_batch=None,
         results=[_search_result(result=_raw_event(room_id="!other:localhost"))],
@@ -1297,7 +1296,7 @@ async def test_matrix_api_search_filter_and_event_context_pass_through() -> None
         "after_limit": 1,
         "include_profile": True,
     }
-    ctx.client._send.return_value = MatrixSearchResponse(
+    ctx.client._send.return_value = _MatrixSearchResponse(
         count=1,
         next_batch=None,
         results=[

@@ -22,7 +22,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
-from agno.team._tools import _determine_tools_for_model as determine_team_tools_for_model
+from agno.team._tools import _determine_tools_for_model
 from agno.tools import Toolkit
 from agno.tools.function import Function
 from agno.utils.message import filter_tool_calls
@@ -912,7 +912,7 @@ def _prepare_team_prompt_inputs_for_estimation(
     )
     model = team.model
     assert model is not None
-    prepared_tools = determine_team_tools_for_model(
+    prepared_tools = _determine_tools_for_model(
         team=team,
         model=model,
         run_response=run_response,

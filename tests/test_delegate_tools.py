@@ -15,7 +15,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
-from mindroom.knowledge import KnowledgeResolution
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -265,7 +266,7 @@ class TestDelegateKnowledge:
         with (
             patch(
                 "mindroom.custom_tools.delegate.resolve_agent_knowledge_access",
-                return_value=KnowledgeResolution(knowledge=mock_knowledge),
+                return_value=_KnowledgeResolution(knowledge=mock_knowledge),
             ) as mock_get,
             patch(
                 "mindroom.custom_tools.delegate.ai_response",
@@ -296,8 +297,6 @@ class TestDelegateKnowledge:
         tmp_path: Path,
     ) -> None:
         """Delegation should trigger the shared-base initial load when the published index is still initializing."""
-        from mindroom.knowledge import KnowledgeAvailability  # noqa: PLC0415
-
         assert mock_storage is not None
         scheduled_base_ids: list[str] = []
 

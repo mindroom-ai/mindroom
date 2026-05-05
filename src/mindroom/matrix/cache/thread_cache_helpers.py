@@ -43,7 +43,7 @@ def thread_cache_rejection_reason(
     return rejection_reason
 
 
-def thread_cache_state_is_usable(
+def _thread_cache_state_is_usable(
     cache_state: _ThreadCacheStateLike | None,
 ) -> bool:
     """Return whether one durable thread snapshot is safe to reuse."""

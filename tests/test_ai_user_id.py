@@ -64,7 +64,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
-from mindroom.execution_preparation import _PreparedExecutionContext as PreparedExecutionContext
+from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import PreparedHistoryState, strip_transient_enrichment_from_session
 from mindroom.history.runtime import ScopeSessionContext
@@ -85,7 +85,11 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
-from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail, KnowledgeResolution
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.utils import (
+    KnowledgeAvailabilityDetail,
+    _KnowledgeResolution,
+)
 from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_fallback import append_inline_media_fallback_prompt
@@ -345,7 +349,7 @@ def _knowledge_access_support(
     return SimpleNamespace(
         for_agent=MagicMock(return_value=knowledge),
         resolve_for_agent=MagicMock(
-            return_value=KnowledgeResolution(
+            return_value=_KnowledgeResolution(
                 knowledge=cast("Knowledge | None", knowledge),
                 unavailable=unavailable or {},
             ),
@@ -2994,7 +2998,7 @@ async def test_generate_response_cleanup_uses_model_time_knowledge_notice(tmp_pa
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     knowledge_access_support = _knowledge_access_support()
     knowledge_access_support.resolve_for_agent.side_effect = [
-        KnowledgeResolution(
+        _KnowledgeResolution(
             knowledge=None,
             unavailable={
                 "docs": KnowledgeAvailabilityDetail(
@@ -3003,7 +3007,7 @@ async def test_generate_response_cleanup_uses_model_time_knowledge_notice(tmp_pa
                 ),
             },
         ),
-        KnowledgeResolution(knowledge=None, unavailable={}),
+        _KnowledgeResolution(knowledge=None, unavailable={}),
     ]
 
     with (
@@ -3040,7 +3044,7 @@ async def test_generate_response_streaming_cleanup_uses_model_time_knowledge_not
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     knowledge_access_support = _knowledge_access_support()
     knowledge_access_support.resolve_for_agent.side_effect = [
-        KnowledgeResolution(
+        _KnowledgeResolution(
             knowledge=None,
             unavailable={
                 "docs": KnowledgeAvailabilityDetail(
@@ -3049,7 +3053,7 @@ async def test_generate_response_streaming_cleanup_uses_model_time_knowledge_not
                 ),
             },
         ),
-        KnowledgeResolution(knowledge=None, unavailable={}),
+        _KnowledgeResolution(knowledge=None, unavailable={}),
     ]
 
     async def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
@@ -4722,7 +4726,7 @@ class TestUserIdPassthrough:
         config = _config()
         mock_agent = MagicMock()
         mock_agent.additional_context = "existing context"
-        prepared_execution = PreparedExecutionContext(
+        prepared_execution = _PreparedExecutionContext(
             messages=(Message(role="user", content="prepared prompt"),),
             replay_plan=None,
             unseen_event_ids=[],

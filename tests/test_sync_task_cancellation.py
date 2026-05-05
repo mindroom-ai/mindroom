@@ -12,13 +12,13 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
-from mindroom.cancellation import _cancel_failure_reason as cancel_failure_reason
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, _cancel_failure_reason
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers
 from mindroom.orchestration.runtime import (
     EntityStartResults,
+    _MatrixSyncStalledError,
     _SyncIteration,
     cancel_sync_task,
     classify_cancel_source,
@@ -27,10 +27,7 @@ from mindroom.orchestration.runtime import (
     stop_entities,
     sync_forever_with_restart,
 )
-from mindroom.orchestration.runtime import (
-    _MatrixSyncStalledError as MatrixSyncStalledError,
-)
-from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock, orchestrator_runtime_paths
 
 
@@ -187,7 +184,7 @@ async def test_sync_forever_with_restart_retries_on_sync_restart_cancel(
             with suppress(asyncio.CancelledError):
                 await sync_task
             await asyncio.sleep(0)
-            raise MatrixSyncStalledError(msg)
+            raise _MatrixSyncStalledError(msg)
         await sync_task
 
     monkeypatch.setattr(_SyncIteration, "_watch", staticmethod(fake_watch))
@@ -261,9 +258,9 @@ async def test_classify_cancel_source_unknown_returns_interrupted() -> None:
 @pytest.mark.asyncio
 async def test_cancel_failure_reason_matches_cancel_source() -> None:
     """Failure reasons should stay aligned with the shared cancel provenance mapping."""
-    assert cancel_failure_reason("user_stop") == "cancelled_by_user"
-    assert cancel_failure_reason("sync_restart") == "sync_restart_cancelled"
-    assert cancel_failure_reason("interrupted") == "interrupted"
+    assert _cancel_failure_reason("user_stop") == "cancelled_by_user"
+    assert _cancel_failure_reason("sync_restart") == "sync_restart_cancelled"
+    assert _cancel_failure_reason("interrupted") == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -681,7 +678,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         mock_load_config.return_value = config
 
         # Create orchestrator
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
         assert orchestrator.config_path == (tmp_path / "config.yaml").resolve()
 
@@ -703,7 +700,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_exits(tmp_path: Path) -> None:
     """A hot-reload restart of the first sync task generation must not end the service."""
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config)
     config.agents = {"general": MagicMock()}
@@ -780,7 +777,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         patch("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # Create orchestrator with existing agent
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
         # Setup existing config and bot
         old_config = MagicMock(spec=Config)
@@ -848,10 +845,10 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
         patch("mindroom.orchestrator.sync_forever_with_restart"),
         patch("mindroom.orchestrator.stop_entities"),
         patch("mindroom.orchestrator.create_temp_user") as mock_create_temp_user,
-        patch.object(MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+        patch.object(_MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # --- existing orchestrator with one agent running ---
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
         old_config = Config(
             agents={
@@ -935,7 +932,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
     """Test that stop() cancels all sync tasks."""
     with patch("mindroom.orchestrator.cancel_sync_task") as mock_cancel:
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
         # Track which tasks are cancelled
         cancelled = []

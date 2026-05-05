@@ -12,9 +12,7 @@ import pytest
 
 from mindroom.api import sandbox_exec
 from mindroom.api.sandbox_exec import (
-    _WORKSPACE_ENV_HOOK_RELATIVE_PATH as WORKSPACE_ENV_HOOK_RELATIVE_PATH,
-)
-from mindroom.api.sandbox_exec import (
+    _WORKSPACE_ENV_HOOK_RELATIVE_PATH,
     WorkspaceEnvHookError,
     resolve_workspace_env_hook_path,
     source_workspace_env_hook,
@@ -406,4 +404,4 @@ def test_source_workspace_env_hook_ignores_script_stdout_before_marker(tmp_path:
 
 def test_workspace_env_hook_relative_path_value() -> None:
     """The exposed relative path constant matches the documented filename."""
-    assert Path(".mindroom") / "worker-env.sh" == WORKSPACE_ENV_HOOK_RELATIVE_PATH
+    assert Path(".mindroom") / "worker-env.sh" == _WORKSPACE_ENV_HOOK_RELATIVE_PATH

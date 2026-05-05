@@ -19,7 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.conversation_resolver import MessageContext
-from mindroom.knowledge import KnowledgeResolution
+from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -677,7 +677,7 @@ class TestRoutingRegression:
         # Mock get_model_instance to return a mock model
         mock_model = Ollama(id="test-model")
         mock_get_model_instance.return_value = mock_model
-        mock_resolve_agent_knowledge_access.return_value = KnowledgeResolution(knowledge=None)
+        mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
         fake_member = MagicMock()
         fake_member.name = "MockAgent"
         fake_member.instructions = []

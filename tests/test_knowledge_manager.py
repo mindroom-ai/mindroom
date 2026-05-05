@@ -31,11 +31,10 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge import (
-    KnowledgeAvailability,
-    KnowledgeAvailabilityDetail,
     KnowledgeRefreshScheduler,
     resolve_agent_knowledge_access,
 )
+from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import (
     KnowledgeManager,
     git_checkout_present,
@@ -46,18 +45,15 @@ from mindroom.knowledge.manager import (
 from mindroom.knowledge.redaction import credential_free_url_identity, redact_url_credentials
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
-    _clear_published_indexes as clear_published_indexes,
-)
-from mindroom.knowledge.registry import (
-    _published_indexed_count as published_indexed_count,
-)
-from mindroom.knowledge.registry import (
+    _clear_published_indexes,
+    _published_indexed_count,
     get_published_index,
     load_published_index_state,
     published_index_metadata_path,
     published_index_refresh_state,
     resolve_published_index_key,
 )
+from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -197,12 +193,12 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
     monkeypatch.setattr("mindroom.knowledge.manager._create_embedder", lambda *_args, **_kwargs: object())
-    clear_published_indexes()
+    _clear_published_indexes()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_runner._refresh_locks.clear()
     knowledge_refresh_runner._active_refresh_counts.clear()
     yield
-    clear_published_indexes()
+    _clear_published_indexes()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_runner._refresh_locks.clear()
     knowledge_refresh_runner._active_refresh_counts.clear()
@@ -811,7 +807,7 @@ async def test_stale_index_metadata_schedules_refresh_without_source_scan(tmp_pa
     doc.write_text("ready index changed", encoding="utf-8")
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.mark_published_index_stale(key, reason="test_stale")
-    clear_published_indexes()
+    _clear_published_indexes()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -854,7 +850,7 @@ async def test_stale_index_skips_duplicate_refresh_when_scheduler_is_active(tmp_
     doc.write_text("ready index changed", encoding="utf-8")
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.mark_published_index_stale(key, reason="test_stale")
-    clear_published_indexes()
+    _clear_published_indexes()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=True)
     scheduler.schedule_refresh = MagicMock()
@@ -1097,7 +1093,7 @@ async def test_index_metadata_without_source_signature_is_unavailable_and_schedu
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     payload.pop("source_signature", None)
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    clear_published_indexes()
+    _clear_published_indexes()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -1954,7 +1950,7 @@ async def test_git_ready_index_schedules_refresh_after_poll_interval(
     payload["last_published_at"] = "2000-01-01T00:00:00+00:00"
     payload["last_refresh_at"] = "2000-01-01T00:00:00+00:00"
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    clear_published_indexes()
+    _clear_published_indexes()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -2048,7 +2044,7 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     payload["last_published_at"] = "2000-01-01T00:00:00+00:00"
     payload["last_refresh_at"] = "2000-01-01T00:00:00+00:00"
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    clear_published_indexes()
+    _clear_published_indexes()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -3152,7 +3148,7 @@ async def test_stale_or_failed_index_reports_chunking_config_mismatch_before_coo
         knowledge_registry.mark_published_index_stale(key, reason="test_stale")
     else:
         knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="previous failure")
-    clear_published_indexes()
+    _clear_published_indexes()
     changed_config = config.model_copy(deep=True)
     changed_config.knowledge_bases["docs"].chunk_size = 1024
     newer_config = config.model_copy(deep=True)
@@ -4668,7 +4664,7 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
         )
         knowledge_registry.mark_published_index_refresh_succeeded(key)
 
-    clear_published_indexes()
+    _clear_published_indexes()
 
     for index in range(count):
         lookup = get_published_index(
@@ -4733,7 +4729,7 @@ async def test_published_indexed_count_uses_persisted_metadata_without_collectio
 
     monkeypatch.setattr(_Client, "get_collection", _raise_scan)
 
-    assert published_indexed_count(lookup.index) == 1
+    assert _published_indexed_count(lookup.index) == 1
 
 
 @pytest.mark.asyncio
@@ -5081,7 +5077,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     assert state.collection is not None
     missing_collection = state.collection
     _VectorDb.collections.pop(missing_collection, None)
-    clear_published_indexes()
+    _clear_published_indexes()
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     repaired_state = load_published_index_state(published_index_metadata_path(key))
 

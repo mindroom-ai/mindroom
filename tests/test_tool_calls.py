@@ -11,12 +11,8 @@ import pytest
 from mindroom.constants import tracking_dir
 from mindroom.tool_system import tool_calls
 from mindroom.tool_system.tool_calls import (
-    _build_tool_failure_record as build_tool_failure_record,
-)
-from mindroom.tool_system.tool_calls import (
-    _build_tool_success_record as build_tool_success_record,
-)
-from mindroom.tool_system.tool_calls import (
+    _build_tool_failure_record,
+    _build_tool_success_record,
     record_tool_failure,
     record_tool_success,
 )
@@ -63,7 +59,7 @@ class _BrokenError(RuntimeError):
 def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
     """Nested mappings, tokens, and URL credentials should be sanitized in persisted records."""
     error = RuntimeError("payload={'api_key': 'secret-value'}")
-    record = build_tool_failure_record(
+    record = _build_tool_failure_record(
         tool_name="demo",
         arguments={
             "path": "notes.txt",
@@ -207,7 +203,7 @@ def test_build_tool_failure_record_redacts_camel_case_and_prefixed_secret_keys(
     prefixed_key: str,
 ) -> None:
     """CamelCase and prefixed secret keys should redact in structured values and text."""
-    record = build_tool_failure_record(
+    record = _build_tool_failure_record(
         tool_name="demo",
         arguments={
             secret_key: "secret-value",
@@ -287,7 +283,7 @@ def test_sanitize_failure_value_replaces_non_finite_floats() -> None:
 @pytest.mark.parametrize("duration_ms", [float("nan"), float("inf"), float("-inf")])
 def test_build_tool_failure_record_normalizes_non_finite_duration(duration_ms: float) -> None:
     """Non-finite durations should not break JSON serialization."""
-    record = build_tool_failure_record(
+    record = _build_tool_failure_record(
         tool_name="demo",
         arguments={},
         error=RuntimeError("boom"),
@@ -326,7 +322,7 @@ def test_build_tool_failure_record_handles_unrepresentable_exception_text(
     """Exceptions with broken __str__ should still produce a durable record."""
     monkeypatch.setattr(tool_calls.traceback, "format_exception", lambda *_args: (_ for _ in ()).throw(RuntimeError))
     error = _BrokenError()
-    record = build_tool_failure_record(
+    record = _build_tool_failure_record(
         tool_name="explode",
         arguments={},
         error=error,
@@ -357,7 +353,7 @@ def test_build_tool_failure_record_truncates_tracebacks(monkeypatch: pytest.Monk
     try:
         explode()
     except RuntimeError as error:
-        record = build_tool_failure_record(
+        record = _build_tool_failure_record(
             tool_name="explode",
             arguments={},
             error=error,
@@ -529,7 +525,7 @@ def test_record_tool_failure_skips_persistence_without_runtime_paths() -> None:
 
 def test_build_tool_success_record_redacts_large_result_payloads() -> None:
     """Success records should reuse the same sanitizer as failure records."""
-    record = build_tool_success_record(
+    record = _build_tool_success_record(
         tool_name="demo",
         arguments={"api_key": "secret"},
         result={
@@ -557,7 +553,7 @@ def test_build_tool_success_record_redacts_large_result_payloads() -> None:
 
 def test_build_tool_failure_record_uses_redaction_markers_and_truncates_large_payloads() -> None:
     """Large values should stay bounded while preserving explicit redaction markers."""
-    record = build_tool_failure_record(
+    record = _build_tool_failure_record(
         tool_name="demo",
         arguments={
             "api_key": "secret",

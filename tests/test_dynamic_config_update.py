@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
-from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock, orchestrator_runtime_paths
 
@@ -45,12 +45,12 @@ def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMo
 @pytest_asyncio.fixture
 async def orchestrator_factory(
     tmp_path: Path,
-) -> AsyncIterator[Callable[[], MultiAgentOrchestrator]]:
+) -> AsyncIterator[Callable[[], _MultiAgentOrchestrator]]:
     """Create orchestrators that are always stopped during test teardown."""
-    orchestrators: list[MultiAgentOrchestrator] = []
+    orchestrators: list[_MultiAgentOrchestrator] = []
 
-    def create() -> MultiAgentOrchestrator:
-        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    def create() -> _MultiAgentOrchestrator:
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrators.append(orchestrator)
         return orchestrator
 
@@ -67,7 +67,7 @@ class TestDynamicConfigUpdate:
     @pytest.mark.asyncio
     async def test_config_update_propagates_to_existing_bots(
         self,
-        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+        orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
         """Test that when config is updated, all existing bots get the new config."""
         # Create initial config with just one agent
@@ -144,7 +144,7 @@ class TestDynamicConfigUpdate:
     @pytest.mark.asyncio
     async def test_plugin_change_restarts_existing_bots(
         self,
-        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+        orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
         """Plugin entry changes should restart existing bots instead of only swapping hook registries."""
         initial_config = Config(
@@ -277,7 +277,7 @@ class TestDynamicConfigUpdate:
     @pytest.mark.asyncio
     async def test_defaults_streaming_toggle_updates_existing_bots_without_restart(
         self,
-        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+        orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
         """Changing defaults.enable_streaming should update existing bots on config reload."""
         initial_config = Config(
@@ -329,7 +329,7 @@ class TestDynamicConfigUpdate:
     @pytest.mark.asyncio
     async def test_thread_summary_threshold_defaults_update_existing_bots_without_restart(
         self,
-        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+        orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
         """Changing thread summary defaults should update existing bots on config reload."""
         initial_config = Config(
@@ -388,7 +388,7 @@ class TestDynamicConfigUpdate:
     @pytest.mark.asyncio
     async def test_matrix_room_access_change_reconciles_rooms_without_restarts(
         self,
-        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+        orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
         """Changing matrix_room_access should trigger room/invitation reconciliation on config reload."""
         initial_config = Config(
@@ -442,7 +442,7 @@ class TestDynamicConfigUpdate:
     @pytest.mark.asyncio
     async def test_authorization_change_reconciles_invitations_without_restarts(
         self,
-        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+        orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
         """Changing authorization should trigger room/invitation reconciliation on config reload."""
         initial_config = Config(
@@ -493,7 +493,7 @@ class TestDynamicConfigUpdate:
     @pytest.mark.asyncio
     async def test_mindroom_user_display_name_change_updates_user_account(
         self,
-        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+        orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
         """Changing mindroom_user.display_name should refresh the internal user account."""
         initial_config = Config(
@@ -546,7 +546,7 @@ class TestDynamicConfigUpdate:
     @pytest.mark.asyncio
     async def test_mindroom_user_username_change_is_rejected_without_partial_update(
         self,
-        orchestrator_factory: Callable[[], MultiAgentOrchestrator],
+        orchestrator_factory: Callable[[], _MultiAgentOrchestrator],
     ) -> None:
         """Reject changing mindroom_user.username and keep the current runtime config."""
         initial_config = Config(

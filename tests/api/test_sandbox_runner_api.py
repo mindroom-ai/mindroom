@@ -28,9 +28,7 @@ import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
-    _serialize_public_runtime_paths as serialize_public_runtime_paths,
-)
-from mindroom.constants import (
+    _serialize_public_runtime_paths,
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
     serialize_runtime_paths,
@@ -528,7 +526,7 @@ def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) ->
         },
     )
 
-    payload = serialize_public_runtime_paths(runtime_paths)
+    payload = _serialize_public_runtime_paths(runtime_paths)
 
     assert payload["process_env"] == {
         "MINDROOM_CONFIG_PATH": str(config_path.resolve()),
@@ -546,7 +544,7 @@ def test_public_startup_runtime_still_allows_python_execution_env(
     """Public startup payloads may stay secret-free while Python execution receives explicit env per request."""
     _set_sandbox_token(monkeypatch)
     child_runtime = sandbox_runner_module.constants.deserialize_runtime_paths(
-        serialize_public_runtime_paths(
+        _serialize_public_runtime_paths(
             resolve_primary_runtime_paths(
                 config_path=tmp_path / "config.yaml",
                 storage_path=tmp_path / "storage",

@@ -39,7 +39,7 @@ class OAuthProviderError(RuntimeError):
     """Base error for provider configuration and OAuth flow failures."""
 
 
-class OAuthProviderNotConfiguredError(OAuthProviderError):
+class _OAuthProviderNotConfiguredError(OAuthProviderError):
     """Raised when a provider has no usable OAuth client configuration."""
 
 
@@ -89,7 +89,7 @@ class OAuthTokenResult:
 
 
 @dataclass(frozen=True, slots=True)
-class OAuthClaimValidationContext:
+class _OAuthClaimValidationContext:
     """Inputs passed to a provider-specific claim validator."""
 
     provider_id: str
@@ -104,7 +104,7 @@ _OAuthTokenExchanger = Callable[
     ["OAuthProvider", str, OAuthClientConfig, "RuntimePaths", str | None],
     OAuthTokenResult | Awaitable[OAuthTokenResult],
 ]
-_OAuthClaimValidator = Callable[[OAuthClaimValidationContext], None]
+_OAuthClaimValidator = Callable[[_OAuthClaimValidationContext], None]
 
 
 def _normalize_env_names(names: str | Sequence[str] | None) -> tuple[str, ...]:
@@ -366,7 +366,7 @@ class OAuthProvider:
             return client_config
         services = ", ".join(self.all_client_config_services) or "a *_oauth_client credential service"
         msg = f"OAuth provider '{self.id}' is not configured. Store client_id and client_secret in {services}."
-        raise OAuthProviderNotConfiguredError(msg)
+        raise _OAuthProviderNotConfiguredError(msg)
 
     def default_redirect_uri(self, runtime_paths: RuntimePaths) -> str:
         """Return the local default redirect URI for this provider."""
@@ -550,7 +550,7 @@ class OAuthProvider:
                 raise OAuthClaimValidationError(msg)
 
         if self.claim_validator is not None:
-            context = OAuthClaimValidationContext(
+            context = _OAuthClaimValidationContext(
                 provider_id=self.id,
                 token_data=result.token_data,
                 claims=result.claims,

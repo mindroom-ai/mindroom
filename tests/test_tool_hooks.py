@@ -21,11 +21,9 @@ from mindroom.agents import create_agent
 from mindroom.approval_manager import (
     PendingApproval,
     SentApprovalEvent,
+    _ApprovalManager,
     get_approval_store,
     initialize_approval_store,
-)
-from mindroom.approval_manager import (
-    _ApprovalManager as ApprovalManager,
 )
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
@@ -49,9 +47,9 @@ from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_na
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
-from mindroom.tool_approval import _shutdown_approval_store as shutdown_approval_store
+from mindroom.tool_approval import _shutdown_approval_store
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -164,7 +162,7 @@ def _initialize_router_approval_store(
     room_send: AsyncMock | None = None,
     editor: AsyncMock | None = None,
 ) -> tuple[MagicMock, AsyncMock]:
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
     orchestrator._capture_runtime_loop()
 
@@ -293,7 +291,7 @@ def _initialize_test_approval_store(runtime_paths: RuntimePaths) -> tuple[AsyncM
 
 
 async def _wait_for_sent_pending(
-    store: ApprovalManager,
+    store: _ApprovalManager,
     sender: AsyncMock | MagicMock,
     *,
     room_id: str = "!room:localhost",
@@ -321,9 +319,9 @@ def _first_function(toolkit: Toolkit) -> Function:
 @pytest.fixture(autouse=True)
 def reset_approval_store() -> Generator[None, None, None]:
     """Keep the module-level approval store isolated per test."""
-    asyncio.run(shutdown_approval_store())
+    asyncio.run(_shutdown_approval_store())
     yield
-    asyncio.run(shutdown_approval_store())
+    asyncio.run(_shutdown_approval_store())
 
 
 def test_tool_events_are_registered_with_expected_timeouts() -> None:
@@ -1195,7 +1193,7 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
         servers=["localhost"],
     )
 
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     orchestrator.agent_bots = {"router": router_bot, "code": bot}
     bot.orchestrator = orchestrator
 
@@ -1316,7 +1314,7 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     router_bot.client.rooms = {}
     router_bot.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Router Lobby"})
     router_bot.client.room_put_state.return_value = object()
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     orchestrator.agent_bots = {"router": router_bot, "code": bot}
     bot.orchestrator = orchestrator
 

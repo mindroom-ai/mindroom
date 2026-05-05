@@ -272,7 +272,7 @@ def oauth_credentials_satisfy_identity_policy(
     return True
 
 
-def build_oauth_authorize_url(
+def _build_oauth_authorize_url(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     *,
@@ -303,7 +303,7 @@ def oauth_connect_url(
     agent_name = worker_target.routing_agent_name if worker_target is not None else None
     execution_scope = worker_target.worker_scope if worker_target is not None else None
     connect_token = _issue_oauth_connect_token(provider, runtime_paths, worker_target)
-    return build_oauth_authorize_url(
+    return _build_oauth_authorize_url(
         provider,
         runtime_paths,
         agent_name=agent_name,
@@ -312,7 +312,7 @@ def oauth_connect_url(
     )
 
 
-def build_oauth_connect_instruction(
+def _build_oauth_connect_instruction(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     *,

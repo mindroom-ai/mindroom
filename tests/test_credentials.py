@@ -14,16 +14,12 @@ from mindroom.credentials import (
     _DEDICATED_WORKER_ROOT_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
+    _get_credentials_manager,
+    _merge_scoped_credentials,
     get_runtime_credentials_manager,
     load_scoped_credentials,
     save_scoped_credentials,
     sync_shared_credentials_to_worker,
-)
-from mindroom.credentials import (
-    _get_credentials_manager as get_credentials_manager,
-)
-from mindroom.credentials import (
-    _merge_scoped_credentials as merge_scoped_credentials,
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 
@@ -725,7 +721,7 @@ class TestCredentialsManager:
         worker_manager = manager.for_worker("worker-a")
         worker_manager.save_credentials("google", {"api_key": "worker-key", "_source": "ui"})
 
-        merged = merge_scoped_credentials(
+        merged = _merge_scoped_credentials(
             "google",
             base_manager=manager,
             worker_manager=worker_manager,
@@ -806,13 +802,13 @@ class TestGlobalCredentialsManager:
 
     def test_get_credentials_manager_singleton(self, tmp_path: Path) -> None:
         """Test that get_credentials_manager returns the same instance."""
-        manager1 = get_credentials_manager(storage_root=tmp_path)
-        manager2 = get_credentials_manager(storage_root=tmp_path)
+        manager1 = _get_credentials_manager(storage_root=tmp_path)
+        manager2 = _get_credentials_manager(storage_root=tmp_path)
         assert manager1 is manager2
 
     def test_global_manager_uses_explicit_storage_root(self, tmp_path: Path) -> None:
         """Test that global manager uses the provided storage root."""
-        manager = get_credentials_manager(storage_root=tmp_path)
+        manager = _get_credentials_manager(storage_root=tmp_path)
         assert manager.base_path == tmp_path / "credentials"
 
     def test_global_manager_uses_explicit_shared_credentials_path(
@@ -848,9 +844,9 @@ class TestGlobalCredentialsManager:
         first_root = tmp_path / "one"
         second_root = tmp_path / "two"
 
-        manager_one = get_credentials_manager(storage_root=first_root)
+        manager_one = _get_credentials_manager(storage_root=first_root)
 
-        manager_two = get_credentials_manager(storage_root=second_root)
+        manager_two = _get_credentials_manager(storage_root=second_root)
 
         assert manager_one.base_path == first_root / "credentials"
         assert manager_two.base_path == second_root / "credentials"

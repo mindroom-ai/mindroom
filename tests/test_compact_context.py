@@ -27,8 +27,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
-from mindroom.history import prepare_history_for_run, request_compaction_before_next_reply
-from mindroom.history.runtime import ScopeSessionContext, open_scope_session_context
+from mindroom.history import request_compaction_before_next_reply
+from mindroom.history.runtime import ScopeSessionContext, _prepare_history_for_run, open_scope_session_context
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.types import (
     CompactionLifecycleStart,
@@ -451,7 +451,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
             ),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(),
             agent_name="test_agent",
             full_prompt="Current question",
@@ -642,7 +642,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
             new=summary_mock,
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(),
             agent_name="test_agent",
             full_prompt="Current question",
@@ -695,7 +695,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
             ),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=agent,
             agent_name="test_agent",
             full_prompt="Current question",
@@ -768,7 +768,7 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
             ),
         ),
     ):
-        prepared = await prepare_history_for_run(
+        prepared = await _prepare_history_for_run(
             agent=_agent(),
             agent_name="test_agent",
             full_prompt="Current question",

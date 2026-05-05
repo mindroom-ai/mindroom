@@ -13,12 +13,10 @@ from agno.session.agent import AgentSession
 from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
+    _build_interrupted_replay_run,
     build_interrupted_replay_snapshot,
     persist_interrupted_replay_snapshot,
     split_interrupted_tool_trace,
-)
-from mindroom.history.interrupted_replay import (
-    _build_interrupted_replay_run as build_interrupted_replay_run,
 )
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.tool_system.events import ToolTraceEntry
@@ -109,7 +107,7 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_marker_an
         response_event_id="$reply",
     )
 
-    run = build_interrupted_replay_run(
+    run = _build_interrupted_replay_run(
         snapshot=snapshot,
         run_id="run-123",
         scope_id="test_agent",
@@ -149,7 +147,7 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata() ->
         response_event_id="$reply",
     )
 
-    run = build_interrupted_replay_run(
+    run = _build_interrupted_replay_run(
         snapshot=snapshot,
         run_id="run-123",
         scope_id="test_agent",
@@ -182,7 +180,7 @@ def test_build_interrupted_replay_run_preserves_coalesced_source_metadata() -> N
         response_event_id="$reply",
     )
 
-    run = build_interrupted_replay_run(
+    run = _build_interrupted_replay_run(
         snapshot=snapshot,
         run_id="run-123",
         scope_id="test_agent",

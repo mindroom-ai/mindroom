@@ -24,17 +24,19 @@ from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth import (
-    OAuthClaimValidationContext,
     OAuthClaimValidationError,
-    OAuthClientConfig,
     OAuthProvider,
-    OAuthTokenResult,
-    load_oauth_providers,
 )
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.providers import (
+    OAuthClientConfig,
+    OAuthTokenResult,
+    _OAuthClaimValidationContext,
+)
+from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_credentials_satisfy_identity_policy
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.worker_routing import (
@@ -965,7 +967,7 @@ def test_safe_token_result_does_not_persist_unverified_claims() -> None:
 
 
 def test_safe_token_result_preserves_verified_claims_for_custom_validator(tmp_path: Path) -> None:
-    def _validate_org(context: OAuthClaimValidationContext) -> None:
+    def _validate_org(context: _OAuthClaimValidationContext) -> None:
         if context.claims.get("org_id") != "acme":
             msg = "OAuth account organization is not allowed"
             raise OAuthClaimValidationError(msg)

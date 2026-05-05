@@ -782,7 +782,7 @@ def finalize_history_preparation(
     )
 
 
-async def prepare_history_for_run(
+async def _prepare_history_for_run(
     *,
     agent: Agent,
     agent_name: str,

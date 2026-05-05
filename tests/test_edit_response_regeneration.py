@@ -29,8 +29,7 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, ROUTER_AGEN
 from mindroom.conversation_state_writer import ConversationStateWriter
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
-from mindroom.history.interrupted_replay import _build_interrupted_replay_run as build_interrupted_replay_run
-from mindroom.history.interrupted_replay import build_interrupted_replay_snapshot
+from mindroom.history.interrupted_replay import _build_interrupted_replay_run, build_interrupted_replay_snapshot
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.event_info import EventInfo
@@ -39,7 +38,7 @@ from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import create_session_id
-from mindroom.turn_store import _LoadedTurnRecord as LoadedTurnRecord
+from mindroom.turn_store import _LoadedTurnRecord
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -2028,7 +2027,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
     storage.get_session.return_value = AgentSession(
         session_id=session_id,
         runs=[
-            build_interrupted_replay_run(
+            _build_interrupted_replay_run(
                 snapshot=build_interrupted_replay_snapshot(
                     user_message="original question",
                     partial_text="Half done",
@@ -2153,7 +2152,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
     storage.get_session.return_value = AgentSession(
         session_id=session_id,
         runs=[
-            build_interrupted_replay_run(
+            _build_interrupted_replay_run(
                 snapshot=build_interrupted_replay_snapshot(
                     user_message="first\nanchor",
                     partial_text="Half done",
@@ -2301,7 +2300,7 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
         session_id=session_id,
         team_id="test_team",
         runs=[
-            build_interrupted_replay_run(
+            _build_interrupted_replay_run(
                 snapshot=build_interrupted_replay_snapshot(
                     user_message="@test_team original question",
                     partial_text="## Worker\n\nHalf done",
@@ -2771,7 +2770,7 @@ def test_turn_store_fallback_cleanup_uses_state_writer_helpers_and_rebound_logge
 
     storage = MagicMock()
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
-    loaded_turn = LoadedTurnRecord(
+    loaded_turn = _LoadedTurnRecord(
         record=HandledTurnRecord(
             anchor_event_id="$original:example.com",
             source_event_ids=("$original:example.com",),

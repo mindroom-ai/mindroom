@@ -27,7 +27,7 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import _MultiAgentOrchestrator as MultiAgentOrchestrator
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -75,7 +75,7 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
 
 @asynccontextmanager
 async def _bind_shared_runtime_support(
-    orchestrator: MultiAgentOrchestrator,
+    orchestrator: _MultiAgentOrchestrator,
     bots_by_name: dict[str, AgentBot],
 ) -> AsyncIterator[None]:
     orchestrator.agent_bots = dict(bots_by_name)
@@ -233,7 +233,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
     """Hooks on bot:ready should be able to send messages through the bound sender."""
     bot = _agent_bot(tmp_path, agent_name="router")
     bot.client = AsyncMock()
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": bot}
     bot.orchestrator = orchestrator
 
@@ -275,7 +275,7 @@ async def test_lifecycle_hooks_prefer_bot_room_state_helpers_before_router_fallb
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.client.room_get_state_event.return_value = MagicMock(content={"name": "Router Lobby"})
     router_bot.client.room_put_state.return_value = object()
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": router_bot, "code": bot}
     bot.orchestrator = orchestrator
 
@@ -323,7 +323,7 @@ async def test_lifecycle_hooks_fallback_to_router_room_state_helpers_when_bot_ca
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.client.room_get_state_event.return_value = MagicMock(content={"name": "Router Lobby"})
     router_bot.client.room_put_state.return_value = object()
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": router_bot, "code": bot}
     bot.orchestrator = orchestrator
 
@@ -817,7 +817,7 @@ async def test_agent_only_ad_hoc_room_still_prewarms_when_router_exists(tmp_path
     agent_bot = _agent_bot(tmp_path)
     agent_bot.client = make_matrix_client_mock(user_id=agent_bot.agent_user.user_id or "@mindroom_code:localhost")
     agent_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!adhoc:localhost"])
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     thread_roots = [
         _thread_root_event("$thread-a:localhost", body="Thread A", origin_server_ts=1, room_id="!adhoc:localhost"),
     ]
@@ -861,7 +861,7 @@ async def test_first_syncing_bot_wins_shared_room_startup_prewarm_claim(tmp_path
     agent_bot = _agent_bot(tmp_path)
     agent_bot.client = make_matrix_client_mock(user_id=agent_bot.agent_user.user_id or "@mindroom_code:localhost")
     agent_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     thread_roots = [_thread_root_event("$thread-a:localhost", body="Thread A", origin_server_ts=1)]
 
     async with _bind_shared_runtime_support(orchestrator, {"router": router_bot, "code": agent_bot}):
@@ -908,7 +908,7 @@ async def test_room_thread_listing_failure_releases_claim_for_later_joined_bot(t
     agent_bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     thread_roots = [_thread_root_event("$thread-a:localhost", body="Thread A", origin_server_ts=1)]
 
     async with _bind_shared_runtime_support(orchestrator, {"router": router_bot, "code": agent_bot}):
@@ -949,7 +949,7 @@ async def test_shutdown_mid_room_prewarm_releases_claim_for_later_joined_bot(tmp
     agent_bot = _agent_bot(tmp_path)
     agent_bot.client = make_matrix_client_mock(user_id=agent_bot.agent_user.user_id or "@mindroom_code:localhost")
     agent_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     async def _abort_after_first_refresh(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
         router_bot._sync_shutting_down = True
@@ -1001,7 +1001,7 @@ async def test_later_started_bot_does_not_rewarm_room_after_startup_wave(tmp_pat
     later_bot = _agent_bot(tmp_path)
     later_bot.client = make_matrix_client_mock(user_id=later_bot.agent_user.user_id or "@mindroom_code:localhost")
     later_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     thread_roots = [_thread_root_event("$thread-a:localhost", body="Thread A", origin_server_ts=1)]
 
     async with _bind_shared_runtime_support(orchestrator, {"router": first_bot, "code": later_bot}):
@@ -1073,7 +1073,7 @@ async def test_disabled_bot_does_not_block_enabled_bot_from_claiming_room(tmp_pa
         user_id=enabled_bot.agent_user.user_id or "@mindroom_research:localhost",
     )
     enabled_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     thread_roots = [_thread_root_event("$thread-a:localhost", body="Thread A", origin_server_ts=1)]
 
     async with _bind_shared_runtime_support(orchestrator, {"code": disabled_bot, "research": enabled_bot}):
@@ -1158,7 +1158,7 @@ async def test_non_router_hook_sender_prefers_current_bot_client(tmp_path: Path)
     router_bot = _agent_bot(tmp_path, agent_name="router")
     router_bot.client = AsyncMock()
     router_bot.client.user_id = "@mindroom_router:localhost"
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": router_bot, "code": bot}
     bot.orchestrator = orchestrator
 

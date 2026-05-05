@@ -19,12 +19,12 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-MANUAL_COMPACTION_SUCCESS_MESSAGE = "Compaction will run before the next reply in this conversation scope."
+_MANUAL_COMPACTION_SUCCESS_MESSAGE = "Compaction will run before the next reply in this conversation scope."
 logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
-class ManualCompactionRequestResult:
+class _ManualCompactionRequestResult:
     """Result of scheduling compaction for the next reply."""
 
     message: str
@@ -43,10 +43,10 @@ def request_compaction_before_next_reply(
     room_id: str | None = None,
     session_state: dict[str, object] | None = None,
     record_pending_scope_in_session_state: bool = False,
-) -> ManualCompactionRequestResult:
+) -> _ManualCompactionRequestResult:
     """Schedule destructive compaction before the next reply in the current history scope."""
     if session_id is None:
-        return ManualCompactionRequestResult("Error: No active session available. Cannot determine session.")
+        return _ManualCompactionRequestResult("Error: No active session available. Cannot determine session.")
 
     with open_scope_session_context(
         agent=agent,
@@ -58,9 +58,9 @@ def request_compaction_before_next_reply(
         create_session_if_missing=True,
     ) as scope_context:
         if scope_context is None:
-            return ManualCompactionRequestResult("Error: Current agent has no history scope. Cannot compact context.")
+            return _ManualCompactionRequestResult("Error: Current agent has no history scope. Cannot compact context.")
         if scope_context.session is None:
-            return ManualCompactionRequestResult("Error: No stored session available. Cannot compact context.")
+            return _ManualCompactionRequestResult("Error: No stored session available. Cannot compact context.")
 
         runtime_model, compaction_config = _resolve_active_compaction_settings(
             agent=agent,
@@ -77,7 +77,7 @@ def request_compaction_before_next_reply(
             compaction_config=compaction_config,
         )
         if budget_error is not None:
-            return ManualCompactionRequestResult(budget_error, session_state=session_state)
+            return _ManualCompactionRequestResult(budget_error, session_state=session_state)
 
         session = scope_context.session
         current_state = read_scope_state(session, scope_context.scope)
@@ -93,8 +93,8 @@ def request_compaction_before_next_reply(
             agent=agent_name,
             scope=scope_context.scope.key,
         )
-        return ManualCompactionRequestResult(
-            MANUAL_COMPACTION_SUCCESS_MESSAGE,
+        return _ManualCompactionRequestResult(
+            _MANUAL_COMPACTION_SUCCESS_MESSAGE,
             session_state=next_session_state,
         )
 

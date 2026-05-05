@@ -23,7 +23,7 @@ from mindroom.api import config_lifecycle, main
 from mindroom.api import knowledge as knowledge_api
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
-from mindroom.knowledge import KnowledgeAvailability
+from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.registry import (
     load_published_index_state,
     published_index_metadata_path,

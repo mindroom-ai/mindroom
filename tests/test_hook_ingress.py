@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.hooks.context import MessageEnvelope
-from mindroom.hooks.ingress import _split_hook_source as split_hook_source
-from mindroom.hooks.ingress import hook_ingress_policy, should_handle_interactive_text_response
+from mindroom.hooks.ingress import _split_hook_source, hook_ingress_policy, should_handle_interactive_text_response
 from mindroom.message_target import MessageTarget
 
 
@@ -33,12 +32,12 @@ def _envelope(
 
 def test_split_hook_source_parses_serialized_tag() -> None:
     """Hook provenance tags should split into plugin and event name once."""
-    assert split_hook_source("origin-plugin:message:received") == (
+    assert _split_hook_source("origin-plugin:message:received") == (
         "origin-plugin",
         "message:received",
     )
-    assert split_hook_source("bad") == (None, None)
-    assert split_hook_source(None) == (None, None)
+    assert _split_hook_source("bad") == (None, None)
+    assert _split_hook_source(None) == (None, None)
 
 
 def test_hook_ingress_policy_skips_origin_plugin_on_first_message_received_hop() -> None:

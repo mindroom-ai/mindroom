@@ -19,32 +19,20 @@ from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cac
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
     PostgresEventCache,
+    _initialize_postgres_event_cache_db,
     _is_transient_postgres_failure,
-)
-from mindroom.matrix.cache.postgres_event_cache import (
-    _initialize_postgres_event_cache_db as initialize_postgres_event_cache_db,
-)
-from mindroom.matrix.cache.postgres_event_cache import (
-    _PostgresEventCacheRuntime as PostgresEventCacheRuntime,
+    _PostgresEventCacheRuntime,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
     StartupThreadPrewarmRegistry,
+    _build_event_cache,
+    _event_cache_runtime_identity,
+    _EventCacheRuntimeIdentity,
+    _initialize_event_cache_best_effort,
     sync_owned_runtime_support,
-)
-from mindroom.runtime_support import (
-    _build_event_cache as build_event_cache,
-)
-from mindroom.runtime_support import (
-    _event_cache_runtime_identity as event_cache_runtime_identity,
-)
-from mindroom.runtime_support import (
-    _EventCacheRuntimeIdentity as EventCacheRuntimeIdentity,
-)
-from mindroom.runtime_support import (
-    _initialize_event_cache_best_effort as initialize_event_cache_best_effort,
 )
 
 if TYPE_CHECKING:
@@ -248,7 +236,7 @@ def test_cache_config_rejects_custom_postgres_url_env_without_database_url_suffi
 def test_build_event_cache_defaults_to_sqlite(tmp_path: Path) -> None:
     """SQLite should remain the default cache backend for local installs."""
     runtime_paths = _runtime_paths(tmp_path)
-    cache = build_event_cache(CacheConfig(), runtime_paths)
+    cache = _build_event_cache(CacheConfig(), runtime_paths)
 
     assert isinstance(cache, SqliteEventCache)
     assert cache.db_path == tmp_path / "mindroom_data" / "event_cache.db"
@@ -334,7 +322,7 @@ def test_build_event_cache_uses_postgres_when_configured(tmp_path: Path) -> None
             "MINDROOM_NAMESPACE": "tenant-a",
         },
     )
-    cache = build_event_cache(CacheConfig(backend="postgres"), runtime_paths)
+    cache = _build_event_cache(CacheConfig(backend="postgres"), runtime_paths)
 
     assert isinstance(cache, PostgresEventCache)
     assert cache.database_url == "postgresql://cache:test@localhost/mindroom"
@@ -363,7 +351,7 @@ async def test_postgres_event_cache_initialize_attempts_cleanup_without_masking_
     monkeypatch.setattr("mindroom.matrix.cache.postgres_event_cache._create_postgres_event_cache_schema", create_schema)
 
     with pytest.raises(asyncio.CancelledError, match=cancel_reason):
-        await initialize_postgres_event_cache_db(
+        await _initialize_postgres_event_cache_db(
             "postgresql://cache:test@localhost/mindroom",
             namespace="tenant-a",
         )
@@ -418,7 +406,7 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
 async def test_postgres_runtime_rolls_back_cancelled_advisory_lock() -> None:
     """Cancellation while acquiring the advisory lock must rollback the implicit transaction."""
     cancel_reason = "lock wait cancelled"
-    runtime = PostgresEventCacheRuntime(
+    runtime = _PostgresEventCacheRuntime(
         "postgresql://cache:test@localhost/mindroom",
         namespace="tenant-a",
     )
@@ -470,7 +458,7 @@ def test_build_event_cache_auto_installs_postgres_extra_before_import(
     monkeypatch.setattr("mindroom.runtime_support.ensure_optional_deps", fake_ensure_optional_deps)
     monkeypatch.setattr("mindroom.runtime_support.import_module", fake_import_module)
 
-    cache = build_event_cache(CacheConfig(backend="postgres"), runtime_paths)
+    cache = _build_event_cache(CacheConfig(backend="postgres"), runtime_paths)
 
     assert isinstance(cache, FakePostgresEventCache)
     assert cache.database_url == "postgresql://cache:test@localhost/mindroom"
@@ -893,7 +881,7 @@ def test_postgres_transient_classifier_rejects_authentication_failures_without_s
 
 def test_postgres_pending_invalidation_records_are_monotonic() -> None:
     """Pending invalidation buffers should keep the newest marker for each scope."""
-    runtime = PostgresEventCacheRuntime("postgresql://cache:secret@db.internal/mindroom", namespace="tenant")
+    runtime = _PostgresEventCacheRuntime("postgresql://cache:secret@db.internal/mindroom", namespace="tenant")
 
     runtime.record_pending_thread_invalidation(
         "!room:localhost",
@@ -954,10 +942,10 @@ async def test_event_cache_startup_backend_unavailable_retries_without_disabling
         event_cache=cast("ConversationEventCache", cache),
         event_cache_write_coordinator=_EventCacheWriteCoordinator(logger=logger),
         startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
-        event_cache_identity=event_cache_runtime_identity(cache_config, runtime_paths),
+        event_cache_identity=_event_cache_runtime_identity(cache_config, runtime_paths),
     )
 
-    await initialize_event_cache_best_effort(
+    await _initialize_event_cache_best_effort(
         support,
         logger=logger,
         init_failure_reason_prefix="test_startup",
@@ -988,7 +976,7 @@ def test_build_event_cache_requires_postgres_database_url(tmp_path: Path) -> Non
     runtime_paths = _runtime_paths(tmp_path)
 
     with pytest.raises(ValueError, match="MINDROOM_EVENT_CACHE_DATABASE_URL"):
-        build_event_cache(CacheConfig(backend="postgres"), runtime_paths)
+        _build_event_cache(CacheConfig(backend="postgres"), runtime_paths)
 
 
 @pytest.mark.parametrize(
@@ -1010,14 +998,14 @@ def test_build_event_cache_requires_postgres_database_url(tmp_path: Path) -> Non
 )
 def test_postgres_connection_info_redaction_hides_secret_forms(conninfo: str, expected: str) -> None:
     """Postgres connection redaction should cover URL and libpq secret forms."""
-    runtime = PostgresEventCacheRuntime(conninfo, namespace="tenant-a")
+    runtime = _PostgresEventCacheRuntime(conninfo, namespace="tenant-a")
 
     assert runtime.redacted_database_url == expected
 
 
 def test_event_cache_runtime_identity_uses_shared_postgres_redaction() -> None:
     """Runtime backend-change logs should use the same Postgres redaction policy."""
-    identity = EventCacheRuntimeIdentity(
+    identity = _EventCacheRuntimeIdentity(
         backend="postgres",
         location="postgresql://db.internal/mindroom?user=cache&password=secret",
         namespace="tenant-a",
