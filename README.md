@@ -19,7 +19,7 @@ Deploy once on Matrix. Your agents now work in any chat platform via bridges. Th
 
 Self-host for complete control or use our encrypted service. Either way, your agents remember you and can collaborate across organizations.
 
-https://github.com/mindroom-ai/assets/raw/refs/heads/main/mindroom.mp4
+https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
 
 ## The Problem
 
