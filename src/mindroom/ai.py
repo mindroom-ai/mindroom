@@ -71,11 +71,9 @@ from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
 from mindroom.tool_system.events import (
+    StreamingToolTracker,
     complete_pending_tool_block,
-    extract_tool_completed_info,
     format_tool_combined,
-    format_tool_completed_event,
-    format_tool_started_event,
 )
 
 if TYPE_CHECKING:
@@ -83,7 +81,6 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
-    from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
     from mindroom.history import CompactionLifecycle
@@ -220,8 +217,7 @@ class _StreamingAttemptState:
     tool_count: int = 0
     observed_tool_calls: int = 0
     observed_request_metric_fields: set[str] = field(default_factory=set)
-    pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
-    completed_tools: list[ToolTraceEntry] = field(default_factory=list)
+    tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker)
     latest_model_id: str | None = None
     latest_model_provider: str | None = None
     latest_request_input_tokens: int | None = None
@@ -237,13 +233,13 @@ class _StreamingAttemptState:
     user_error: Exception | None = None
     stream_exception: Exception | None = None
 
+    @property
+    def pending_tools(self) -> list[Any]:
+        return self.tool_tracker.pending_tools
 
-@dataclass
-class _PendingStreamingTool:
-    tool_name: str
-    trace_entry: ToolTraceEntry
-    tool_call_id: str | None = None
-    visible_tool_index: int | None = None
+    @property
+    def completed_tools(self) -> list[ToolTraceEntry]:
+        return self.tool_tracker.completed_tools
 
 
 def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True) -> str:
@@ -289,27 +285,6 @@ def _extract_tool_trace(response: RunOutput) -> list[ToolTraceEntry]:
 def _extract_cancelled_tool_trace(response: RunOutput) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
     """Extract completed and unfinished tool traces from an interrupted RunOutput."""
     return split_interrupted_tool_trace(response.tools)
-
-
-def _find_matching_pending_stream_tool(
-    pending_tools: list[_PendingStreamingTool],
-    tool: ToolExecution | None,
-) -> int | None:
-    """Return the newest pending tool matching a completion event."""
-    call_id = tool_execution_call_id(tool)
-    if call_id is not None:
-        for pos in range(len(pending_tools) - 1, -1, -1):
-            if pending_tools[pos].tool_call_id == call_id:
-                return pos
-    info = extract_tool_completed_info(tool)
-    if info is None:
-        return None
-    tool_name, _ = info
-    for pos in range(len(pending_tools) - 1, -1, -1):
-        pending_tool = pending_tools[pos]
-        if pending_tool.tool_call_id is None and pending_tool.tool_name == tool_name:
-            return pos
-    return None
 
 
 def _stream_attempt_has_progress(state: _StreamingAttemptState) -> bool:
@@ -473,22 +448,13 @@ def _track_stream_tool_started(
     """Track started tool-call metadata for streaming output."""
     state.observed_tool_calls += 1
     display_tool_index = state.tool_count + 1 if show_tool_calls else None
-    tool_msg, trace_entry = format_tool_started_event(event.tool, tool_index=display_tool_index)
-    if trace_entry is not None:
-        state.pending_tools.append(
-            _PendingStreamingTool(
-                tool_name=trace_entry.tool_name,
-                trace_entry=trace_entry,
-                tool_call_id=tool_execution_call_id(event.tool),
-                visible_tool_index=display_tool_index,
-            ),
-        )
+    started = state.tool_tracker.start(event.tool, tool_index=display_tool_index)
     if not show_tool_calls or display_tool_index is None:
         return
 
     state.tool_count = display_tool_index
-    if tool_msg:
-        state.full_response += tool_msg
+    if started.visible_text:
+        state.full_response += started.visible_text
 
 
 def _track_stream_tool_completed(
@@ -499,29 +465,24 @@ def _track_stream_tool_completed(
     agent_name: str,
 ) -> None:
     """Track completed tool-call metadata for streaming output."""
-    info = extract_tool_completed_info(event.tool)
-    if info is None:
+    completion = state.tool_tracker.complete(event.tool)
+    if completion is None:
         return
-    tool_name, result = info
-    pending_trace_pos = _find_matching_pending_stream_tool(state.pending_tools, event.tool)
-    pending_tool = state.pending_tools.pop(pending_trace_pos) if pending_trace_pos is not None else None
-    _, completed_trace = format_tool_completed_event(event.tool)
-    if completed_trace is not None:
-        state.completed_tools.append(completed_trace)
     if not show_tool_calls:
         return
 
+    pending_tool = completion.pending_tool
     if pending_tool is None or pending_tool.visible_tool_index is None:
         logger.warning(
             "Missing pending tool start in AI stream; skipping completion marker",
-            tool_name=tool_name,
+            tool_name=completion.tool_name,
             agent=agent_name,
         )
         return
     state.full_response, _ = complete_pending_tool_block(
         state.full_response,
-        tool_name,
-        result,
+        completion.tool_name,
+        completion.result,
         tool_index=pending_tool.visible_tool_index,
     )
 

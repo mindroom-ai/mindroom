@@ -10,6 +10,7 @@ from mindroom.tool_system.events import (
     _MAX_TOOL_RESULT_DISPLAY_CHARS,
     _MAX_TOOL_TRACE_EVENTS,
     _TOOL_TRACE_KEY,
+    StreamingToolTracker,
     ToolTraceEntry,
     _format_tool_started,
     build_tool_trace_content,
@@ -316,6 +317,74 @@ def test_complete_pending_tool_block_no_result_marks_completed() -> None:
 
     assert updated == "🔧 `save_file` [1]"
     assert trace.result_preview is None
+
+
+def test_streaming_tool_tracker_records_hidden_pending_and_completion() -> None:
+    """Hidden tool calls should still preserve pending and completed trace state."""
+    tracker = StreamingToolTracker()
+    started = tracker.start(ToolExecution(tool_call_id="call-1", tool_name="save_file", tool_args={"file": "a.py"}))
+
+    assert started.visible_text
+    assert len(tracker.pending_tools) == 1
+    assert [pending.trace_entry for pending in tracker.pending_tools] == [started.trace_entry]
+
+    completed = tracker.complete(ToolExecution(tool_call_id="call-1", tool_name="save_file", result="ok"))
+
+    assert completed is not None
+    assert completed.pending_tool == started.pending_tool
+    assert completed.tool_name == "save_file"
+    assert completed.result == "ok"
+    assert tracker.pending_tools == []
+    assert len(tracker.completed_tools) == 1
+    assert tracker.completed_tools[0].result_preview == "ok"
+
+
+def test_streaming_tool_tracker_uses_scope_for_name_fallback_matching() -> None:
+    """Fallback matching by tool name must not cross team/member scopes."""
+    tracker = StreamingToolTracker()
+    member_start = tracker.start(ToolExecution(tool_name="search", tool_args={"q": "member"}), scope_key="agent:code")
+    team_start = tracker.start(ToolExecution(tool_name="search", tool_args={"q": "team"}), scope_key="team")
+
+    completed = tracker.complete(ToolExecution(tool_name="search", result="team result"), scope_key="team")
+
+    assert completed is not None
+    assert completed.pending_tool == team_start.pending_tool
+    assert [pending.trace_entry for pending in tracker.pending_tools] == [member_start.trace_entry]
+
+
+def test_streaming_tool_tracker_prefers_call_id_over_newest_same_named_tool() -> None:
+    """Call IDs should keep same-named concurrent tools paired with their own completion."""
+    tracker = StreamingToolTracker()
+    first_start = tracker.start(ToolExecution(tool_call_id="first", tool_name="save_file", tool_args={"file": "a.py"}))
+    tracker.start(ToolExecution(tool_call_id="second", tool_name="save_file", tool_args={"file": "b.py"}))
+
+    completed = tracker.complete(ToolExecution(tool_call_id="first", tool_name="save_file", result="saved a"))
+
+    assert completed is not None
+    assert completed.pending_tool == first_start.pending_tool
+    assert [pending.tool_call_id for pending in tracker.pending_tools] == ["second"]
+
+
+def test_streaming_tool_tracker_updates_visible_trace_slot() -> None:
+    """Visible tool trace snapshots should be converted from started to completed in-place."""
+    tracker = StreamingToolTracker()
+    visible_trace: list[ToolTraceEntry] = []
+    started = tracker.start(ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}), tool_index=1)
+    assert started.trace_entry is not None
+    visible_trace.append(started.trace_entry)
+
+    completed = tracker.complete(ToolExecution(tool_name="save_file", result="ok"))
+
+    assert completed is not None
+    assert tracker.update_visible_trace_entry(visible_trace, completed) is True
+    assert visible_trace == [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="save_file",
+            args_preview="file=a.py",
+            result_preview="ok",
+        ),
+    ]
 
 
 def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None:

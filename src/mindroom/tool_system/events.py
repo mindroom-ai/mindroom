@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
-from agno.models.response import ToolExecution  # noqa: TC002 - used in isinstance checks
+from agno.models.response import ToolExecution
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -47,6 +47,141 @@ class StructuredStreamChunk:
 
     content: str
     tool_trace: list[ToolTraceEntry] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingStreamingTool:
+    scope_key: str
+    tool_name: str
+    trace_entry: ToolTraceEntry
+    tool_call_id: str | None = None
+    visible_tool_index: int | None = None
+    visible_text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamingToolStart:
+    visible_text: str
+    trace_entry: ToolTraceEntry | None
+    pending_tool: _PendingStreamingTool | None
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamingToolCompletion:
+    tool_name: str
+    result: object | None
+    pending_tool: _PendingStreamingTool | None
+    completed_trace: ToolTraceEntry | None
+
+
+@dataclass(slots=True)
+class StreamingToolTracker:
+    """Track pending and completed tool traces for one streaming response."""
+
+    pending_tools: list[_PendingStreamingTool] = field(default_factory=list)
+    completed_tools: list[ToolTraceEntry] = field(default_factory=list)
+
+    def start(
+        self,
+        tool: ToolExecution | None,
+        *,
+        scope_key: str = "",
+        tool_index: int | None = None,
+    ) -> _StreamingToolStart:
+        """Record one started tool call and return its visible marker."""
+        visible_text, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
+        pending_tool = None
+        if trace_entry is not None:
+            pending_tool = _PendingStreamingTool(
+                scope_key=scope_key,
+                tool_name=trace_entry.tool_name,
+                trace_entry=trace_entry,
+                tool_call_id=_streaming_tool_call_id(tool),
+                visible_tool_index=tool_index,
+                visible_text=visible_text,
+            )
+            self.pending_tools.append(pending_tool)
+        return _StreamingToolStart(
+            visible_text=visible_text,
+            trace_entry=trace_entry,
+            pending_tool=pending_tool,
+        )
+
+    def complete(
+        self,
+        tool: ToolExecution | None,
+        *,
+        scope_key: str = "",
+    ) -> _StreamingToolCompletion | None:
+        """Record one completed tool call and return the matched pending state."""
+        info = extract_tool_completed_info(tool)
+        if info is None:
+            return None
+
+        tool_name, result = info
+        pending_pos = self._find_pending_tool_index(scope_key=scope_key, tool=tool)
+        pending_tool = self.pending_tools.pop(pending_pos) if pending_pos is not None else None
+        _, completed_trace = format_tool_completed_event(tool)
+        if completed_trace is not None:
+            self.completed_tools.append(completed_trace)
+        return _StreamingToolCompletion(
+            tool_name=tool_name,
+            result=result,
+            pending_tool=pending_tool,
+            completed_trace=completed_trace,
+        )
+
+    def update_visible_trace_entry(
+        self,
+        tool_trace: list[ToolTraceEntry],
+        completion: _StreamingToolCompletion,
+    ) -> bool:
+        """Update the visible trace snapshot slot for a matched completion."""
+        pending_tool = completion.pending_tool
+        if pending_tool is None or pending_tool.visible_tool_index is None or completion.completed_trace is None:
+            return False
+        if not 0 < pending_tool.visible_tool_index <= len(tool_trace):
+            return False
+        existing_entry = tool_trace[pending_tool.visible_tool_index - 1]
+        existing_entry.type = "tool_call_completed"
+        existing_entry.result_preview = completion.completed_trace.result_preview
+        existing_entry.truncated = existing_entry.truncated or completion.completed_trace.truncated
+        return True
+
+    def _find_pending_tool_index(
+        self,
+        *,
+        scope_key: str,
+        tool: ToolExecution | None,
+    ) -> int | None:
+        call_id = _streaming_tool_call_id(tool)
+        if call_id is not None:
+            for pos in range(len(self.pending_tools) - 1, -1, -1):
+                pending_tool = self.pending_tools[pos]
+                if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call_id:
+                    return pos
+        info = extract_tool_completed_info(tool)
+        if info is None:
+            return None
+        tool_name, _ = info
+        for pos in range(len(self.pending_tools) - 1, -1, -1):
+            pending_tool = self.pending_tools[pos]
+            if (
+                pending_tool.scope_key == scope_key
+                and pending_tool.tool_call_id is None
+                and pending_tool.tool_name == tool_name
+            ):
+                return pos
+        return None
+
+
+def _streaming_tool_call_id(tool: ToolExecution | None) -> str | None:
+    if not isinstance(tool, ToolExecution):
+        return None
+    if not isinstance(tool.tool_call_id, str):
+        return None
+    call_id = tool.tool_call_id.strip()
+    return call_id or None
 
 
 def _to_compact_text(value: object) -> str:

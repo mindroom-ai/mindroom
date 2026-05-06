@@ -52,7 +52,7 @@ from mindroom.history import (
     team_tool_definition_payloads_for_logging,
     update_scope_seen_event_ids,
 )
-from mindroom.history.interrupted_replay import split_interrupted_tool_trace, tool_execution_call_id
+from mindroom.history.interrupted_replay import split_interrupted_tool_trace
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
@@ -72,12 +72,11 @@ from mindroom.team_exact_members import (
     resolve_live_shared_agent_names,
 )
 from mindroom.tool_system.events import (
+    StreamingToolTracker,
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,
-    extract_tool_completed_info,
     format_tool_completed_event,
-    format_tool_started_event,
 )
 
 if TYPE_CHECKING:
@@ -151,15 +150,6 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
 def _append_additional_context(entity: Agent | Team, context_chunk: str) -> None:
     existing_context = entity.additional_context.strip() if entity.additional_context else ""
     entity.additional_context = f"{existing_context}\n\n{context_chunk}" if existing_context else context_chunk
-
-
-@dataclass
-class _PendingTeamTool:
-    scope_key: str
-    tool_name: str
-    trace_entry: ToolTraceEntry
-    tool_call_id: str | None = None
-    visible_tool_index: int | None = None
 
 
 class TeamMode(str, Enum):
@@ -1987,8 +1977,9 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     run_metadata: dict[str, Any] | None = None
     canonical_per_member: dict[str, str] = {}
     canonical_consensus = ""
-    completed_tools: list[ToolTraceEntry] = []
-    pending_tools: list[_PendingTeamTool] = []
+    tool_tracker = StreamingToolTracker()
+    completed_tools = tool_tracker.completed_tools
+    pending_tools = tool_tracker.pending_tools
 
     def _empty_canonical_partial_text() -> str:
         return ""
@@ -2106,31 +2097,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     interrupted_tools=[pending.trace_entry for pending in pending_tools],
                 )
 
-            def _find_pending_tool_index(
-                *,
-                scope_key: str,
-                tool: ToolExecution | None,
-            ) -> int | None:
-                call_id = tool_execution_call_id(tool)
-                if call_id is not None:
-                    for pos in range(len(pending_tools) - 1, -1, -1):
-                        pending_tool = pending_tools[pos]
-                        if pending_tool.scope_key == scope_key and pending_tool.tool_call_id == call_id:
-                            return pos
-                info = extract_tool_completed_info(tool)
-                if not info:
-                    return None
-                tool_name, _ = info
-                for pos in range(len(pending_tools) - 1, -1, -1):
-                    pending_tool = pending_tools[pos]
-                    if (
-                        pending_tool.scope_key == scope_key
-                        and pending_tool.tool_call_id is None
-                        and pending_tool.tool_name == tool_name
-                    ):
-                        return pos
-                return None
-
             def _start_tool(
                 *,
                 scope_key: str,
@@ -2139,23 +2105,13 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             ) -> None:
                 nonlocal next_tool_index
                 tool_index = next_tool_index if show_tool_calls else None
-                tool_msg, trace_entry = format_tool_started_event(tool, tool_index=tool_index)
-                if trace_entry is not None:
-                    pending_tools.append(
-                        _PendingTeamTool(
-                            scope_key=scope_key,
-                            tool_name=trace_entry.tool_name,
-                            trace_entry=trace_entry,
-                            tool_call_id=tool_execution_call_id(tool),
-                            visible_tool_index=tool_index,
-                        ),
-                    )
+                started = tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
                 if not show_tool_calls or tool_index is None:
                     return
-                if tool_msg:
-                    apply_visible_text(tool_msg)
-                if trace_entry is not None:
-                    tool_trace.append(trace_entry)
+                if started.visible_text:
+                    apply_visible_text(started.visible_text)
+                if started.trace_entry is not None:
+                    tool_trace.append(started.trace_entry)
                 next_tool_index += 1
 
             def _complete_tool(
@@ -2165,44 +2121,34 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 set_visible_text: Callable[[str], None],
                 tool: ToolExecution | None,
             ) -> None:
-                info = extract_tool_completed_info(tool)
-                if not info:
+                completion = tool_tracker.complete(tool, scope_key=scope_key)
+                if completion is None:
                     return
 
-                tool_name, result = info
-                pending_trace_pos = _find_pending_tool_index(scope_key=scope_key, tool=tool)
-                pending_tool = pending_tools.pop(pending_trace_pos) if pending_trace_pos is not None else None
-                _, completed_trace = format_tool_completed_event(tool)
-                if completed_trace is not None:
-                    completed_tools.append(completed_trace)
                 if not show_tool_calls:
                     return
 
+                pending_tool = completion.pending_tool
                 if pending_tool is None or pending_tool.visible_tool_index is None:
                     logger.warning(
                         "Missing pending tool start in team stream; skipping completion marker",
-                        tool_name=tool_name,
+                        tool_name=completion.tool_name,
                         scope=scope_key,
                     )
                     return
 
-                updated_text, trace_entry = complete_pending_tool_block(
+                updated_text, _ = complete_pending_tool_block(
                     get_visible_text(),
-                    tool_name,
-                    result,
+                    completion.tool_name,
+                    completion.result,
                     tool_index=pending_tool.visible_tool_index,
                 )
                 set_visible_text(updated_text)
 
-                if 0 < pending_tool.visible_tool_index <= len(tool_trace):
-                    existing_entry = tool_trace[pending_tool.visible_tool_index - 1]
-                    existing_entry.type = "tool_call_completed"
-                    existing_entry.result_preview = trace_entry.result_preview
-                    existing_entry.truncated = existing_entry.truncated or trace_entry.truncated
-                else:
+                if not tool_tracker.update_visible_trace_entry(tool_trace, completion):
                     logger.warning(
                         "Missing tool trace slot in team stream for completion",
-                        tool_name=tool_name,
+                        tool_name=completion.tool_name,
                         tool_index=pending_tool.visible_tool_index,
                         trace_len=len(tool_trace),
                     )
@@ -2244,9 +2190,10 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     canonical_consensus = ""
                     visible_consensus = ""
                     tool_trace = []
-                    completed_tools = []
+                    tool_tracker = StreamingToolTracker()
+                    completed_tools = tool_tracker.completed_tools
                     next_tool_index = 1
-                    pending_tools = []
+                    pending_tools = tool_tracker.pending_tools
                     emitted_output = False
                     retry_requested = False
 

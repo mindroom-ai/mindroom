@@ -2756,6 +2756,7 @@ from = ["mindroom.history.turn_recorder"]
 
 [[interfaces]]
 expose = [
+    "StreamingToolTracker",
     "StructuredStreamChunk",
     "ToolTraceEntry",
     "build_tool_trace_content",
