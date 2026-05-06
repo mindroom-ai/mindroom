@@ -51,6 +51,7 @@ interface KnowledgeFile {
 
 interface KnowledgeStatus {
   base_id: string;
+  description?: string;
   folder_path: string;
   watch: boolean;
   file_count: number;
@@ -87,6 +88,7 @@ const DEFAULT_CHUNK_SIZE = 5000;
 const DEFAULT_CHUNK_OVERLAP = 0;
 
 const DEFAULT_BASE_SETTINGS: KnowledgeBaseConfig = {
+  description: "",
   path: "./knowledge_docs/default",
   watch: true,
   chunk_size: DEFAULT_CHUNK_SIZE,
@@ -259,6 +261,7 @@ export function Knowledge() {
 
   const [selectedBase, setSelectedBase] = useState<string>("");
   const [newBaseName, setNewBaseName] = useState("");
+  const [newBaseDescription, setNewBaseDescription] = useState("");
   const [newBaseSourceType, setNewBaseSourceType] =
     useState<KnowledgeSourceType>("local");
   const [newBaseGitSettings, setNewBaseGitSettings] =
@@ -326,6 +329,7 @@ export function Knowledge() {
       selectedConfig.chunk_overlap,
     );
     setSettings({
+      description: selectedConfig.description ?? "",
       path: selectedConfig.path,
       watch: selectedConfig.watch,
       ...chunking,
@@ -559,6 +563,7 @@ export function Knowledge() {
       }
 
       const nextBaseConfig: KnowledgeBaseConfig = {
+        description: newBaseDescription.trim(),
         path: defaultPathForBase(baseName),
         watch: true,
         chunk_size: DEFAULT_CHUNK_SIZE,
@@ -586,6 +591,7 @@ export function Knowledge() {
       }
       setSelectedBase(baseName);
       setNewBaseName("");
+      setNewBaseDescription("");
       setNewBaseSourceType("local");
       setNewBaseGitSettings(defaultGitSettings());
       await loadData(baseName);
@@ -615,6 +621,7 @@ export function Knowledge() {
     newBaseName,
     newBaseSourceType,
     newBaseGitSettings,
+    newBaseDescription,
     saveConfig,
     toast,
   ]);
@@ -1041,6 +1048,24 @@ export function Knowledge() {
               </div>
 
               <div className="space-y-2">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="new-base-description"
+                >
+                  Description
+                </label>
+                <Textarea
+                  id="new-base-description"
+                  value={newBaseDescription}
+                  onChange={(event) =>
+                    setNewBaseDescription(event.target.value)
+                  }
+                  placeholder="Product docs, support notes, and operating procedures"
+                  rows={3}
+                />
+              </div>
+
+              <div className="space-y-2">
                 <p className="text-sm font-medium">Source Type</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <Button
@@ -1180,6 +1205,24 @@ export function Knowledge() {
                       Git Repository
                     </Button>
                   </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label
+                    className="text-sm font-medium"
+                    htmlFor="knowledge-description"
+                  >
+                    Search Description
+                  </label>
+                  <Textarea
+                    id="knowledge-description"
+                    value={settings.description ?? ""}
+                    onChange={(event) =>
+                      updateSettings({ description: event.target.value })
+                    }
+                    placeholder="Product docs, support notes, and operating procedures"
+                    rows={3}
+                  />
                 </div>
 
                 <div className="space-y-2">

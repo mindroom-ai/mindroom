@@ -75,6 +75,7 @@ export interface KnowledgeGitConfig {
 }
 
 export interface KnowledgeBaseConfig {
+  description?: string;
   path: string;
   watch: boolean;
   chunk_size?: number;
@@ -84,6 +85,7 @@ export interface KnowledgeBaseConfig {
 
 export interface AgentPrivateKnowledgeConfig {
   enabled?: boolean;
+  description?: string;
   path?: string | null;
   watch?: boolean;
   chunk_size?: number;

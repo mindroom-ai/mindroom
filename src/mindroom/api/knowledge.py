@@ -533,6 +533,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
 
         base_entry: dict[str, Any] = {
             "name": base_id,
+            "description": base_config.description,
             "path": str(root),
             "watch": base_config.watch,
             "file_count": len(file_info.files),
@@ -659,6 +660,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     """Return current indexing status for one knowledge base."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
+    base_config = config.knowledge_bases[base_id]
     index_status = await _index_status(config, base_id, runtime_paths)
     file_info = await _list_file_info(config, base_id, root)
     git_status = await _git_status(
@@ -672,8 +674,9 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
 
     payload: dict[str, Any] = {
         "base_id": base_id,
+        "description": base_config.description,
         "folder_path": str(root),
-        "watch": config.knowledge_bases[base_id].watch,
+        "watch": base_config.watch,
         "file_count": len(file_info.files),
         "indexed_count": index_status.indexed_count,
         "refreshing": refreshing,

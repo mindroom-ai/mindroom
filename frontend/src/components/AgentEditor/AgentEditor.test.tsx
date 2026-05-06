@@ -963,6 +963,58 @@ describe("AgentEditor", () => {
     });
   });
 
+  it("updates private knowledge description", async () => {
+    const privateAgent: Agent = {
+      ...mockAgent,
+      private: {
+        per: "user",
+        knowledge: {
+          enabled: true,
+          path: "memory",
+          watch: true,
+        },
+      },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [privateAgent],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: privateAgent,
+        },
+      },
+      agentPoliciesByAgent: makeAgentPolicies({
+        is_private: true,
+        effective_execution_scope: "user",
+        scope_label: "private.per=user",
+        scope_source: "private.per",
+        private_workspace_enabled: true,
+        private_agent_knowledge_enabled: true,
+      }),
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.change(screen.getByLabelText("Private Knowledge Description"), {
+      target: {
+        value: "Requester-private notes, preferences, and working memory.",
+      },
+    });
+
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      "test_agent",
+      expect.objectContaining({
+        private: expect.objectContaining({
+          knowledge: expect.objectContaining({
+            description:
+              "Requester-private notes, preferences, and working memory.",
+          }),
+        }),
+      }),
+    );
+  });
+
   it("drops empty compaction overrides during normalization", () => {
     expect(
       normalizeAgentUpdates(mockAgent, { compaction: {} }).compaction,

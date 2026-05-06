@@ -995,7 +995,7 @@ class TestAgentBot:
             runtime_root=tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        expected_knowledge = object()
+        expected_knowledge = Knowledge()
         lookup = SimpleNamespace(
             key=SimpleNamespace(
                 base_id="research",

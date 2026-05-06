@@ -24,6 +24,7 @@ const mockSaveConfig = vi
 type KnowledgeApiPayloads = {
   status: {
     base_id: string;
+    description?: string;
     folder_path: string;
     watch: boolean;
     file_count: number;
@@ -454,6 +455,51 @@ describe("Knowledge", () => {
         }),
       );
       expect(mockSaveConfig).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("creates a knowledge base with a description", async () => {
+    mockStore({});
+    setKnowledgeApiMock({
+      product_docs: {
+        status: {
+          base_id: "product_docs",
+          folder_path: "./knowledge_docs/product_docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "product_docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Knowledge Bases");
+
+    fireEvent.change(screen.getByLabelText("Base Name"), {
+      target: { value: "product_docs" },
+    });
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: {
+        value:
+          "Product requirements, roadmap notes, and user-facing decisions.",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add Base" }));
+
+    await waitFor(() => {
+      expect(mockUpdateKnowledgeBase).toHaveBeenCalledWith(
+        "product_docs",
+        expect.objectContaining({
+          description:
+            "Product requirements, roadmap notes, and user-facing decisions.",
+        }),
+      );
     });
   });
 
@@ -1130,6 +1176,51 @@ describe("Knowledge", () => {
     expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
       "docs",
       expect.objectContaining({ git: undefined }),
+    );
+  });
+
+  it("updates a knowledge base description from base settings", async () => {
+    mockStore({
+      docs: {
+        description: "Old docs description",
+        path: "./knowledge_docs/docs",
+        watch: true,
+      },
+    });
+    setKnowledgeApiMock({
+      docs: {
+        status: {
+          base_id: "docs",
+          description: "Old docs description",
+          folder_path: "./knowledge_docs/docs",
+          watch: true,
+          file_count: 0,
+          indexed_count: 0,
+        },
+        files: {
+          base_id: "docs",
+          files: [],
+          total_size: 0,
+          file_count: 0,
+        },
+      },
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    fireEvent.change(screen.getByLabelText("Search Description"), {
+      target: {
+        value: "Updated docs description for the model-facing search tool.",
+      },
+    });
+
+    expect(mockUpdateKnowledgeBase).toHaveBeenCalledWith(
+      "docs",
+      expect.objectContaining({
+        description:
+          "Updated docs description for the model-facing search tool.",
+      }),
     );
   });
 

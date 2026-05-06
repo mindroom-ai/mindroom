@@ -87,8 +87,6 @@ class _AsyncKnowledgeVectorDb(_KnowledgeVectorDb, Protocol):
 
 def _apply_knowledge_metadata(base_id: str, knowledge: Knowledge, config: Config) -> None:
     """Attach configured source metadata to one queryable Knowledge handle."""
-    if not isinstance(knowledge, Knowledge):
-        return
     base_config = config.get_knowledge_base_config(base_id)
     knowledge.name = base_id
     knowledge.description = base_config.description.strip() or None
@@ -626,9 +624,7 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
     if not vector_db_sources:
         return None
     source_descriptions = [
-        f"{knowledge.name}: {knowledge.description}"
-        for knowledge in knowledges
-        if isinstance(knowledge, Knowledge) and knowledge.description
+        f"{knowledge.name}: {knowledge.description}" for knowledge in knowledges if knowledge.description
     ]
     return Knowledge(
         name=f"{agent_name}_multi_knowledge",

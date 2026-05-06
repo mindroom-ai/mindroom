@@ -544,7 +544,7 @@ Per-agent overrides are configured from the **Agents** tab using the **Memory ba
 
 Manage file-backed RAG knowledge bases:
 
-- **Create/edit/delete knowledge bases** with `path` and refresh-on-access `watch` settings
+- **Create/edit/delete knowledge bases** with `description`, `path`, and refresh-on-access `watch` settings
 - **Configure Git repository, branch, filtering, credentials service, and sync options**
 - **Upload and remove files** for non-Git-backed knowledge bases
 - **Reindex** a knowledge base on demand
@@ -1100,6 +1100,7 @@ memory:
 # Keys must be non-empty single path components, so do not use "", ., .., /, or \ in a knowledge base ID.
 knowledge_bases:
   docs:
+    description: Product documentation, support notes, and operating procedures
     path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
     watch: false                   # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
@@ -1645,6 +1646,7 @@ In the example above, each requester gets their own effective `mind_data/` root 
 | `private.context_files`           | list                   | `null`              | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it                                                                                                                   |
 | `private.knowledge`               | object                 | `null`              | Optional PrivateAgentKnowledge indexed from inside the private root. Sub-fields below. See [Knowledge Bases](https://docs.mindroom.chat/knowledge/#private-agent-knowledge)                                                                            |
 | `private.knowledge.enabled`       | bool                   | `true`              | Whether to index PrivateAgentKnowledge for this private agent instance. Set to `false` to disable indexing                                                                                                                                             |
+| `private.knowledge.description`   | string                 | `""`                | Short description of what the private knowledge contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant                                                                                     |
 | `private.knowledge.path`          | string                 | `null`              | Path to a private knowledge directory relative to the private root                                                                                                                                                                                     |
 | `private.knowledge.watch`         | bool                   | `true`              | When true, PrivateAgentKnowledge schedules background refresh on access. When false, direct external edits require explicit refresh                                                                                                                    |
 | `private.knowledge.chunk_size`    | int                    | `5000`              | Maximum characters per indexed chunk (min: 128)                                                                                                                                                                                                        |

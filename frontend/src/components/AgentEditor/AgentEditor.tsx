@@ -531,6 +531,13 @@ export function AgentEditor() {
     }));
   };
 
+  const handlePrivateKnowledgeDescriptionChange = (description: string) => {
+    mutatePrivateKnowledge((current) => ({
+      ...(current ?? { enabled: true, watch: true }),
+      description,
+    }));
+  };
+
   const handlePrivateKnowledgeWatchChange = (watch: boolean) => {
     mutatePrivateKnowledge((current) => ({
       ...(current ?? { enabled: true }),
@@ -950,6 +957,21 @@ export function AgentEditor() {
 
             {privateKnowledge?.enabled === true && (
               <>
+                <FieldGroup
+                  label="Private Knowledge Description"
+                  helperText="Shown in the knowledge search tool metadata for this requester-private source."
+                  htmlFor="private_knowledge_description"
+                >
+                  <Textarea
+                    id="private_knowledge_description"
+                    value={privateKnowledge.description ?? ""}
+                    placeholder="Requester-private notes, preferences, and working memory"
+                    onChange={(e) =>
+                      handlePrivateKnowledgeDescriptionChange(e.target.value)
+                    }
+                  />
+                </FieldGroup>
+
                 <FieldGroup
                   label="Private Knowledge Path"
                   helperText="Private-root-relative path to index as private agent knowledge."

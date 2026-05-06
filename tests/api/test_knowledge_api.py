@@ -42,9 +42,11 @@ def _knowledge_config(
     extra_base: bool = False,
     duplicate_source_base: bool = False,
     git: bool = False,
+    description: str = "",
 ) -> Config:
     knowledge_bases = {
         "research": KnowledgeBaseConfig(
+            description=description,
             path=str(path),
             watch=False,
             git=KnowledgeGitConfig(repo_url="https://example.com/org/research.git") if git else None,
@@ -183,6 +185,26 @@ def test_knowledge_bases_list_does_not_initialize_unused_configured_bases(tmp_pa
     assert all("manager_available" not in base for base in payload["bases"])
     assert all("refresh_job" not in base for base in payload["bases"])
     refresh.assert_not_awaited()
+
+
+def test_knowledge_status_and_list_include_configured_description(tmp_path: Path) -> None:
+    """Knowledge metadata APIs should expose the configured source description."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    config = _knowledge_config(
+        docs,
+        description="Research briefs, experiment notes, and decision records.",
+    )
+    _publish_committed_runtime_config(client.app, config)
+
+    status_response = client.get("/api/knowledge/bases/research/status")
+    list_response = client.get("/api/knowledge/bases")
+
+    assert status_response.status_code == 200
+    assert list_response.status_code == 200
+    assert status_response.json()["description"] == "Research briefs, experiment notes, and decision records."
+    assert list_response.json()["bases"][0]["description"] == "Research briefs, experiment notes, and decision records."
 
 
 def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: Path) -> None:

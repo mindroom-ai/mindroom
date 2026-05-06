@@ -456,6 +456,7 @@ For a `mind` agent with `private.per: user`, different users get different priva
 | `private.context_files` | list | `null` | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it |
 | `private.knowledge` | object | `null` | Optional PrivateAgentKnowledge indexed from inside the private root. Sub-fields below. See [Knowledge Bases](../knowledge.md#private-agent-knowledge) |
 | `private.knowledge.enabled` | bool | `true` | Whether to index PrivateAgentKnowledge for this private agent instance. Set to `false` to disable indexing |
+| `private.knowledge.description` | string | `""` | Short description of what the private knowledge contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant |
 | `private.knowledge.path` | string | `null` | Path to a private knowledge directory relative to the private root |
 | `private.knowledge.watch` | bool | `true` | When true, PrivateAgentKnowledge schedules background refresh on access. When false, direct external edits require explicit refresh |
 | `private.knowledge.chunk_size` | int | `5000` | Maximum characters per indexed chunk (min: 128) |
