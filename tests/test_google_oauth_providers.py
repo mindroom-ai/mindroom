@@ -11,6 +11,7 @@ from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, google_drive_oauth_provider
 from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import _GOOGLE_SHEETS_OAUTH_SCOPES, google_sheets_oauth_provider
+from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 
 if TYPE_CHECKING:
     from mindroom.oauth.providers import OAuthProvider
@@ -151,3 +152,19 @@ def test_google_oauth_provider_helper_builds_common_google_provider_skeleton() -
     assert provider.extra_auth_params == GOOGLE_EXTRA_AUTH_PARAMS
     assert provider.status_capabilities == ("Example read/write",)
     assert provider.token_parser is _google_token_parser
+
+
+def test_oauth_connection_required_payload_preserves_structured_fields() -> None:
+    """OAuth-required tool payloads keep the established public field names."""
+    exc = OAuthConnectionRequired(
+        "Google Drive is not connected for this agent.",
+        provider_id="google_drive",
+        connect_url="/api/oauth/google_drive/connect?agent_name=general",
+    )
+
+    assert oauth_connection_required_payload(exc) == {
+        "error": "Google Drive is not connected for this agent.",
+        "oauth_connection_required": True,
+        "provider": "google_drive",
+        "connect_url": "/api/oauth/google_drive/connect?agent_name=general",
+    }

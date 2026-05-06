@@ -13,7 +13,7 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import credentials as google_credentials
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
-from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider
+from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider, oauth_connection_required_payload
 from mindroom.oauth.service import (
     oauth_connect_url,
     oauth_credentials_have_required_scopes,
@@ -159,14 +159,7 @@ class ScopedOAuthClientMixin:
         raise self._connection_required()
 
     def _structured_auth_failure(self, exc: OAuthConnectionRequired) -> str:
-        return json.dumps(
-            {
-                "error": str(exc),
-                "oauth_connection_required": True,
-                "provider": exc.provider_id,
-                "connect_url": exc.connect_url,
-            },
-        )
+        return json.dumps(oauth_connection_required_payload(exc))
 
     def _ensure_structured_auth(self) -> str | None:
         auth_source = self._select_auth_source()

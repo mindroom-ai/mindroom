@@ -36,7 +36,7 @@ from mindroom.attachments import normalize_attachment_id
 from mindroom.config.main import Config, load_config, normalized_config_data
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
-from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -1015,12 +1015,7 @@ async def _execute_request_inprocess(
 
 def _oauth_connection_required_result(exc: OAuthConnectionRequired) -> dict[str, object]:
     """Serialize OAuthConnectionRequired as the same structured tool result used in-process."""
-    return {
-        "error": str(exc),
-        "oauth_connection_required": True,
-        "provider": exc.provider_id,
-        "connect_url": exc.connect_url,
-    }
+    return oauth_connection_required_payload(exc)
 
 
 def _subprocess_failure_response(

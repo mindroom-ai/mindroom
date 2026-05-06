@@ -62,6 +62,16 @@ class OAuthConnectionRequired(OAuthProviderError):  # noqa: N818
         self.connect_url = connect_url
 
 
+def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str, object]:
+    """Return the structured tool payload for one OAuth connection prompt."""
+    return {
+        "error": str(exc),
+        "oauth_connection_required": True,
+        "provider": exc.provider_id,
+        "connect_url": exc.connect_url,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class OAuthClientConfig:
     """Resolved OAuth client settings for one runtime."""

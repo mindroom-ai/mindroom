@@ -26,7 +26,7 @@ from mindroom.hooks import (
 )
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
-from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.sync_bridge_state import sync_tool_bridge_blocked_loop
 from mindroom.timing import emit_timing_event
 from mindroom.tool_approval import ToolApprovalCall, ToolApprovalScriptError, request_tool_approval_for_call
@@ -636,12 +636,7 @@ async def _execute_bridge(
             agent_name=resolved_context.agent_name or None,
         )
     except OAuthConnectionRequired as exc:
-        result = {
-            "error": str(exc),
-            "oauth_connection_required": True,
-            "provider": exc.provider_id,
-            "connect_url": exc.connect_url,
-        }
+        result = oauth_connection_required_payload(exc)
         duration_ms = (time.perf_counter() - started_at) * 1000
         _record_debug_tool_success(
             tool_name=tool_name,
