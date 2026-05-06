@@ -118,6 +118,9 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
+_ISOLATED_RUNTIME_PATH_EXCLUDED_NAMES = _EXECUTION_RUNTIME_EXCLUDED_NAMES - {
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
+}
 _RUNNER_CONTROL_ENV_EXCLUDED_NAMES = frozenset(
     {
         "MINDROOM_API_KEY",
@@ -395,7 +398,7 @@ def _is_public_runtime_startup_env_name(name: str) -> bool:
 
 
 def _is_isolated_runtime_public_env_name(name: str) -> bool:
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+    if name in _ISOLATED_RUNTIME_PATH_EXCLUDED_NAMES:
         return False
     if is_runtime_database_url_env_name(name):
         return False
