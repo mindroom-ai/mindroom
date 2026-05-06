@@ -38,6 +38,17 @@ _COMMAND_DOCS = {
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
     CommandType.HI: ("!hi", "Show welcome message"),
 }
+_WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP)
+_COMPACT_COMMAND_DOC_OVERRIDES = {
+    CommandType.SCHEDULE: ("!schedule <time> <message>", "Schedule tasks and reminders"),
+    CommandType.HELP: ("!help [topic]", "Get detailed help"),
+    CommandType.HI: ("!hi", "Show this welcome message again"),
+}
+
+
+def _format_command_entry(syntax: str, description: str, *, format_code: bool = False, bullet: str = "-") -> str:
+    command = f"`{syntax}`" if format_code else syntax
+    return f"{bullet} {command} - {description}"
 
 
 def _get_command_entries(format_code: bool = False) -> list[str]:
@@ -50,26 +61,27 @@ def _get_command_entries(format_code: bool = False) -> list[str]:
         List of formatted command strings
 
     """
-    entries = []
-    for cmd_type in CommandType:
-        if cmd_type in _COMMAND_DOCS and cmd_type != CommandType.UNKNOWN:
-            syntax, description = _COMMAND_DOCS[cmd_type]
-            if format_code:
-                entries.append(f"- `{syntax}` - {description}")
-            else:
-                entries.append(f"- {syntax} - {description}")
-    return entries
+    return [
+        _format_command_entry(*_COMMAND_DOCS[cmd_type], format_code=format_code)
+        for cmd_type in CommandType
+        if cmd_type in _COMMAND_DOCS and cmd_type != CommandType.UNKNOWN
+    ]
 
 
-def _get_command_list() -> str:
-    """Get a formatted list of all available commands.
-
-    Returns:
-        Formatted string with all commands and their descriptions
-
-    """
-    lines = ["Available commands:", *_get_command_entries(format_code=False)]
-    return "\n".join(lines)
+def get_compact_command_entries(
+    command_types: tuple[CommandType, ...] | None = None,
+    *,
+    format_code: bool = False,
+) -> list[str]:
+    """Get compact command entries for welcome and other short command lists."""
+    return [
+        _format_command_entry(
+            *_COMPACT_COMMAND_DOC_OVERRIDES.get(cmd_type, _COMMAND_DOCS[cmd_type]),
+            format_code=format_code,
+            bullet="\u2022",
+        )
+        for cmd_type in (command_types or _WELCOME_COMMAND_TYPES)
+    ]
 
 
 @dataclass
@@ -84,7 +96,6 @@ class Command:
 class _CommandParser:
     """Parser for user commands in messages."""
 
-    # Command patterns
     HELP_PATTERN = re.compile(r"^!help(?:\s+(.+))?$", re.IGNORECASE)
     RELOAD_PLUGINS_PATTERN = re.compile(r"^!reload(?:-|_)plugins$", re.IGNORECASE)
     SCHEDULE_PATTERN = re.compile(r"^!schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
@@ -106,14 +117,10 @@ class _CommandParser:
         """
         message = message.strip()
 
-        # Handle voice emoji prefixe (e.g., "🎤 !schedule ...")
         message = message.removeprefix(VOICE_PREFIX)
         if not message.startswith("!"):
             return None
 
-        # Try to match each command pattern
-
-        # !hi command (check this early as it's simple)
         if self.HI_PATTERN.match(message):
             return Command(
                 type=CommandType.HI,
@@ -121,7 +128,6 @@ class _CommandParser:
                 raw_text=message,
             )
 
-        # !help command
         match = self.HELP_PATTERN.match(message)
         if match:
             topic = match.group(1)
@@ -134,18 +140,15 @@ class _CommandParser:
         if self.RELOAD_PLUGINS_PATTERN.match(message):
             return Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text=message)
 
-        # !schedule command
         match = self.SCHEDULE_PATTERN.match(message)
         if match:
             full_text = match.group(1).strip()
-            # Pass the entire text to AI - it will parse both time and message
             return Command(
                 type=CommandType.SCHEDULE,
                 args={"full_text": full_text},
                 raw_text=message,
             )
 
-        # !list_schedules command
         if self.LIST_SCHEDULES_PATTERN.match(message):
             return Command(
                 type=CommandType.LIST_SCHEDULES,
@@ -153,11 +156,9 @@ class _CommandParser:
                 raw_text=message,
             )
 
-        # !cancel_schedule command
         match = self.CANCEL_SCHEDULE_PATTERN.match(message)
         if match:
             task_id = match.group(1).strip()
-            # Check if user wants to cancel all tasks
             cancel_all = task_id.lower() == "all"
             return Command(
                 type=CommandType.CANCEL_SCHEDULE,
@@ -165,7 +166,6 @@ class _CommandParser:
                 raw_text=message,
             )
 
-        # !edit_schedule command
         match = self.EDIT_SCHEDULE_PATTERN.match(message)
         if match:
             task_id = match.group(1).strip()
@@ -176,7 +176,6 @@ class _CommandParser:
                 raw_text=message,
             )
 
-        # !config command
         match = self.CONFIG_PATTERN.match(message)
         if match:
             args_text = match.group(1).strip() if match.group(1) else ""
@@ -186,7 +185,6 @@ class _CommandParser:
                 raw_text=message,
             )
 
-        # Unknown command - return a special Command indicating it's unknown
         logger.debug("unknown_command", command=message)
         return Command(
             type=CommandType.UNKNOWN,
