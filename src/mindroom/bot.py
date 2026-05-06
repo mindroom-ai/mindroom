@@ -87,7 +87,7 @@ from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
-from .matrix.room_member_joins import RoomMemberJoin, room_member_join_from_event
+from .matrix.room_member_joins import RoomMemberJoin, room_member_join_from_event, room_member_joins_from_sync_state
 from .media_inputs import MediaInputs
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
@@ -760,6 +760,7 @@ class AgentBot:
 
         context = RoomMemberJoinedContext(
             **self._hook_context_support.base_kwargs(EVENT_ROOM_MEMBER_JOINED, join.event_id),
+            agent_name=self.agent_name,
             room_id=join.room_id,
             event_id=join.event_id,
             user_id=join.user_id,
@@ -1078,6 +1079,8 @@ class AgentBot:
                 first_sync_response=first_sync_response,
             )
             self._apply_sync_certification_decision(decision, cache_result=cache_result)
+            if not first_sync_response:
+                await self._emit_room_member_joined_sync_state_hooks(_response)
         self._first_sync_done = True
 
         if first_sync_response:
@@ -1433,6 +1436,25 @@ class AgentBot:
             return
 
         await self._emit_room_member_joined_hooks(join)
+
+    async def _emit_room_member_joined_sync_state_hooks(self, response: nio.SyncResponse) -> None:
+        """Expose human joins that matrix-nio delivers through sync room state."""
+        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done:
+            return
+        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+            return
+        client = self.client
+        if client is None:
+            return
+
+        for join in room_member_joins_from_sync_state(
+            response,
+            rooms=client.rooms,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            storage_root=self.runtime_paths.storage_root,
+        ):
+            await self._emit_room_member_joined_hooks(join)
 
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""

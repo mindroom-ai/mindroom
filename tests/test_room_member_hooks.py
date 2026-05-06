@@ -6,7 +6,7 @@ import asyncio
 import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -17,6 +17,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from mindroom.matrix import room_member_joins
+from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, test_runtime_paths
 
@@ -77,6 +78,21 @@ def _room_member_event(
     event = nio.RoomMemberEvent.from_dict(raw_event)
     assert isinstance(event, nio.RoomMemberEvent)
     return event
+
+
+def _sync_response_with_state(room_id: str, events: list[object]) -> nio.SyncResponse:
+    response = MagicMock()
+    response.__class__ = nio.SyncResponse
+    response.next_batch = "s_next"
+    response.rooms = SimpleNamespace(
+        join={
+            room_id: SimpleNamespace(
+                state=events,
+                timeline=SimpleNamespace(events=[], limited=False),
+            ),
+        },
+    )
+    return cast("nio.SyncResponse", response)
 
 
 def _router_bot(tmp_path: Path, *, bot_accounts: list[str] | None = None) -> AgentBot:
@@ -152,6 +168,7 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
 
     assert len(seen) == 1
     context = seen[0]
+    assert context.agent_name == ROUTER_AGENT_NAME
     assert context.room_id == "!lobby:localhost"
     assert context.event_id == "$join1"
     assert context.user_id == "@alice:localhost"
@@ -162,6 +179,50 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
     assert context.avatar_url == "mxc://localhost/alice"
     assert context.first_join is True
     assert context.matrix_admin is not None
+
+
+@pytest.mark.asyncio
+async def test_room_member_joined_supports_router_agent_scope(tmp_path: Path) -> None:
+    """room:member_joined hooks should support router agent scoping."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED, agents=[ROUTER_AGENT_NAME])
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.user_id)
+
+    bot = _router_bot(tmp_path)
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+
+    await bot._on_room_member(_room(), _room_member_event())
+
+    assert seen == ["@alice:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_router_emits_room_member_joined_from_sync_state_after_initial_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live joins delivered through sync room state should trigger onboarding hooks."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot,
+        "_sync_cache_result_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    await bot._on_sync_response(_sync_response_with_state(room.room_id, [_room_member_event(event_id="$state-join")]))
+
+    assert seen == ["$state-join"]
 
 
 @pytest.mark.asyncio

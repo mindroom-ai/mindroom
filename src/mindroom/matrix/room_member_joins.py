@@ -8,14 +8,15 @@ from threading import Lock
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import nio
+
 from mindroom.constants import safe_replace
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import extract_agent_name
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
-
-    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -148,6 +149,35 @@ def room_member_join_from_event(
         prev_membership=event.prev_membership,
         first_join=first_join,
     )
+
+
+def room_member_joins_from_sync_state(
+    response: nio.SyncResponse,
+    *,
+    rooms: Mapping[str, nio.MatrixRoom],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    storage_root: Path,
+) -> tuple[RoomMemberJoin, ...]:
+    """Return hook payloads for human joins delivered through sync room state."""
+    joins: list[RoomMemberJoin] = []
+    for room_id, join_info in response.rooms.join.items():
+        room = rooms.get(room_id)
+        if room is None:
+            continue
+        for event in join_info.state:
+            if not isinstance(event, nio.RoomMemberEvent):
+                continue
+            join = room_member_join_from_event(
+                room,
+                event,
+                config=config,
+                runtime_paths=runtime_paths,
+                storage_root=storage_root,
+            )
+            if join is not None:
+                joins.append(join)
+    return tuple(joins)
 
 
 def _optional_string(content: dict[str, object], key: str) -> str | None:

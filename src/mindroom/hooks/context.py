@@ -549,6 +549,7 @@ class ReactionReceivedContext(HookContext):
 class RoomMemberJoinedContext(HookContext):
     """Context for room:member_joined hooks."""
 
+    agent_name: str
     room_id: str
     event_id: str
     user_id: str

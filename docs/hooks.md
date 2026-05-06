@@ -604,6 +604,7 @@ ResponseResult(
 )
 
 RoomMemberJoinedContext(
+    agent_name: str,
     room_id: str,
     event_id: str,
     user_id: str,

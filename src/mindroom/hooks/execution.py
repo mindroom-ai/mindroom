@@ -57,18 +57,20 @@ class _HookInvocationResult:
 
 
 def _scope_agent_name(context: _HookExecutionContext) -> str | None:
+    agent_name: str | None = None
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
-        return context.agent_name
-    envelope = message_envelope_for_hook_context(context)
-    if envelope is not None:
-        return envelope.agent_name
-    if isinstance(context, MessageEnrichContext | SystemEnrichContext):
-        return context.target_entity_name
-    if isinstance(context, AgentLifecycleContext):
-        return context.entity_name
-    if isinstance(context, CompactionHookContext | SessionHookContext):
-        return context.agent_name
-    return None
+        agent_name = context.agent_name
+    else:
+        envelope = message_envelope_for_hook_context(context)
+        if envelope is not None:
+            agent_name = envelope.agent_name
+        elif isinstance(context, MessageEnrichContext | SystemEnrichContext):
+            agent_name = context.target_entity_name
+        elif isinstance(context, AgentLifecycleContext):
+            agent_name = context.entity_name
+        elif isinstance(context, CompactionHookContext | SessionHookContext | RoomMemberJoinedContext):
+            agent_name = context.agent_name
+    return agent_name
 
 
 def _scope_room_ids(context: _HookExecutionContext) -> tuple[str, ...]:  # noqa: PLR0911
