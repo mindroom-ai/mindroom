@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp.client.sse import sse_client
@@ -18,6 +18,7 @@ _ENV_REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
     from contextlib import AbstractAsyncContextManager
+    from typing import Any
 
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.config import MCPServerConfig, MCPTransport
@@ -26,6 +27,9 @@ _TransportStreams = tuple[
     MemoryObjectReceiveStream[SessionMessage | Exception],
     MemoryObjectSendStream[SessionMessage],
 ]
+
+if TYPE_CHECKING:
+    _RemoteTransportClient = Callable[..., AbstractAsyncContextManager[tuple[Any, ...]]]
 
 
 @dataclass(frozen=True)
@@ -85,37 +89,23 @@ async def _open_stdio(
 
 
 @asynccontextmanager
-async def _open_sse(
+async def _open_remote_transport(
     server_config: MCPServerConfig,
     runtime_paths: RuntimePaths,
+    *,
+    transport: MCPTransport,
+    client: _RemoteTransportClient,
 ) -> AsyncIterator[_TransportStreams]:
     if server_config.url is None:
-        msg = "sse MCP servers require url"
+        msg = f"{transport} MCP servers require url"
         raise ValueError(msg)
-    async with sse_client(
+    async with client(
         server_config.url,
         headers=_interpolate_mcp_headers(server_config.headers, runtime_paths),
         timeout=server_config.startup_timeout_seconds,
         sse_read_timeout=server_config.call_timeout_seconds,
     ) as streams:
-        yield streams
-
-
-@asynccontextmanager
-async def _open_streamable_http(
-    server_config: MCPServerConfig,
-    runtime_paths: RuntimePaths,
-) -> AsyncIterator[_TransportStreams]:
-    if server_config.url is None:
-        msg = "streamable-http MCP servers require url"
-        raise ValueError(msg)
-    async with streamablehttp_client(
-        server_config.url,
-        headers=_interpolate_mcp_headers(server_config.headers, runtime_paths),
-        timeout=server_config.startup_timeout_seconds,
-        sse_read_timeout=server_config.call_timeout_seconds,
-    ) as streams:
-        yield streams[0], streams[1]
+        yield cast("_TransportStreams", streams[:2])
 
 
 def build_transport_handle(
@@ -127,11 +117,24 @@ def build_transport_handle(
     if server_config.transport == "stdio":
         return _MCPTransportHandle(transport="stdio", opener=lambda: _open_stdio(server_config, runtime_paths))
     if server_config.transport == "sse":
-        return _MCPTransportHandle(transport="sse", opener=lambda: _open_sse(server_config, runtime_paths))
+        return _MCPTransportHandle(
+            transport="sse",
+            opener=lambda: _open_remote_transport(
+                server_config,
+                runtime_paths,
+                transport="sse",
+                client=sse_client,
+            ),
+        )
     if server_config.transport == "streamable-http":
         return _MCPTransportHandle(
             transport="streamable-http",
-            opener=lambda: _open_streamable_http(server_config, runtime_paths),
+            opener=lambda: _open_remote_transport(
+                server_config,
+                runtime_paths,
+                transport="streamable-http",
+                client=streamablehttp_client,
+            ),
         )
     msg = f"Unsupported MCP transport for server '{server_id}': {server_config.transport}"
     raise ValueError(msg)
