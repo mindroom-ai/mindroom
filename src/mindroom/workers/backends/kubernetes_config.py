@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_env_values
-from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
+from mindroom.runtime_env_policy import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
+    KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+)
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -204,6 +208,8 @@ def kubernetes_backend_config_signature(
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
     config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
+    credentials_encryption_key_marker = credentials_encryption_key_hash(credentials_encryption_key) or ""
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     extra_annotations_json = json.dumps(config.extra_annotations, sort_keys=True, separators=(",", ":"))
@@ -235,6 +241,17 @@ def kubernetes_backend_config_signature(
         resource_limits_json,
         str(config.enable_service_links),
         config.auth_secret_name or "",
+        credentials_encryption_key_marker,
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )
+
+
+def credentials_encryption_key_hash(encryption_key: str | None) -> str | None:
+    """Return a stable non-secret marker for the credential encryption key."""
+    if encryption_key is None:
+        return None
+    normalized_key = encryption_key.strip()
+    if not normalized_key:
+        return None
+    return hashlib.sha256(normalized_key.encode("utf-8")).hexdigest()

@@ -34,7 +34,11 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
-from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, KubernetesWorkerBackendConfig
+from mindroom.workers.backends.kubernetes import (
+    KubernetesWorkerBackend,
+    KubernetesWorkerBackendConfig,
+    kubernetes_backend_config_signature,
+)
 from mindroom.workers.backends.kubernetes_resources import (
     _ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH,
     _ANNOTATION_RUNNER_TOKEN_HASH,
@@ -730,6 +734,54 @@ def test_kubernetes_worker_credentials_encryption_key_rotation_changes_template_
     )
     assert first_key not in json.dumps(first_deployment)
     assert second_key not in json.dumps(second_deployment)
+
+
+def test_kubernetes_backend_config_signature_changes_with_credentials_encryption_key(tmp_path: Path) -> None:
+    """Credential encryption key changes should invalidate cached Kubernetes managers without storing the key."""
+    base_env = {
+        "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
+    }
+    first_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii")
+    second_key = base64.urlsafe_b64encode(b"2" * 32).decode("ascii")
+    first_runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+        process_env={**base_env, CREDENTIALS_ENCRYPTION_KEY_ENV: first_key},
+    )
+    second_runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+        process_env={**base_env, CREDENTIALS_ENCRYPTION_KEY_ENV: second_key},
+    )
+    disabled_runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+        process_env=base_env,
+    )
+
+    first_signature = kubernetes_backend_config_signature(
+        first_runtime_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=first_runtime_paths.storage_root,
+    )
+    second_signature = kubernetes_backend_config_signature(
+        second_runtime_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=second_runtime_paths.storage_root,
+    )
+    disabled_signature = kubernetes_backend_config_signature(
+        disabled_runtime_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=disabled_runtime_paths.storage_root,
+    )
+
+    first_key_hash = hashlib.sha256(first_key.encode("utf-8")).hexdigest()
+    assert first_signature != second_signature
+    assert first_signature != disabled_signature
+    assert first_key_hash in first_signature
+    assert first_key not in "\n".join(first_signature)
+    assert second_key not in "\n".join(second_signature)
 
 
 def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -> None:

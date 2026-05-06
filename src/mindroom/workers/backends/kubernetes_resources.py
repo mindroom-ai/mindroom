@@ -26,6 +26,7 @@ from mindroom.runtime_env_policy import (
 )
 from mindroom.tool_system import worker_routing
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends.kubernetes_config import credentials_encryption_key_hash
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -207,13 +208,6 @@ def _worker_auth_token_hash(shared_token: str | None, worker_key: str) -> str | 
     if token is None:
         return None
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def _credentials_encryption_key_hash(encryption_key: str | None) -> str | None:
-    """Return a stable non-secret marker for the credential encryption key."""
-    if encryption_key is None:
-        return None
-    return hashlib.sha256(encryption_key.encode("utf-8")).hexdigest()
 
 
 def _secret_data_value(value: str) -> str:
@@ -728,7 +722,7 @@ class KubernetesResourceManager:
             msg = "A worker auth token is required for Kubernetes workers."
             raise WorkerBackendError(msg)
         template_annotations[_ANNOTATION_RUNNER_TOKEN_HASH] = token_hash
-        credentials_key_hash = _credentials_encryption_key_hash(self._credentials_encryption_key())
+        credentials_key_hash = credentials_encryption_key_hash(self._credentials_encryption_key())
         if credentials_key_hash is not None:
             template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH] = credentials_key_hash
         template_metadata = {

@@ -259,13 +259,22 @@ class CredentialsManager:
         normalized_service = validate_service_name(service)
         credentials_path = self.get_credentials_path(service)
         if credentials_path.exists():
-            try:
-                if self._encryption_key is not None:
+            if self._encryption_key is not None:
+                try:
                     return _decrypt_credentials_payload(
                         credentials_path.read_bytes(),
                         service=normalized_service,
                         key=self._encryption_key,
                     )
+                except (OSError, TypeError, ValueError, json.JSONDecodeError, InvalidTag, binascii.Error) as exc:
+                    logger.warning(
+                        "Failed to load encrypted credentials",
+                        service=service,
+                        path=str(credentials_path),
+                        error_type=type(exc).__name__,
+                    )
+                    return None
+            try:
                 with credentials_path.open(encoding="utf-8") as f:
                     data: dict[str, Any] = json.load(f)
                     return data

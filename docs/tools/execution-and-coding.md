@@ -179,7 +179,7 @@ kill_shell_command("shell:abcd1234")
 ### Notes
 
 - `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries.
-  MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names, and names starting with `MINDROOM_SANDBOX_`.
+  MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and names starting with `MINDROOM_SANDBOX_`.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.

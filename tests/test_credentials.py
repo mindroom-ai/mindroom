@@ -159,6 +159,48 @@ class TestCredentialsManager:
 
         assert manager.load_credentials("oauth_service") is None
 
+    def test_encrypted_credentials_reject_plaintext_without_traceback_logging(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted-mode load failures should not log traceback locals containing secrets."""
+
+        class CapturingLogger:
+            def __init__(self) -> None:
+                self.warning_calls: list[tuple[str, dict[str, object]]] = []
+
+            def warning(self, event: str, **kwargs: object) -> None:
+                self.warning_calls.append((event, kwargs))
+
+            def exception(self, event: str, **kwargs: object) -> None:
+                _ = event, kwargs
+                pytest.fail("encrypted credential load must not use traceback logging")
+
+        encryption_key = _test_encryption_key()
+        captured_logger = CapturingLogger()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        monkeypatch.setattr(mindroom.credentials, "logger", captured_logger)
+        manager = CredentialsManager(tmp_path / "credentials")
+        creds_path = manager.get_credentials_path("oauth_service")
+        creds_path.write_text('{"token":"plaintext-token"}', encoding="utf-8")
+
+        assert manager.load_credentials("oauth_service") is None
+
+        assert captured_logger.warning_calls == [
+            (
+                "Failed to load encrypted credentials",
+                {
+                    "service": "oauth_service",
+                    "path": str(creds_path),
+                    "error_type": "ValueError",
+                },
+            ),
+        ]
+        logged_payload = repr(captured_logger.warning_calls)
+        assert "plaintext-token" not in logged_payload
+        assert encryption_key not in logged_payload
+
     def test_encrypted_credentials_file_mode_is_private(
         self,
         tmp_path: Path,
