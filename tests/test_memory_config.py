@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -25,18 +24,11 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 class TestMemoryConfig:
     """Test memory configuration."""
 
-    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     def test_get_memory_config_with_ollama(
         self,
-        mock_get_creds_manager: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test memory config creation with Ollama embedder."""
-        # Mock credentials manager to return None for ollama credentials
-        mock_creds_manager = MagicMock()
-        mock_creds_manager.load_credentials.return_value = None
-        mock_get_creds_manager.return_value = mock_creds_manager
-
         # Create config with Ollama embedder
         embedder_config = _MemoryEmbedderConfig(
             provider="ollama",
@@ -76,18 +68,13 @@ class TestMemoryConfig:
         assert result["vector_store"]["config"]["collection_name"] == _memory_collection_name(config)
         assert str(storage_path / "chroma") in result["vector_store"]["config"]["path"]
 
-    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
     def test_get_memory_config_with_openai(
         self,
-        mock_get_creds_manager: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test memory config creation with OpenAI embedder."""
-        # Mock credentials manager to return test API key
-        mock_creds_manager = MagicMock()
-        mock_creds_manager.get_api_key.return_value = "test-key"
-        mock_get_creds_manager.return_value = mock_creds_manager
+        runtime_paths = _runtime_paths(tmp_path)
+        get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-key")
 
         # Create config with OpenAI embedder
         embedder_config = _MemoryEmbedderConfig(
@@ -103,33 +90,23 @@ class TestMemoryConfig:
 
         # Test config generation
         storage_path = tmp_path / "memory"
-        result = _get_memory_config(storage_path, config, _runtime_paths(tmp_path))
+        result = _get_memory_config(storage_path, config, runtime_paths)
 
         # Verify embedder config
         assert result["embedder"]["provider"] == "openai"
         assert result["embedder"]["config"]["model"] == "text-embedding-ada-002"
-        # API key is now set as environment variable, not in config
+        assert result["embedder"]["config"]["api_key"] == "test-key"
 
         # Verify LLM config
         assert result["llm"]["provider"] == "openai"
         assert result["llm"]["config"]["model"] == "gpt-4"
-        # API key is now set as environment variable, not in config
+        assert result["llm"]["config"]["api_key"] == "test-key"
 
-        # Verify the environment variable was set
-        assert os.environ.get("OPENAI_API_KEY") == "test-key"
-
-    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
-    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,
-        mock_get_creds_manager: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Configured embedding dimensions should be forwarded to Mem0."""
-        mock_creds_manager = MagicMock()
-        mock_creds_manager.get_api_key.return_value = "test-key"
-        mock_get_creds_manager.return_value = mock_creds_manager
-
         embedder_config = _MemoryEmbedderConfig(
             provider="openai",
             config=EmbedderConfig(
@@ -145,17 +122,11 @@ class TestMemoryConfig:
 
         assert result["embedder"]["config"]["embedding_dims"] == 3072
 
-    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     def test_get_memory_config_with_sentence_transformers(
         self,
-        mock_get_creds_manager: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Sentence-transformers should map to Mem0's local huggingface embedder."""
-        mock_creds_manager = MagicMock()
-        mock_creds_manager.load_credentials.return_value = None
-        mock_get_creds_manager.return_value = mock_creds_manager
-
         embedder_config = _MemoryEmbedderConfig(
             provider="sentence_transformers",
             config=EmbedderConfig(
@@ -172,14 +143,11 @@ class TestMemoryConfig:
         assert result["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
         assert result["embedder"]["config"]["embedding_dims"] == 384
 
-    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     def test_get_memory_config_keeps_existing_huggingface_provider_support(
         self,
-        mock_get_creds_manager: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Existing Mem0 providers should remain valid after adding sentence-transformers."""
-        mock_get_creds_manager.return_value = MagicMock()
         config = Config(
             memory={
                 "embedder": {
@@ -241,6 +209,62 @@ class TestMemoryConfig:
 
         assert result["embedder"]["config"]["api_key"] == "shared-openai-key"
 
+    def test_get_memory_config_openai_embedder_maps_provider_settings(self, tmp_path: Path) -> None:
+        """OpenAI Mem0 embedder config should keep the provider-specific field names."""
+        runtime_paths = _runtime_paths(tmp_path)
+        get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "shared-openai-key")
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "openai",
+                    "config": {
+                        "model": "custom-embedding-model",
+                        "host": "http://embeddings.local/v1",
+                        "dimensions": 1024,
+                    },
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
+
+        assert result["embedder"]["provider"] == "openai"
+        assert result["embedder"]["config"] == {
+            "model": "custom-embedding-model",
+            "api_key": "shared-openai-key",
+            "openai_base_url": "http://embeddings.local/v1",
+            "embedding_dims": 1024,
+        }
+
+    def test_get_memory_config_ollama_embedder_uses_credential_host_before_config(self, tmp_path: Path) -> None:
+        """Credential-backed Ollama host should override the embedder config host."""
+        runtime_paths = _runtime_paths(tmp_path)
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            "ollama",
+            {"host": "http://credential-ollama:11434"},
+        )
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "ollama",
+                    "config": {
+                        "model": "nomic-embed-text",
+                        "host": "http://config-ollama:11434",
+                    },
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
+
+        assert result["embedder"]["provider"] == "ollama"
+        assert result["embedder"]["config"] == {
+            "model": "nomic-embed-text",
+            "ollama_base_url": "http://credential-ollama:11434",
+        }
+
     @pytest.mark.parametrize(
         ("model", "effective_dimensions"),
         [
@@ -301,19 +325,11 @@ class TestMemoryConfig:
 
         assert _memory_collection_name(implicit_config) != _memory_collection_name(explicit_config)
 
-    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
-    @patch.dict("os.environ", {}, clear=True)
     def test_get_memory_config_no_model_fallback(
         self,
-        mock_get_creds_manager: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test memory config falls back to Ollama when no model configured."""
-        # Mock credentials manager to return None for ollama credentials
-        mock_creds_manager = MagicMock()
-        mock_creds_manager.load_credentials.return_value = None
-        mock_get_creds_manager.return_value = mock_creds_manager
-
         # Create config with no models
         embedder_config = _MemoryEmbedderConfig(
             provider="ollama",
@@ -332,18 +348,11 @@ class TestMemoryConfig:
         assert result["llm"]["config"]["model"] == "llama3.2"
         assert result["llm"]["config"]["ollama_base_url"] == "http://localhost:11434"
 
-    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     def test_chroma_directory_creation(
         self,
-        mock_get_creds_manager: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test that ChromaDB directory is created."""
-        # Mock credentials manager to return None for ollama credentials
-        mock_creds_manager = MagicMock()
-        mock_creds_manager.load_credentials.return_value = None
-        mock_get_creds_manager.return_value = mock_creds_manager
-
         # Create minimal config
         embedder_config = _MemoryEmbedderConfig(
             provider="ollama",
@@ -363,18 +372,12 @@ class TestMemoryConfig:
         assert chroma_path.exists()
         assert chroma_path.is_dir()
 
-    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     def test_relative_storage_path_remains_stable_after_cwd_change(
         self,
-        mock_get_creds_manager: MagicMock,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Relative storage paths should be anchored once and survive later cwd changes."""
-        mock_creds_manager = MagicMock()
-        mock_creds_manager.load_credentials.return_value = None
-        mock_get_creds_manager.return_value = mock_creds_manager
-
         project_root = tmp_path / "project"
         project_root.mkdir(parents=True, exist_ok=True)
         monkeypatch.chdir(project_root)

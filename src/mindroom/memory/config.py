@@ -8,7 +8,7 @@ from mem0 import AsyncMemory
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
-from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
@@ -48,7 +48,6 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     app_config = config
     # Canonicalize once so Chroma path is independent of runtime cwd changes.
     resolved_storage_path = storage_path.expanduser().resolve()
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
 
     # Ensure storage directories exist
     chroma_path = resolved_storage_path / "chroma"
@@ -66,7 +65,7 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
 
     # Add provider-specific configuration
     if embedder_provider == "openai":
-        api_key = creds_manager.get_api_key("openai")
+        api_key = get_api_key_for_provider("openai", runtime_paths=runtime_paths)
         if api_key:
             embedder_provider_config["api_key"] = api_key
         # Support custom OpenAI-compatible base URL (e.g., llama.cpp)
@@ -75,12 +74,11 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
         if app_config.memory.embedder.config.dimensions is not None:
             embedder_provider_config["embedding_dims"] = app_config.memory.embedder.config.dimensions
     elif embedder_provider == "ollama":
-        # Check CredentialsManager for Ollama host
-        ollama_creds = creds_manager.load_credentials("ollama")
-        if ollama_creds and "host" in ollama_creds:
-            host = ollama_creds["host"]
-        else:
-            host = app_config.memory.embedder.config.host or "http://localhost:11434"
+        host = (
+            get_ollama_host(runtime_paths=runtime_paths)
+            or app_config.memory.embedder.config.host
+            or "http://localhost:11434"
+        )
         embedder_provider_config["ollama_base_url"] = host
     elif embedder_provider == "sentence_transformers" and app_config.memory.embedder.config.dimensions is not None:
         embedder_provider_config["embedding_dims"] = app_config.memory.embedder.config.dimensions
@@ -95,21 +93,14 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
         # Copy config but handle provider-specific field names
         for key, value in app_config.memory.llm.config.items():
             if key == "host" and app_config.memory.llm.provider == "ollama":
-                # Check CredentialsManager for Ollama host
-                ollama_creds = creds_manager.load_credentials("ollama")
-                if ollama_creds and "host" in ollama_creds:
-                    llm_config["config"]["ollama_base_url"] = ollama_creds["host"]
-                else:
-                    llm_config["config"]["ollama_base_url"] = value or "http://localhost:11434"
+                llm_config["config"]["ollama_base_url"] = (
+                    get_ollama_host(runtime_paths=runtime_paths) or value or "http://localhost:11434"
+                )
             elif key != "host":  # Skip host for other fields
                 llm_config["config"][key] = value
 
-        if app_config.memory.llm.provider == "openai":
-            api_key = creds_manager.get_api_key("openai")
-            if api_key:
-                llm_config["config"]["api_key"] = api_key
-        elif app_config.memory.llm.provider == "anthropic":
-            api_key = creds_manager.get_api_key("anthropic")
+        if app_config.memory.llm.provider in {"openai", "anthropic"}:
+            api_key = get_api_key_for_provider(app_config.memory.llm.provider, runtime_paths=runtime_paths)
             if api_key:
                 llm_config["config"]["api_key"] = api_key
 
@@ -121,15 +112,12 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     else:
         # Fallback if no LLM configured
         logger.warning("No memory LLM configured, using default ollama/llama3.2")
-        # Check CredentialsManager for Ollama host
-        ollama_creds = creds_manager.load_credentials("ollama")
-        ollama_host = ollama_creds["host"] if ollama_creds and "host" in ollama_creds else "http://localhost:11434"
 
         llm_config = {
             "provider": "ollama",
             "config": {
                 "model": "llama3.2",
-                "ollama_base_url": ollama_host,
+                "ollama_base_url": get_ollama_host(runtime_paths=runtime_paths) or "http://localhost:11434",
                 "temperature": 0.1,
                 "top_p": 1,
             },
