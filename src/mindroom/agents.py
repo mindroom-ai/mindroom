@@ -18,12 +18,8 @@ from agno.run.team import TeamRunOutput
 import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
-from mindroom.agent_knowledge_descriptions import (
-    KnowledgeToolDescribingAgent as Agent,
-)
-from mindroom.agent_knowledge_descriptions import (
-    knowledge_source_descriptions,
-)
+from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
+from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry

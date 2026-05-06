@@ -39,7 +39,7 @@ _TOKEN_LIKE_PATTERN = re.compile(
     r"|gh(?:p|o|u|s|r)_[A-Za-z0-9_]+"
     r"|github_pat_[A-Za-z0-9_]+"
     r"|AIza[0-9A-Za-z_-]+"
-    r"))(?![A-Za-z0-9])",
+    r"))(?![A-Za-z0-9])"
 )
 _SECRET_KEYS = frozenset(
     {
