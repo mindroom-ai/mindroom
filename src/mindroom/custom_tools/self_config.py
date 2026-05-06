@@ -8,12 +8,12 @@ import yaml
 from agno.tools import Toolkit
 from pydantic import ValidationError
 
+from mindroom.api.config_lifecycle import validate_and_persist_config_payload
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import (
     preserve_tool_overrides,
-    save_runtime_validated_config,
     validate_knowledge_bases,
 )
 from mindroom.logging_config import get_logger
@@ -208,7 +208,7 @@ class SelfConfigTools(Toolkit):
 
         config.agents[self.agent_name] = validated_agent
         try:
-            save_runtime_validated_config(config, self.runtime_paths)
+            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:

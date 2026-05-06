@@ -217,7 +217,7 @@ def _save_raw_config_source_to_file(
     constants.safe_replace(tmp_path, config_path)
 
 
-def persist_runtime_validated_config(
+def _persist_runtime_validated_config(
     runtime_config: Config,
     runtime_paths: constants.RuntimePaths,
 ) -> None:
@@ -254,6 +254,16 @@ def _validated_config_payload(
     """Normalize and validate one config payload against the active runtime."""
     validated_config = Config.validate_with_runtime(raw_config, runtime_paths)
     return validated_config, validated_config.authored_model_dump()
+
+
+def validate_and_persist_config_payload(
+    raw_config: dict[str, Any],
+    runtime_paths: constants.RuntimePaths,
+) -> Config:
+    """Validate and persist one authored config payload against the active runtime."""
+    validated_config, _ = _validated_config_payload(raw_config, runtime_paths)
+    _persist_runtime_validated_config(validated_config, runtime_paths)
+    return validated_config
 
 
 def register_api_app(api_app: FastAPI) -> None:

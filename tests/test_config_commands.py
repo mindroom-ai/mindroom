@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from mindroom import constants as constants_mod
+from mindroom.api import config_lifecycle
 from mindroom.commands.config_commands import (
     _format_value,
     _get_nested_value,
@@ -26,6 +27,7 @@ from mindroom.commands.config_confirmation import add_confirmation_reactions
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import HookRegistry
@@ -36,6 +38,50 @@ from tests.conftest import make_event_cache_mock
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
     return resolve_runtime_paths(config_path=config_path)
+
+
+def test_validate_and_persist_config_payload_validates_and_writes_authored_payload(tmp_path: Path) -> None:
+    """Runtime config payload persistence should validate before writing."""
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = _runtime_paths_for_config(config_path)
+    config = Config(models={"default": {"provider": "openai", "id": "gpt-5.4"}})
+    config.save_to_yaml(config_path)
+    payload = config.authored_model_dump()
+    payload["agents"] = {
+        "writer": {
+            "display_name": "Writer",
+            "role": "Write docs",
+            "rooms": ["Lab"],
+        },
+    }
+
+    validated = config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+
+    assert validated.agents["writer"].display_name == "Writer"
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["agents"]["writer"]["rooms"] == ["Lab"]
+
+
+def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_path: Path) -> None:
+    """Runtime config payload persistence should leave the file untouched on validation failure."""
+    plugin_root = tmp_path / "plugins" / "bad-name"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "BadName", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = _runtime_paths_for_config(config_path)
+    config = Config(models={"default": {"provider": "openai", "id": "gpt-5.4"}})
+    config.save_to_yaml(config_path)
+    original_source = config_path.read_text(encoding="utf-8")
+    payload = config.authored_model_dump()
+    payload["plugins"] = ["./plugins/bad-name"]
+
+    with pytest.raises(ConfigRuntimeValidationError):
+        config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+
+    assert config_path.read_text(encoding="utf-8") == original_source
 
 
 @pytest.mark.asyncio

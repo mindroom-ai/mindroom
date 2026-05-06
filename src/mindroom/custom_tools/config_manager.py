@@ -11,7 +11,7 @@ import yaml
 from agno.tools import Toolkit
 from pydantic import ValidationError
 
-from mindroom.api import config_lifecycle
+from mindroom.api.config_lifecycle import validate_and_persist_config_payload
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -78,12 +78,6 @@ def validate_knowledge_bases(
     if not available:
         return f"Error: Unknown knowledge bases: {invalid}. No knowledge bases are configured."
     return f"Error: Unknown knowledge bases: {invalid}. Available knowledge bases: {available}."
-
-
-def save_runtime_validated_config(config: Config, runtime_paths: RuntimePaths) -> None:
-    """Revalidate the full config against the active runtime before writing it."""
-    validated = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
-    config_lifecycle.persist_runtime_validated_config(validated, runtime_paths)
 
 
 class _InfoType(str, Enum):
@@ -644,7 +638,7 @@ class ConfigManagerTools(Toolkit):
             config.agents[agent_name] = new_agent
 
             # Save config
-            save_runtime_validated_config(config, self.runtime_paths)
+            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
 
             # Build success message
             tools_str = ", ".join(tools) if tools else "None"
@@ -759,7 +753,7 @@ class ConfigManagerTools(Toolkit):
                 return "No changes made. All provided values are the same as current configuration."
 
             # Save config
-            save_runtime_validated_config(config, self.runtime_paths)
+            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
 
             return f"✅ Successfully updated agent '{agent_name}'!\n\n**Changes:**\n" + "\n".join(
                 f"- {c}" for c in changes
@@ -808,7 +802,7 @@ class ConfigManagerTools(Toolkit):
             config.teams[team_name] = new_team
 
             # Save config
-            save_runtime_validated_config(config, self.runtime_paths)
+            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
 
             return (
                 f"✅ Successfully created team '{team_name}'!\n\n"
