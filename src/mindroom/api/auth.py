@@ -283,12 +283,14 @@ def _trusted_upstream_email_localpart(email: str) -> str | None:
 
 def _validated_trusted_upstream_email_to_matrix_template(
     settings: _TrustedUpstreamAuthSettings,
+    *,
+    require_email_header: bool,
 ) -> str | None:
     """Return the configured email-to-Matrix template after validating it."""
     template = settings.email_to_matrix_user_id_template
     if template is None:
         return None
-    if settings.email_header is None:
+    if require_email_header and settings.email_header is None:
         raise HTTPException(
             status_code=500,
             detail=(
@@ -308,7 +310,7 @@ def _derive_trusted_upstream_matrix_user_id(
     email: str | None,
     template: str | None,
 ) -> str | None:
-    """Derive a Matrix user ID from the trusted email header when configured."""
+    """Derive a Matrix user ID from a trusted email identity when configured."""
     if template is None:
         return None
     if email is None:
@@ -436,7 +438,6 @@ def _verified_trusted_upstream_matrix_user_id(
     settings: _TrustedUpstreamAuthSettings,
     matrix_user_id: str | None,
     email: str | None,
-    email_to_matrix_template: str | None,
     jwt_identity: _TrustedUpstreamJwtIdentity | None,
 ) -> str | None:
     """Return a Matrix identity only when it is trusted for the active auth mode."""
@@ -447,6 +448,10 @@ def _verified_trusted_upstream_matrix_user_id(
     if jwt_identity is None:
         if parsed_matrix_user_id is not None:
             return parsed_matrix_user_id
+        email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(
+            settings,
+            require_email_header=True,
+        )
         return _derive_trusted_upstream_matrix_user_id(settings, email, email_to_matrix_template)
 
     if jwt_identity.matrix_user_id is not None:
@@ -460,6 +465,10 @@ def _verified_trusted_upstream_matrix_user_id(
             )
         return verified_matrix_user_id
 
+    email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(
+        settings,
+        require_email_header=False,
+    )
     derived_matrix_user_id = _derive_trusted_upstream_matrix_user_id(settings, email, email_to_matrix_template)
     if derived_matrix_user_id is not None:
         if parsed_matrix_user_id is not None and parsed_matrix_user_id != derived_matrix_user_id:
@@ -496,7 +505,6 @@ async def _trusted_upstream_auth_user(
         )
 
     jwt_identity = await _verified_trusted_upstream_jwt_identity(request, settings, jwt_client)
-    email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(settings)
     email = _get_configured_header(request, settings.email_header)
     user_id, email = _verified_trusted_upstream_identity(user_id, email, jwt_identity)
     matrix_user_id = _get_configured_header(request, settings.matrix_user_id_header)
@@ -504,7 +512,6 @@ async def _trusted_upstream_auth_user(
         settings,
         matrix_user_id,
         email,
-        email_to_matrix_template,
         jwt_identity,
     )
 

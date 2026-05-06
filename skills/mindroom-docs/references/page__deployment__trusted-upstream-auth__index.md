@@ -28,8 +28,8 @@ MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE='@{localpart}:example
 
 `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER` is required when trusted upstream auth is enabled.
 The user ID value must be stable for the authenticated browser user.
-`MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is optional unless `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` is set.
-When the email-to-Matrix template is set, `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is required because MindRoom derives the Matrix localpart from that trusted email value.
+`MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is optional unless header-only auth uses `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE`.
+When the email-to-Matrix template is set without strict JWT mode, `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is required because MindRoom derives the Matrix localpart from that trusted email value.
 When present, the email value is stored in `request.scope["auth_user"]["email"]`.
 `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` is optional for shared dashboard access.
 For private `user` and `user_agent` OAuth flows, the trusted identity must resolve to the requester identity used by Matrix-backed tool execution.
@@ -68,6 +68,7 @@ When `MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM` is not set, the trusted user 
 When a trusted email header is configured, that email value must match `MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM`.
 When `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` is set, `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` must match that verified JWT claim.
 When no Matrix user ID claim is configured, strict mode only accepts a Matrix identity derived from the verified email via `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE`.
+That derivation can use the verified JWT email claim even when `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is not configured.
 When no Matrix user ID claim or email-to-Matrix template is configured, strict mode rejects `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` because that header is not backed by a signed identity.
 
 ## Instance Chart
