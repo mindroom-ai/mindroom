@@ -50,7 +50,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
     if first_segment in _API_ROUTE_PREFIXES:
         raise HTTPException(status_code=404, detail="Not found")
 
-    if not request_has_frontend_access(request):
+    if not await request_has_frontend_access(request):
         target_path = sanitize_next_path(f"/{path}" if path else "/")
         login_redirect = login_redirect_for_request(request, next_path=target_path)
         if login_redirect is not None:

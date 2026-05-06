@@ -20,6 +20,9 @@ metadata:
 {{ if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailHeader | default "")) }}
 {{ fail "provisioner.trustedUpstreamAuth.emailHeader is required when provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" }}
 {{ end }}
+{{ if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.userIdHeader | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.userIdHeader is required when provisioner.trustedUpstreamAuth.enabled=true" }}
+{{ end }}
 {{ if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtHeader | default "")) }}
 {{ fail "provisioner.trustedUpstreamAuth.jwtHeader is required when provisioner.trustedUpstreamAuth.requireJwt=true" }}
 {{ end }}

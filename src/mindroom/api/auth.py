@@ -1,6 +1,7 @@
 # ruff: noqa: D100
 from __future__ import annotations
 
+import asyncio
 import html
 import importlib
 import json
@@ -321,7 +322,7 @@ def _trusted_upstream_required_jwt_setting(value: str | None, env_name: str) -> 
     return value
 
 
-def _verified_trusted_upstream_jwt_claim(
+async def _verified_trusted_upstream_jwt_claim(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
     jwt_client: PyJWKClient | None,
@@ -358,7 +359,7 @@ def _verified_trusted_upstream_jwt_claim(
         raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
 
     try:
-        signing_key = jwt_client.get_signing_key_from_jwt(token)
+        signing_key = await asyncio.to_thread(jwt_client.get_signing_key_from_jwt, token)
         algorithm = signing_key.algorithm_name
         if algorithm is None:
             raise jwt.InvalidTokenError
@@ -389,15 +390,16 @@ def _verified_trusted_upstream_email(
     if jwt_claim is None:
         return email
 
-    identity_value = email or user_id
-    if not secrets.compare_digest(identity_value, jwt_claim):
+    if not secrets.compare_digest(user_id, jwt_claim):
+        raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
+    if email is not None and not secrets.compare_digest(email, jwt_claim):
         raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
     if settings.email_header is None and email is None:
         return jwt_claim
     return email
 
 
-def _trusted_upstream_auth_user(
+async def _trusted_upstream_auth_user(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
     jwt_client: PyJWKClient | None = None,
@@ -418,7 +420,7 @@ def _trusted_upstream_auth_user(
             detail=f"Missing trusted upstream identity header: {settings.user_id_header}",
         )
 
-    jwt_claim = _verified_trusted_upstream_jwt_claim(request, settings, jwt_client)
+    jwt_claim = await _verified_trusted_upstream_jwt_claim(request, settings, jwt_client)
     email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(settings)
     email = _get_configured_header(request, settings.email_header)
     email = _verified_trusted_upstream_email(settings, user_id, email, jwt_claim)
@@ -504,13 +506,13 @@ def _request_auth_state(request: Request) -> ApiAuthState:
     return auth_state
 
 
-def request_has_frontend_access(request: Request) -> bool:
+async def request_has_frontend_access(request: Request) -> bool:
     """Return whether the current request may load the dashboard UI."""
     authorization = request.headers.get("authorization")
     auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
     try:
-        trusted_auth_user = _trusted_upstream_auth_user(
+        trusted_auth_user = await _trusted_upstream_auth_user(
             request,
             auth_state.settings.trusted_upstream,
             auth_state.trusted_upstream_jwt_client,
@@ -692,7 +694,7 @@ async def verify_user(
     snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
-    trusted_auth_user = _trusted_upstream_auth_user(
+    trusted_auth_user = await _trusted_upstream_auth_user(
         request,
         auth_state.settings.trusted_upstream,
         auth_state.trusted_upstream_jwt_client,
@@ -776,7 +778,7 @@ async def standalone_login(request: Request, next: str = "/") -> Response:  # no
         raise HTTPException(status_code=404, detail="Not found")
 
     next_path = sanitize_next_path(next)
-    if request_has_frontend_access(request):
+    if await request_has_frontend_access(request):
         return RedirectResponse(next_path)
 
     return HTMLResponse(_render_standalone_login_page(next_path, config_lifecycle.api_runtime_paths(request)))

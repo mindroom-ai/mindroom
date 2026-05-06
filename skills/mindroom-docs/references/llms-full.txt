@@ -11765,7 +11765,7 @@ OAuth tokens are stored under provider token services such as `google_drive_oaut
 
 # Trusted Upstream Browser Auth
 
-Use trusted upstream auth when MindRoom API and browser routes sit behind a deployment-owned access layer that has already authenticated the human. This mode is disabled by default. Do not enable it unless the reverse proxy or identity gateway strips client-supplied copies of the trusted headers and injects verified values itself. Header-only mode is a compatibility option for deployments where MindRoom is unreachable except through that trusted gateway. Prefer strict JWT mode when the gateway can provide a signed upstream assertion.
+Use trusted upstream auth when MindRoom API and browser routes sit behind a deployment-owned access layer that has already authenticated the human. This mode is disabled by default. Do not enable it unless the reverse proxy or identity gateway strips client-supplied copies of the trusted headers and injects verified values itself. Header-only mode is a compatibility option for deployments where MindRoom is only reachable through that trusted gateway. Prefer strict JWT mode when the gateway can provide a signed upstream assertion.
 
 ## Why It Exists
 
@@ -11798,7 +11798,7 @@ MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER=https://gateway.example.com
 MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM=email
 ```
 
-`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT` is disabled by default to preserve existing header-only deployments. When it is set to true, `MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER`, `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL`, `MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE`, and `MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER` are required. `MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM` defaults to `email`. MindRoom caches the JWKS response briefly and refreshes it automatically so key rotation can take effect without fetching keys on every request. If the JWT is missing, expired, signed by an unknown key, issued by the wrong issuer, meant for the wrong audience, missing the configured email claim, or inconsistent with the configured trusted email header, MindRoom returns `401`. If no trusted email header is configured, the trusted user ID header must match the verified JWT claim.
+`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT` is disabled by default to preserve existing header-only deployments. When it is set to true, `MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER`, `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL`, `MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE`, and `MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER` are required. `MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM` defaults to `email`. MindRoom caches the JWKS response briefly and refreshes it automatically so key rotation can take effect without fetching keys on every request. If the JWT is missing, expired, signed by an unknown key, issued by the wrong issuer, meant for the wrong audience, missing the configured email claim, or inconsistent with the configured trusted email header, MindRoom returns `401`. The trusted user ID header must match the verified JWT claim. When a trusted email header is configured, that email value must also match the verified JWT claim.
 
 ## Instance Chart
 
