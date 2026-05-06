@@ -262,6 +262,20 @@ def _config_discovery_env(path: Path | None = None) -> dict[str, str]:
     return process_env
 
 
+def _format_config_search_locations(process_env: Mapping[str, str]) -> list[str]:
+    """Return rendered config search locations with existence labels."""
+    return [
+        f"  {i}. {loc} ({'[green]exists[/green]' if loc.exists() else '[dim]not found[/dim]'})"
+        for i, loc in enumerate(config_search_locations(process_env), 1)
+    ]
+
+
+def _print_config_search_locations(process_env: Mapping[str, str], *, title: str) -> None:
+    console.print(title)
+    for line in _format_config_search_locations(process_env):
+        console.print(line)
+
+
 def _resolve_config_path(
     path: Path | None,
     *,
@@ -447,10 +461,7 @@ def config_show(
     if not config_file.exists():
         console.print(f"[yellow]No config file found at:[/yellow] {config_file}")
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
-        console.print("\nSearch locations (first match wins):")
-        for i, loc in enumerate(config_search_locations(process_env), 1):
-            status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
-            console.print(f"  {i}. {loc} ({status})")
+        _print_config_search_locations(process_env, title="\nSearch locations (first match wins):")
         raise typer.Exit(1)
 
     try:
@@ -558,10 +569,7 @@ def config_path_cmd(
     status = "[green]exists[/green]" if exists else "[red]not found[/red]"
     console.print(f"Resolved config path: {resolved} ({status})")
 
-    console.print("\nSearch locations (first match wins):")
-    for i, loc in enumerate(config_search_locations(process_env), 1):
-        loc_status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
-        console.print(f"  {i}. {loc} ({loc_status})")
+    _print_config_search_locations(process_env, title="\nSearch locations (first match wins):")
 
 
 # ---------------------------------------------------------------------------
