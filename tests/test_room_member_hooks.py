@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
@@ -300,6 +301,46 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     assert seen == []
 
     await bot._on_room_member(room, _room_member_event(event_id="$live", user_id="@bob:localhost"))
+
+    assert seen == ["$live"]
+
+
+@pytest.mark.asyncio
+async def test_registered_room_member_callback_uses_delivery_time_arming_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queued recovery-sync member events should not emit after hooks re-arm."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_rejected"
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._register_room_member_callback_after_initial_sync()
+    room_member_callback = bot.client.add_event_callback.call_args.args[0]
+    monkeypatch.setattr(
+        bot,
+        "_sync_cache_result_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    await bot._on_sync_error(sync_error)
+    await room_member_callback(room, _room_member_event(event_id="$timeline-snapshot"))
+    await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert seen == []
+
+    await room_member_callback(room, _room_member_event(event_id="$live", user_id="@bob:localhost"))
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == ["$live"]
 

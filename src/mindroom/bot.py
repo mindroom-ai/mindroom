@@ -1048,11 +1048,32 @@ class AgentBot:
         client = self.client
         if client is None:
             return
-        client.add_event_callback(
-            _create_task_wrapper(self._on_room_member, owner=self._runtime_view),
-            nio.RoomMemberEvent,
-        )
+        client.add_event_callback(self._create_room_member_task_wrapper(), nio.RoomMemberEvent)
         self._room_member_callback_registered = True
+
+    def _create_room_member_task_wrapper(self) -> Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]:
+        """Return a background callback that preserves delivery-time hook arming."""
+
+        async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
+            if not isinstance(event, nio.RoomMemberEvent):
+                return
+            hooks_armed_at_delivery = self._first_sync_done and self._room_member_join_hooks_armed
+
+            async def error_handler() -> None:
+                try:
+                    await self._on_room_member(
+                        room,
+                        event,
+                        hooks_armed_at_delivery=hooks_armed_at_delivery,
+                    )
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Error in event callback")
+
+            create_background_task(error_handler(), owner=self._runtime_view)
+
+        return wrapper
 
     async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
@@ -1426,9 +1447,16 @@ class AgentBot:
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._handle_reaction_inner(room, event)
 
-    async def _on_room_member(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
+    async def _on_room_member(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMemberEvent,
+        *,
+        hooks_armed_at_delivery: bool | None = None,
+    ) -> None:
         """Expose live human room joins to router-owned hooks."""
-        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
+        hooks_armed = self._room_member_join_hooks_armed if hooks_armed_at_delivery is None else hooks_armed_at_delivery
+        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not hooks_armed:
             return
         if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
