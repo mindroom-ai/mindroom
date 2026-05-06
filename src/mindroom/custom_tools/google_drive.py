@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
-from agno.tools.google.drive import authenticate
+from agno.tools.google.drive import MediaIoBaseDownload, WorkspaceType, authenticate
 from agno.utils.log import log_error
 from googleapiclient.errors import HttpError
 
@@ -113,7 +114,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 "q": effective_query,
                 "pageSize": max_results,
                 "orderBy": "modifiedTime desc",
-                "fields": self.SEARCH_FIELDS,
+                "fields": f"incompleteSearch, {self.SEARCH_FIELDS}",
                 "includeItemsFromAllDrives": True,
                 "supportsAllDrives": True,
                 "corpora": "allDrives",
@@ -128,10 +129,108 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                     "files": files,
                     "count": len(files),
                     "nextPageToken": results.get("nextPageToken"),
+                    "incompleteSearch": results.get("incompleteSearch", False),
                 },
             )
         except HttpError as exc:
             return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
             log_error(f"Could not search Google Drive files: {exc}")
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+
+    @authenticate
+    def read_file(self, file_id: str) -> str:
+        """Read a Drive file and return its text content, including files in Shared Drives."""
+        try:
+            service = cast("Any", self.service)
+            metadata = self._get_file_metadata(file_id, self.READ_METADATA_FIELDS)
+            mime_type = metadata.get("mimeType", "")
+
+            if mime_type in self.TEXT_EXPORT_TYPES:
+                export_mime = self.TEXT_EXPORT_TYPES[mime_type]
+            elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
+                return json.dumps(
+                    {"error": f"Cannot read {mime_type} as text. Use download_file instead.", "file": metadata},
+                )
+            else:
+                export_mime = None
+
+            if export_mime:
+                request = service.files().export_media(fileId=file_id, mimeType=export_mime)
+                content_bytes = self._download_bytes(request)
+            else:
+                file_size = int(metadata.get("size", 0))
+                if file_size > self.max_read_size:
+                    return json.dumps(
+                        {
+                            "error": f"File is {file_size} bytes, exceeds max_read_size ({self.max_read_size}). Use download_file instead.",
+                            "file": metadata,
+                        },
+                    )
+                request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+                content_bytes = self._download_bytes(request)
+
+            content = content_bytes.decode("utf-8", errors="replace")
+            return json.dumps(
+                {
+                    "file": metadata,
+                    "content": content,
+                    "contentLength": len(content),
+                    "exportMimeType": export_mime,
+                },
+            )
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            log_error(f"Could not read Google Drive file {file_id}: {exc}")
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+
+    @authenticate
+    def download_file(self, file_id: str, export_format: str | None = None) -> str:
+        """Download a Drive file and save it locally, including files in Shared Drives."""
+        try:
+            service = cast("Any", self.service)
+            metadata = self._get_file_metadata(file_id, "id,name,mimeType")
+            mime_type = metadata.get("mimeType", "")
+            path = self.download_dir / metadata.get("name", file_id)
+
+            if export_format:
+                target_mime = export_format
+                ext = mimetypes.guess_extension(export_format) or ""
+            elif mime_type in self.DOWNLOAD_EXPORT_TYPES:
+                target_mime, ext = self.DOWNLOAD_EXPORT_TYPES[mime_type]
+            elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
+                return json.dumps({"error": f"Unsupported Workspace file type for download: {mime_type}"})
+            else:
+                target_mime = None
+                ext = ""
+
+            if not path.suffix and ext:
+                path = path.with_suffix(ext)
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+            if target_mime:
+                request = service.files().export_media(fileId=file_id, mimeType=target_mime)
+                path.write_bytes(self._download_bytes(request))
+                return json.dumps(
+                    {
+                        "fileId": file_id,
+                        "path": str(path),
+                        "status": "exported",
+                        "exportMimeType": target_mime,
+                        "originalMimeType": mime_type,
+                    },
+                )
+
+            request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+            with path.open("wb") as file_handle:
+                downloader = MediaIoBaseDownload(file_handle, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+            return json.dumps({"fileId": file_id, "path": str(path), "status": "downloaded"})
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            log_error(f"Could not download file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
