@@ -21,6 +21,7 @@ from mindroom.matrix.cache import (
     sqlite_event_cache_threads,
     thread_cache_rejection_reason,
 )
+from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.conversation_cache import _cached_room_get_event
@@ -175,6 +176,72 @@ def test_event_cache_normalization_is_backend_neutral() -> None:
         "event_id": "$event",
         "sender": "@user:localhost",
         "origin_server_ts": 1234,
+    }
+
+
+def test_group_lookup_events_by_room_normalizes_and_preserves_order() -> None:
+    """Lookup event batch grouping should be shared by durable cache backends."""
+    grouped_events = group_lookup_events_by_room(
+        [
+            (
+                "$a",
+                "!alpha:localhost",
+                {
+                    "type": "m.room.message",
+                    "content": {"body": "alpha first"},
+                    "com.mindroom.dispatch_pipeline_timing": {"resolution_ms": 12},
+                },
+            ),
+            (
+                "$b",
+                "!beta:localhost",
+                {
+                    "type": "m.room.message",
+                    "event_id": "$already-present",
+                    "content": {"body": "beta first"},
+                },
+            ),
+            (
+                "$c",
+                "!alpha:localhost",
+                {
+                    "type": "m.room.message",
+                    "content": {"body": "alpha second"},
+                },
+            ),
+        ],
+    )
+
+    assert list(grouped_events) == ["!alpha:localhost", "!beta:localhost"]
+    assert grouped_events == {
+        "!alpha:localhost": [
+            (
+                "$a",
+                {
+                    "type": "m.room.message",
+                    "content": {"body": "alpha first"},
+                    "event_id": "$a",
+                },
+            ),
+            (
+                "$c",
+                {
+                    "type": "m.room.message",
+                    "content": {"body": "alpha second"},
+                    "event_id": "$c",
+                },
+            ),
+        ],
+        "!beta:localhost": [
+            (
+                "$b",
+                {
+                    "type": "m.room.message",
+                    "event_id": "$already-present",
+                    "content": {"body": "beta first"},
+                },
+            ),
+        ],
     }
 
 

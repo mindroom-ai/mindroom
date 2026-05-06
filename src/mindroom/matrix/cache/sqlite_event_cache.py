@@ -14,6 +14,7 @@ import aiosqlite
 from mindroom.logging_config import get_logger
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
+from .event_batching import group_lookup_events_by_room
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_agent_message_snapshot import load_sqlite_agent_message_snapshot
 
@@ -601,12 +602,7 @@ class SqliteEventCache:
             return
 
         cached_at = time.time()
-        events_by_room: dict[str, list[tuple[str, dict[str, Any]]]] = {}
-        for event_id, room_id, event_data in events:
-            normalized_event = normalize_event_source_for_cache(event_data, event_id=event_id)
-            events_by_room.setdefault(room_id, []).append((event_id, normalized_event))
-
-        for room_id, room_events in events_by_room.items():
+        for room_id, room_events in group_lookup_events_by_room(events).items():
             await self._write_operation(
                 room_id,
                 operation="store_events_batch",
