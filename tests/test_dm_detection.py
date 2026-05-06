@@ -208,3 +208,20 @@ class TestDMDetection:
         assert first_result is True
         assert second_result is False
         assert client.list_direct_rooms.call_count == 2
+
+    async def test_filter_non_dm_rooms_preserves_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test non-DM room filtering keeps only non-DM rooms in input order."""
+        client = AsyncMock()
+        dm_room_ids = {"!dm1:server", "!dm2:server"}
+
+        async def mock_is_dm_room(_client: AsyncMock, room_id: str) -> bool:
+            return room_id in dm_room_ids
+
+        monkeypatch.setattr(rooms, "is_dm_room", mock_is_dm_room)
+
+        result = await rooms.filter_non_dm_rooms(
+            client,
+            ["!room1:server", "!dm1:server", "!room2:server", "!dm2:server"],
+        )
+
+        assert result == ["!room1:server", "!room2:server"]

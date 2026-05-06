@@ -10,7 +10,7 @@ from mindroom import constants
 from mindroom.api.config_lifecycle import read_committed_config_and_runtime
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_name, leave_room
-from mindroom.matrix.rooms import resolve_room_aliases
+from mindroom.matrix.rooms import filter_non_dm_rooms, resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user
 
 logger = get_logger(__name__)
@@ -105,8 +105,8 @@ async def _get_agent_matrix_rooms(
     # Resolve room aliases to room IDs for comparison
     configured_room_ids = resolve_room_aliases(configured_room_aliases, runtime_paths=runtime_paths)
 
-    # Calculate unconfigured rooms (joined but not in config)
-    unconfigured_rooms = [room for room in joined_rooms if room not in configured_room_ids]
+    rooms_not_configured = [room for room in joined_rooms if room not in configured_room_ids]
+    unconfigured_rooms = await filter_non_dm_rooms(client, rooms_not_configured)
 
     # Get room names for unconfigured rooms
     unconfigured_room_details = []

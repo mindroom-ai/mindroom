@@ -67,6 +67,10 @@ class TestMatrixOperations:
                 "mindroom.api.matrix_operations.get_joined_rooms",
                 return_value=["test_room", "team_room", "!extra_room:localhost", "!dm_room:localhost"],
             ),
+            patch(
+                "mindroom.matrix.rooms.is_dm_room",
+                side_effect=lambda _client, room_id: room_id == "!dm_room:localhost",
+            ),
         ):
             response = test_client.get("/api/matrix/agents/rooms")
 
@@ -81,12 +85,12 @@ class TestMatrixOperations:
             assert entities_by_id["test_agent"]["display_name"] == "Test Agent"
             assert "test_room" in entities_by_id["test_agent"]["configured_rooms"]
             assert "!extra_room:localhost" in entities_by_id["test_agent"]["unconfigured_rooms"]
-            assert "!dm_room:localhost" in entities_by_id["test_agent"]["unconfigured_rooms"]
+            assert "!dm_room:localhost" not in entities_by_id["test_agent"]["unconfigured_rooms"]
 
             assert entities_by_id["test_team"]["display_name"] == "Test Team"
             assert "team_room" in entities_by_id["test_team"]["configured_rooms"]
             assert "!extra_room:localhost" in entities_by_id["test_team"]["unconfigured_rooms"]
-            assert "!dm_room:localhost" in entities_by_id["test_team"]["unconfigured_rooms"]
+            assert "!dm_room:localhost" not in entities_by_id["test_team"]["unconfigured_rooms"]
 
     @pytest.mark.asyncio
     async def test_get_specific_agent_rooms(

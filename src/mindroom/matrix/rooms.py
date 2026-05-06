@@ -694,6 +694,11 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
     return is_dm
 
 
+async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> list[str]:
+    """Return rooms from *room_ids* that are not DM rooms."""
+    return [room_id for room_id in room_ids if not await is_dm_room(client, room_id)]
+
+
 async def leave_non_dm_rooms(
     client: nio.AsyncClient,
     room_ids: list[str],
