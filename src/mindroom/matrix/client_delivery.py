@@ -496,6 +496,8 @@ __all__ = [
     "DeliveredMatrixEvent",
     "build_edit_event_content",
     "build_threaded_edit_content",
+    "cached_room",
+    "can_send_to_encrypted_room",
     "edit_message_result",
     "send_file_message",
     "send_message_result",

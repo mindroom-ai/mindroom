@@ -119,7 +119,7 @@ type _MatrixEventId = str
 
 logger = get_logger(__name__)
 
-__all__ = ["AgentBot"]
+__all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 
 
 # Constants

@@ -27,7 +27,11 @@ from .event_normalization import normalize_event_source_for_cache, normalize_nio
 if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 
-__all__ = ["_collect_sync_timeline_cache_updates"]
+__all__ = [
+    "ThreadLiveWritePolicy",
+    "ThreadOutboundWritePolicy",
+    "ThreadSyncWritePolicy",
+]
 
 
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})

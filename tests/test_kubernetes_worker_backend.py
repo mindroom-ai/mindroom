@@ -32,7 +32,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
-from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
+from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, KubernetesWorkerBackendConfig
 from mindroom.workers.backends.kubernetes_resources import (
     _ANNOTATION_RUNNER_TOKEN_HASH,
     _ANNOTATION_STARTUP_MANIFEST_HASH,
@@ -374,7 +374,7 @@ def _backend(
     enable_service_links: bool = False,
     auth_secret_name: str | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
-    config = _KubernetesWorkerBackendConfig(
+    config = KubernetesWorkerBackendConfig(
         namespace="chat",
         image="ghcr.io/mindroom-ai/mindroom:latest",
         image_pull_policy="IfNotPresent",
@@ -1026,7 +1026,7 @@ def test_kubernetes_backend_config_resource_envs_override_defaults(tmp_path: Pat
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
 
-    config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
 
     assert config.resource_requests == {"memory": "2Gi", "cpu": "500m"}
     assert config.resource_limits == {"memory": "8Gi", "cpu": "2"}
@@ -1051,7 +1051,7 @@ def test_kubernetes_backend_config_resources_default_when_env_unset(tmp_path: Pa
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
 
-    config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
 
     assert config.resource_requests == {"memory": "256Mi", "cpu": "100m"}
     assert config.resource_limits == {"memory": "1Gi", "cpu": "500m"}
@@ -1078,7 +1078,7 @@ def test_kubernetes_backend_config_allows_service_links_override(tmp_path: Path)
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
 
-    config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
 
     assert config.enable_service_links is True
 
@@ -1132,7 +1132,7 @@ def test_kubernetes_backend_config_reads_worker_annotations_from_env(tmp_path: P
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
 
-    config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
 
     assert config.extra_annotations == {
         "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
