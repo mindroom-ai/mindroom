@@ -278,6 +278,7 @@ class AgentBot:
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _startup_thread_prewarm_task: asyncio.Task[None] | None
     _room_member_callback_registered: bool
+    _room_member_join_hooks_armed: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _invited_rooms: set[str]
@@ -309,6 +310,7 @@ class AgentBot:
         self._sync_checkpoint: SyncCheckpoint | None = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
+        self._room_member_join_hooks_armed = False
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
@@ -1055,6 +1057,7 @@ class AgentBot:
     async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
+        room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
 
@@ -1079,9 +1082,10 @@ class AgentBot:
                 first_sync_response=first_sync_response,
             )
             self._apply_sync_certification_decision(decision, cache_result=cache_result)
-            if not first_sync_response:
+            if not first_sync_response and room_member_join_hooks_were_armed:
                 await self._emit_room_member_joined_sync_state_hooks(_response)
         self._first_sync_done = True
+        self._room_member_join_hooks_armed = True
 
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
@@ -1100,6 +1104,7 @@ class AgentBot:
         self._last_sync_monotonic = time.monotonic()
         if _response.status_code == "M_UNKNOWN_POS":
             self._apply_sync_certification_decision(handle_unknown_pos())
+            self._room_member_join_hooks_armed = False
             self.logger.warning(
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,
@@ -1259,6 +1264,7 @@ class AgentBot:
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
+        self._room_member_join_hooks_armed = False
         self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)
@@ -1420,7 +1426,7 @@ class AgentBot:
 
     async def _on_room_member(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Expose live human room joins to router-owned hooks."""
-        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done:
+        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
             return
         if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
@@ -1439,7 +1445,7 @@ class AgentBot:
 
     async def _emit_room_member_joined_sync_state_hooks(self, response: nio.SyncResponse) -> None:
         """Expose human joins that matrix-nio delivers through sync room state."""
-        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done:
+        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
             return
         if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
