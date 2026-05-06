@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import functools
 import hashlib
 import json
@@ -13,7 +14,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 import httpx
 
@@ -60,6 +61,12 @@ _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _ATTACHMENT_SAVE_WORKSPACE_CONSUMER_TOOLS = frozenset({"file", "coding", "python", "shell"})
 
 
+class _AttachmentSavePayloadFields(TypedDict):
+    bytes_b64: str
+    sha256: str
+    size_bytes: int
+
+
 @dataclass(frozen=True)
 class WorkerAttachmentSaveReceipt:
     """Receipt returned after writing attachment bytes into a worker workspace."""
@@ -67,6 +74,62 @@ class WorkerAttachmentSaveReceipt:
     worker_path: str
     size_bytes: int
     sha256: str
+
+
+def _attachment_save_payload_fields(payload_bytes: bytes) -> _AttachmentSavePayloadFields:
+    """Return the byte-integrity fields for one save-attachment request."""
+    return {
+        "bytes_b64": base64.b64encode(payload_bytes).decode("ascii"),
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "size_bytes": len(payload_bytes),
+    }
+
+
+def decode_attachment_save_bytes(*, bytes_b64: str, sha256: str, size_bytes: int | None) -> bytes | str:
+    """Decode and integrity-check one save-attachment payload."""
+    if size_bytes is not None and (type(size_bytes) is not int or size_bytes < 0):
+        return "Attachment size_bytes must be a non-negative integer."
+    try:
+        payload_bytes = base64.b64decode(bytes_b64.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error):
+        return "Attachment bytes are not valid base64."
+    if size_bytes is not None and len(payload_bytes) != size_bytes:
+        return "Attachment byte length does not match the request receipt."
+    actual_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    if not secrets.compare_digest(actual_sha256, sha256):
+        return "Attachment SHA256 does not match the request payload."
+    return payload_bytes
+
+
+def _validate_attachment_save_receipt(
+    data: Mapping[str, object],
+    *,
+    requested_path: str,
+    byte_count: int,
+    sha256: str,
+) -> WorkerAttachmentSaveReceipt | str:
+    """Validate one successful worker save response against the sent bytes."""
+    worker_path = data.get("worker_path")
+    response_size = data.get("size_bytes")
+    response_sha256 = data.get("sha256")
+    if (
+        not isinstance(worker_path, str)
+        or type(response_size) is not int
+        or response_size < 0
+        or not isinstance(response_sha256, str)
+    ):
+        return "Sandbox save-attachment response is missing its receipt fields."
+    if worker_path != requested_path:
+        return "Sandbox save-attachment response path does not match the requested workspace path."
+    if response_size != byte_count:
+        return "Sandbox save-attachment response size does not match the sent bytes."
+    if not secrets.compare_digest(response_sha256, sha256):
+        return "Sandbox save-attachment response SHA256 does not match the sent bytes."
+    return WorkerAttachmentSaveReceipt(
+        worker_path=worker_path,
+        size_bytes=response_size,
+        sha256=response_sha256,
+    )
 
 
 @dataclass(frozen=True)
@@ -560,56 +623,21 @@ def _validated_worker_save_receipt(
     runtime_paths: RuntimePaths,
     proxy_config: _SandboxProxyConfig,
 ) -> WorkerAttachmentSaveReceipt:
-    """Validate one successful worker save response against the sent bytes."""
-    worker_path = data.get("worker_path")
-    response_size = data.get("size_bytes")
-    response_sha256 = data.get("sha256")
-    if (
-        not isinstance(worker_path, str)
-        or type(response_size) is not int
-        or response_size < 0
-        or not isinstance(response_sha256, str)
-    ):
-        msg = "Sandbox save-attachment response is missing its receipt fields."
-        _record_worker_save_failure(
-            worker_handle=worker_handle,
-            runtime_paths=runtime_paths,
-            proxy_config=proxy_config,
-            error=msg,
-        )
-        raise RuntimeError(msg)
-    if worker_path != requested_path:
-        msg = "Sandbox save-attachment response path does not match the requested workspace path."
-        _record_worker_save_failure(
-            worker_handle=worker_handle,
-            runtime_paths=runtime_paths,
-            proxy_config=proxy_config,
-            error=msg,
-        )
-        raise RuntimeError(msg)
-    if response_size != byte_count:
-        msg = "Sandbox save-attachment response size does not match the sent bytes."
-        _record_worker_save_failure(
-            worker_handle=worker_handle,
-            runtime_paths=runtime_paths,
-            proxy_config=proxy_config,
-            error=msg,
-        )
-        raise RuntimeError(msg)
-    if not secrets.compare_digest(response_sha256, sha256):
-        msg = "Sandbox save-attachment response SHA256 does not match the sent bytes."
-        _record_worker_save_failure(
-            worker_handle=worker_handle,
-            runtime_paths=runtime_paths,
-            proxy_config=proxy_config,
-            error=msg,
-        )
-        raise RuntimeError(msg)
-    return WorkerAttachmentSaveReceipt(
-        worker_path=worker_path,
-        size_bytes=response_size,
-        sha256=response_sha256,
+    result = _validate_attachment_save_receipt(
+        data,
+        requested_path=requested_path,
+        byte_count=byte_count,
+        sha256=sha256,
     )
+    if isinstance(result, str):
+        _record_worker_save_failure(
+            worker_handle=worker_handle,
+            runtime_paths=runtime_paths,
+            proxy_config=proxy_config,
+            error=result,
+        )
+        raise RuntimeError(result)  # noqa: TRY004
+    return result
 
 
 def save_attachment_to_worker(
@@ -651,16 +679,14 @@ def save_attachment_to_worker(
     if worker_handle is None and proxy_config.proxy_url is None:
         return None
 
-    sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    attachment_fields = _attachment_save_payload_fields(payload_bytes)
     request_payload: dict[str, object] = {
         **worker_payload,
         "attachment_id": attachment_id,
         "mindroom_output_path": mindroom_output_path,
-        "sha256": sha256,
-        "size_bytes": byte_count,
+        **attachment_fields,
         "mime_type": mime_type,
         "filename": filename,
-        "bytes_b64": base64.b64encode(payload_bytes).decode("ascii"),
     }
 
     try:
@@ -697,7 +723,7 @@ def save_attachment_to_worker(
             data,
             requested_path=mindroom_output_path,
             byte_count=byte_count,
-            sha256=sha256,
+            sha256=attachment_fields["sha256"],
             worker_handle=worker_handle,
             runtime_paths=runtime_paths,
             proxy_config=proxy_config,

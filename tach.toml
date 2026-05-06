@@ -2810,6 +2810,7 @@ from = ["mindroom.sync_bridge_state"]
 expose = [
     "WorkerAttachmentSaveReceipt",
     "attachment_save_uses_worker",
+    "decode_attachment_save_bytes",
     "inline_attachment_byte_limit",
     "maybe_wrap_toolkit_for_sandbox_proxy",
     "sandbox_proxy_config",

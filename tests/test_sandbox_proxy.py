@@ -80,6 +80,118 @@ _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
+def test_attachment_save_protocol_payload_fields_round_trip() -> None:
+    """Attachment save payload helpers should preserve the current wire fields."""
+    payload_bytes = b"attachment-bytes"
+    fields = sandbox_proxy_module._attachment_save_payload_fields(payload_bytes)
+
+    assert fields == {
+        "bytes_b64": base64.b64encode(payload_bytes).decode("ascii"),
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "size_bytes": len(payload_bytes),
+    }
+    assert (
+        sandbox_proxy_module.decode_attachment_save_bytes(
+            bytes_b64=fields["bytes_b64"],
+            sha256=fields["sha256"],
+            size_bytes=fields["size_bytes"],
+        )
+        == payload_bytes
+    )
+
+
+@pytest.mark.parametrize(
+    ("bytes_b64", "sha256", "size_bytes", "expected_error"),
+    [
+        ("abc", "0" * 64, True, "Attachment size_bytes must be a non-negative integer."),
+        ("not valid base64", "0" * 64, None, "Attachment bytes are not valid base64."),
+        (
+            base64.b64encode(b"payload").decode("ascii"),
+            hashlib.sha256(b"payload").hexdigest(),
+            999,
+            "Attachment byte length does not match the request receipt.",
+        ),
+        (
+            base64.b64encode(b"payload").decode("ascii"),
+            "0" * 64,
+            len(b"payload"),
+            "Attachment SHA256 does not match the request payload.",
+        ),
+    ],
+)
+def test_attachment_save_protocol_decode_preserves_error_strings(
+    bytes_b64: str,
+    sha256: str,
+    size_bytes: int | None,
+    expected_error: str,
+) -> None:
+    """Malformed attachment payloads should keep the current runner error text."""
+    assert (
+        sandbox_proxy_module.decode_attachment_save_bytes(
+            bytes_b64=bytes_b64,
+            sha256=sha256,
+            size_bytes=size_bytes,
+        )
+        == expected_error
+    )
+
+
+@pytest.mark.parametrize(
+    ("response_payload", "expected_error"),
+    [
+        (
+            {"worker_path": "sample.bin", "size_bytes": True, "sha256": "0" * 64},
+            "Sandbox save-attachment response is missing its receipt fields.",
+        ),
+        (
+            {"worker_path": "other.bin", "size_bytes": 16, "sha256": "0" * 64},
+            "Sandbox save-attachment response path does not match the requested workspace path.",
+        ),
+        (
+            {"worker_path": "sample.bin", "size_bytes": 999, "sha256": "0" * 64},
+            "Sandbox save-attachment response size does not match the sent bytes.",
+        ),
+        (
+            {"worker_path": "sample.bin", "size_bytes": 16, "sha256": "0" * 64},
+            "Sandbox save-attachment response SHA256 does not match the sent bytes.",
+        ),
+    ],
+)
+def test_attachment_save_protocol_receipt_validation_preserves_error_strings(
+    response_payload: dict[str, object],
+    expected_error: str,
+) -> None:
+    """Bad worker receipts should keep the current primary-side error text."""
+    payload_bytes = b"attachment-bytes"
+    result = sandbox_proxy_module._validate_attachment_save_receipt(
+        response_payload,
+        requested_path="sample.bin",
+        byte_count=len(payload_bytes),
+        sha256=hashlib.sha256(payload_bytes).hexdigest(),
+    )
+
+    assert result == expected_error
+
+
+def test_attachment_save_protocol_receipt_validation_returns_dataclass() -> None:
+    """Valid worker receipts should keep the current receipt field names."""
+    payload_bytes = b"attachment-bytes"
+    sha256 = hashlib.sha256(payload_bytes).hexdigest()
+
+    receipt = sandbox_proxy_module._validate_attachment_save_receipt(
+        {"worker_path": "sample.bin", "size_bytes": len(payload_bytes), "sha256": sha256},
+        requested_path="sample.bin",
+        byte_count=len(payload_bytes),
+        sha256=sha256,
+    )
+
+    assert receipt == sandbox_proxy_module.WorkerAttachmentSaveReceipt(
+        worker_path="sample.bin",
+        size_bytes=len(payload_bytes),
+        sha256=sha256,
+    )
+
+
 def _runtime_paths_from_env() -> RuntimePaths:
     return resolve_runtime_paths(config_path=Path("config.yaml"), process_env=dict(os.environ))
 
