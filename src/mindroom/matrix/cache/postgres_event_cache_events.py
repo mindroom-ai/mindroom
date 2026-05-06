@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, LiteralString
+from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.event_info import EventInfo
+
+from .postgres_cursor import fetchall, fetchone, rowcount
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
@@ -31,43 +33,6 @@ class _CachedEventRow:
 
     event: dict[str, Any]
     cached_at: float | None
-
-
-async def _fetchone(
-    db: AsyncConnection,
-    query: LiteralString,
-    params: tuple[object, ...],
-) -> tuple[Any, ...] | None:
-    cursor = await db.execute(query, params)
-    try:
-        return await cursor.fetchone()
-    finally:
-        await cursor.close()
-
-
-async def _fetchall(
-    db: AsyncConnection,
-    query: LiteralString,
-    params: tuple[object, ...],
-) -> list[tuple[Any, ...]]:
-    cursor = await db.execute(query, params)
-    try:
-        rows = await cursor.fetchall()
-        return [tuple(row) for row in rows]
-    finally:
-        await cursor.close()
-
-
-async def _rowcount(
-    db: AsyncConnection,
-    query: LiteralString,
-    params: tuple[object, ...],
-) -> int:
-    cursor = await db.execute(query, params)
-    try:
-        return 0 if cursor.rowcount is None else int(cursor.rowcount)
-    finally:
-        await cursor.close()
 
 
 def event_id_for_cache(event: dict[str, Any]) -> str:
@@ -112,7 +77,7 @@ async def load_event(
     event_id: str,
 ) -> dict[str, Any] | None:
     """Return one cached event payload by event ID."""
-    row = await _fetchone(
+    row = await fetchone(
         db,
         """
         SELECT event_json
@@ -136,7 +101,7 @@ async def load_recent_room_events(
     """Return recent cached room events of one type, newest first."""
     if limit <= 0:
         return []
-    rows = await _fetchall(
+    rows = await fetchall(
         db,
         """
         SELECT event_json
@@ -163,7 +128,7 @@ async def load_latest_edit(
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
     if sender is None:
-        row = await _fetchone(
+        row = await fetchone(
             db,
             """
             SELECT mindroom_event_cache_events.event_json
@@ -181,7 +146,7 @@ async def load_latest_edit(
         )
         return None if row is None else json.loads(row[0])
 
-    row = await _fetchone(
+    row = await fetchone(
         db,
         """
         SELECT mindroom_event_cache_events.event_json
@@ -209,7 +174,7 @@ async def load_latest_edit_row(
     original_event_id: str,
 ) -> _CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
-    row = await _fetchone(
+    row = await fetchone(
         db,
         """
         SELECT mindroom_event_cache_events.event_json, mindroom_event_cache_events.cached_at
@@ -240,7 +205,7 @@ async def load_mxc_text(
     mxc_url: str,
 ) -> str | None:
     """Return one durably cached MXC text payload when present."""
-    row = await _fetchone(
+    row = await fetchone(
         db,
         """
         SELECT text_content
@@ -302,7 +267,7 @@ async def load_thread_id_for_event(
     event_id: str,
 ) -> str | None:
     """Return the cached thread ID for one event."""
-    row = await _fetchone(
+    row = await fetchone(
         db,
         """
         SELECT thread_id
@@ -497,7 +462,7 @@ async def _dependent_edit_event_ids(
     original_event_id: str,
 ) -> list[str]:
     """Return cached edit event IDs that target one original event."""
-    rows = await _fetchall(
+    rows = await fetchall(
         db,
         """
         SELECT edit_event_id
@@ -518,7 +483,7 @@ async def delete_cached_events(
     """Delete point-lookup cache rows for the provided event IDs."""
     if not event_ids:
         return 0
-    return await _rowcount(
+    return await rowcount(
         db,
         """
         DELETE FROM mindroom_event_cache_events
@@ -538,7 +503,7 @@ async def delete_event_thread_rows(
     """Delete durable event-to-thread rows for the provided event IDs."""
     if not event_ids:
         return 0
-    return await _rowcount(
+    return await rowcount(
         db,
         """
         DELETE FROM mindroom_event_cache_event_threads
@@ -559,7 +524,7 @@ async def delete_event_edit_rows(
     """Delete derived edit-index rows affected by one event redaction."""
     deleted_rows = 0
     if event_ids:
-        deleted_rows += await _rowcount(
+        deleted_rows += await rowcount(
             db,
             """
             DELETE FROM mindroom_event_cache_event_edits
@@ -568,7 +533,7 @@ async def delete_event_edit_rows(
             (namespace, room_id, event_ids),
         )
     if original_event_id is not None:
-        deleted_rows += await _rowcount(
+        deleted_rows += await rowcount(
             db,
             """
             DELETE FROM mindroom_event_cache_event_edits
@@ -644,7 +609,7 @@ async def _delete_room_thread_events(
     """Delete cached thread rows for the provided event IDs within one room."""
     if not event_ids:
         return 0
-    return await _rowcount(
+    return await rowcount(
         db,
         """
         DELETE FROM mindroom_event_cache_thread_events
@@ -683,7 +648,7 @@ async def _redacted_event_ids_for_candidates(
     """Return the subset of candidate event IDs that are durably tombstoned."""
     if not event_ids:
         return frozenset()
-    rows = await _fetchall(
+    rows = await fetchall(
         db,
         """
         SELECT event_id
