@@ -505,6 +505,17 @@ def build_matrix_edit_content(event_id: str, new_content: Mapping[str, Any]) -> 
     }
 
 
+def build_reaction_content(event_id: str, key: str) -> dict[str, Any]:
+    """Build a Matrix ``m.reaction`` annotation content payload."""
+    return {
+        "m.relates_to": {
+            "rel_type": "m.annotation",
+            "event_id": event_id,
+            "key": key,
+        },
+    }
+
+
 def build_message_content(
     body: str,
     formatted_body: str | None = None,
