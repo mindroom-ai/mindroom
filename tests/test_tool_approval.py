@@ -2193,9 +2193,28 @@ def test_approval_hostname_normalization_uses_exact_display_host(value: str, exp
     assert _normalize_approval_hostname(value) == expected
 
 
-@pytest.mark.parametrize("value", ["*.example.com", "bad host.example"])
+@pytest.mark.parametrize("value", ["*.example.com", "bad host.example", "[bad"])
 def test_approval_hostname_normalization_rejects_non_exact_hosts(value: str) -> None:
     assert _normalize_approval_hostname(value) is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_domain_grant_is_denied_without_matrix_card(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender)
+
+    decision = await store.request_approval(
+        tool_name="network_access",
+        arguments={"approval_kind": "domain_grant", "hostname": "*.example.com", "ttl_seconds": 60},
+        room_id="!room:localhost",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=30,
+    )
+
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access without an exact hostname."
+    sender.assert_not_awaited()
 
 
 def test_domain_grant_approval_payload_uses_normalized_hostname_and_warning() -> None:

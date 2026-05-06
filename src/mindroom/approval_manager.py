@@ -56,6 +56,7 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the displayed arguments are truncated. "
     "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
 )
+_INVALID_DOMAIN_GRANT_REASON = "Cannot approve network access without an exact hostname."
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
 _UNTRUSTED_APPROVAL_WARNING = (
     "Content from files, web pages, tickets, messages, or tool outputs may be untrusted and "
@@ -209,8 +210,11 @@ def _normalize_approval_hostname(value: object) -> str | None:
     if not raw:
         return None
 
-    parsed = urlsplit(raw if "://" in raw else f"//{raw}")
-    hostname = parsed.hostname
+    try:
+        parsed = urlsplit(raw if "://" in raw else f"//{raw}")
+        hostname = parsed.hostname
+    except ValueError:
+        return None
     if hostname is None:
         hostname = raw.strip("[]")
     hostname = hostname.strip().rstrip(".").lower()
@@ -256,6 +260,11 @@ def _is_domain_grant_approval(tool_name: str, arguments: dict[str, Any]) -> bool
     if kind in _DOMAIN_GRANT_KIND_VALUES:
         return True
     return tool_name in _DOMAIN_GRANT_TOOL_NAMES and _domain_grant_hostname(arguments) is not None
+
+
+def _is_domain_grant_request(tool_name: str, arguments: dict[str, Any]) -> bool:
+    kind = _approval_kind_value(arguments)
+    return kind in _DOMAIN_GRANT_KIND_VALUES or tool_name in _DOMAIN_GRANT_TOOL_NAMES
 
 
 def _normalize_approval_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -408,6 +417,12 @@ class _ApprovalManager:
         requested_at = _utcnow()
         expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
         approval_arguments = _normalize_approval_arguments(tool_name, arguments)
+        invalid_domain_grant = (
+            _is_domain_grant_request(tool_name, approval_arguments)
+            and _domain_grant_hostname(approval_arguments) is None
+        )
+        if invalid_domain_grant:
+            return self._new_decision(status="denied", reason=_INVALID_DOMAIN_GRANT_REASON, resolved_by=None)
         event_arguments, arguments_truncated = _build_event_arguments_preview(approval_arguments)
         content = self._pending_event_content(
             approval_id=approval_id,
