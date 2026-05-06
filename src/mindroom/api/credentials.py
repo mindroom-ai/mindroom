@@ -547,7 +547,7 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
         return load_scoped_credentials(
             service,
             credentials_manager=target.base_manager,
-            worker_target=_worker_target_for_credentials_target(target),
+            worker_target=worker_target_for_credentials_target(target),
             allowed_shared_services=target.allowed_shared_services,
         )
 
@@ -579,7 +579,8 @@ def _service_uses_primary_runtime_global_store(service: str, target: RequestCred
     return credential_service_policy(service, target.worker_scope).uses_primary_runtime_global_credentials
 
 
-def _worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:
+def worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:
+    """Resolve the worker target represented by one credentials request target."""
     if target.worker_scope is None:
         return None
     return resolve_worker_target(
@@ -600,7 +601,7 @@ def _save_credentials_for_target(service: str, credentials: dict[str, Any], targ
         service,
         credentials,
         credentials_manager=target.base_manager,
-        worker_target=_worker_target_for_credentials_target(target),
+        worker_target=worker_target_for_credentials_target(target),
     )
 
 
@@ -631,7 +632,7 @@ def _delete_credentials_for_target(service: str, target: RequestCredentialsTarge
     delete_scoped_credentials(
         service,
         credentials_manager=target.base_manager,
-        worker_target=_worker_target_for_credentials_target(target),
+        worker_target=worker_target_for_credentials_target(target),
     )
 
 
