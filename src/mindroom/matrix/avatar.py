@@ -1,13 +1,12 @@
 """Matrix avatar management helpers."""
 
-import io
 import mimetypes
 from pathlib import Path
 
 import nio
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.media import upload_content_uri
+from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 
 logger = get_logger(__name__)
 
@@ -52,16 +51,11 @@ async def _upload_avatar_file(
     with avatar_path.open("rb") as f:
         avatar_data = f.read()
 
-    file_size = len(avatar_data)
-
-    def data_provider(_upload_monitor: object, _unused_data: object) -> io.BytesIO:
-        return io.BytesIO(avatar_data)
-
-    upload_result = await client.upload(
-        data_provider=data_provider,
+    upload_result = await upload_media_bytes(
+        client,
+        avatar_data,
         content_type=content_type,
         filename=avatar_path.name,
-        filesize=file_size,
     )
 
     # nio returns tuple (response, error)

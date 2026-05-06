@@ -6,7 +6,6 @@ JSON and send a compact preview event with a pointer to that sidecar.
 
 from __future__ import annotations
 
-import io
 import json
 from time import monotonic
 from typing import Any
@@ -27,7 +26,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.media import upload_content_uri
+from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
 
 logger = get_logger(__name__)
@@ -291,7 +290,7 @@ def _create_preview(
     return _prefix_by_bytes(text, target_bytes) + continuation_indicator
 
 
-async def _upload_text_as_mxc(  # noqa: C901
+async def _upload_text_as_mxc(
     client: nio.AsyncClient,
     text: str,
     room_id: str | None = None,
@@ -350,19 +349,15 @@ async def _upload_text_as_mxc(  # noqa: C901
     else:
         upload_data = text_bytes
 
-    # Upload the file
-    def data_provider(_monitor: object, _data: object) -> io.BytesIO:
-        return io.BytesIO(upload_data)
-
     enc_filename = f"{filename}.enc" if room_encrypted else filename
 
     try:
         # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
-        upload_result, _encryption_dict = await client.upload(
-            data_provider=data_provider,
+        upload_result, _encryption_dict = await upload_media_bytes(
+            client,
+            upload_data,
             content_type="application/octet-stream" if room_encrypted else mimetype,
             filename=enc_filename,
-            filesize=len(upload_data),
         )
 
         # Check if upload was successful

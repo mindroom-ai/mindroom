@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import mimetypes
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -19,7 +18,7 @@ from nio.exceptions import OlmTrustError
 from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import prepare_large_message
-from mindroom.matrix.media import upload_content_uri
+from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
@@ -313,17 +312,12 @@ async def _upload_file_as_mxc(
             "size": len(file_bytes),
         }
 
-    _upload_payload = upload_bytes
-
-    def data_provider(_monitor: object, _data: object) -> io.BytesIO:
-        return io.BytesIO(_upload_payload)
-
     try:
-        upload_response = await client.upload(
-            data_provider=data_provider,
+        upload_response = await upload_media_bytes(
+            client,
+            upload_bytes,
             content_type=upload_mimetype,
             filename=upload_name,
-            filesize=len(upload_bytes),
         )
     except Exception:
         logger.exception("Failed uploading Matrix file", path=str(file_path))
