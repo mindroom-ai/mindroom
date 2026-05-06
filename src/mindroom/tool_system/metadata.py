@@ -338,33 +338,40 @@ def sanitize_tool_init_overrides(
     }
 
 
-def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: object) -> int | float | object:
-    """Normalize a persisted dashboard number field before passing it to a tool constructor."""
+def coerce_optional_finite_number(value: object) -> int | float | None:
+    """Normalize an optional finite number from runtime config text or JSON values."""
     if value is None:
-        return _OMIT_TOOL_CONFIG_ARG
+        return None
     if isinstance(value, bool):
-        msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
-        raise ToolConfigOverrideError(msg)
-    if isinstance(value, int | float) and math.isfinite(value):
-        return value
+        raise TypeError
     if isinstance(value, int | float):
-        msg = f"Stored config value for '{tool_name}.{field_name}' must be a finite number."
-        raise ToolConfigOverrideError(msg)
+        if math.isfinite(value):
+            return value
+        raise OverflowError
     if isinstance(value, str):
         raw_value = value.strip()
         if not raw_value:
-            return _OMIT_TOOL_CONFIG_ARG
-        try:
-            parsed = float(raw_value)
-        except ValueError as exc:
-            msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
-            raise ToolConfigOverrideError(msg) from exc
+            return None
+        parsed = float(raw_value)
         if not math.isfinite(parsed):
-            msg = f"Stored config value for '{tool_name}.{field_name}' must be a finite number."
-            raise ToolConfigOverrideError(msg)
+            raise OverflowError
         return int(parsed) if parsed.is_integer() else parsed
-    msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
-    raise ToolConfigOverrideError(msg)
+    raise TypeError
+
+
+def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: object) -> int | float | object:
+    """Normalize a persisted dashboard number field before passing it to a tool constructor."""
+    try:
+        coerced = coerce_optional_finite_number(value)
+    except OverflowError as exc:
+        msg = f"Stored config value for '{tool_name}.{field_name}' must be a finite number."
+        raise ToolConfigOverrideError(msg) from exc
+    except (TypeError, ValueError) as exc:
+        msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
+        raise ToolConfigOverrideError(msg) from exc
+    if coerced is None:
+        return _OMIT_TOOL_CONFIG_ARG
+    return coerced
 
 
 def _coerce_runtime_tool_config_value(tool_name: str, field: ConfigField, value: object) -> object:

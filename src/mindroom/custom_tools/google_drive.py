@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Any
 
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
@@ -11,6 +10,7 @@ from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, 
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 if TYPE_CHECKING:
@@ -25,6 +25,13 @@ _MODEL_FUNCTION_NAME_ALIASES = {
     "search_files": "google_drive_search_files",
     "read_file": "google_drive_read_file",
 }
+
+
+def _max_read_size_finite_error(value: object) -> TypeError | ValueError:
+    msg = "Google Drive max_read_size must be a finite number"
+    if isinstance(value, str):
+        return ValueError(msg)
+    return TypeError(msg)
 
 
 class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleDriveTools):
@@ -66,31 +73,16 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         apply_toolkit_function_aliases(self, _MODEL_FUNCTION_NAME_ALIASES)
 
     def _coerce_max_read_size(self, value: object) -> int | float | None:
-        if value is None:
-            return None
-        if isinstance(value, bool):
+        try:
+            return coerce_optional_finite_number(value)
+        except OverflowError as exc:
+            raise _max_read_size_finite_error(value) from exc
+        except TypeError as exc:
             msg = "Google Drive max_read_size must be a number"
-            raise TypeError(msg)
-        if isinstance(value, int | float) and math.isfinite(value):
-            return value
-        if isinstance(value, int | float):
-            msg = "Google Drive max_read_size must be a finite number"
-            raise TypeError(msg)
-        if isinstance(value, str):
-            raw_value = value.strip()
-            if not raw_value:
-                return None
-            try:
-                parsed = float(raw_value)
-            except ValueError as exc:
-                msg = "Google Drive max_read_size must be a number"
-                raise ValueError(msg) from exc
-            if not math.isfinite(parsed):
-                msg = "Google Drive max_read_size must be a finite number"
-                raise ValueError(msg)
-            return int(parsed) if parsed.is_integer() else parsed
-        msg = "Google Drive max_read_size must be a number"
-        raise TypeError(msg)
+            raise TypeError(msg) from exc
+        except ValueError as exc:
+            msg = "Google Drive max_read_size must be a number"
+            raise ValueError(msg) from exc
 
     def _should_fallback_to_original_auth(self) -> bool:
         return google_service_account_configured(self.service_account_path, self._runtime_paths)

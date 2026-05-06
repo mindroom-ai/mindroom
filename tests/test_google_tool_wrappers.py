@@ -366,3 +366,55 @@ def test_google_wrapper_valid_provided_creds_skip_service_account_fallback(
 
     assert tool._ensure_structured_auth() is None
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("max_read_size", "expected"),
+    [
+        ("42", 42),
+        ("42.5", 42.5),
+        ("", 10485760),
+        (None, 10485760),
+    ],
+)
+def test_google_drive_constructor_coerces_optional_max_read_size(
+    max_read_size: object,
+    expected: float,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Direct constructor overrides should match stored dashboard number coercion."""
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=ValidCredentials(),
+        max_read_size=max_read_size,
+    )
+
+    assert tool.max_read_size == expected
+
+
+@pytest.mark.parametrize(
+    ("max_read_size", "error_type", "match"),
+    [
+        (True, TypeError, "Google Drive max_read_size must be a number"),
+        ("not-a-number", ValueError, "Google Drive max_read_size must be a number"),
+        (float("inf"), TypeError, "Google Drive max_read_size must be a finite number"),
+        ("inf", ValueError, "Google Drive max_read_size must be a finite number"),
+    ],
+)
+def test_google_drive_constructor_rejects_invalid_max_read_size_with_current_errors(
+    max_read_size: object,
+    error_type: type[Exception],
+    match: str,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Direct constructor validation should keep current exception types and messages."""
+    with pytest.raises(error_type, match=match):
+        GoogleDriveTools(
+            runtime_paths=runtime_paths,
+            credentials_manager=CredentialsManager(tmp_path / "credentials"),
+            creds=ValidCredentials(),
+            max_read_size=max_read_size,
+        )
