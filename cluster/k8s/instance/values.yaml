@@ -46,6 +46,13 @@ trustedUpstreamAuth:
   emailHeader: ""
   matrixUserIdHeader: ""
   emailToMatrixUserIdTemplate: ""
+  requireJwt: "false"
+  jwtHeader: ""
+  jwksUrl: ""
+  jwtAudience: ""
+  jwtIssuer: ""
+  jwtEmailClaim: "email"
+  jwtUserIdClaim: ""
 
 # Matrix admin user (leave empty and set via --set or Secret)
 matrix_admin_password: ""

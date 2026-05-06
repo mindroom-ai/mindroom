@@ -15,8 +15,25 @@ metadata:
 {{ $trustedUpstreamAuth := $prov.trustedUpstreamAuth | default (dict) }}
 {{ $trustedUpstreamAuthEnabledValue := lower (toString ($trustedUpstreamAuth.enabled | default false)) }}
 {{ $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") }}
+{{ $trustedUpstreamRequireJwtValue := lower (toString ($trustedUpstreamAuth.requireJwt | default false)) }}
+{{ $trustedUpstreamRequireJwt := has $trustedUpstreamRequireJwtValue (list "1" "true" "yes" "on") }}
 {{ if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailHeader | default "")) }}
 {{ fail "provisioner.trustedUpstreamAuth.emailHeader is required when provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" }}
+{{ end }}
+{{ if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.userIdHeader | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.userIdHeader is required when provisioner.trustedUpstreamAuth.enabled=true" }}
+{{ end }}
+{{ if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtHeader | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.jwtHeader is required when provisioner.trustedUpstreamAuth.requireJwt=true" }}
+{{ end }}
+{{ if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwksUrl | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.jwksUrl is required when provisioner.trustedUpstreamAuth.requireJwt=true" }}
+{{ end }}
+{{ if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtAudience | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.jwtAudience is required when provisioner.trustedUpstreamAuth.requireJwt=true" }}
+{{ end }}
+{{ if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtIssuer | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.jwtIssuer is required when provisioner.trustedUpstreamAuth.requireJwt=true" }}
 {{ end }}
 data:
   PLATFORM_DOMAIN: {{ .Values.domain }}
@@ -33,6 +50,13 @@ data:
   INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER: {{ $trustedUpstreamAuth.emailHeader | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER: {{ $trustedUpstreamAuth.matrixUserIdHeader | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE: {{ $trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT: {{ $trustedUpstreamAuth.requireJwt | default "false" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER: {{ $trustedUpstreamAuth.jwtHeader | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_JWKS_URL: {{ $trustedUpstreamAuth.jwksUrl | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE: {{ $trustedUpstreamAuth.jwtAudience | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER: {{ $trustedUpstreamAuth.jwtIssuer | default "" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM: {{ $trustedUpstreamAuth.jwtEmailClaim | default "email" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM: {{ $trustedUpstreamAuth.jwtUserIdClaim | default "" | quote }}
   DO_NOT_TRACK: "1"
   NEXT_TELEMETRY_DISABLED: "1"
   TURBO_TELEMETRY_DISABLED: "1"

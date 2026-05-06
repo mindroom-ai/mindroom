@@ -9,6 +9,8 @@
 {{- $trustedUpstreamAuth := .Values.trustedUpstreamAuth | default (dict) -}}
 {{- $trustedUpstreamAuthEnabledValue := lower (toString ($trustedUpstreamAuth.enabled | default false)) -}}
 {{- $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") -}}
+{{- $trustedUpstreamRequireJwtValue := lower (toString ($trustedUpstreamAuth.requireJwt | default false)) -}}
+{{- $trustedUpstreamRequireJwt := has $trustedUpstreamRequireJwtValue (list "1" "true" "yes" "on") -}}
 {{- if and (eq $workerBackend "kubernetes") (ne $storageAccessMode "ReadWriteMany") (eq $controlPlaneNodeName "") -}}
 {{- fail "workerBackend=kubernetes with shared storage requires either storageAccessMode=ReadWriteMany or controlPlaneNodeName to keep the control plane and workers on one node" -}}
 {{- end -}}
@@ -17,6 +19,18 @@
 {{- end -}}
 {{- if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailHeader | default "")) -}}
 {{- fail "trustedUpstreamAuth.emailHeader is required when trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" -}}
+{{- end -}}
+{{- if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtHeader | default "")) -}}
+{{- fail "trustedUpstreamAuth.jwtHeader is required when trustedUpstreamAuth.requireJwt=true" -}}
+{{- end -}}
+{{- if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwksUrl | default "")) -}}
+{{- fail "trustedUpstreamAuth.jwksUrl is required when trustedUpstreamAuth.requireJwt=true" -}}
+{{- end -}}
+{{- if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtAudience | default "")) -}}
+{{- fail "trustedUpstreamAuth.jwtAudience is required when trustedUpstreamAuth.requireJwt=true" -}}
+{{- end -}}
+{{- if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtIssuer | default "")) -}}
+{{- fail "trustedUpstreamAuth.jwtIssuer is required when trustedUpstreamAuth.requireJwt=true" -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -140,6 +154,24 @@ spec:
         {{- if $trustedUpstreamAuth.emailToMatrixUserIdTemplate }}
         - name: MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE
           value: {{ $trustedUpstreamAuth.emailToMatrixUserIdTemplate | quote }}
+        {{- end }}
+        {{- if $trustedUpstreamRequireJwt }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT
+          value: "true"
+        - name: MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER
+          value: {{ $trustedUpstreamAuth.jwtHeader | quote }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_JWKS_URL
+          value: {{ $trustedUpstreamAuth.jwksUrl | quote }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE
+          value: {{ $trustedUpstreamAuth.jwtAudience | quote }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER
+          value: {{ $trustedUpstreamAuth.jwtIssuer | quote }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM
+          value: {{ $trustedUpstreamAuth.jwtEmailClaim | default "email" | quote }}
+        {{- if $trustedUpstreamAuth.jwtUserIdClaim }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM
+          value: {{ $trustedUpstreamAuth.jwtUserIdClaim | quote }}
+        {{- end }}
         {{- end }}
         {{- end }}
         - name: MINDROOM_PLATFORM_LOGIN_URL
