@@ -179,15 +179,14 @@ def _reject_tool_service_collisions(providers: Iterable[OAuthProvider]) -> None:
         raise plugin_imports.PluginValidationError(msg)
 
 
-def load_oauth_providers(
+def _load_oauth_provider_registry(
     config: Config,
     runtime_paths: RuntimePaths,
+    cache_key: tuple[object, ...],
     *,
-    skip_broken_plugins: bool = True,
+    skip_broken_plugins: bool,
 ) -> dict[str, OAuthProvider]:
-    """Return all OAuth providers available for one runtime config."""
     global _provider_cache
-    cache_key = ("config", id(config), runtime_paths, skip_broken_plugins)
     with _provider_cache_lock:
         if _provider_cache is not None and _provider_cache.key == cache_key:
             return _provider_cache.providers
@@ -204,30 +203,31 @@ def load_oauth_providers(
     return registry
 
 
+def load_oauth_providers(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    skip_broken_plugins: bool = True,
+) -> dict[str, OAuthProvider]:
+    """Return all OAuth providers available for one runtime config."""
+    cache_key = ("config", id(config), runtime_paths, skip_broken_plugins)
+    return _load_oauth_provider_registry(config, runtime_paths, cache_key, skip_broken_plugins=skip_broken_plugins)
+
+
 def load_oauth_providers_for_snapshot(
     snapshot: ApiSnapshot,
     *,
     skip_broken_plugins: bool = True,
 ) -> dict[str, OAuthProvider]:
     """Return OAuth providers cached by one API config snapshot."""
-    global _provider_cache
-
     cache_key = ("snapshot", snapshot.generation, id(snapshot), snapshot.runtime_paths, skip_broken_plugins)
-    with _provider_cache_lock:
-        if _provider_cache is not None and _provider_cache.key == cache_key:
-            return _provider_cache.providers
     if snapshot.runtime_config is not None:
         config = snapshot.runtime_config
     else:
         config = Config.model_validate(snapshot.config_data or {}, context={"runtime_paths": snapshot.runtime_paths})
-    plugin_providers = _load_plugin_oauth_providers(
+    return _load_oauth_provider_registry(
         config,
         snapshot.runtime_paths,
+        cache_key,
         skip_broken_plugins=skip_broken_plugins,
     )
-    providers = (*_builtin_oauth_providers(), *plugin_providers)
-    registry = _provider_registry(providers)
-    with _provider_cache_lock:
-        _provider_cache = _ProviderCacheEntry(cache_key, registry)
-    logger.debug("Loaded OAuth providers", providers=sorted(registry))
-    return registry
