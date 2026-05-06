@@ -1334,6 +1334,60 @@ def test_create_agent(test_client: TestClient, sample_agent_data: dict[str, Any]
     assert config["agents"][result["id"]]["display_name"] == sample_agent_data["display_name"]
 
 
+@pytest.mark.parametrize(
+    ("section", "payload", "expected_id"),
+    [
+        (
+            "agents",
+            {
+                "id": "client_agent_id",
+                "display_name": "Section Entity",
+                "role": "A test agent",
+                "tools": ["calculator"],
+                "instructions": ["Test instruction"],
+                "rooms": ["test_room"],
+            },
+            "section_entity",
+        ),
+        (
+            "teams",
+            {
+                "id": "client_team_id",
+                "display_name": "Section Entity",
+                "role": "A test team",
+                "agents": ["test_agent"],
+                "rooms": ["test_room"],
+                "model": "default",
+                "mode": "coordinate",
+            },
+            "section_entity",
+        ),
+    ],
+)
+def test_config_entity_create_strips_payload_id_and_lists_section_entities(
+    test_client: TestClient,
+    temp_config_file: Path,
+    section: str,
+    payload: dict[str, Any],
+    expected_id: str,
+) -> None:
+    """Agent and team section CRUD should expose IDs from config keys only."""
+    test_client.post("/api/config/load")
+
+    create_response = test_client.post(f"/api/config/{section}", json=payload)
+    assert create_response.status_code == 200
+    assert create_response.json() == {"id": expected_id, "success": True}
+
+    with temp_config_file.open() as f:
+        saved_config = yaml.safe_load(f)
+    assert "id" not in saved_config[section][expected_id]
+
+    list_response = test_client.get(f"/api/config/{section}")
+    assert list_response.status_code == 200
+    created_entity = next(entity for entity in list_response.json() if entity["id"] == expected_id)
+    assert created_entity["display_name"] == "Section Entity"
+
+
 def test_update_agent(test_client: TestClient, temp_config_file: Path) -> None:
     """Test updating an existing agent."""
     # Load config first
@@ -3097,6 +3151,28 @@ def test_error_handling_agent_not_found(test_client: TestClient) -> None:
     # DELETE should return 404 for non-existent agent
     response = test_client.delete("/api/config/agents/really_non_existent")
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("section", "entity_id", "expected_detail"),
+    [
+        ("agents", "missing_agent", "Agent not found"),
+        ("teams", "missing_team", "Team not found"),
+    ],
+)
+def test_config_entity_delete_not_found_preserves_exact_error_text(
+    test_client: TestClient,
+    section: str,
+    entity_id: str,
+    expected_detail: str,
+) -> None:
+    """Missing agent and team deletes should keep their user-facing messages."""
+    test_client.post("/api/config/load")
+
+    response = test_client.delete(f"/api/config/{section}/{entity_id}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == expected_detail
 
 
 def test_cors_headers(test_client: TestClient) -> None:

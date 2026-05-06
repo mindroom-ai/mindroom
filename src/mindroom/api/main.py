@@ -407,6 +407,42 @@ def _resolve_unique_entity_id(base_id: str, entities: dict[str, Any]) -> str:
     return f"{base_id}_{counter}"
 
 
+def _list_entities(config_data: dict[str, Any], section: str) -> list[dict[str, Any]]:
+    return [{"id": entity_id, **entity_data} for entity_id, entity_data in config_data.get(section, {}).items()]
+
+
+def _upsert_section_entity(
+    candidate_config: dict[str, Any],
+    section: str,
+    entity_id: str,
+    entity_data: dict[str, Any],
+) -> None:
+    candidate_config.setdefault(section, {})[entity_id] = _sanitize_entity_payload(entity_data)
+
+
+def _create_section_entity(
+    candidate_config: dict[str, Any],
+    section: str,
+    default_entity_id: str,
+    entity_data: dict[str, Any],
+) -> str:
+    base_entity_id = entity_data.get("display_name", default_entity_id).lower().replace(" ", "_")
+    entity_id = _resolve_unique_entity_id(base_entity_id, candidate_config.setdefault(section, {}))
+    _upsert_section_entity(candidate_config, section, entity_id, entity_data)
+    return entity_id
+
+
+def _delete_section_entity(
+    candidate_config: dict[str, Any],
+    section: str,
+    entity_id: str,
+    not_found_detail: str,
+) -> None:
+    if section not in candidate_config or entity_id not in candidate_config[section]:
+        raise HTTPException(status_code=404, detail=not_found_detail)
+    del candidate_config[section][entity_id]
+
+
 def _set_config_generation_header(response: Response, generation: int) -> None:
     """Attach the committed config generation to one API response."""
     response.headers[config_lifecycle.CONFIG_GENERATION_HEADER] = str(generation)
@@ -550,17 +586,7 @@ async def get_agent_policies(
 @app.get("/api/config/agents")
 async def get_agents(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all agents."""
-
-    def read_agents(config_data: dict[str, Any]) -> list[dict[str, Any]]:
-        agents = config_data.get("agents", {})
-        # Convert to list format with IDs
-        agent_list = []
-        for agent_id, agent_data in agents.items():
-            agent = {"id": agent_id, **agent_data}
-            agent_list.append(agent)
-        return agent_list
-
-    return config_lifecycle.read_committed_config(request, read_agents)
+    return config_lifecycle.read_committed_config(request, lambda config_data: _list_entities(config_data, "agents"))
 
 
 @app.put("/api/config/agents/{agent_id}")
@@ -573,9 +599,7 @@ async def update_agent(
     """Update a specific agent."""
 
     def mutate(candidate_config: dict[str, Any]) -> None:
-        if "agents" not in candidate_config:
-            candidate_config["agents"] = {}
-        candidate_config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
+        _upsert_section_entity(candidate_config, "agents", agent_id, agent_data)
 
     config_lifecycle.write_committed_config(
         request,
@@ -592,14 +616,9 @@ async def create_agent(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Create a new agent."""
-    base_agent_id = agent_data.get("display_name", "new_agent").lower().replace(" ", "_")
 
     def mutate(candidate_config: dict[str, Any]) -> str:
-        if "agents" not in candidate_config:
-            candidate_config["agents"] = {}
-        agent_id = _resolve_unique_entity_id(base_agent_id, candidate_config["agents"])
-        candidate_config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
-        return agent_id
+        return _create_section_entity(candidate_config, "agents", "new_agent", agent_data)
 
     agent_id = config_lifecycle.write_committed_config(
         request,
@@ -618,9 +637,7 @@ async def delete_agent(
     """Delete an agent."""
 
     def mutate(candidate_config: dict[str, Any]) -> None:
-        if "agents" not in candidate_config or agent_id not in candidate_config["agents"]:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        del candidate_config["agents"][agent_id]
+        _delete_section_entity(candidate_config, "agents", agent_id, "Agent not found")
 
     config_lifecycle.write_committed_config(
         request,
@@ -633,17 +650,7 @@ async def delete_agent(
 @app.get("/api/config/teams")
 async def get_teams(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all teams."""
-
-    def read_teams(config_data: dict[str, Any]) -> list[dict[str, Any]]:
-        teams = config_data.get("teams", {})
-        # Convert to list format with IDs
-        team_list = []
-        for team_id, team_data in teams.items():
-            team = {"id": team_id, **team_data}
-            team_list.append(team)
-        return team_list
-
-    return config_lifecycle.read_committed_config(request, read_teams)
+    return config_lifecycle.read_committed_config(request, lambda config_data: _list_entities(config_data, "teams"))
 
 
 @app.put("/api/config/teams/{team_id}")
@@ -656,9 +663,7 @@ async def update_team(
     """Update a specific team."""
 
     def mutate(candidate_config: dict[str, Any]) -> None:
-        if "teams" not in candidate_config:
-            candidate_config["teams"] = {}
-        candidate_config["teams"][team_id] = _sanitize_entity_payload(team_data)
+        _upsert_section_entity(candidate_config, "teams", team_id, team_data)
 
     config_lifecycle.write_committed_config(
         request,
@@ -675,14 +680,9 @@ async def create_team(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Create a new team."""
-    base_team_id = team_data.get("display_name", "new_team").lower().replace(" ", "_")
 
     def mutate(candidate_config: dict[str, Any]) -> str:
-        if "teams" not in candidate_config:
-            candidate_config["teams"] = {}
-        team_id = _resolve_unique_entity_id(base_team_id, candidate_config["teams"])
-        candidate_config["teams"][team_id] = _sanitize_entity_payload(team_data)
-        return team_id
+        return _create_section_entity(candidate_config, "teams", "new_team", team_data)
 
     team_id = config_lifecycle.write_committed_config(
         request,
@@ -701,9 +701,7 @@ async def delete_team(
     """Delete a team."""
 
     def mutate(candidate_config: dict[str, Any]) -> None:
-        if "teams" not in candidate_config or team_id not in candidate_config["teams"]:
-            raise HTTPException(status_code=404, detail="Team not found")
-        del candidate_config["teams"][team_id]
+        _delete_section_entity(candidate_config, "teams", team_id, "Team not found")
 
     config_lifecycle.write_committed_config(
         request,
