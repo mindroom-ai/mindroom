@@ -2193,7 +2193,17 @@ def test_approval_hostname_normalization_uses_exact_display_host(value: str, exp
     assert _normalize_approval_hostname(value) == expected
 
 
-@pytest.mark.parametrize("value", ["*.example.com", "bad host.example", "[bad"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "*.example.com",
+        "bad host.example",
+        "[bad",
+        "http:///path",
+        "file:///etc/passwd",
+        "/path/to/socket",
+    ],
+)
 def test_approval_hostname_normalization_rejects_non_exact_hosts(value: str) -> None:
     assert _normalize_approval_hostname(value) is None
 

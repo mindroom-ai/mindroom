@@ -13,7 +13,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 from uuid import uuid4
 
 from mindroom.approval_events import (
@@ -202,6 +202,31 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
     return preview, True
 
 
+def _split_approval_hostname_value(raw: str) -> SplitResult | None:
+    if "://" in raw or raw.startswith("//"):
+        parsed = urlsplit(raw)
+        return parsed if parsed.netloc else None
+    if any(character in raw for character in "/\\?#@"):
+        return None
+    return urlsplit(f"//{raw}")
+
+
+def _normalized_hostname_text(hostname: str) -> str | None:
+    normalized = hostname.strip().rstrip(".").lower()
+    if (
+        not normalized
+        or "*" in normalized
+        or any(character.isspace() or character in "/\\?#@" for character in normalized)
+    ):
+        return None
+    if ":" in normalized:
+        return normalized
+    try:
+        return normalized.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+
+
 def _normalize_approval_hostname(value: object) -> str | None:
     """Return the exact lowercase hostname represented by one approval value."""
     if not isinstance(value, str):
@@ -211,21 +236,13 @@ def _normalize_approval_hostname(value: object) -> str | None:
         return None
 
     try:
-        parsed = urlsplit(raw if "://" in raw else f"//{raw}")
-        hostname = parsed.hostname
+        parsed = _split_approval_hostname_value(raw)
+        if parsed is None:
+            return None
+        _ = parsed.port
     except ValueError:
         return None
-    if hostname is None:
-        hostname = raw.strip("[]")
-    hostname = hostname.strip().rstrip(".").lower()
-    if not hostname or "*" in hostname or any(character.isspace() for character in hostname):
-        return None
-    if ":" not in hostname:
-        try:
-            hostname = hostname.encode("idna").decode("ascii")
-        except UnicodeError:
-            return None
-    return hostname
+    return _normalized_hostname_text(parsed.hostname) if parsed.hostname is not None else None
 
 
 def _first_argument_value(arguments: dict[str, Any], keys: tuple[str, ...]) -> object | None:
