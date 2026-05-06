@@ -1,5 +1,7 @@
 """Tests for the centralized credentials manager."""
 
+import base64
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials import (
     _DEDICATED_WORKER_KEY_ENV,
     _DEDICATED_WORKER_ROOT_ENV,
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
     _get_credentials_manager,
@@ -22,6 +25,10 @@ from mindroom.credentials import (
     sync_shared_credentials_to_worker,
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
+
+
+def _test_encryption_key() -> str:
+    return base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
 
 
 @pytest.fixture
@@ -114,6 +121,129 @@ class TestCredentialsManager:
         # Load credentials
         loaded_creds = credentials_manager.load_credentials("test_service")
         assert loaded_creds == test_creds
+
+    def test_encrypted_save_and_load_credentials_round_trip(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted credential storage should not leave JSON or token text on disk."""
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+        manager = CredentialsManager(tmp_path / "credentials")
+        test_creds = {
+            "token": "test_token_123",
+            "refresh_token": "refresh_123",
+            "client_secret": "secret_123",
+        }
+
+        manager.save_credentials("oauth_service", test_creds)
+
+        creds_file = manager.get_credentials_path("oauth_service")
+        stored_bytes = creds_file.read_bytes()
+        assert b"test_token_123" not in stored_bytes
+        assert b"refresh_123" not in stored_bytes
+        assert b'"token"' not in stored_bytes
+        assert manager.load_credentials("oauth_service") == test_creds
+
+    def test_encrypted_credentials_reject_plaintext_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted mode should refuse to load plaintext credential JSON."""
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+        manager = CredentialsManager(tmp_path / "credentials")
+        creds_path = manager.get_credentials_path("oauth_service")
+        creds_path.write_text('{"token":"plaintext-token"}', encoding="utf-8")
+
+        assert manager.load_credentials("oauth_service") is None
+
+    def test_encrypted_credentials_file_mode_is_private(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted credential files should be written with mode 0600."""
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+        manager = CredentialsManager(tmp_path / "credentials")
+
+        manager.save_credentials("oauth_service", {"token": "test-token"})
+
+        mode = stat.S_IMODE(manager.get_credentials_path("oauth_service").stat().st_mode)
+        assert mode == 0o600
+
+    def test_encrypted_credentials_directory_mode_is_private(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted credential directories should be created with mode 0700."""
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+
+        manager = CredentialsManager(tmp_path / "credentials")
+
+        mode = stat.S_IMODE(manager.base_path.stat().st_mode)
+        assert mode == 0o700
+
+    def test_encrypted_scoped_credentials_directories_are_private(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted scoped credential directories should be written with mode 0700."""
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+        manager = CredentialsManager(tmp_path / "credentials")
+
+        scoped_manager = manager.for_primary_runtime_scope("@user:example.test", "agent")
+
+        scoped_root = tmp_path / "private_oauth"
+        for directory_path in [scoped_root, scoped_manager.base_path.parent, scoped_manager.base_path]:
+            mode = stat.S_IMODE(directory_path.stat().st_mode)
+            assert mode == 0o700
+
+    def test_encrypted_credentials_reject_corrupt_files(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted mode should fail closed when ciphertext cannot be authenticated."""
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+        manager = CredentialsManager(tmp_path / "credentials")
+        creds_path = manager.get_credentials_path("oauth_service")
+        creds_path.write_bytes(b"MINDROOM-CREDENTIALS-V1\nnot-valid-ciphertext")
+
+        assert manager.load_credentials("oauth_service") is None
+
+    def test_isolated_worker_runtime_loads_encrypted_shared_credentials(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Isolated workers should keep the encryption key in RuntimePaths for credential reads."""
+        encryption_key = _test_encryption_key()
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
+        worker_manager = manager.for_worker("worker-a")
+        worker_manager.shared_manager().save_credentials("openai", {"api_key": "shared-key", "_source": "env"})
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=worker_manager.storage_root,
+            process_env={
+                CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key,
+                SHARED_CREDENTIALS_PATH_ENV: str(worker_manager.shared_base_path),
+            },
+        )
+
+        isolated_runtime_paths = constants_mod.isolated_runtime_paths(runtime_paths)
+
+        loaded_credentials = (
+            get_runtime_credentials_manager(isolated_runtime_paths)
+            .shared_manager()
+            .load_credentials(
+                "openai",
+            )
+        )
+        assert loaded_credentials == {"api_key": "shared-key", "_source": "env"}
 
     def test_load_nonexistent_credentials(self, credentials_manager: CredentialsManager) -> None:
         """Test loading credentials that don't exist."""

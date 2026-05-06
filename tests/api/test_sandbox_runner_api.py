@@ -453,6 +453,36 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
     assert effective_runtime.env_value("TEST_EXECUTION_ENV") is None
 
 
+def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers may read the encryption key from process env without exposing it to tools."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_NAMESPACE": "alpha1234",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1",
+        },
+    )
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    monkeypatch.setenv(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV, encryption_key)
+
+    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    execution_env = sandbox_exec_module.request_execution_env("shell", None, startup_runtime)
+
+    assert startup_runtime.env_value(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
+
+
 @pytest.mark.asyncio
 async def test_dedicated_worker_inprocess_shell_does_not_see_runner_local_env(
     monkeypatch: pytest.MonkeyPatch,

@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.constants import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     deserialize_runtime_paths,
     resolve_primary_runtime_paths,
@@ -602,6 +603,7 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     assert template_annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] == startup_manifest_sha256(
         committed_runtime,
         tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
+        public_runtime=True,
     )
     assert deployment["spec"]["template"]["spec"]["securityContext"] == {
         "runAsUser": 1000,
@@ -624,6 +626,30 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
         "periodSeconds": 5,
         "failureThreshold": 60,
     }
+
+
+def test_kubernetes_worker_startup_manifest_omits_credentials_encryption_key(tmp_path: Path) -> None:
+    """Worker manifests should not persist credential encryption key material beside worker state."""
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+        process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    startup_manifest = _load_startup_manifest(backend, worker_key=worker_key)
+    committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
+
+    assert env_values[CREDENTIALS_ENCRYPTION_KEY_ENV] == encryption_key
+    assert committed_runtime.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert encryption_key not in json.dumps(startup_manifest)
 
 
 def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -> None:
@@ -1164,6 +1190,7 @@ def test_kubernetes_backend_renders_configured_annotations_on_worker_pod_templat
     assert annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] == startup_manifest_sha256(
         committed_runtime,
         tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
+        public_runtime=True,
     )
     assert annotations[ANNOTATION_WORKER_KEY] != "user-supplied-value"
     assert annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] != "user-supplied-value"
