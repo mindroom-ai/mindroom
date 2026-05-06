@@ -58,4 +58,13 @@ def _cancel_failure_reason(cancel_source: CancelSource) -> str:
     return "interrupted"
 
 
+def cancel_source_from_failure_reason(failure_reason: str | None) -> CancelSource:
+    """Return cancellation provenance from one canonical failure reason."""
+    if failure_reason == "sync_restart_cancelled":
+        return "sync_restart"
+    if failure_reason == "cancelled_by_user":
+        return "user_stop"
+    return "interrupted"
+
+
 cancel_failure_reason = _cancel_failure_reason

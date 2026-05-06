@@ -37,13 +37,18 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source
+from mindroom.orchestration.runtime import (
+    cancel_failure_reason,
+    cancel_source_from_failure_reason,
+    classify_cancel_source,
+    log_cancelled_response,
+    log_cancelled_response_source,
+)
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import (
     ResponseAttemptDeps,
     ResponseAttemptRequest,
     ResponseAttemptRunner,
-    log_cancelled_response,
 )
 from mindroom.response_terminal import (
     PendingVisibleResponse,
@@ -1280,17 +1285,15 @@ class ResponseRunner:
         except StreamingDeliveryError as error:
             stream_transport_outcome = error.transport_outcome
             if stream_transport_outcome.terminal_status == "cancelled":
-                if stream_transport_outcome.failure_reason == "sync_restart_cancelled":
-                    self.deps.logger.info(
-                        "Team streaming response interrupted by sync restart",
-                        message_id=error.event_id,
-                    )
-                else:
-                    self.deps.logger.warning(
-                        "Team streaming response cancelled — traceback for diagnosis",
-                        message_id=error.event_id,
-                        exc_info=True,
-                    )
+                log_cancelled_response_source(
+                    self.deps.logger,
+                    cancel_source=cancel_source_from_failure_reason(stream_transport_outcome.failure_reason),
+                    message_id=error.event_id,
+                    restart_message="Team streaming response interrupted by sync restart",
+                    user_stop_message="Team streaming response cancelled by user",
+                    interrupted_message="Team streaming response interrupted — traceback for diagnosis",
+                    exc_info=(type(error.error), error.error, error.error.__traceback__),
+                )
             else:
                 self.deps.logger.exception("Error in team streaming response", error=str(error.error))
             if error.event_id:
@@ -1962,17 +1965,15 @@ class ResponseRunner:
         except StreamingDeliveryError as error:
             stream_transport_outcome = error.transport_outcome
             if stream_transport_outcome.terminal_status == "cancelled":
-                if stream_transport_outcome.failure_reason == "sync_restart_cancelled":
-                    self.deps.logger.info(
-                        "Bot streaming response interrupted by sync restart",
-                        message_id=error.event_id,
-                    )
-                else:
-                    self.deps.logger.warning(
-                        "Bot streaming response cancelled — traceback for diagnosis",
-                        message_id=error.event_id,
-                        exc_info=True,
-                    )
+                log_cancelled_response_source(
+                    self.deps.logger,
+                    cancel_source=cancel_source_from_failure_reason(stream_transport_outcome.failure_reason),
+                    message_id=error.event_id,
+                    restart_message="Bot streaming response interrupted by sync restart",
+                    user_stop_message="Bot streaming response cancelled by user",
+                    interrupted_message="Bot streaming response interrupted — traceback for diagnosis",
+                    exc_info=(type(error.error), error.error, error.error.__traceback__),
+                )
             else:
                 self.deps.logger.exception("Error in streaming response", error=str(error.error))
             tool_trace[:] = error.tool_trace

@@ -24,10 +24,12 @@ from mindroom.orchestration.runtime import (
     EntityStartResults,
     _MatrixSyncStalledError,
     _SyncIteration,
+    cancel_source_from_failure_reason,
     cancel_sync_task,
     classify_cancel_source,
     is_sync_restart_cancel,
     log_cancelled_response,
+    log_cancelled_response_source,
     matrix_sync_startup_timeout_seconds,
     stop_entities,
     sync_forever_with_restart,
@@ -269,6 +271,24 @@ async def test_cancel_failure_reason_matches_cancel_source() -> None:
 
 
 @pytest.mark.parametrize(
+    ("failure_reason", "expected_cancel_source"),
+    [
+        ("cancelled_by_user", "user_stop"),
+        ("sync_restart_cancelled", "sync_restart"),
+        ("interrupted", "interrupted"),
+        ("other", "interrupted"),
+        (None, "interrupted"),
+    ],
+)
+def test_cancel_source_from_failure_reason_matches_canonical_reasons(
+    failure_reason: str | None,
+    expected_cancel_source: str,
+) -> None:
+    """Canonical terminal failure reasons should map back to cancellation provenance."""
+    assert cancel_source_from_failure_reason(failure_reason) == expected_cancel_source
+
+
+@pytest.mark.parametrize(
     ("cancel_error", "expected_method", "expected_message"),
     [
         (asyncio.CancelledError(USER_STOP_CANCEL_MSG), "info", "Response cancelled by user"),
@@ -306,6 +326,48 @@ def test_log_cancelled_response_preserves_caller_messages_and_traceback(
         )
     else:
         assert "exc_info" not in log_call.kwargs
+
+
+def test_log_cancelled_response_source_logs_user_stop_without_traceback() -> None:
+    """Resolved user-stop provenance should remain an expected info-level cancellation."""
+    logger = MagicMock()
+
+    log_cancelled_response_source(
+        logger,
+        cancel_source="user_stop",
+        message_id="$event",
+        restart_message="Response interrupted by sync restart",
+        user_stop_message="Response cancelled by user",
+        interrupted_message="Response interrupted — traceback for diagnosis",
+        exc_info=True,
+    )
+
+    logger.info.assert_called_once_with("Response cancelled by user", message_id="$event")
+    logger.warning.assert_not_called()
+
+
+def test_log_cancelled_response_source_logs_interrupted_with_traceback() -> None:
+    """Resolved generic interruptions should keep diagnostic traceback details."""
+    logger = MagicMock()
+    cancel_error = asyncio.CancelledError("other")
+    exc_info = (type(cancel_error), cancel_error, cancel_error.__traceback__)
+
+    log_cancelled_response_source(
+        logger,
+        cancel_source="interrupted",
+        message_id="$event",
+        restart_message="Response interrupted by sync restart",
+        user_stop_message="Response cancelled by user",
+        interrupted_message="Response interrupted — traceback for diagnosis",
+        exc_info=exc_info,
+    )
+
+    logger.warning.assert_called_once_with(
+        "Response interrupted — traceback for diagnosis",
+        message_id="$event",
+        exc_info=exc_info,
+    )
+    logger.info.assert_not_called()
 
 
 @pytest.mark.asyncio

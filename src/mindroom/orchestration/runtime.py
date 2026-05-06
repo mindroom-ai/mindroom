@@ -17,6 +17,7 @@ from mindroom.cancellation import (
     USER_STOP_CANCEL_MSG,
     CancelSource,
     cancel_failure_reason,
+    cancel_source_from_failure_reason,
     classify_cancel_source,
     request_task_cancel,
 )
@@ -34,6 +35,7 @@ from mindroom.runtime_state import set_runtime_starting
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
+    from types import TracebackType
 
     import structlog
 
@@ -60,6 +62,7 @@ __all__ = [
     "EntityStartResults",
     "cancel_failure_reason",
     "cancel_logged_task",
+    "cancel_source_from_failure_reason",
     "cancel_sync_task",
     "cancel_task",
     "classify_cancel_source",
@@ -68,6 +71,7 @@ __all__ = [
     "is_permanent_startup_error",
     "is_sync_restart_cancel",
     "log_cancelled_response",
+    "log_cancelled_response_source",
     "matrix_sync_startup_timeout_seconds",
     "request_task_cancel",
     "retry_delay_seconds",
@@ -93,17 +97,37 @@ def log_cancelled_response(
     interrupted_message: str,
 ) -> None:
     """Log one CancelledError with the right provenance label."""
-    cancel_source = classify_cancel_source(exc)
+    log_cancelled_response_source(
+        logger,
+        cancel_source=classify_cancel_source(exc),
+        message_id=message_id,
+        restart_message=restart_message,
+        user_stop_message=user_stop_message,
+        interrupted_message=interrupted_message,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
+def log_cancelled_response_source(
+    logger: structlog.stdlib.BoundLogger,
+    *,
+    cancel_source: CancelSource,
+    message_id: str | None,
+    restart_message: str,
+    user_stop_message: str,
+    interrupted_message: str,
+    exc_info: tuple[type[BaseException], BaseException, TracebackType | None] | bool | None = None,
+) -> None:
+    """Log one resolved cancellation source with caller-specific text."""
     if cancel_source == "sync_restart":
         logger.info(restart_message, message_id=message_id)
     elif cancel_source == "user_stop":
         logger.info(user_stop_message, message_id=message_id)
     else:
-        logger.warning(
-            interrupted_message,
-            message_id=message_id,
-            exc_info=(type(exc), exc, exc.__traceback__),
-        )
+        kwargs: dict[str, Any] = {"message_id": message_id}
+        if exc_info is not None:
+            kwargs["exc_info"] = exc_info
+        logger.warning(interrupted_message, **kwargs)
 
 
 def matrix_sync_startup_timeout_seconds(runtime_paths: RuntimePaths) -> float:
