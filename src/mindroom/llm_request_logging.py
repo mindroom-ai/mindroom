@@ -17,6 +17,7 @@ from agno.models.message import Message
 from pydantic import BaseModel
 
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
+from mindroom.redaction import redact_sensitive_data
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine, Iterator, Sequence
@@ -104,7 +105,7 @@ def _model_params(model: Model) -> dict[str, _JSONValue]:
 def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload))
+        handle.write(json.dumps(redact_sensitive_data(payload)))
         handle.write("\n")
 
 
