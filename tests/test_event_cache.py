@@ -14,6 +14,10 @@ import pytest
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache.sqlite_event_cache as event_cache_module
+from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.matrix.cache import (
     ConversationEventCache,
     event_normalization,
@@ -23,15 +27,43 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client_thread_history import fetch_thread_history
-from mindroom.matrix.conversation_cache import _cached_room_get_event
+from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.timing import DispatchPipelineTiming
+from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
+
+
+def _conversation_cache_for_thread_reads(
+    tmp_path: Path,
+    event_cache: ConversationEventCache,
+    *,
+    client: object,
+) -> MatrixConversationCache:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    runtime = BotRuntimeState(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=event_cache,
+        event_cache_write_coordinator=None,
+    )
+    return MatrixConversationCache(logger=MagicMock(), runtime=runtime)
 
 
 def test_sqlite_event_cache_is_explicit_concrete_cache(tmp_path: Path) -> None:
@@ -243,6 +275,107 @@ def test_group_lookup_events_by_room_normalizes_and_preserves_order() -> None:
             ),
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
+    tmp_path: Path,
+) -> None:
+    """Thread read modes should preserve the facade metadata passed to client fetchers."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    client = MagicMock()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+    read_modes = [
+        (False, False, "fetch_thread_snapshot", False, 101.0, 25.0),
+        (True, False, "fetch_thread_history", True, 102.0, 50.0),
+        (False, True, "fetch_dispatch_thread_snapshot", False, 103.0, 75.0),
+        (True, True, "fetch_dispatch_thread_history", True, 104.0, 100.0),
+    ]
+    fetchers = {
+        name: AsyncMock(return_value=thread_history_result([], is_full_history=is_full_history))
+        for _full_history, _dispatch_safe, name, is_full_history, _guard_started_at, _queue_wait_ms in read_modes
+    }
+
+    try:
+        with (
+            patch("mindroom.matrix.conversation_cache.fetch_thread_snapshot", fetchers["fetch_thread_snapshot"]),
+            patch("mindroom.matrix.conversation_cache.fetch_thread_history", fetchers["fetch_thread_history"]),
+            patch(
+                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+                fetchers["fetch_dispatch_thread_snapshot"],
+            ),
+            patch(
+                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
+                fetchers["fetch_dispatch_thread_history"],
+            ),
+            patch("mindroom.matrix.conversation_cache.time.time", side_effect=[101.0, 102.0, 103.0, 104.0]),
+            patch(
+                "mindroom.matrix.cache.thread_reads.time.perf_counter",
+                side_effect=[1.0, 1.025, 2.0, 2.05, 3.0, 3.075, 4.0, 4.1],
+            ),
+        ):
+            for full_history, dispatch_safe, _name, is_full_history, _guard_started_at, _queue_wait_ms in read_modes:
+                result = await conversation_cache.get_thread_messages(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    full_history=full_history,
+                    dispatch_safe=dispatch_safe,
+                    caller_label=f"caller-{full_history}-{dispatch_safe}",
+                )
+                assert result.is_full_history is is_full_history
+
+        for full_history, dispatch_safe, name, _is_full_history, guard_started_at, queue_wait_ms in read_modes:
+            fetchers[name].assert_awaited_once_with(
+                client,
+                "!room:localhost",
+                "$thread:localhost",
+                event_cache=event_cache,
+                cache_write_guard_started_at=guard_started_at,
+                trusted_sender_ids=conversation_cache._trusted_sender_ids(),
+                caller_label=f"caller-{full_history}-{dispatch_safe}",
+                coordinator_queue_wait_ms=queue_wait_ms,
+            )
+    finally:
+        await event_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_conversation_cache_startup_prewarm_fetch_preserves_fixed_metadata(
+    tmp_path: Path,
+) -> None:
+    """Startup prewarm should bypass read coordination while keeping strict fetch metadata."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    client = MagicMock()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+    fetch_dispatch_thread_snapshot = AsyncMock(return_value=thread_history_result([], is_full_history=False))
+
+    try:
+        with (
+            patch(
+                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+                fetch_dispatch_thread_snapshot,
+            ),
+            patch("mindroom.matrix.conversation_cache.time.time", return_value=222.0),
+        ):
+            await conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+                "!room:localhost",
+                "$thread:localhost",
+            )
+
+        fetch_dispatch_thread_snapshot.assert_awaited_once_with(
+            client,
+            "!room:localhost",
+            "$thread:localhost",
+            event_cache=event_cache,
+            cache_write_guard_started_at=222.0,
+            trusted_sender_ids=conversation_cache._trusted_sender_ids(),
+            caller_label="startup_thread_prewarm",
+            coordinator_queue_wait_ms=0.0,
+        )
+    finally:
+        await event_cache.close()
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,7 @@ from mindroom.matrix.thread_membership import (
 from mindroom.matrix.thread_room_scan import room_scan_membership_access_for_client
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Collection
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -571,14 +571,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str,
         coordinator_queue_wait_ms: float,
     ) -> ThreadHistoryResult:
-        fetch_started_at = time.time()
-        return await fetch_thread_history(
-            self._require_client(),
+        return await self._fetch_thread_from_client(
+            fetch_thread_history,
             room_id,
             thread_id,
-            event_cache=self.runtime.event_cache,
-            cache_write_guard_started_at=fetch_started_at,
-            trusted_sender_ids=self._trusted_sender_ids(),
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         )
@@ -591,14 +587,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str,
         coordinator_queue_wait_ms: float,
     ) -> ThreadHistoryResult:
-        fetch_started_at = time.time()
-        return await fetch_thread_snapshot(
-            self._require_client(),
+        return await self._fetch_thread_from_client(
+            fetch_thread_snapshot,
             room_id,
             thread_id,
-            event_cache=self.runtime.event_cache,
-            cache_write_guard_started_at=fetch_started_at,
-            trusted_sender_ids=self._trusted_sender_ids(),
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         )
@@ -611,14 +603,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str,
         coordinator_queue_wait_ms: float,
     ) -> ThreadHistoryResult:
-        fetch_started_at = time.time()
-        return await fetch_dispatch_thread_history(
-            self._require_client(),
+        return await self._fetch_thread_from_client(
+            fetch_dispatch_thread_history,
             room_id,
             thread_id,
-            event_cache=self.runtime.event_cache,
-            cache_write_guard_started_at=fetch_started_at,
-            trusted_sender_ids=self._trusted_sender_ids(),
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         )
@@ -631,8 +619,25 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str,
         coordinator_queue_wait_ms: float,
     ) -> ThreadHistoryResult:
+        return await self._fetch_thread_from_client(
+            fetch_dispatch_thread_snapshot,
+            room_id,
+            thread_id,
+            caller_label=caller_label,
+            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        )
+
+    async def _fetch_thread_from_client(
+        self,
+        fetcher: Callable[..., Awaitable[ThreadHistoryResult]],
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str,
+        coordinator_queue_wait_ms: float,
+    ) -> ThreadHistoryResult:
         fetch_started_at = time.time()
-        return await fetch_dispatch_thread_snapshot(
+        return await fetcher(
             self._require_client(),
             room_id,
             thread_id,
@@ -649,14 +654,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_id: str,
     ) -> ThreadHistoryResult:
         """Refresh one strict thread snapshot for advisory startup prewarm without the live read barrier."""
-        fetch_started_at = time.time()
-        return await fetch_dispatch_thread_snapshot(
-            self._require_client(),
+        return await self._fetch_thread_from_client(
+            fetch_dispatch_thread_snapshot,
             room_id,
             thread_id,
-            event_cache=self.runtime.event_cache,
-            cache_write_guard_started_at=fetch_started_at,
-            trusted_sender_ids=self._trusted_sender_ids(),
             caller_label="startup_thread_prewarm",
             # Startup prewarm bypasses the read coordinator; 0.0 means no coordinator queue was used.
             coordinator_queue_wait_ms=0.0,
