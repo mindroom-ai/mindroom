@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from hashlib import sha256
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
@@ -13,8 +12,11 @@ import httpx
 from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 
+from .env_file import env_path_for_config, upsert_env_values
+
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 _PAIR_CODE_RE = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]{4,32}$")
@@ -106,11 +108,6 @@ def persist_local_provisioning_env(
     config_path: str | Path,
 ) -> Path:
     """Write local provisioning credentials to .env next to the active config file."""
-    resolved_config_path = Path(config_path).expanduser().resolve()
-    env_path = resolved_config_path.parent / ".env"
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-
     updates = {
         "MINDROOM_PROVISIONING_URL": provisioning_url.rstrip("/"),
         "MINDROOM_LOCAL_CLIENT_ID": client_id,
@@ -119,11 +116,8 @@ def persist_local_provisioning_env(
     }
     if parsed_owner_user_id := parse_owner_matrix_user_id(owner_user_id):
         updates[OWNER_MATRIX_USER_ID_ENV] = parsed_owner_user_id
-    for key, value in updates.items():
-        lines = _upsert_env_var(lines, key, value)
 
-    env_path.write_text(f"{'\n'.join(lines)}\n", encoding="utf-8")
-    return env_path
+    return upsert_env_values(env_path_for_config(config_path), updates)
 
 
 def replace_owner_placeholders_in_config(*, config_path: Path, owner_user_id: str) -> bool:
@@ -185,14 +179,3 @@ def _extract_error_detail(response: httpx.Response) -> str:
         if detail is not None:
             return str(detail)
     return "unknown error"
-
-
-def _upsert_env_var(lines: list[str], key: str, value: str) -> list[str]:
-    """Upsert a single KEY=value entry while preserving unrelated lines."""
-    pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
-    for idx, line in enumerate(lines):
-        if pattern.match(line):
-            lines[idx] = f"{key}={value}"
-            return lines
-    lines.append(f"{key}={value}")
-    return lines

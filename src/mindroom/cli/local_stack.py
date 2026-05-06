@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +17,7 @@ import typer
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
 from .config import activate_cli_runtime, console
+from .env_file import env_path_for_config, upsert_env_values
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -154,31 +154,14 @@ def _persist_local_matrix_env(
     config_path: Path,
 ) -> Path:
     """Write local Matrix settings to .env next to the active config file."""
-    env_path = config_path.expanduser().resolve().parent / ".env"
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-
-    updates = {
-        "MATRIX_HOMESERVER": homeserver_url,
-        "MATRIX_SSL_VERIFY": "false",
-        "MATRIX_SERVER_NAME": server_name,
-    }
-    for key, value in updates.items():
-        lines = _upsert_env_var(lines, key, value)
-
-    env_path.write_text(f"{'\n'.join(lines)}\n", encoding="utf-8")
-    return env_path
-
-
-def _upsert_env_var(lines: list[str], key: str, value: str) -> list[str]:
-    """Upsert a single KEY=value entry while preserving unrelated lines."""
-    pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
-    for idx, line in enumerate(lines):
-        if pattern.match(line):
-            lines[idx] = f"{key}={value}"
-            return lines
-    lines.append(f"{key}={value}")
-    return lines
+    return upsert_env_values(
+        env_path_for_config(config_path),
+        {
+            "MATRIX_HOMESERVER": homeserver_url,
+            "MATRIX_SSL_VERIFY": "false",
+            "MATRIX_SERVER_NAME": server_name,
+        },
+    )
 
 
 def _require_supported_platform() -> None:

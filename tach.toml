@@ -1556,8 +1556,17 @@ depends_on = [
 [[modules]]
 path = "mindroom.cli.connect"
 depends_on = [
+    "mindroom.cli.env_file",
     "mindroom.cli.owner",
     "mindroom.constants",
+]
+
+[[modules]]
+path = "mindroom.cli.env_file"
+depends_on = []
+visibility = [
+    "mindroom.cli.connect",
+    "mindroom.cli.local_stack",
 ]
 
 [[modules]]
@@ -1582,6 +1591,7 @@ depends_on = [
 path = "mindroom.cli.local_stack"
 depends_on = [
     "mindroom.cli.config",
+    "mindroom.cli.env_file",
     "mindroom.matrix.health",
 ]
 
