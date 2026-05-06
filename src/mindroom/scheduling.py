@@ -1606,7 +1606,7 @@ async def cancel_all_scheduled_tasks(
     return result
 
 
-async def restore_scheduled_tasks(  # noqa: C901, PLR0912
+async def restore_scheduled_tasks(  # noqa: C901
     client: nio.AsyncClient,
     room_id: str,
     config: Config,
@@ -1625,79 +1625,60 @@ async def restore_scheduled_tasks(  # noqa: C901, PLR0912
         return 0
 
     restored_count = 0
-    for event in response.events:
-        if event["type"] != _SCHEDULED_TASK_EVENT_TYPE:
-            continue
+    for task in _parse_task_records_from_state(room_id, response, include_non_pending=False):
+        task_id = task.task_id
+        workflow = task.workflow
 
-        content = event["content"]
-        if content.get("status") != "pending":
-            continue
-
-        try:
-            task_id: str = event["state_key"]
-
-            # Parse the workflow
-            workflow_data = json.loads(content["workflow"])
-            workflow = ScheduledWorkflow(**workflow_data)
-
-            # Validate workflow has required fields
-            if workflow.schedule_type == "once":
-                if not workflow.execute_at:
-                    logger.warning("skipping_one_time_task_without_execution_time", task_id=task_id)
-                    continue
-                # Handle past one-time tasks: execute if within grace period, fail if too old
-                if workflow.execute_at <= datetime.now(UTC):
-                    missed_by = (datetime.now(UTC) - workflow.execute_at).total_seconds()
-                    if missed_by > _MISSED_TASK_MAX_AGE_SECONDS:
-                        logger.warning(
-                            "Skipping ancient missed task",
-                            task_id=task_id,
-                            missed_by_seconds=missed_by,
-                        )
-                        try:
-                            await _persist_scheduled_task_state(
-                                client=client,
-                                room_id=room_id,
-                                task_id=task_id,
-                                workflow=workflow,
-                                status="failed",
-                                created_at=content.get("created_at"),
-                            )
-                        except Exception:
-                            logger.exception("Failed to mark ancient task as failed", task_id=task_id)
-                        continue
-                    if _queue_deferred_overdue_task(task_id, workflow):
-                        logger.warning(
-                            "Queued missed one-time task until sync is ready",
-                            task_id=task_id,
-                            missed_by_seconds=missed_by,
-                        )
-                        restored_count += 1
-                    continue
-            elif workflow.schedule_type == "cron":
-                if not workflow.cron_schedule:
-                    logger.warning("skipping_recurring_task_without_cron_schedule", task_id=task_id)
-                    continue
-            else:
-                logger.warning("unknown_schedule_type", task_id=task_id, schedule_type=workflow.schedule_type)
+        if workflow.schedule_type == "once":
+            if not workflow.execute_at:
+                logger.warning("skipping_one_time_task_without_execution_time", task_id=task_id)
                 continue
-
-            # Start the appropriate task
-            if _start_scheduled_task(
-                client,
-                task_id,
-                workflow,
-                config,
-                runtime_paths,
-                event_cache,
-                conversation_cache,
-                matrix_admin=build_hook_matrix_admin(client, runtime_paths),
-            ):
-                restored_count += 1
-
-        except (KeyError, ValueError, json.JSONDecodeError):
-            logger.exception("Failed to restore task")
+            # Handle past one-time tasks: execute if within grace period, fail if too old
+            now = datetime.now(UTC)
+            if workflow.execute_at <= now:
+                missed_by = (now - workflow.execute_at).total_seconds()
+                if missed_by > _MISSED_TASK_MAX_AGE_SECONDS:
+                    logger.warning(
+                        "Skipping ancient missed task",
+                        task_id=task_id,
+                        missed_by_seconds=missed_by,
+                    )
+                    try:
+                        await _persist_scheduled_task_state(
+                            client=client,
+                            room_id=room_id,
+                            task_id=task_id,
+                            workflow=workflow,
+                            status="failed",
+                            created_at=task.created_at,
+                        )
+                    except Exception:
+                        logger.exception("Failed to mark ancient task as failed", task_id=task_id)
+                    continue
+                if _queue_deferred_overdue_task(task_id, workflow):
+                    logger.warning(
+                        "Queued missed one-time task until sync is ready",
+                        task_id=task_id,
+                        missed_by_seconds=missed_by,
+                    )
+                    restored_count += 1
+                continue
+        elif workflow.schedule_type == "cron" and not workflow.cron_schedule:
+            logger.warning("skipping_recurring_task_without_cron_schedule", task_id=task_id)
             continue
+
+        # Start the appropriate task
+        if _start_scheduled_task(
+            client,
+            task_id,
+            workflow,
+            config,
+            runtime_paths,
+            event_cache,
+            conversation_cache,
+            matrix_admin=build_hook_matrix_admin(client, runtime_paths),
+        ):
+            restored_count += 1
 
     if restored_count > 0:
         logger.info("Restored scheduled tasks in room", room_id=room_id, restored_count=restored_count)

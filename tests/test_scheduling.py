@@ -405,6 +405,72 @@ async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue() 
 
 
 @pytest.mark.asyncio
+async def test_restore_scheduled_tasks_uses_canonical_state_parser_for_mixed_records() -> None:
+    """Restore should skip non-pending and malformed records while restoring valid pending records."""
+    client = AsyncMock()
+    cron_workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="Run the daily report",
+        description="Daily report",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+    state_response = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "malformed_content",
+                "content": "not a dict",
+                "event_id": "$state_malformed_content",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567888,
+            },
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "old_cancelled",
+                "content": {
+                    "status": "cancelled",
+                },
+                "event_id": "$state_cancelled",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567889,
+            },
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task_cron",
+                "content": {
+                    "workflow": cron_workflow.model_dump_json(),
+                    "status": "pending",
+                    "created_at": datetime.now(UTC).isoformat(),
+                },
+                "event_id": "$state_task_cron",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567890,
+            },
+        ],
+        room_id="!test:server",
+    )
+    client.room_get_state = AsyncMock(return_value=state_response)
+    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+
+    with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
+        restored = await restore_scheduled_tasks(
+            client=client,
+            room_id="!test:server",
+            config=MagicMock(),
+            runtime_paths=_runtime_paths(),
+            event_cache=_event_cache(),
+            conversation_cache=conversation_cache,
+        )
+
+    assert restored == 1
+    mock_start.assert_called_once()
+    assert mock_start.call_args.args[1] == "task_cron"
+    assert len(scheduling._deferred_overdue_tasks) == 0
+
+
+@pytest.mark.asyncio
 async def test_list_scheduled_tasks_real_implementation() -> None:
     """Test list_scheduled_tasks with real implementation, only mocking Matrix API."""
     # Create mock client
