@@ -2828,7 +2828,14 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(tmp_pa
     }
     config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
-    agent = _create_agent_for_test("general", config, knowledge=Knowledge())
+    knowledge = Knowledge(
+        name="general_multi_knowledge",
+        description=(
+            "engineering: Architecture docs, ADRs, deployment runbooks, and coding conventions.\n"
+            "product: Product requirements, feature specs, roadmap notes, and user-facing behavior decisions."
+        ),
+    )
+    agent = _create_agent_for_test("general", config, knowledge=knowledge)
     run_output = RunOutput(
         run_id="run-knowledge-description",
         agent_id="general",
@@ -2860,6 +2867,56 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(tmp_pa
         "- product: Product requirements, feature specs, roadmap notes, and user-facing behavior decisions."
         in description
     )
+
+
+def test_agent_knowledge_search_tool_description_excludes_unavailable_sources(tmp_path: Path) -> None:
+    """The model-facing knowledge search tool should only list queryable sources."""
+    config = _test_config()
+    config.agents["general"].knowledge_bases = ["engineering", "legal"]
+    config.knowledge_bases = {
+        "engineering": KnowledgeBaseConfig(
+            description="Architecture docs, ADRs, deployment runbooks, and coding conventions.",
+            path="./knowledge_docs/engineering",
+        ),
+        "legal": KnowledgeBaseConfig(
+            description="Contracts, regulatory notes, and legal review records.",
+            path="./knowledge_docs/legal",
+        ),
+    }
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    ready_knowledge = Knowledge(
+        name="engineering",
+        description="Architecture docs, ADRs, deployment runbooks, and coding conventions.",
+    )
+
+    agent = _create_agent_for_test("general", config, knowledge=ready_knowledge)
+    run_output = RunOutput(
+        run_id="run-knowledge-description-mixed",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-knowledge-description-mixed",
+        input="hello",
+        content="ok",
+    )
+    run_context = RunContext(run_id="run-knowledge-description-mixed", session_id="session-knowledge-description-mixed")
+    session = AgentSession(
+        session_id="session-knowledge-description-mixed",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    search_tools = [
+        tool
+        for tool in agent.get_tools(run_output, run_context, session)
+        if isinstance(tool, Function) and tool.name == "search_knowledge_base"
+    ]
+
+    assert len(search_tools) == 1
+    description = search_tools[0].description
+    assert description is not None
+    assert "- engineering: Architecture docs, ADRs, deployment runbooks, and coding conventions." in description
+    assert "legal" not in description
 
 
 @pytest.mark.parametrize("base_id", ["", ".", "..", "group/research"])

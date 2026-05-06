@@ -9,13 +9,13 @@ from agno.agent import Agent
 from agno.tools.function import Function
 
 if TYPE_CHECKING:
+    from agno.knowledge.knowledge import Knowledge
     from agno.run import RunContext
     from agno.run.agent import RunOutput
     from agno.session import AgentSession
 
-    from mindroom.config.main import Config
-
 _KNOWLEDGE_SEARCH_TOOL_NAME = "search_knowledge_base"
+_SOURCE_DESCRIPTION_SEPARATOR = ": "
 
 
 @dataclass(frozen=True)
@@ -30,18 +30,39 @@ def _normalize_description(value: str) -> str:
     return " ".join(value.split())
 
 
-def knowledge_source_descriptions(agent_name: str, config: Config) -> tuple[KnowledgeSourceDescription, ...]:
-    """Return the configured knowledge sources one agent can search."""
-    sources: list[KnowledgeSourceDescription] = []
-    for base_id in config.get_agent_knowledge_base_ids(agent_name):
-        base_config = config.get_knowledge_base_config(base_id)
-        description = _normalize_description(base_config.description)
-        if not description:
-            private_agent = config.get_private_knowledge_base_agent(base_id)
-            if private_agent is not None:
-                description = f"Private knowledge for agent '{private_agent}' scoped to the current requester."
-        sources.append(KnowledgeSourceDescription(base_id=base_id, description=description))
-    return tuple(sources)
+def _source_description_from_line(line: str) -> KnowledgeSourceDescription | None:
+    base_id, separator, description = line.partition(_SOURCE_DESCRIPTION_SEPARATOR)
+    if not separator:
+        return None
+    normalized_base_id = base_id.strip()
+    if not normalized_base_id:
+        return None
+    return KnowledgeSourceDescription(
+        base_id=normalized_base_id,
+        description=_normalize_description(description),
+    )
+
+
+def knowledge_source_descriptions(knowledge: Knowledge | None) -> tuple[KnowledgeSourceDescription, ...]:
+    """Return the resolved queryable knowledge sources one agent can search."""
+    if knowledge is None or knowledge.name is None:
+        return ()
+
+    if knowledge.description is not None and "\n" in knowledge.description:
+        sources = [
+            source
+            for line in knowledge.description.splitlines()
+            if (source := _source_description_from_line(line.strip())) is not None
+        ]
+        if sources:
+            return tuple(sources)
+
+    return (
+        KnowledgeSourceDescription(
+            base_id=knowledge.name,
+            description=_normalize_description(knowledge.description or ""),
+        ),
+    )
 
 
 def _knowledge_search_tool_description(sources: tuple[KnowledgeSourceDescription, ...]) -> str:

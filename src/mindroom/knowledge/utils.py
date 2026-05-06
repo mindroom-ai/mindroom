@@ -88,8 +88,12 @@ class _AsyncKnowledgeVectorDb(_KnowledgeVectorDb, Protocol):
 def _apply_knowledge_metadata(base_id: str, knowledge: Knowledge, config: Config) -> None:
     """Attach configured source metadata to one queryable Knowledge handle."""
     base_config = config.get_knowledge_base_config(base_id)
+    description = " ".join(base_config.description.split())
+    private_agent = config.get_private_knowledge_base_agent(base_id)
+    if not description and private_agent is not None:
+        description = f"Private knowledge for agent '{private_agent}' scoped to the current requester."
     knowledge.name = base_id
-    knowledge.description = base_config.description.strip() or None
+    knowledge.description = description or None
 
 
 def _lookup_knowledge_for_base(
@@ -624,7 +628,7 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
     if not vector_db_sources:
         return None
     source_descriptions = [
-        f"{knowledge.name}: {knowledge.description}" for knowledge in knowledges if knowledge.description
+        f"{knowledge.name}: {knowledge.description or 'No description configured.'}" for knowledge in knowledges
     ]
     return Knowledge(
         name=f"{agent_name}_multi_knowledge",
