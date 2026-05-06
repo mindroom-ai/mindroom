@@ -566,10 +566,25 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
     monkeypatch.setenv(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV, encryption_key)
 
     startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
-    execution_env = sandbox_exec_module.request_execution_env("shell", None, startup_runtime)
+    execution_env = sandbox_exec_module.request_execution_env(
+        "shell",
+        None,
+        startup_runtime,
+        extra_env_passthrough="MINDROOM_*",
+    )
+    subprocess_runtime = sandbox_exec_module.runtime_paths_with_execution_env(
+        startup_runtime,
+        {"VIRTUAL_ENV": "/worker-venv"},
+    )
 
     assert startup_runtime.env_value(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
     assert constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
+    assert constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV not in constants_module.shell_extra_env_values(
+        extra_env_passthrough="MINDROOM_*",
+        process_env={constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    assert not constants_module.is_workspace_env_overlay_name_allowed(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV)
+    assert subprocess_runtime.env_value(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
 
 
 @pytest.mark.asyncio
