@@ -155,13 +155,6 @@ class _PreparedAgentRun:
         return ai_runtime.copy_run_input(self.messages)
 
 
-def _next_retry_run_id(run_id: str | None) -> str | None:
-    """Return a fresh Agno run identifier for a retry attempt."""
-    if run_id is None:
-        return None
-    return str(uuid4())
-
-
 def _prompt_current_sender_id(user_id: str | None, *, include_openai_compat_guidance: bool) -> str | None:
     """Return the Matrix current sender ID when prompt formatting should include it."""
     if include_openai_compat_guidance:
@@ -181,12 +174,6 @@ def _build_timing_scope(
         if candidate:
             return candidate[:20]
     return "unknown"
-
-
-def _note_attempt_run_id(run_id_callback: Callable[[str], None] | None, run_id: str | None) -> None:
-    """Publish the current run_id before starting a real Agno run attempt."""
-    if run_id_callback is not None and run_id is not None:
-        run_id_callback(run_id)
 
 
 @timed("system_prompt_assembly.system_enrichment_render")
@@ -1034,7 +1021,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                             )
                             attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
-                            attempt_run_id = _next_retry_run_id(run_id)
+                            attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
 
                         logger.exception("Error generating AI response", agent=agent_name)
@@ -1053,7 +1040,7 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                             )
                             attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
-                            attempt_run_id = _next_retry_run_id(run_id)
+                            attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
 
                         logger.warning("AI response returned errored run output", agent=agent_name, error=error_text)
@@ -1502,7 +1489,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     try:
                         if pipeline_timing is not None:
                             pipeline_timing.mark("model_request_sent", overwrite=True)
-                        _note_attempt_run_id(run_id_callback, attempt_run_id)
+                        ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
                         request_context = _attempt_request_log_context(
                             agent_id=agent_name,
                             session_id=session_id,
@@ -1557,7 +1544,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         ):
                             attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
                             attempt_media_inputs = MediaInputs()
-                            attempt_run_id = _next_retry_run_id(run_id)
+                            attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
                         logger.exception("Error starting streaming AI response")
                         yield get_user_friendly_error_message(e, agent_name)
@@ -1566,7 +1553,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     if state.retry_requested:
                         attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
                         attempt_media_inputs = MediaInputs()
-                        attempt_run_id = _next_retry_run_id(run_id)
+                        attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                         continue
 
                     if state.user_error is not None:

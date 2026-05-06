@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from uuid import uuid4
 
 from agno.db.base import SessionType
 from agno.models.message import Message
@@ -34,6 +35,8 @@ __all__ = [
     "cleanup_queued_notice_state",
     "copy_run_input",
     "install_queued_message_notice_hook",
+    "next_retry_run_id",
+    "note_attempt_run_id",
     "queued_message_signal_context",
     "scrub_queued_notice_session_context",
 ]
@@ -319,7 +322,14 @@ def install_queued_message_notice_hook(model: Model) -> None:
     model_dict["_handle_function_call_media"] = _handle_function_call_media_with_notice
 
 
-def _note_attempt_run_id(run_id_callback: Callable[[str], None] | None, run_id: str | None) -> None:
+def next_retry_run_id(run_id: str | None) -> str | None:
+    """Return a fresh Agno run identifier for a retry attempt."""
+    if run_id is None:
+        return None
+    return str(uuid4())
+
+
+def note_attempt_run_id(run_id_callback: Callable[[str], None] | None, run_id: str | None) -> None:
     """Publish the current run_id before starting a real Agno run attempt."""
     if run_id_callback is not None and run_id is not None:
         run_id_callback(run_id)
@@ -338,7 +348,7 @@ async def cached_agent_run(
 ) -> RunOutput:
     """Shared wrapper for one ``agent.arun()`` call."""
     media_inputs = media or MediaInputs()
-    _note_attempt_run_id(run_id_callback, run_id)
+    note_attempt_run_id(run_id_callback, run_id)
     prepared_input = attach_media_to_run_input(run_input, media_inputs)
     return await agent.arun(
         prepared_input,

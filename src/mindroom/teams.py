@@ -7,7 +7,6 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
-from uuid import uuid4
 
 from agno.agent import Agent
 from agno.db.base import SessionType
@@ -176,13 +175,6 @@ class _PreparedMaterializedTeamExecution:
     def context_messages(self) -> tuple[Message, ...]:
         """Return replayed context messages without the current user turn."""
         return self.messages[:-1]
-
-
-def _next_retry_run_id(run_id: str | None) -> str | None:
-    """Return a fresh Agno run identifier for a retry attempt."""
-    if run_id is None:
-        return None
-    return str(uuid4())
 
 
 class _TeamModeDecision(BaseModel):
@@ -1639,8 +1631,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                 current_media_inputs: MediaInputs,
                 current_run_id: str | None,
             ) -> object:
-                if run_id_callback is not None and current_run_id is not None:
-                    run_id_callback(current_run_id)
+                ai_runtime.note_attempt_run_id(run_id_callback, current_run_id)
                 prepared_input = (
                     ai_runtime.attach_media_to_run_input(current_prompt, current_media_inputs)
                     if current_media_inputs.has_any()
@@ -1694,7 +1685,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             )
                             attempt_prompt = append_inline_media_fallback_prompt(prompt)
                             attempt_media_inputs = MediaInputs()
-                            attempt_run_id = _next_retry_run_id(run_id)
+                            attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
 
                         logger.exception("team_response_failed", agents=agent_list)
@@ -1725,7 +1716,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                             )
                             attempt_prompt = append_inline_media_fallback_prompt(prompt)
                             attempt_media_inputs = MediaInputs()
-                            attempt_run_id = _next_retry_run_id(run_id)
+                            attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
                         logger.warning("Team response returned errored run output", agents=agent_list, error=error_text)
 
@@ -2197,8 +2188,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     emitted_output = False
                     retry_requested = False
 
-                    if run_id_callback is not None and attempt_run_id is not None:
-                        run_id_callback(attempt_run_id)
+                    ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
 
                     raw_stream = await _team_response_stream_raw(
                         team=team,
@@ -2268,7 +2258,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                     )
                                     attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
                                     attempt_media_inputs = MediaInputs()
-                                    attempt_run_id = _next_retry_run_id(run_id)
+                                    attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                                     retry_requested = True
                                     break
                                 yield get_user_friendly_error_message(Exception(error_text), team_label)
@@ -2310,7 +2300,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                 )
                                 attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
                                 attempt_media_inputs = MediaInputs()
-                                attempt_run_id = _next_retry_run_id(run_id)
+                                attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                                 retry_requested = True
                                 break
                             yield get_user_friendly_error_message(Exception(error_text), team_label)
