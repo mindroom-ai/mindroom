@@ -54,9 +54,9 @@ from mindroom.team_exact_members import (
 from mindroom.teams import (
     TeamMode,
     _materialize_team_members,
-    _prepare_materialized_team_execution,
     _team_response_stream_raw,
     materialize_exact_team_members,
+    prepare_materialized_team_execution,
     team_response,
     team_response_stream,
 )
@@ -827,7 +827,7 @@ async def test_prepare_materialized_team_execution_scrubs_queued_notices_when_ca
             "mindroom.execution_preparation._prepare_bound_team_execution_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ):
-            await _prepare_materialized_team_execution(
+            await prepare_materialized_team_execution(
                 scope_context=scope_context,
                 agents=[fake_agent],
                 team=mock_team,
@@ -869,7 +869,7 @@ async def test_prepare_materialized_team_execution_forwards_explicit_thread_hist
         "mindroom.teams.prepare_bound_team_run_context",
         new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
     ):
-        await _prepare_materialized_team_execution(
+        await prepare_materialized_team_execution(
             scope_context=None,
             agents=[fake_agent],
             team=mock_team,
@@ -913,7 +913,7 @@ async def test_prepare_materialized_team_execution_appends_system_enrichment_con
         "mindroom.teams.prepare_bound_team_run_context",
         new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
     ):
-        await _prepare_materialized_team_execution(
+        await prepare_materialized_team_execution(
             scope_context=None,
             agents=[fake_agent],
             team=mock_team,
@@ -971,7 +971,7 @@ async def test_prepare_materialized_team_execution_carries_compaction_metadata_a
         "mindroom.teams.prepare_bound_team_run_context",
         new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
     ):
-        prepared = await _prepare_materialized_team_execution(
+        prepared = await prepare_materialized_team_execution(
             scope_context=None,
             agents=[fake_agent],
             team=mock_team,

@@ -2068,6 +2068,7 @@ expose = [
     "resolve_configured_team",
     "decide_team_formation",
     "materialize_exact_team_members",
+    "prepare_materialized_team_execution",
     "build_materialized_team_instance",
     "format_team_response",
     "is_cancelled_run_output",

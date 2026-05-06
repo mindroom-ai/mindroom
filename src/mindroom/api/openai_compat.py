@@ -14,7 +14,7 @@ import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Annotated, Literal, NoReturn, cast
 from uuid import uuid4
 
 from agno.run.agent import (
@@ -40,32 +40,24 @@ from mindroom.agent_run_context import prepend_knowledge_availability_notice
 from mindroom.ai import (
     AIStreamChunk,
     ai_response,
-    build_matrix_run_metadata,
     stream_agent_response,
 )
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.execution_preparation import (
-    prepare_bound_team_run_context,
-    render_prepared_team_messages_text,
-)
+from mindroom.execution_preparation import render_prepared_team_messages_text
 from mindroom.history import (
     ScopeSessionContext,
     close_team_runtime_state_dbs,
     open_bound_scope_session_context,
-    team_tool_definition_payloads_for_logging,
 )
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,
-    model_params_payload,
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.routing import suggest_agent
 from mindroom.teams import (
     TeamMode,
@@ -75,6 +67,7 @@ from mindroom.teams import (
     is_cancelled_run_output,
     is_errored_run_output,
     materialize_exact_team_members,
+    prepare_materialized_team_execution,
     resolve_configured_team,
 )
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
@@ -96,7 +89,6 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.knowledge.knowledge import Knowledge
-    from agno.models.message import Message
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
@@ -104,7 +96,6 @@ if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
 
     from mindroom.config.main import Config
-    from mindroom.history import CompactionOutcome
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 logger = get_logger(__name__)
 
@@ -245,14 +236,6 @@ class _PreparedOpenAITeamPrompt:
     """Prepared team prompt plus the run metadata that must reach Agno."""
 
     prompt: str
-    run_metadata: dict[str, object] | None
-
-
-@dataclass(frozen=True, slots=True)
-class _PreparedOpenAIMaterializedTeamExecution:
-    """Prepared team execution state needed by the OpenAI-compatible API."""
-
-    messages: tuple[Message, ...]
     run_metadata: dict[str, object] | None
 
 
@@ -1447,73 +1430,6 @@ def _is_failed_team_output(response: TeamRunOutput | RunOutput) -> bool:
     return is_errored_run_output(response) or is_cancelled_run_output(response)
 
 
-async def _prepare_materialized_team_execution(
-    *,
-    scope_context: ScopeSessionContext | None,
-    agents: list[Agent],
-    team: Team,
-    message: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    active_model_name: str | None,
-    reply_to_event_id: str | None,
-    active_event_ids: frozenset[str],
-    response_sender_id: str | None,
-    current_sender_id: str | None,
-    room_id: str | None,
-    thread_id: str | None,
-    requester_id: str | None,
-    correlation_id: str | None,
-    compaction_outcomes_collector: list[CompactionOutcome] | None,
-    configured_team_name: str | None,
-    matrix_run_metadata: dict[str, object] | None = None,
-) -> _PreparedOpenAIMaterializedTeamExecution:
-    """Prepare one team run using only public execution-preparation interfaces."""
-    prepared_execution = await prepare_bound_team_run_context(
-        scope_context=scope_context,
-        agents=agents,
-        team=team,
-        prompt=message,
-        thread_history=thread_history,
-        config=config,
-        runtime_paths=runtime_paths,
-        entity_name=configured_team_name,
-        active_model_name=active_model_name,
-        active_context_window=config.resolve_runtime_model(
-            entity_name=configured_team_name,
-            active_model_name=active_model_name,
-        ).context_window,
-        reply_to_event_id=reply_to_event_id,
-        active_event_ids=active_event_ids,
-        response_sender_id=response_sender_id,
-        current_sender_id=current_sender_id,
-        compaction_outcomes_collector=compaction_outcomes_collector,
-    )
-    run_extra_content = build_prepared_history_metadata_content(prepared_execution.prepared_history)
-    run_metadata = build_matrix_run_metadata(
-        reply_to_event_id,
-        prepared_execution.unseen_event_ids,
-        room_id=room_id,
-        thread_id=thread_id,
-        requester_id=requester_id,
-        correlation_id=correlation_id,
-        tools_schema=team_tool_definition_payloads_for_logging(team),
-        model_params=model_params_payload(team.model) if team.model is not None else {},
-        extra_metadata=cast(
-            "dict[str, object] | None",
-            deep_merge_metadata(
-                cast("dict[str, Any] | None", matrix_run_metadata),
-                run_extra_content,
-            ),
-        ),
-    )
-    return _PreparedOpenAIMaterializedTeamExecution(
-        messages=prepared_execution.messages,
-        run_metadata=cast("dict[str, object] | None", run_metadata),
-    )
-
-
 async def _prepare_openai_team_prompt(
     *,
     scope_context: ScopeSessionContext | None,
@@ -1527,7 +1443,7 @@ async def _prepare_openai_team_prompt(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> _PreparedOpenAITeamPrompt:
     """Prepare the final prompt for one OpenAI-compatible team run."""
-    prepared_execution = await _prepare_materialized_team_execution(
+    prepared_execution = await prepare_materialized_team_execution(
         scope_context=scope_context,
         agents=agents,
         team=team,
@@ -1550,7 +1466,7 @@ async def _prepare_openai_team_prompt(
     )
     return _PreparedOpenAITeamPrompt(
         prompt=render_prepared_team_messages_text(prepared_execution.messages),
-        run_metadata=prepared_execution.run_metadata,
+        run_metadata=cast("dict[str, object] | None", prepared_execution.run_metadata),
     )
 
 

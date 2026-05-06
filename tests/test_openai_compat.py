@@ -2630,6 +2630,74 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
 class TestTeamCompletion:
     """Tests for team model support (Phase 3)."""
 
+    @pytest.mark.asyncio
+    async def test_prepare_openai_team_prompt_uses_non_matrix_team_preparation_defaults(
+        self,
+        team_config: Config,
+        tmp_path: Path,
+    ) -> None:
+        """OpenAI team prompt preparation should preserve non-Matrix request defaults."""
+        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
+        execution_identity = build_tool_execution_identity(
+            channel="openai_compat",
+            agent_name="team/super_team",
+            session_id="session-openai-team",
+            runtime_paths=runtime_paths,
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+        )
+        mock_team = _make_test_team()
+        mock_agents = [_make_test_agent("GeneralAgent")]
+        prepared_messages = (
+            Message(role="assistant", content="Previous team reply"),
+            Message(role="user", content="Build it"),
+        )
+        run_metadata = {"correlation_id": "metadata-correlation"}
+
+        with patch(
+            "mindroom.api.openai_compat.prepare_materialized_team_execution",
+            new_callable=AsyncMock,
+        ) as mock_prepare:
+            mock_prepare.return_value = SimpleNamespace(
+                messages=prepared_messages,
+                run_metadata=run_metadata,
+            )
+
+            prepared = await openai_compat._prepare_openai_team_prompt(
+                scope_context=None,
+                team_name="super_team",
+                agents=mock_agents,
+                team=mock_team,
+                prompt="Build it",
+                config=team_config,
+                runtime_paths=runtime_paths,
+                thread_history=[],
+                execution_identity=execution_identity,
+            )
+
+        assert prepared.prompt == "assistant: Previous team reply\n\nBuild it"
+        assert prepared.run_metadata is run_metadata
+        assert mock_prepare.await_count == 1
+        preparation_kwargs = mock_prepare.await_args.kwargs
+        assert preparation_kwargs["agents"] == mock_agents
+        assert preparation_kwargs["team"] is mock_team
+        assert preparation_kwargs["message"] == "Build it"
+        assert preparation_kwargs["thread_history"] == []
+        assert preparation_kwargs["reply_to_event_id"] is None
+        assert preparation_kwargs["active_event_ids"] == frozenset()
+        assert preparation_kwargs["response_sender_id"] is None
+        assert preparation_kwargs["current_sender_id"] is None
+        assert preparation_kwargs["room_id"] is None
+        assert preparation_kwargs["thread_id"] is None
+        assert preparation_kwargs["requester_id"] is None
+        assert re.fullmatch(r"[0-9a-f]{32}", preparation_kwargs["correlation_id"])
+        assert preparation_kwargs["compaction_outcomes_collector"] is None
+        assert preparation_kwargs["configured_team_name"] == "super_team"
+        assert preparation_kwargs["matrix_run_metadata"] is None
+        assert preparation_kwargs["active_model_name"] == "default"
+
     def test_team_listed_in_models(self, team_app_client: TestClient) -> None:
         """Teams appear in /v1/models with team/ prefix."""
         response = team_app_client.get("/v1/models")
@@ -2662,7 +2730,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2741,7 +2809,7 @@ class TestTeamCompletion:
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2757,7 +2825,7 @@ class TestTeamCompletion:
         assert response.status_code == 200
         assert (
             "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
-            in mock_prepare.await_args.kwargs["prompt"]
+            in mock_prepare.await_args.kwargs["message"]
         )
         assert scheduled_base_ids == ["docs"]
 
@@ -2829,7 +2897,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new=AsyncMock(side_effect=mock_prepare_team_execution),
             ),
         ):
@@ -2873,7 +2941,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2906,7 +2974,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2938,7 +3006,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -2975,7 +3043,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3092,7 +3160,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new=AsyncMock(side_effect=mock_prepare_team_execution),
             ),
         ):
@@ -3182,7 +3250,7 @@ class TestTeamCompletion:
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
             patch(
-                "mindroom.api.openai_compat.prepare_bound_team_run_context",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3199,7 +3267,7 @@ class TestTeamCompletion:
         assert response.status_code == 200
         assert (
             "Knowledge base `docs` is refreshing against newer config and may be stale this turn."
-            in mock_prepare.await_args.kwargs["prompt"]
+            in mock_prepare.await_args.kwargs["message"]
         )
         assert scheduled_base_ids == ["docs"]
 
@@ -3219,7 +3287,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3259,7 +3327,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -3477,7 +3545,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -4088,7 +4156,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -4143,7 +4211,7 @@ class TestTeamCompletion:
                 return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
             ),
             patch(
-                "mindroom.api.openai_compat._prepare_materialized_team_execution",
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
         ):
@@ -4269,12 +4337,12 @@ class TestTeamCompletion:
                     new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
                 ),
                 patch(
-                    "mindroom.api.openai_compat.team_tool_definition_payloads_for_logging",
+                    "mindroom.teams.team_tool_definition_payloads_for_logging",
                     return_value=[{"name": "demo_tool", "description": "Demo"}],
                     create=True,
                 ),
                 patch(
-                    "mindroom.api.openai_compat.model_params_payload",
+                    "mindroom.teams.model_params_payload",
                     return_value={"temperature": 0.7},
                     create=True,
                 ),
