@@ -22,8 +22,8 @@ from mindroom.attachments import (
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.matrix.client_delivery import send_file_message
 from mindroom.tool_system.output_files import (
-    OUTPUT_PATH_ARGUMENT_DESCRIPTION,
     ToolOutputFilePolicy,
+    ensure_output_path_schema_optional,
     validate_output_path,
     validate_output_path_syntax,
     write_bytes_to_output_path,
@@ -386,18 +386,13 @@ class AttachmentTools(Toolkit):
         function = self.async_functions.get("get_attachment")
         if function is None:
             return
+        ensure_output_path_schema_optional(function)
         parameters = dict(function.parameters)
         properties = dict(parameters.get("properties") or {})
         attachment_id_schema = dict(properties.get("attachment_id") or {})
         attachment_id_schema["description"] = "Context-scoped attachment ID returned by list_attachments."
         properties["attachment_id"] = attachment_id_schema
-        output_path_schema = dict(properties.get("mindroom_output_path") or {})
-        output_path_schema["description"] = OUTPUT_PATH_ARGUMENT_DESCRIPTION
-        properties["mindroom_output_path"] = output_path_schema
         parameters["properties"] = properties
-        required = parameters.get("required")
-        if isinstance(required, list):
-            parameters["required"] = [name for name in required if name != "mindroom_output_path"]
         function.parameters = parameters
 
     async def list_attachments(self, target: str | None = None) -> str:

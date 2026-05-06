@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 OUTPUT_PATH_ARGUMENT = "mindroom_output_path"
-OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
+_OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "Optional MindRoom-managed workspace-relative path. "
     "If set, the full supported tool output is written to this file in your workspace and the tool returns only a "
     "compact receipt. "
@@ -136,7 +136,7 @@ def _output_path_schema() -> dict[str, object]:
     return {
         "anyOf": [{"type": "string"}, {"type": "null"}],
         "default": None,
-        "description": OUTPUT_PATH_ARGUMENT_DESCRIPTION,
+        "description": _OUTPUT_PATH_ARGUMENT_DESCRIPTION,
     }
 
 
@@ -147,7 +147,7 @@ def _has_output_path_argument(function: Function) -> bool:
     return isinstance(properties, dict) and OUTPUT_PATH_ARGUMENT in properties
 
 
-def _ensure_output_path_schema_optional(function: Function) -> None:
+def ensure_output_path_schema_optional(function: Function) -> None:
     """Keep MindRoom's reserved output-path argument optional in one tool schema."""
     parameters = dict(function.parameters or _DEFAULT_PARAMETERS)
     properties = dict(parameters.get("properties") or {})
@@ -178,7 +178,7 @@ def normalize_output_path_argument(raw_path: object) -> object | None:
 def _process_entrypoint_with_output_path_schema(self: Function, strict: bool = False) -> None:
     effective_strict = False if self.strict is False else strict
     Function.process_entrypoint(self, strict=effective_strict)
-    _ensure_output_path_schema_optional(self)
+    ensure_output_path_schema_optional(self)
 
 
 def _copy_function_model(self: Function, *, update: Mapping[str, object] | None, deep: bool) -> Function:
@@ -538,7 +538,7 @@ def _copy_annotations_with_output_path(
 
 def _docstring_with_output_path(original_doc: str | None) -> str:
     base = (original_doc or "MindRoom wrapped tool entrypoint.").strip()
-    output_arg_doc = f"Args:\n    {OUTPUT_PATH_ARGUMENT}: {OUTPUT_PATH_ARGUMENT_DESCRIPTION}"
+    output_arg_doc = f"Args:\n    {OUTPUT_PATH_ARGUMENT}: {_OUTPUT_PATH_ARGUMENT_DESCRIPTION}"
     return f"{base}\n\n{output_arg_doc}"
 
 
@@ -600,7 +600,7 @@ def _wrap_function_for_output_files(function: Function, policy: ToolOutputFilePo
     function.strict = False
     _install_output_path_schema_postprocessor(function)
     if uses_custom_parameters:
-        _ensure_output_path_schema_optional(function)
+        ensure_output_path_schema_optional(function)
     return function
 
 
