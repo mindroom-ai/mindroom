@@ -2392,6 +2392,57 @@ async def test_tool_before_call_hooks_run_before_tool_approval_gate(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_tool_after_call_sees_domain_grant_arguments_that_executed(tmp_path: Path) -> None:
+    """Approval normalization should not leave after-call hooks with stale argument snapshots."""
+    after_seen: list[dict[str, object]] = []
+    tool_seen: list[dict[str, object]] = []
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Help with coding.",
+                    rooms=[],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        runtime_paths,
+    )
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        after_seen.append(dict(ctx.arguments))
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [after])])
+    bridge = build_tool_hook_bridge(
+        registry,
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> str:
+        tool_seen.append(dict(kwargs))
+        return "ok"
+
+    arguments = {
+        "approval_kind": "domain_grant",
+        "hostname": "HTTPS://Sub.Example.COM/path",
+        "ttl_seconds": 60,
+    }
+    with tool_execution_identity(_execution_identity()):
+        result = await bridge("network_access", next_func, arguments)
+
+    assert result == "ok"
+    assert tool_seen == [{"approval_kind": "domain_grant", "hostname": "sub.example.com", "ttl_seconds": 60}]
+    assert after_seen == tool_seen
+
+
+@pytest.mark.asyncio
 async def test_tool_before_call_decline_short_circuits_tool_approval(tmp_path: Path) -> None:
     """Denied policy hooks should prevent approval cards from being shown."""
     runtime_paths = test_runtime_paths(tmp_path)

@@ -2228,6 +2228,8 @@ def test_approval_hostname_normalization_uses_exact_display_host(value: str, exp
         "http://evil.com\\@good.com/path",
         "https://evil.com@good.com/path",
         "https://good.com%2f.evil.com/path",
+        "good.com\x00.evil.com",
+        "good.com\n.evil.com",
         "/path/to/socket",
     ],
 )
@@ -2371,6 +2373,31 @@ async def test_domain_grant_rejects_negative_ttl_before_auto_approved_tool_conti
     assert decision.reason == "Cannot approve network access with an invalid requested TTL."
 
 
+def test_non_network_tool_cannot_claim_domain_grant_approval_type() -> None:
+    card = _ApprovalManager._pending_event_content(
+        approval_id="approval-1",
+        tool_name="delete_file",
+        arguments={
+            "approval_kind": "domain_grant",
+            "hostname": "example.com",
+            "ttl_seconds": 60,
+            "reason": "Fetch public documentation.",
+        },
+        arguments_truncated=False,
+        agent_name="code",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        requested_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+        status="pending",
+    )
+
+    assert card["approval_type"] == "tool_action"
+    assert card["body"] == "Tool/action approval required: delete_file"
+    assert "normalized_hostname" not in card
+
+
 @pytest.mark.asyncio
 async def test_domain_grant_allows_matching_hostname_and_url(tmp_path: Path) -> None:
     arguments = {
@@ -2419,7 +2446,10 @@ def test_domain_grant_approval_payload_uses_normalized_hostname_and_warning() ->
     )
 
     assert card["approval_type"] == "domain_grant"
-    assert card["body"] == "Domain grant approval required: sub.example.com"
+    assert card["body"] == (
+        "Domain grant approval required: hostname=sub.example.com; ttl=900s; "
+        "agent=code; tool=network_access; reason=Fetch public documentation."
+    )
     assert card["normalized_hostname"] == "sub.example.com"
     assert card["requested_ttl_seconds"] == 900
     assert card["approval_reason"] == "Fetch public documentation."

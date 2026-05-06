@@ -76,18 +76,6 @@ _DOMAIN_GRANT_TOOL_NAMES = frozenset(
         "request_network_access",
     },
 )
-_DOMAIN_GRANT_KIND_VALUES = frozenset(
-    {
-        "domain",
-        "domain_grant",
-        "dynamic_egress",
-        "dynamic_network_access",
-        "egress_domain_grant",
-        "network_access",
-        "network_domain_grant",
-    },
-)
-_APPROVAL_KIND_KEYS = ("approval_kind", "approval_type", "grant_kind", "grant_type")
 _HOSTNAME_ARGUMENT_KEYS = ("hostname", "host", "domain", "requested_hostname", "target_host")
 _URL_ARGUMENT_KEYS = ("url", "uri", "endpoint")
 _TTL_ARGUMENT_KEYS = ("requested_ttl_seconds", "ttl_seconds", "ttl")
@@ -216,6 +204,10 @@ def _split_approval_hostname_value(raw: str) -> SplitResult | None:
     return urlsplit(f"//{raw}")
 
 
+def _has_control_character(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
 def _normalized_hostname_text(hostname: str) -> str | None:
     normalized = hostname.strip().rstrip(".").lower()
     if (
@@ -235,6 +227,8 @@ def _normalized_hostname_text(hostname: str) -> str | None:
 def _normalize_approval_hostname(value: object) -> str | None:
     """Return the exact lowercase hostname represented by one approval value."""
     if not isinstance(value, str):
+        return None
+    if _has_control_character(value):
         return None
     raw = value.strip()
     if not raw:
@@ -265,11 +259,6 @@ def _first_argument_key(arguments: dict[str, Any], keys: tuple[str, ...]) -> str
     return None
 
 
-def _approval_kind_value(arguments: dict[str, Any]) -> str | None:
-    value = _first_argument_value(arguments, _APPROVAL_KIND_KEYS)
-    return value.strip().lower() if isinstance(value, str) and value.strip() else None
-
-
 def _domain_grant_argument_hostnames(arguments: dict[str, Any]) -> tuple[str, ...] | None:
     hostnames: list[str] = []
     for key in (*_HOSTNAME_ARGUMENT_KEYS, *_URL_ARGUMENT_KEYS):
@@ -294,15 +283,11 @@ def _domain_grant_hostname(arguments: dict[str, Any]) -> str | None:
 
 
 def _is_domain_grant_approval(tool_name: str, arguments: dict[str, Any]) -> bool:
-    kind = _approval_kind_value(arguments)
-    if kind in _DOMAIN_GRANT_KIND_VALUES:
-        return True
     return tool_name in _DOMAIN_GRANT_TOOL_NAMES and _domain_grant_hostname(arguments) is not None
 
 
-def _is_domain_grant_request(tool_name: str, arguments: dict[str, Any]) -> bool:
-    kind = _approval_kind_value(arguments)
-    return kind in _DOMAIN_GRANT_KIND_VALUES or tool_name in _DOMAIN_GRANT_TOOL_NAMES
+def _is_domain_grant_request(tool_name: str, _arguments: dict[str, Any]) -> bool:
+    return tool_name in _DOMAIN_GRANT_TOOL_NAMES
 
 
 def _normalize_approval_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -367,6 +352,19 @@ def _domain_grant_ttl_is_valid(arguments: dict[str, Any]) -> bool:
         return int(value) >= 0
     except ValueError:
         return False
+
+
+def _domain_grant_event_subject(
+    *,
+    hostname: str | None,
+    requested_ttl_seconds: int | None,
+    agent_name: str | None,
+    tool_name: str,
+    reason: str,
+) -> str:
+    ttl = "unspecified" if requested_ttl_seconds is None else f"{requested_ttl_seconds}s"
+    agent = agent_name or "unknown"
+    return f"hostname={hostname or 'unknown'}; ttl={ttl}; agent={agent}; tool={tool_name}; reason={reason}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1287,6 +1285,8 @@ class _ApprovalManager:
             else None
         )
         approval_type = "domain_grant" if normalized_hostname is not None else "tool_action"
+        approval_reason = _approval_reason(normalized_arguments)
+        requested_ttl_seconds = _requested_ttl_seconds(normalized_arguments)
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
             "body": _ApprovalManager._event_body(
@@ -1294,6 +1294,9 @@ class _ApprovalManager:
                 status,
                 approval_type=approval_type,
                 subject=normalized_hostname,
+                requested_ttl_seconds=requested_ttl_seconds,
+                agent_name=agent_name,
+                approval_reason=approval_reason,
             ),
             "tool_name": tool_name,
             "tool_call_id": approval_id,
@@ -1301,7 +1304,7 @@ class _ApprovalManager:
             "status": status,
             "approval_id": approval_id,
             "approval_type": approval_type,
-            "approval_reason": _approval_reason(normalized_arguments),
+            "approval_reason": approval_reason,
             "approval_warning": _UNTRUSTED_APPROVAL_WARNING,
             "request_context": {
                 "agent_name": agent_name,
@@ -1315,7 +1318,7 @@ class _ApprovalManager:
         }
         if normalized_hostname is not None:
             content["normalized_hostname"] = normalized_hostname
-            content["requested_ttl_seconds"] = _requested_ttl_seconds(normalized_arguments)
+            content["requested_ttl_seconds"] = requested_ttl_seconds
         if agent_name is not None:
             content["agent_name"] = agent_name
         if arguments_truncated:
@@ -1347,6 +1350,9 @@ class _ApprovalManager:
                 status,
                 approval_type=pending.approval_type,
                 subject=pending.normalized_hostname,
+                requested_ttl_seconds=pending.requested_ttl_seconds,
+                agent_name=pending.agent_name,
+                approval_reason=pending.approval_reason,
             ),
             "tool_name": pending.tool_name,
             "tool_call_id": pending.approval_id,
@@ -1384,9 +1390,21 @@ class _ApprovalManager:
         *,
         approval_type: str = "tool_action",
         subject: str | None = None,
+        requested_ttl_seconds: int | None = None,
+        agent_name: str | None = None,
+        approval_reason: str | None = None,
     ) -> str:
         label = "Domain grant" if approval_type == "domain_grant" else "Tool/action"
-        target = subject or tool_name
+        if approval_type == "domain_grant":
+            target = _domain_grant_event_subject(
+                hostname=subject,
+                requested_ttl_seconds=requested_ttl_seconds,
+                agent_name=agent_name,
+                tool_name=tool_name,
+                reason=approval_reason or "Tool call requires human approval.",
+            )
+        else:
+            target = tool_name
         if status == "approved":
             return f"{label} approved: {target}"
         if status == "denied":

@@ -491,7 +491,13 @@ async def _maybe_block_for_tool_approval(
                 requester_id=resolved_context.requester_id,
             ),
         )
+        if hook_arguments is not None:
+            hook_arguments.clear()
+            hook_arguments.update(deepcopy(args))
     except ToolApprovalScriptError:
+        if hook_arguments is not None:
+            hook_arguments.clear()
+            hook_arguments.update(deepcopy(args))
         logger.warning("Tool approval policy failed", exc_info=True)
         return await _blocked_tool_result(
             hook_registry=hook_registry,
