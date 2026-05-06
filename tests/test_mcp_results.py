@@ -110,3 +110,24 @@ def test_tool_result_from_call_result_converts_audio_blocks() -> None:
     assert result.audios is not None
     assert result.audios[0].content == audio_bytes
     assert result.audios[0].mime_type == "audio/ogg"
+
+
+def test_tool_result_from_call_result_keeps_invalid_base64_media_as_utf8_bytes() -> None:
+    """Keep permissive MCP media decoding for non-base64 payloads."""
+    image_data = "not-base64-image"
+    audio_data = "not-base64-audio"
+    result = tool_result_from_call_result(
+        "demo",
+        CallToolResult(
+            content=[
+                ImageContent(type="image", data=image_data, mimeType="image/png"),
+                AudioContent(type="audio", data=audio_data, mimeType="audio/wav"),
+            ],
+        ),
+    )
+    assert result.images is not None
+    assert result.images[0].content == image_data.encode("utf-8")
+    assert result.images[0].mime_type == "image/png"
+    assert result.audios is not None
+    assert result.audios[0].content == audio_data.encode("utf-8")
+    assert result.audios[0].mime_type == "audio/wav"

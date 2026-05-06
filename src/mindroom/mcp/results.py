@@ -64,16 +64,19 @@ def _text_lines_from_blocks(content_blocks: Iterable[object]) -> list[str]:
     return lines
 
 
+def _mcp_block_data_as_bytes(data: str) -> bytes:
+    try:
+        return base64.b64decode(data)
+    except Exception:
+        return data.encode("utf-8")
+
+
 def _image_artifacts_from_blocks(content_blocks: Iterable[object]) -> list[Image]:
     images: list[Image] = []
     for block in content_blocks:
         if not isinstance(block, ImageContent):
             continue
-        try:
-            image_bytes = base64.b64decode(block.data)
-        except Exception:
-            image_bytes = block.data.encode("utf-8")
-        images.append(Image(content=image_bytes, mime_type=block.mimeType))
+        images.append(Image(content=_mcp_block_data_as_bytes(block.data), mime_type=block.mimeType))
     return images
 
 
@@ -82,11 +85,7 @@ def _audio_artifacts_from_blocks(content_blocks: Iterable[object]) -> list[Audio
     for block in content_blocks:
         if not isinstance(block, AudioContent):
             continue
-        try:
-            audio_bytes = base64.b64decode(block.data)
-        except Exception:
-            audio_bytes = block.data.encode("utf-8")
-        audios.append(Audio(content=audio_bytes, mime_type=block.mimeType))
+        audios.append(Audio(content=_mcp_block_data_as_bytes(block.data), mime_type=block.mimeType))
     return audios
 
 
