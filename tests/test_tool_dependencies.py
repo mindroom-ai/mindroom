@@ -20,6 +20,7 @@ from mindroom.tool_system.dependencies import (
     _install_via_uv_sync,
     _pip_name_to_import,
     auto_install_enabled,
+    auto_install_optional_extra_for_import_retry,
     check_deps_installed,
     install_command_for_current_python,
 )
@@ -201,7 +202,7 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
     )
 
     monkeypatch.setattr(
-        "mindroom.tool_system.metadata.auto_install_tool_extra",
+        "mindroom.tool_system.dependencies._auto_install_optional_extra",
         lambda name, runtime_paths: name == tool_name and runtime_paths == TEST_RUNTIME_PATHS,
     )
     try:
@@ -245,7 +246,7 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
     )
 
     monkeypatch.setattr(
-        "mindroom.tool_system.metadata.auto_install_tool_extra",
+        "mindroom.tool_system.dependencies._auto_install_optional_extra",
         lambda _name, _runtime_paths: False,
     )
     try:
@@ -254,6 +255,46 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
     finally:
         TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
+
+
+def test_auto_install_optional_extra_for_import_retry_invalidates_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Optional import retries should refresh import caches after installing."""
+    installed: list[str] = []
+    invalidated: list[bool] = []
+
+    def auto_install(extra_name: str, runtime_paths: object) -> bool:
+        assert runtime_paths == TEST_RUNTIME_PATHS
+        installed.append(extra_name)
+        return True
+
+    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", auto_install)
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies.importlib.invalidate_caches",
+        lambda: invalidated.append(True),
+    )
+
+    assert auto_install_optional_extra_for_import_retry("supabase", TEST_RUNTIME_PATHS)
+
+    assert installed == ["supabase"]
+    assert invalidated == [True]
+
+
+def test_auto_install_optional_extra_for_import_retry_skips_cache_invalidation_when_install_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed optional installs should not invalidate import caches before callers raise."""
+    invalidated: list[bool] = []
+
+    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", lambda *_args: False)
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies.importlib.invalidate_caches",
+        lambda: invalidated.append(True),
+    )
+
+    assert not auto_install_optional_extra_for_import_retry("supabase", TEST_RUNTIME_PATHS)
+    assert invalidated == []
 
 
 def test_check_deps_installed_positive_and_negative() -> None:

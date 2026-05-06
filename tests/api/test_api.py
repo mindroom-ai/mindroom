@@ -248,7 +248,7 @@ def test_init_supabase_auth_raises_when_auto_install_disabled(
 
     monkeypatch.setattr(auth.importlib, "import_module", _missing_supabase)
     monkeypatch.setattr(auth, "auto_install_enabled", lambda _runtime_paths: False)
-    monkeypatch.setattr(auth, "auto_install_tool_extra", _auto_install)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match="MINDROOM_NO_AUTO_INSTALL_TOOLS"):
         auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
@@ -271,13 +271,50 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
 
     monkeypatch.setattr(auth.importlib, "import_module", _missing_supabase)
     monkeypatch.setattr(auth, "auto_install_enabled", lambda _runtime_paths: True)
-    monkeypatch.setattr(auth, "auto_install_tool_extra", _auto_install)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match=r"mindroom\[supabase\]") as err:
         auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
 
     assert install_calls == ["supabase"]
     assert "MINDROOM_NO_AUTO_INSTALL_TOOLS" not in str(err.value)
+
+
+def test_init_supabase_auth_retries_import_after_auto_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Supabase auth should retry the import once after installing the optional extra."""
+    imported_modules: list[str] = []
+    install_calls: list[str] = []
+    runtime_paths = _runtime_paths(tmp_path)
+
+    class FakeClient:
+        pass
+
+    def create_client(url: str, key: str) -> FakeClient:
+        assert url == "https://supabase.test"
+        assert key == "anon-key"
+        return FakeClient()
+
+    def import_module(module_name: str) -> SimpleNamespace:
+        imported_modules.append(module_name)
+        if len(imported_modules) == 1:
+            raise ModuleNotFoundError(module_name)
+        return SimpleNamespace(create_client=create_client)
+
+    def auto_install(extra_name: str, _runtime_paths: constants.RuntimePaths) -> bool:
+        install_calls.append(extra_name)
+        return True
+
+    monkeypatch.setattr(auth.importlib, "import_module", import_module)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", auto_install)
+
+    supabase_auth = auth._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
+
+    assert isinstance(supabase_auth, FakeClient)
+    assert imported_modules == ["supabase", "supabase"]
+    assert install_calls == ["supabase"]
 
 
 def test_validate_supabase_token_catches_supabase_auth_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

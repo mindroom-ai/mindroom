@@ -2534,7 +2534,7 @@ exclusive = true
 [[interfaces]]
 expose = [
     "auto_install_enabled",
-    "auto_install_tool_extra",
+    "auto_install_optional_extra_for_import_retry",
     "check_deps_installed",
     "ensure_optional_deps",
     "ensure_tool_deps",

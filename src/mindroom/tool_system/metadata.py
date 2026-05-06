@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import functools
-import importlib
 import math
 import os
 import sys
@@ -16,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
+from mindroom.tool_system.dependencies import auto_install_optional_extra_for_import_retry, ensure_tool_deps
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
@@ -616,28 +615,31 @@ def get_tool_by_name(
     # Pre-check dependencies using find_spec (no side effects) before importing
     metadata = TOOL_METADATA.get(tool_name)
     deps = metadata.dependencies if metadata and metadata.dependencies else []
-    if deps and not check_deps_installed(deps):
-        if not auto_install_tool_extra(tool_name, runtime_paths):
-            missing = ", ".join(deps)
+    if deps:
+        missing = ", ".join(deps)
+        try:
+            installed = ensure_tool_deps(
+                deps,
+                tool_name,
+                runtime_paths,
+                missing_message=f"Missing dependencies for tool '{tool_name}': {missing}",
+            )
+        except ImportError:
             logger.warning("tool_dependencies_missing", tool_name=tool_name, missing_dependencies=missing)
             logger.warning("tool_dependency_install_required", tool_name=tool_name)
-            msg = f"Missing dependencies for tool '{tool_name}': {missing}"
-            raise ImportError(msg)
-        logger.info("tool_optional_dependencies_auto_installed", tool_name=tool_name)
-        importlib.invalidate_caches()
+            raise
+        if installed:
+            logger.info("tool_optional_dependencies_auto_installed", tool_name=tool_name)
 
     try:
         return build()
     except ImportError as first_error:
-        # Safety net: deps may not be exhaustively listed in metadata
-        if not auto_install_tool_extra(tool_name, runtime_paths):
+        if not auto_install_optional_extra_for_import_retry(tool_name, runtime_paths):
             logger.warning("tool_import_failed", tool_name=tool_name, error=str(first_error))
             logger.warning("tool_dependency_install_required", tool_name=tool_name)
             raise
 
         logger.info("auto_installing_tool_optional_dependencies", tool_name=tool_name)
-        importlib.invalidate_caches()
-
         try:
             return build()
         except ImportError as second_error:

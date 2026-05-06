@@ -228,28 +228,38 @@ def _auto_install_optional_extra(extra_name: str, runtime_paths: RuntimePaths) -
     return _install_optional_extras([resolved_extra_name], quiet=True)
 
 
-def auto_install_tool_extra(tool_name: str, runtime_paths: RuntimePaths) -> bool:
-    """Auto-install a tool extra when supported and enabled."""
-    return _auto_install_optional_extra(tool_name, runtime_paths)
+def auto_install_optional_extra_for_import_retry(extra_name: str, runtime_paths: RuntimePaths) -> bool:
+    """Auto-install an optional extra and invalidate import caches before a retry."""
+    installed = _auto_install_optional_extra(extra_name, runtime_paths)
+    if installed:
+        importlib.invalidate_caches()
+    return installed
 
 
-def ensure_optional_deps(dependencies: list[str], extra_name: str, runtime_paths: RuntimePaths) -> None:
+def ensure_optional_deps(
+    dependencies: list[str],
+    extra_name: str,
+    runtime_paths: RuntimePaths,
+    *,
+    missing_message: str | None = None,
+) -> bool:
     """Ensure dependencies are installed, auto-installing via optional extra if needed."""
     if check_deps_installed(dependencies):
-        return
-    if not _auto_install_optional_extra(extra_name, runtime_paths):
+        return False
+    if not auto_install_optional_extra_for_import_retry(extra_name, runtime_paths):
         missing = ", ".join(dependencies)
-        msg = f"Missing dependencies: {missing}. Install with: pip install 'mindroom[{extra_name}]'"
-        raise ImportError(msg)
-    importlib.invalidate_caches()
+        if missing_message is None:
+            missing_message = f"Missing dependencies: {missing}. Install with: pip install 'mindroom[{extra_name}]'"
+        raise ImportError(missing_message)
+    return True
 
 
-def ensure_tool_deps(dependencies: list[str], tool_extra: str, runtime_paths: RuntimePaths) -> None:
-    """Ensure dependencies are installed, auto-installing via tool extra if needed.
-
-    Uses find_spec to check availability (no side effects), then auto-installs
-    and invalidates import caches if necessary.
-
-    Raises ImportError if dependencies cannot be satisfied.
-    """
-    ensure_optional_deps(dependencies, tool_extra, runtime_paths)
+def ensure_tool_deps(
+    dependencies: list[str],
+    tool_extra: str,
+    runtime_paths: RuntimePaths,
+    *,
+    missing_message: str | None = None,
+) -> bool:
+    """Ensure tool dependencies are installed, auto-installing via tool extra if needed."""
+    return ensure_optional_deps(dependencies, tool_extra, runtime_paths, missing_message=missing_message)

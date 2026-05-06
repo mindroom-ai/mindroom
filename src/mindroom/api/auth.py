@@ -18,7 +18,7 @@ from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
-from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
+from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -162,7 +162,7 @@ def _init_supabase_auth(
         disabled_hint = ""
         if not auto_install_enabled(runtime_paths):
             disabled_hint = " Auto-install is disabled by MINDROOM_NO_AUTO_INSTALL_TOOLS."
-        if not auto_install_tool_extra("supabase", runtime_paths):
+        if not auto_install_optional_extra_for_import_retry("supabase", runtime_paths):
             msg = (
                 "SUPABASE_URL and SUPABASE_ANON_KEY are set but the 'supabase' package is not available."
                 f"{disabled_hint} Install it with: pip install 'mindroom[supabase]'"
