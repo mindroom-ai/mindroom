@@ -10,6 +10,7 @@ from mindroom.timing import timed
 
 from ._policy import (
     agent_scope_user_id,
+    allowed_scope_storage_paths,
     build_team_user_id,
     effective_storage_paths_for_context,
     get_allowed_memory_user_ids,
@@ -182,17 +183,16 @@ async def _find_mem0_anchor_memory_result(
     create_memory: _MemoryFactory,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryResult | None:
-    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-        for target_storage_path in storage_paths_for_scope_user_id(
-            scope_user_id,
-            storage_path,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        ):
-            memory = await create_memory(target_storage_path, config)
-            if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
-                return result
+    for _scope_user_id, target_storage_path in allowed_scope_storage_paths(
+        caller_context,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    ):
+        memory = await create_memory(target_storage_path, config)
+        if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
+            return result
     return None
 
 
@@ -374,19 +374,15 @@ async def get_mem0_agent_memory(
     create_memory: _MemoryFactory,
 ) -> MemoryResult | None:
     """Return one mem0 memory visible to the caller."""
-    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-        for target_storage_path in storage_paths_for_scope_user_id(
-            scope_user_id,
-            storage_path,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        ):
-            memory = await create_memory(target_storage_path, config)
-            result = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
-            if result is not None:
-                return result
-    return None
+    return await _find_mem0_anchor_memory_result(
+        memory_id,
+        caller_context,
+        storage_path,
+        config,
+        runtime_paths,
+        create_memory=create_memory,
+        execution_identity=execution_identity,
+    )
 
 
 async def update_mem0_agent_memory(

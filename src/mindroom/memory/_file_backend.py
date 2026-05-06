@@ -14,9 +14,9 @@ from mindroom.timing import timed
 from ._policy import (
     agent_name_from_scope_user_id,
     agent_scope_user_id,
+    allowed_scope_storage_paths,
     build_team_user_id,
     effective_storage_paths_for_context,
-    get_allowed_memory_user_ids,
     get_team_ids_for_agent,
     resolve_file_memory_resolution,
     storage_paths_for_scope_user_id,
@@ -457,24 +457,23 @@ def _find_file_anchor_memory_result(
     *,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryResult | None:
-    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-        for target_storage_path in storage_paths_for_scope_user_id(
-            scope_user_id,
-            storage_path,
+    for scope_user_id, target_storage_path in allowed_scope_storage_paths(
+        caller_context,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    ):
+        resolution = resolve_file_memory_resolution(
+            target_storage_path,
             config,
             runtime_paths,
+            agent_name=agent_name_from_scope_user_id(scope_user_id),
+            original_storage_path=storage_path,
             execution_identity=execution_identity,
-        ):
-            resolution = resolve_file_memory_resolution(
-                target_storage_path,
-                config,
-                runtime_paths,
-                agent_name=agent_name_from_scope_user_id(scope_user_id),
-                original_storage_path=storage_path,
-                execution_identity=execution_identity,
-            )
-            if result := _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config):
-                return result
+        )
+        if result := _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config):
+            return result
     return None
 
 
@@ -713,26 +712,14 @@ def get_file_agent_memory(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryResult | None:
     """Return one file-backed memory visible to the caller."""
-    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-        for target_storage_path in storage_paths_for_scope_user_id(
-            scope_user_id,
-            storage_path,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        ):
-            resolution = resolve_file_memory_resolution(
-                target_storage_path,
-                config,
-                runtime_paths,
-                agent_name=agent_name_from_scope_user_id(scope_user_id),
-                original_storage_path=storage_path,
-                execution_identity=execution_identity,
-            )
-            result = _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config)
-            if result is not None:
-                return result
-    return None
+    return _find_file_anchor_memory_result(
+        memory_id,
+        caller_context,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
 
 
 def update_file_agent_memory(
