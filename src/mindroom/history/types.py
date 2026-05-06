@@ -11,7 +11,7 @@ _CompactionMode = Literal["auto", "manual"]
 _CompactionDecisionMode = Literal["none", "required"]
 CompactionReplyOutcome = Literal["none", "success", "failed", "timeout"]
 _CompactionLifecycleStatus = Literal["success", "failed", "timeout"]
-_CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summary_input_budget"]
+CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summary_input_budget"]
 _ReplayPlanMode = Literal["configured", "limited", "disabled"]
 
 
@@ -72,7 +72,7 @@ class ResolvedHistoryExecutionPlan:
     static_prompt_tokens: int | None
     replay_budget_tokens: int | None
     summary_input_budget_tokens: int | None
-    unavailable_reason: _CompactionAvailabilityReason | None = None
+    unavailable_reason: CompactionAvailabilityReason | None = None
     hard_replay_budget_tokens: int | None = None
 
 

@@ -52,7 +52,7 @@ from mindroom.matrix.cache.thread_writes import (
     _apply_thread_redaction_mutation,
     _collect_sync_timeline_cache_updates,
 )
-from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, PermanentMatrixStartupError, ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
@@ -266,9 +266,9 @@ def _runtime_event_cache() -> AsyncMock:
     return make_event_cache_mock()
 
 
-def _runtime_write_coordinator() -> _EventCacheWriteCoordinator:
+def _runtime_write_coordinator() -> EventCacheWriteCoordinator:
     """Return one real coordinator for runtime-state tests."""
-    return _EventCacheWriteCoordinator(
+    return EventCacheWriteCoordinator(
         logger=MagicMock(),
         background_task_owner=object(),
     )
@@ -361,7 +361,7 @@ def _conversation_runtime(
     *,
     client: nio.AsyncClient | None = None,
     event_cache: SqliteEventCache | None = None,
-    coordinator: _EventCacheWriteCoordinator | None = None,
+    coordinator: EventCacheWriteCoordinator | None = None,
 ) -> BotRuntimeState:
     """Build one minimal live runtime state for conversation-cache tests."""
     config = _conversation_runtime_config()
@@ -514,9 +514,9 @@ async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_rac
     client.room_messages.assert_awaited_once()
 
 
-def _install_runtime_write_coordinator(bot: AgentBot) -> _EventCacheWriteCoordinator:
+def _install_runtime_write_coordinator(bot: AgentBot) -> EventCacheWriteCoordinator:
     """Attach one explicit runtime write coordinator to a bot test double."""
-    coordinator = _EventCacheWriteCoordinator(
+    coordinator = EventCacheWriteCoordinator(
         logger=MagicMock(),
         background_task_owner=bot._runtime_view,
     )
@@ -1854,7 +1854,7 @@ class TestThreadingBehavior:
         )
 
         shared_cache = SqliteEventCache(bot.config.cache.resolve_db_path(bot.runtime_paths))
-        shared_coordinator = _EventCacheWriteCoordinator(
+        shared_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -3273,7 +3273,7 @@ class TestThreadingBehavior:
         )
         event_cache.append_event = AsyncMock()
         bot.event_cache = event_cache
-        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=bot._runtime_view,
         )
@@ -3316,7 +3316,7 @@ class TestThreadingBehavior:
         event_cache.get_event = AsyncMock(return_value=None)
         event_cache.append_event = AsyncMock()
         bot.event_cache = event_cache
-        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=bot._runtime_view,
         )
@@ -3809,7 +3809,7 @@ class TestThreadingBehavior:
         real_event_cache = SqliteEventCache(bot.storage_path / "plain-reply-thread-membership.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
-        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=bot._runtime_view,
         )
@@ -3875,7 +3875,7 @@ class TestThreadingBehavior:
         real_event_cache = SqliteEventCache(bot.storage_path / "plain-reply-second-hop-membership.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
-        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=bot._runtime_view,
         )
@@ -3958,7 +3958,7 @@ class TestThreadingBehavior:
         real_event_cache = SqliteEventCache(bot.storage_path / "media-ingress-thread-membership.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
-        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=bot._runtime_view,
         )
@@ -4606,7 +4606,7 @@ class TestThreadingBehavior:
         real_event_cache = SqliteEventCache(bot.storage_path / "plain-reply-edit-thread-membership.db")
         await real_event_cache.initialize()
         bot.event_cache = real_event_cache
-        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=bot._runtime_view,
         )
@@ -4752,7 +4752,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_wait_for_room_idle_returns_after_completed_tail_task(self) -> None:
         """Room-idle waiting should not livelock on a tail task that already finished."""
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -4845,7 +4845,7 @@ class TestThreadingBehavior:
         monkeypatch.setattr(timing_module, "logger", timing_logger)
         event_cache = _runtime_event_cache()
         coordinator_logger = MagicMock()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=coordinator_logger,
             background_task_owner=object(),
         )
@@ -4913,7 +4913,7 @@ class TestThreadingBehavior:
     async def test_outbound_final_streaming_edit_is_preserved_after_coalesced_intermediates(self) -> None:
         """A final outbound stream edit should stay queued behind the latest intermediate edit."""
         event_cache = _runtime_event_cache()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -4979,7 +4979,7 @@ class TestThreadingBehavior:
     async def test_outbound_plain_edits_are_not_coalesced(self) -> None:
         """Normal outbound edits should retain the existing one-cache-update-per-edit behavior."""
         event_cache = _runtime_event_cache()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -5040,7 +5040,7 @@ class TestThreadingBehavior:
         monkeypatch.setenv("MINDROOM_TIMING", "1")
         timing_logger = MagicMock()
         monkeypatch.setattr(timing_module, "logger", timing_logger)
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -5102,7 +5102,7 @@ class TestThreadingBehavior:
             "mindroom.matrix.cache.write_coordinator.time.perf_counter",
             lambda: next(perf_counter_values),
         )
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -5138,7 +5138,7 @@ class TestThreadingBehavior:
         monkeypatch.setenv("MINDROOM_TIMING", "1")
         timing_logger = MagicMock()
         monkeypatch.setattr(timing_module, "logger", timing_logger)
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -5204,7 +5204,7 @@ class TestThreadingBehavior:
         monkeypatch.setenv("MINDROOM_TIMING", "1")
         timing_logger = MagicMock()
         monkeypatch.setattr(timing_module, "logger", timing_logger)
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -5249,7 +5249,7 @@ class TestThreadingBehavior:
         monkeypatch.setenv("MINDROOM_TIMING", "1")
         timing_logger = MagicMock()
         monkeypatch.setattr(timing_module, "logger", timing_logger)
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -5303,7 +5303,7 @@ class TestThreadingBehavior:
         monkeypatch.setenv("MINDROOM_TIMING", "1")
         timing_logger = MagicMock()
         monkeypatch.setattr(timing_module, "logger", timing_logger)
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -5358,7 +5358,7 @@ class TestThreadingBehavior:
         monkeypatch.setenv("MINDROOM_TIMING", "1")
         timing_logger = MagicMock()
         monkeypatch.setattr(timing_module, "logger", timing_logger)
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -5443,7 +5443,7 @@ class TestThreadingBehavior:
             "mindroom.matrix.cache.write_coordinator.time.perf_counter",
             Mock(side_effect=AssertionError("perf_counter should stay unused when timing is disabled")),
         )
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=object(),
         )
@@ -6780,7 +6780,7 @@ class TestThreadingBehavior:
         allow_first_failure = asyncio.Event()
         second_update_finished = asyncio.Event()
         owner = object()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=owner,
         )
@@ -6825,7 +6825,7 @@ class TestThreadingBehavior:
         release_first_update = asyncio.Event()
         second_update_started = asyncio.Event()
         owner = object()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=owner,
         )
@@ -6874,7 +6874,7 @@ class TestThreadingBehavior:
         release_first_update = asyncio.Event()
         second_update_started = asyncio.Event()
         owner = object()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=owner,
         )
@@ -6920,7 +6920,7 @@ class TestThreadingBehavior:
         sibling_thread_started = asyncio.Event()
         release_sibling_thread = asyncio.Event()
         owner = object()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=owner,
         )
@@ -7324,7 +7324,7 @@ class TestThreadingBehavior:
         release_blocker = asyncio.Event()
         queued_update_started = asyncio.Event()
         owner = object()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=owner,
         )
@@ -7367,7 +7367,7 @@ class TestThreadingBehavior:
         release_first_update = asyncio.Event()
         third_update_started = asyncio.Event()
         owner = object()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=owner,
         )
@@ -7427,7 +7427,7 @@ class TestThreadingBehavior:
         follow_up_thread_started = asyncio.Event()
         release_follow_up_thread = asyncio.Event()
         owner = object()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=owner,
         )
@@ -7612,7 +7612,7 @@ class TestThreadingBehavior:
     async def test_run_room_update_does_not_log_handled_exception_as_background_failure(self) -> None:
         """Awaited room updates should not be logged as unhandled background task failures."""
         owner = object()
-        coordinator = _EventCacheWriteCoordinator(
+        coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=owner,
         )

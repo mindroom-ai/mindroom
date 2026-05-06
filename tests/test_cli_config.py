@@ -20,7 +20,7 @@ from typer.testing import CliRunner
 
 import mindroom.constants as constants_module
 from mindroom.agents import ensure_default_agent_workspaces
-from mindroom.cli.config import _activate_cli_runtime, _format_config_search_locations
+from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
 from mindroom.cli.main import _load_active_config_or_exit, app
 from mindroom.config.main import Config
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
@@ -88,7 +88,7 @@ def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(
     )
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
 
-    runtime_paths = _activate_cli_runtime(config_path)
+    runtime_paths = activate_cli_runtime(config_path)
 
     assert runtime_paths.storage_root == storage_path.resolve()
 

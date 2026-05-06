@@ -20,7 +20,7 @@ from mindroom.memory import list_all_agent_memories as public_list_all_agent_mem
 from mindroom.memory import search_agent_memories as public_search_agent_memories
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
-from mindroom.memory._prompting import _format_memories_as_context
+from mindroom.memory._prompting import format_memories_as_context
 from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
@@ -411,7 +411,7 @@ class TestMemoryFacade:
             {"memory": "Second memory", "id": "2"},
         ]
 
-        context = _format_memories_as_context(memories, "agent")
+        context = format_memories_as_context(memories, "agent")
         expected = (
             "[Automatically extracted agent memories - may not be relevant to current context]\n"
             "Previous agent memories that might be related:\n"
@@ -421,7 +421,7 @@ class TestMemoryFacade:
         assert context == expected
 
     def test_format_memories_as_context_empty(self) -> None:
-        assert _format_memories_as_context([], "agent") == ""
+        assert format_memories_as_context([], "agent") == ""
 
     @pytest.mark.asyncio
     async def test_build_memory_prompt_parts(

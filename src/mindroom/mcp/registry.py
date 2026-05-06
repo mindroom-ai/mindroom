@@ -15,7 +15,7 @@ from mindroom.tool_system.catalog import (
     ToolMetadata,
     ToolStatus,
 )
-from mindroom.tool_system.registry_state import _TOOL_REGISTRY
+from mindroom.tool_system.registry_state import TOOL_REGISTRY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -39,7 +39,7 @@ def mcp_server_id_from_tool_name(tool_name: str) -> str | None:
     """Return the server id for an MCP registry tool name."""
     if not tool_name.startswith(_MCP_TOOL_PREFIX):
         return None
-    factory = _TOOL_REGISTRY.get(tool_name)
+    factory = TOOL_REGISTRY.get(tool_name)
     if tool_name not in _MCP_TOOL_NAMES and not getattr(factory, _MCP_TOOL_FACTORY_MARKER, False):
         return None
     server_id = tool_name.removeprefix(_MCP_TOOL_PREFIX)
@@ -57,7 +57,7 @@ def _registered_mcp_tool_names() -> set[str]:
         *_MCP_TOOL_NAMES,
         *(
             tool_name
-            for tool_name, factory in _TOOL_REGISTRY.items()
+            for tool_name, factory in TOOL_REGISTRY.items()
             if getattr(factory, _MCP_TOOL_FACTORY_MARKER, False)
         ),
     }
@@ -166,18 +166,18 @@ def _tool_factory(server_id: str) -> Callable[[], type[Toolkit]]:
 def _register_mcp_tool(server_id: str, server_config: MCPServerConfig) -> None:
     """Register one dynamic MCP tool entry."""
     tool_name = mcp_tool_name(server_id)
-    if tool_name not in _registered_mcp_tool_names() and (tool_name in TOOL_METADATA or tool_name in _TOOL_REGISTRY):
+    if tool_name not in _registered_mcp_tool_names() and (tool_name in TOOL_METADATA or tool_name in TOOL_REGISTRY):
         msg = f"MCP tool '{tool_name}' conflicts with an existing registered tool"
         raise ValueError(msg)
     TOOL_METADATA[tool_name] = _tool_metadata(server_id, server_config)
-    _TOOL_REGISTRY[tool_name] = _tool_factory(server_id)
+    TOOL_REGISTRY[tool_name] = _tool_factory(server_id)
     _MCP_TOOL_NAMES.add(tool_name)
 
 
 def _unregister_mcp_tool(tool_name: str) -> None:
     """Remove one dynamic MCP tool entry."""
     TOOL_METADATA.pop(tool_name, None)
-    _TOOL_REGISTRY.pop(tool_name, None)
+    TOOL_REGISTRY.pop(tool_name, None)
     _MCP_TOOL_NAMES.discard(tool_name)
 
 
@@ -194,7 +194,7 @@ def sync_mcp_tool_registry(config: Config | None) -> None:
     desired_registry, desired_metadata = resolved_mcp_tool_state(config)
     desired_tool_names = set(desired_registry)
     registered_mcp_tool_names = _registered_mcp_tool_names()
-    existing_non_mcp_tool_names = {*TOOL_METADATA, *_TOOL_REGISTRY} - registered_mcp_tool_names
+    existing_non_mcp_tool_names = {*TOOL_METADATA, *TOOL_REGISTRY} - registered_mcp_tool_names
     conflicting_tool_names = sorted(desired_tool_names & existing_non_mcp_tool_names)
     if conflicting_tool_names:
         msg = f"MCP tool '{conflicting_tool_names[0]}' conflicts with an existing registered tool"
@@ -205,7 +205,7 @@ def sync_mcp_tool_registry(config: Config | None) -> None:
 
     for tool_name in desired_tool_names:
         TOOL_METADATA[tool_name] = desired_metadata[tool_name]
-        _TOOL_REGISTRY[tool_name] = desired_registry[tool_name]
+        TOOL_REGISTRY[tool_name] = desired_registry[tool_name]
 
     _MCP_TOOL_NAMES.clear()
     _MCP_TOOL_NAMES.update(desired_tool_names)

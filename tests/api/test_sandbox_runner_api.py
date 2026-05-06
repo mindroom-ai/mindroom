@@ -322,21 +322,21 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     sandbox_runner_module.initialize_sandbox_runner_app(
         sandbox_runner_app,
         startup_runtime,
-        runner_token=sandbox_runner_module._startup_runner_token_from_env(),
+        runner_token=sandbox_runner_module.startup_runner_token_from_env(),
     )
 
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
-    assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == "from-env"
+    assert sandbox_runner_module.app_runner_token(sandbox_runner_app) == "from-env"
 
 
 def test_startup_runner_token_is_removed_from_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Startup auth token loading should not leave runner auth in process env."""
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
 
-    assert sandbox_runner_module._startup_runner_token_from_env() == "from-env"
+    assert sandbox_runner_module.startup_runner_token_from_env() == "from-env"
 
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in os.environ
-    assert sandbox_runner_module._startup_runner_token_from_env() is None
+    assert sandbox_runner_module.startup_runner_token_from_env() is None
 
 
 def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_config(tmp_path: Path) -> None:
@@ -365,8 +365,8 @@ def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_confi
         response = client.get("/healthz")
 
     assert response.status_code == 200
-    assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == preserved_runner_token
-    assert sandbox_runner_module._app_runtime_config(sandbox_runner_app) == config
+    assert sandbox_runner_module.app_runner_token(sandbox_runner_app) == preserved_runner_token
+    assert sandbox_runner_module.app_runtime_config(sandbox_runner_app) == config
 
 
 def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
@@ -1421,7 +1421,7 @@ def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_ref
 ) -> None:
     """Execute requests should keep using the runner's committed startup config after later disk drift."""
     _set_sandbox_token(monkeypatch)
-    runtime_paths = sandbox_runner_module._app_runtime_paths(sandbox_runner_app)
+    runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
     runtime_paths.config_path.write_text("models: [\n", encoding="utf-8")
 
     response = runner_client.post(
@@ -1520,10 +1520,10 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
 
     tool_name = "dummy_cred_tool"
     stored_value = "value123"
-    original_registry = metadata_module._TOOL_REGISTRY.copy()
+    original_registry = metadata_module.TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_builtin_registry = metadata_module._BUILTIN_TOOL_REGISTRY.copy()
-    original_builtin_metadata = metadata_module._BUILTIN_TOOL_METADATA.copy()
+    original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
+    original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
     original_manager = credentials_module._credentials_manager
     original_signature = credentials_module._credentials_manager_signature
     shared_storage = tmp_path / "shared-storage"
@@ -1565,14 +1565,14 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
 
         assert toolkit.token == stored_value
     finally:
-        metadata_module._TOOL_REGISTRY.clear()
-        metadata_module._TOOL_REGISTRY.update(original_registry)
-        metadata_module._BUILTIN_TOOL_REGISTRY.clear()
-        metadata_module._BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
+        metadata_module.TOOL_REGISTRY.clear()
+        metadata_module.TOOL_REGISTRY.update(original_registry)
+        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
+        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
-        metadata_module._BUILTIN_TOOL_METADATA.clear()
-        metadata_module._BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
+        metadata_module.BUILTIN_TOOL_METADATA.clear()
+        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
         credentials_module._credentials_manager = original_manager
         credentials_module._credentials_manager_signature = original_signature
 
@@ -1593,10 +1593,10 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
 
     tool_name = "dummy_runtime_cred_tool"
     stored_value = "value123"
-    original_registry = metadata_module._TOOL_REGISTRY.copy()
+    original_registry = metadata_module.TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_builtin_registry = metadata_module._BUILTIN_TOOL_REGISTRY.copy()
-    original_builtin_metadata = metadata_module._BUILTIN_TOOL_METADATA.copy()
+    original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
+    original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
     original_manager = credentials_module._credentials_manager
     original_signature = credentials_module._credentials_manager_signature
     storage_root = tmp_path / "runtime-storage"
@@ -1630,14 +1630,14 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
 
         assert toolkit.token == stored_value
     finally:
-        metadata_module._TOOL_REGISTRY.clear()
-        metadata_module._TOOL_REGISTRY.update(original_registry)
-        metadata_module._BUILTIN_TOOL_REGISTRY.clear()
-        metadata_module._BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
+        metadata_module.TOOL_REGISTRY.clear()
+        metadata_module.TOOL_REGISTRY.update(original_registry)
+        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
+        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
-        metadata_module._BUILTIN_TOOL_METADATA.clear()
-        metadata_module._BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
+        metadata_module.BUILTIN_TOOL_METADATA.clear()
+        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
         credentials_module._credentials_manager = original_manager
         credentials_module._credentials_manager_signature = original_signature
 

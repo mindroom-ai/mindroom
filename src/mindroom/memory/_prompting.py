@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 _USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
 
 
-def _format_memories_as_context(memories: list[MemoryResult], context_type: str = "agent") -> str:
+def format_memories_as_context(memories: list[MemoryResult], context_type: str = "agent") -> str:
     """Format memories into a context string."""
     if not memories:
         return ""

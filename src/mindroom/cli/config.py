@@ -270,7 +270,8 @@ def _format_config_search_locations(process_env: Mapping[str, str]) -> list[str]
     ]
 
 
-def _print_config_search_locations(process_env: Mapping[str, str], *, title: str) -> None:
+def print_config_search_locations(process_env: Mapping[str, str], *, title: str) -> None:
+    """Print the config search locations used by CLI commands."""
     console.print(title)
     for line in _format_config_search_locations(process_env):
         console.print(line)
@@ -288,7 +289,7 @@ def _resolve_config_path(
     return resolve_primary_runtime_paths(process_env=resolved_process_env).config_path.resolve()
 
 
-def _activate_cli_runtime(
+def activate_cli_runtime(
     path: Path | None = None,
     *,
     storage_path: Path | None = None,
@@ -327,7 +328,7 @@ def _get_editor() -> str:
     return "vi"
 
 
-def _format_validation_errors(
+def format_validation_errors(
     exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
     config_path: Path | None = None,
 ) -> None:
@@ -461,13 +462,13 @@ def config_show(
     if not config_file.exists():
         console.print(f"[yellow]No config file found at:[/yellow] {config_file}")
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
-        _print_config_search_locations(process_env, title="\nSearch locations (first match wins):")
+        print_config_search_locations(process_env, title="\nSearch locations (first match wins):")
         raise typer.Exit(1)
 
     try:
         content = config_file.read_text(encoding="utf-8")
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        _format_validation_errors(exc, config_path=config_file)
+        format_validation_errors(exc, config_path=config_file)
         raise typer.Exit(1) from None
 
     if raw:
@@ -532,7 +533,7 @@ def config_validate(
     Parses the YAML config using Pydantic and reports errors in a friendly format.
     Also checks whether required API keys are set as environment variables.
     """
-    runtime_paths = _activate_cli_runtime(path)
+    runtime_paths = activate_cli_runtime(path)
     config_path = runtime_paths.config_path
     console.print(f"Validating configuration: [bold]{config_path}[/bold]\n")
 
@@ -542,9 +543,9 @@ def config_validate(
         raise typer.Exit(1)
 
     try:
-        config = _load_config_quiet(runtime_paths=runtime_paths)
+        config = load_config_quiet(runtime_paths=runtime_paths)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        _format_validation_errors(exc, config_path)
+        format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
 
     console.print("[green]Configuration is valid.[/green]\n")
@@ -555,7 +556,7 @@ def config_validate(
     console.print(f"  Rooms:  {len(rooms)} ({', '.join(sorted(rooms)) or 'none'})")
 
     # Check for missing API keys based on configured providers
-    _check_env_keys(config, runtime_paths=runtime_paths)
+    check_env_keys(config, runtime_paths=runtime_paths)
 
 
 @config_app.command("path")
@@ -569,7 +570,7 @@ def config_path_cmd(
     status = "[green]exists[/green]" if exists else "[red]not found[/red]"
     console.print(f"Resolved config path: {resolved} ({status})")
 
-    _print_config_search_locations(process_env, title="\nSearch locations (first match wins):")
+    print_config_search_locations(process_env, title="\nSearch locations (first match wins):")
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +578,7 @@ def config_path_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _load_config_quiet(
+def load_config_quiet(
     runtime_paths: RuntimePaths,
     *,
     tolerate_plugin_load_errors: bool = False,
@@ -677,7 +678,7 @@ def _normalize_init_profile(profile: str) -> tuple[_ConfigInitProfile, _Provider
     return aliases.get(profile.strip().lower())
 
 
-def _check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
+def check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
     """Warn about missing environment variables for configured providers."""
     missing = _find_missing_env_keys(config, runtime_paths)
     if missing:

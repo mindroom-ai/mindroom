@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Protocol
 import nio
 from nio.responses import RoomGetEventError
 
-from mindroom.matrix.client_thread_history import _fetch_thread_event_sources_via_room_messages
+from mindroom.matrix.client_thread_history import fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import ThreadMembershipAccess, room_scan_thread_membership_access
 
@@ -33,7 +33,7 @@ async def _scan_thread_event_sources(
     thread_root_id: str,
 ) -> tuple[Sequence[Mapping[str, object]], bool]:
     """Fetch authoritative room-scan event sources for one candidate thread root."""
-    scan_result = await _fetch_thread_event_sources_via_room_messages(client, room_id, thread_root_id)
+    scan_result = await fetch_thread_event_sources_via_room_messages(client, room_id, thread_root_id)
     return scan_result.event_sources, True
 
 

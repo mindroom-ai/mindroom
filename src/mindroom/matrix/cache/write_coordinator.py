@@ -6,7 +6,7 @@ import asyncio
 import time
 import typing
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.logging_config import bound_log_context
@@ -59,78 +59,8 @@ class _RoomSchedulerState:
     waiters: list[asyncio.Future[None]] = field(default_factory=list)
 
 
-class EventCacheWriteCoordinator(Protocol):
-    """Runtime-facing coordinator contract for ordered advisory cache writes."""
-
-    def queue_room_update(
-        self,
-        room_id: str,
-        update_coro_factory: _UpdateCoroFactory,
-        *,
-        name: str,
-        log_exceptions: bool = True,
-        emit_timing: bool = True,
-        coalesce_key: _CoalesceKey | None = None,
-        coalesce_log_context: dict[str, object] | None = None,
-    ) -> asyncio.Task[object]:
-        """Queue one room-scoped update behind any active predecessor."""
-
-    async def run_room_update(
-        self,
-        room_id: str,
-        update_coro_factory: _UpdateCoroFactory,
-        *,
-        name: str,
-    ) -> object:
-        """Run one room-scoped update through the same ordered barrier."""
-
-    def queue_thread_update(
-        self,
-        room_id: str,
-        thread_id: str,
-        update_coro_factory: _UpdateCoroFactory,
-        *,
-        name: str,
-        log_exceptions: bool = True,
-        emit_timing: bool = False,
-        coalesce_key: _CoalesceKey | None = None,
-        coalesce_log_context: dict[str, object] | None = None,
-    ) -> asyncio.Task[object]:
-        """Queue one thread-scoped update behind same-thread and room-wide predecessors."""
-
-    async def run_thread_update(
-        self,
-        room_id: str,
-        thread_id: str,
-        update_coro_factory: _UpdateCoroFactory,
-        *,
-        name: str,
-        ignore_cancelled_room_fences: bool = False,
-    ) -> object:
-        """Run one thread-scoped update through the ordered thread barrier."""
-
-    async def wait_for_room_idle(self, room_id: str) -> None:
-        """Wait for one room's queued updates to drain."""
-
-    async def wait_for_thread_idle(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        ignore_cancelled_room_fences: bool = False,
-    ) -> None:
-        """Wait for room-wide and same-thread queued updates to drain.
-
-        Set ``ignore_cancelled_room_fences`` only for read-style callers that can
-        safely bypass cancelled room fences preserving write ordering.
-        """
-
-    async def close(self) -> None:
-        """Drain and tear down the coordinator."""
-
-
 @dataclass
-class _EventCacheWriteCoordinator:
+class EventCacheWriteCoordinator:
     """Serialize same-room advisory cache writes across the whole runtime."""
 
     logger: structlog.stdlib.BoundLogger

@@ -38,7 +38,7 @@ from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
 )
-from mindroom.streaming import _RESTART_INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -1298,9 +1298,9 @@ async def _iter_reaction_relation_events(
 def _extract_partial_text(body: str) -> str:
     """Return partial text without the restart interruption note."""
     interrupted_body = build_restart_interrupted_body(body)
-    if interrupted_body == _RESTART_INTERRUPTED_RESPONSE_NOTE:
+    if interrupted_body == RESTART_INTERRUPTED_RESPONSE_NOTE:
         return ""
-    return interrupted_body.removesuffix(f"\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}")
+    return interrupted_body.removesuffix(f"\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}")
 
 
 def _truncate_partial_text(text: str, *, limit: int = _INTERRUPTED_PARTIAL_TEXT_LIMIT) -> str:
@@ -1343,7 +1343,7 @@ def _select_threads_to_resume(
 
 def _has_restart_interrupted_note(body: str) -> bool:
     """Return whether the body already contains the restart interruption note."""
-    return body.rstrip().endswith(_RESTART_INTERRUPTED_RESPONSE_NOTE)
+    return body.rstrip().endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
 
 
 def _is_cleanup_candidate(state: _MessageState) -> bool:

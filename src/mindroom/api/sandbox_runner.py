@@ -32,8 +32,8 @@ from mindroom.api.worker_responses import (
     SandboxWorkerListResponse,
     serialize_sandbox_worker_response,
 )
-from mindroom.attachments import _normalize_attachment_id
-from mindroom.config.main import Config, _normalized_config_data, load_config
+from mindroom.attachments import normalize_attachment_id
+from mindroom.config.main import Config, load_config, normalized_config_data
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired
@@ -129,7 +129,7 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
     )
 
 
-def _startup_runner_token_from_env() -> str | None:
+def startup_runner_token_from_env() -> str | None:
     """Read and remove the runner auth token from process env after startup."""
     raw_token = os.environ.pop(_RUNNER_TOKEN_ENV, "").strip()
     return raw_token or None
@@ -171,7 +171,7 @@ def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Co
     # runtime is authoritative for full authored tool validation; workers
     # validate the requested tool at execution time with their local registry.
     config = Config.model_validate(
-        _normalized_config_data(data),
+        normalized_config_data(data),
         context={"runtime_paths": runtime_paths},
     )
     return _config_with_available_plugins(config, runtime_paths)
@@ -212,7 +212,7 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
     return config.model_copy(update={"plugins": available_plugins}, deep=True)
 
 
-def _load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
+def load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
     """Read the sandbox runner runtime context from explicit startup payload."""
     runtime_paths = _startup_runtime_paths_from_env()
     return runtime_paths, _runtime_config_or_empty(runtime_paths)
@@ -388,11 +388,13 @@ def _app_context(app: FastAPI) -> _SandboxRunnerContext:
     return context
 
 
-def _app_runtime_paths(app: FastAPI) -> RuntimePaths:
+def app_runtime_paths(app: FastAPI) -> RuntimePaths:
+    """Return sandbox runner runtime paths stored on the FastAPI app."""
     return _app_context(app).runtime_paths
 
 
-def _app_runtime_config(app: FastAPI) -> Config:
+def app_runtime_config(app: FastAPI) -> Config:
+    """Return sandbox runner config stored on the FastAPI app."""
     return _app_context(app).config
 
 
@@ -400,7 +402,8 @@ def _app_tool_metadata(app: FastAPI) -> dict[str, Any]:
     return _app_context(app).tool_metadata
 
 
-def _app_runner_token(app: FastAPI) -> str | None:
+def app_runner_token(app: FastAPI) -> str | None:
+    """Return the configured sandbox runner token for the FastAPI app."""
     runner_token = _app_context(app).runner_token
     if runner_token is None:
         return None
@@ -412,12 +415,12 @@ def _app_runner_token(app: FastAPI) -> str | None:
 
 def _sandbox_runner_runtime_paths(request: Request) -> RuntimePaths:
     """Return the committed runtime paths for one sandbox runner request."""
-    return _app_runtime_paths(request.app)
+    return app_runtime_paths(request.app)
 
 
 def _sandbox_runner_runtime_config(request: Request) -> Config:
     """Return the committed validated config for one sandbox runner request."""
-    return _app_runtime_config(request.app)
+    return app_runtime_config(request.app)
 
 
 def _sandbox_runner_tool_metadata(request: Request) -> dict[str, Any]:
@@ -429,7 +432,7 @@ async def _validate_runner_token(
     request: Request,
     x_mindroom_sandbox_token: Annotated[str | None, Header()] = None,
 ) -> None:
-    proxy_token = _app_runner_token(request.app)
+    proxy_token = app_runner_token(request.app)
     if proxy_token is None:
         raise HTTPException(status_code=503, detail="Sandbox runner token is not configured.")
     if not secrets.compare_digest(x_mindroom_sandbox_token or "", proxy_token):
@@ -1337,10 +1340,10 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     """Save one context-authorized attachment into the prepared worker workspace."""
     runtime_paths = _sandbox_runner_runtime_paths(request)
     config = _sandbox_runner_runtime_config(request)
-    runner_token = _app_runner_token(request.app)
+    runner_token = app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
 
-    attachment_id = _normalize_attachment_id(payload.attachment_id)
+    attachment_id = normalize_attachment_id(payload.attachment_id)
     if attachment_id is None:
         return SandboxRunnerSaveAttachmentResponse(
             ok=False,
@@ -1431,7 +1434,7 @@ async def execute_tool_call(
     runtime_paths = _sandbox_runner_runtime_paths(request)
     config = _sandbox_runner_runtime_config(request)
     tool_metadata = _sandbox_runner_tool_metadata(request)
-    runner_token = _app_runner_token(request.app)
+    runner_token = app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     _validate_execute_request_payload(payload, tool_metadata=tool_metadata)
     credential_overrides: dict[str, object] = {}

@@ -40,7 +40,7 @@ from ._policy import (
     use_disabled_memory_backend,
     use_file_memory_backend,
 )
-from ._prompting import _format_memories_as_context, build_memory_messages
+from ._prompting import build_memory_messages, format_memories_as_context
 from ._shared import MemoryResult, new_memory_id
 
 if TYPE_CHECKING:
@@ -410,7 +410,7 @@ async def build_memory_prompt_parts(
             session_preamble = f"[File memory entrypoint (agent)]\n{agent_entrypoint}"
         context_type = "agent file"
 
-    turn_context = _format_memories_as_context(agent_memories, context_type) if agent_memories else ""
+    turn_context = format_memories_as_context(agent_memories, context_type) if agent_memories else ""
     return MemoryPromptParts(
         session_preamble=session_preamble,
         turn_context=turn_context,

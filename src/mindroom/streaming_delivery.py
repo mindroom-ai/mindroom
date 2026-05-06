@@ -38,7 +38,7 @@ _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 _STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS = 5.0
 
 
-class _NonTerminalDeliveryError(Exception):
+class NonTerminalDeliveryError(Exception):
     """Internal wrapper for non-terminal delivery failures."""
 
     def __init__(self, error: Exception) -> None:
@@ -46,7 +46,7 @@ class _NonTerminalDeliveryError(Exception):
         self.error = error
 
 
-class _StreamDeliveryShutdownTimeoutError(TimeoutError):
+class StreamDeliveryShutdownTimeoutError(TimeoutError):
     """Raised when the single non-terminal delivery owner refuses to stop."""
 
 
@@ -86,7 +86,7 @@ def _merge_prior_delta_at(existing: float | None, incoming: float | None) -> flo
 
 
 @dataclass(frozen=True, slots=True)
-class _DeliveryRequest:
+class DeliveryRequest:
     """One non-terminal stream delivery request for the single delivery owner."""
 
     progress_hint: bool = False
@@ -99,13 +99,13 @@ class _DeliveryRequest:
     capture_completion: asyncio.Future[None] | None = None
 
 
-def _raise_progress_delivery_error(error: Exception) -> NoReturn:
+def raise_progress_delivery_error(error: Exception) -> NoReturn:
     """Raise a stored worker-progress delivery error from a helper."""
     raise error
 
 
 def _queue_delivery_request(
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_queue: asyncio.Queue[DeliveryRequest | None],
     *,
     progress_hint: bool = False,
     force_refresh: bool = False,
@@ -119,7 +119,7 @@ def _queue_delivery_request(
     """Queue one non-terminal delivery request for the single delivery owner."""
     capture_completion = asyncio.get_running_loop().create_future() if wait_for_capture else None
     delivery_queue.put_nowait(
-        _DeliveryRequest(
+        DeliveryRequest(
             progress_hint=progress_hint,
             force_refresh=force_refresh,
             boundary_refresh=boundary_refresh,
@@ -150,7 +150,7 @@ def _queue_delivery_request(
 
 async def _flush_phase_boundary_if_needed(
     streaming: StreamingResponse,
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_queue: asyncio.Queue[DeliveryRequest | None],
 ) -> None:
     """Flush any buffered visible text before mutating the next phase."""
     if streaming.chars_since_last_update == 0:
@@ -170,7 +170,7 @@ async def _flush_phase_boundary_if_needed(
 
 async def _apply_visible_text_chunk(
     streaming: StreamingResponse,
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_queue: asyncio.Queue[DeliveryRequest | None],
     text_chunk: str,
     *,
     apply_chunk: Callable[[str], None],
@@ -205,7 +205,7 @@ async def _apply_visible_text_chunk(
 async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
     response_stream: AsyncIterator[StreamInputChunk],
     streaming: StreamingResponse,
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_queue: asyncio.Queue[DeliveryRequest | None],
 ) -> None:
     """Consume stream chunks and apply incremental message updates."""
     pending_tools: list[tuple[str, int, str]] = []
@@ -329,11 +329,11 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
         )
 
 
-async def _drain_worker_progress_events(
+async def drain_worker_progress_events(
     streaming: StreamingResponse,
     queue: asyncio.Queue[WorkerProgressEvent],
     pump: WorkerProgressPump,
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_queue: asyncio.Queue[DeliveryRequest | None],
 ) -> None:
     """Apply worker progress events to side-band state and refresh the current stream body."""
     while True:
@@ -362,7 +362,7 @@ async def _drain_worker_progress_events(
             _queue_delivery_request(delivery_queue, progress_hint=True)
 
 
-async def _shutdown_worker_progress_drain(
+async def shutdown_worker_progress_drain(
     pump: WorkerProgressPump,
     progress_task: asyncio.Task[None] | None,
 ) -> Exception | None:
@@ -381,10 +381,10 @@ async def _shutdown_worker_progress_drain(
     return None
 
 
-async def _drive_stream_delivery(  # noqa: C901, PLR0912
+async def drive_stream_delivery(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     streaming: StreamingResponse,
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_queue: asyncio.Queue[DeliveryRequest | None],
 ) -> None:
     """Own all non-terminal stream sends and edits from one supervised task."""
     stop_after_current = False
@@ -415,7 +415,7 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
                 phase_boundary_capture_completions.append(next_request.capture_completion)
             if next_request.boundary_refresh and next_request.capture_completion is not None:
                 boundary_refresh_capture_completions.append(next_request.capture_completion)
-            merged_request = _DeliveryRequest(
+            merged_request = DeliveryRequest(
                 progress_hint=merged_request.progress_hint or next_request.progress_hint,
                 force_refresh=merged_request.force_refresh or next_request.force_refresh,
                 boundary_refresh=merged_request.boundary_refresh or next_request.boundary_refresh,
@@ -506,8 +506,8 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
             return
 
 
-async def _shutdown_stream_delivery(
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+async def shutdown_stream_delivery(
+    delivery_queue: asyncio.Queue[DeliveryRequest | None],
     delivery_task: asyncio.Task[None] | None,
     *,
     drain_timeout_seconds: float = _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS,
@@ -523,7 +523,7 @@ async def _shutdown_stream_delivery(
         delivery_task.cancel()
         done, _pending = await asyncio.wait({delivery_task}, timeout=cancel_timeout_seconds)
         if delivery_task not in done:
-            return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
+            return StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
     if delivery_task.cancelled():
         return None
     task_error = delivery_task.exception()
@@ -567,19 +567,19 @@ async def _handle_auxiliary_task_completion(
         if not isinstance(task_error, Exception):
             raise task_error
         if task is delivery_task:
-            raise _NonTerminalDeliveryError(task_error) from task_error
-        _raise_progress_delivery_error(task_error)
+            raise NonTerminalDeliveryError(task_error) from task_error
+        raise_progress_delivery_error(task_error)
 
     monitored_tasks.discard(task)
     return True
 
 
-async def _consume_stream_with_progress_supervision(
+async def consume_stream_with_progress_supervision(
     response_stream: AsyncIterator[StreamInputChunk],
     streaming: StreamingResponse,
     progress_task: asyncio.Task[None] | None,
     delivery_task: asyncio.Task[None] | None,
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_queue: asyncio.Queue[DeliveryRequest | None],
 ) -> None:
     """Abort chunk consumption as soon as the worker-progress drain fails."""
     stream_task = asyncio.create_task(_consume_streaming_chunks(response_stream, streaming, delivery_queue))

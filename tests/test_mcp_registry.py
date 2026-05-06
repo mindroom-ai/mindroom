@@ -18,7 +18,7 @@ from mindroom.mcp.registry import (
     sync_mcp_tool_registry,
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
-from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.worker_routing import supports_tool_name_for_worker_scope
 
 if TYPE_CHECKING:
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _BASE_TOOL_REGISTRY = {
-    tool_name: factory for tool_name, factory in _TOOL_REGISTRY.items() if not tool_name.startswith("mcp_")
+    tool_name: factory for tool_name, factory in TOOL_REGISTRY.items() if not tool_name.startswith("mcp_")
 }
 _BASE_TOOL_METADATA = {
     tool_name: metadata for tool_name, metadata in TOOL_METADATA.items() if not tool_name.startswith("mcp_")
@@ -38,16 +38,16 @@ _BASE_TOOL_METADATA = {
 @pytest.fixture(autouse=True)
 def _restore_tool_registry() -> Iterator[None]:
     _MCP_TOOL_NAMES.clear()
-    _TOOL_REGISTRY.clear()
-    _TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
+    TOOL_REGISTRY.clear()
+    TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
     TOOL_METADATA.clear()
     TOOL_METADATA.update(_BASE_TOOL_METADATA)
     bind_mcp_server_manager(None)
     sync_mcp_tool_registry(None)
     yield
     _MCP_TOOL_NAMES.clear()
-    _TOOL_REGISTRY.clear()
-    _TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
+    TOOL_REGISTRY.clear()
+    TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
     TOOL_METADATA.clear()
     TOOL_METADATA.update(_BASE_TOOL_METADATA)
     bind_mcp_server_manager(None)
@@ -85,7 +85,7 @@ def test_sync_mcp_tool_registry_registers_dynamic_tool(tmp_path: Path) -> None:
     sync_mcp_tool_registry(config)
     tool_name = mcp_tool_name("demo")
     assert tool_name in TOOL_METADATA
-    assert tool_name in _TOOL_REGISTRY
+    assert tool_name in TOOL_REGISTRY
     assert TOOL_METADATA[tool_name].agent_override_fields is not None
 
 
@@ -136,7 +136,7 @@ def test_sync_mcp_tool_registry_removes_deleted_servers(tmp_path: Path) -> None:
         ),
     )
     assert "mcp_demo" not in TOOL_METADATA
-    assert "mcp_demo" not in _TOOL_REGISTRY
+    assert "mcp_demo" not in TOOL_REGISTRY
 
 
 def test_sync_mcp_tool_registry_removes_untracked_dynamic_entries(tmp_path: Path) -> None:
@@ -158,12 +158,12 @@ def test_sync_mcp_tool_registry_removes_untracked_dynamic_entries(tmp_path: Path
         ),
     )
     assert "mcp_demo" not in TOOL_METADATA
-    assert "mcp_demo" not in _TOOL_REGISTRY
+    assert "mcp_demo" not in TOOL_REGISTRY
 
 
 def test_sync_mcp_tool_registry_rejects_name_collisions(tmp_path: Path) -> None:
     """Fail fast instead of silently overwriting an existing built-in tool entry."""
-    _TOOL_REGISTRY["mcp_demo"] = _TOOL_REGISTRY["shell"]
+    TOOL_REGISTRY["mcp_demo"] = TOOL_REGISTRY["shell"]
     TOOL_METADATA["mcp_demo"] = TOOL_METADATA["shell"]
     with pytest.raises(ValueError, match="conflicts with an existing registered tool"):
         sync_mcp_tool_registry(_config(tmp_path))
@@ -171,18 +171,18 @@ def test_sync_mcp_tool_registry_rejects_name_collisions(tmp_path: Path) -> None:
 
 def test_sync_mcp_tool_registry_keeps_non_mcp_prefixed_plugin_tools() -> None:
     """Do not unregister unrelated tools just because their names start with mcp_."""
-    _TOOL_REGISTRY["mcp_custom_plugin"] = _TOOL_REGISTRY["shell"]
+    TOOL_REGISTRY["mcp_custom_plugin"] = TOOL_REGISTRY["shell"]
     TOOL_METADATA["mcp_custom_plugin"] = replace(TOOL_METADATA["shell"], name="mcp_custom_plugin")
 
     sync_mcp_tool_registry(None)
 
     assert "mcp_custom_plugin" in TOOL_METADATA
-    assert "mcp_custom_plugin" in _TOOL_REGISTRY
+    assert "mcp_custom_plugin" in TOOL_REGISTRY
 
 
 def test_mcp_server_id_from_tool_name_ignores_non_mcp_prefixed_plugin_tools() -> None:
     """Only registry-owned MCP tools should be classified as MCP integrations."""
-    _TOOL_REGISTRY["mcp_custom_plugin"] = _TOOL_REGISTRY["shell"]
+    TOOL_REGISTRY["mcp_custom_plugin"] = TOOL_REGISTRY["shell"]
     TOOL_METADATA["mcp_custom_plugin"] = replace(TOOL_METADATA["shell"], name="mcp_custom_plugin")
 
     assert mcp_server_id_from_tool_name("mcp_custom_plugin") is None

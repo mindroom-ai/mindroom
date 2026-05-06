@@ -49,7 +49,7 @@ _CLEANUP_INTERVAL = timedelta(hours=1)
 _last_cleanup_time_by_storage_path: dict[Path, datetime] = {}
 
 
-def _normalize_attachment_id(raw_attachment_id: str) -> str | None:
+def normalize_attachment_id(raw_attachment_id: str) -> str | None:
     """Normalize attachment IDs and reject unsafe values."""
     attachment_id = raw_attachment_id.strip()
     if not attachment_id or not _ATTACHMENT_ID_PATTERN.fullmatch(attachment_id):
@@ -105,7 +105,7 @@ def parse_attachment_ids_from_event_source(event_source: dict[str, Any] | None) 
     for raw_attachment_id in raw_attachment_ids:
         if not isinstance(raw_attachment_id, str):
             continue
-        attachment_id = _normalize_attachment_id(raw_attachment_id)
+        attachment_id = normalize_attachment_id(raw_attachment_id)
         if attachment_id and attachment_id not in seen_attachment_ids:
             seen_attachment_ids.add(attachment_id)
             normalized.append(attachment_id)
@@ -416,7 +416,7 @@ def register_local_attachment(
         return None
 
     resolved_attachment_id = attachment_id or f"att_{uuid4().hex[:16]}"
-    normalized_attachment_id = _normalize_attachment_id(resolved_attachment_id)
+    normalized_attachment_id = normalize_attachment_id(resolved_attachment_id)
     if normalized_attachment_id is None:
         logger.warning("Invalid attachment ID", attachment_id=resolved_attachment_id)
         return None
@@ -579,7 +579,7 @@ async def register_audio_attachment(
 
 def load_attachment(storage_path: Path, attachment_id: str) -> AttachmentRecord | None:
     """Load attachment metadata by ID."""
-    normalized_attachment_id = _normalize_attachment_id(attachment_id)
+    normalized_attachment_id = normalize_attachment_id(attachment_id)
     if normalized_attachment_id is None:
         return None
     record_path = _attachment_record_path(storage_path, normalized_attachment_id)
@@ -629,7 +629,7 @@ def resolve_attachments(storage_path: Path, attachment_ids: list[str]) -> list[A
     resolved: list[AttachmentRecord] = []
     seen_ids: set[str] = set()
     for attachment_id in attachment_ids:
-        normalized_attachment_id = _normalize_attachment_id(attachment_id)
+        normalized_attachment_id = normalize_attachment_id(attachment_id)
         if normalized_attachment_id is None or normalized_attachment_id in seen_ids:
             continue
         seen_ids.add(normalized_attachment_id)

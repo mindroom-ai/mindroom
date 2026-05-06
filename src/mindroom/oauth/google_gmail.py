@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from mindroom.oauth.google import (
     GOOGLE_IDENTITY_SCOPES,
-    _google_domain_env_names,
-    _google_token_parser,
+    google_domain_env_names,
+    google_token_parser,
 )
 from mindroom.oauth.providers import OAuthProvider
 
@@ -29,13 +29,13 @@ def google_gmail_oauth_provider() -> OAuthProvider:
         tool_config_service="gmail",
         client_config_services=("google_gmail_oauth_client",),
         shared_client_config_services=("google_oauth_client",),
-        allowed_email_domains_env=_google_domain_env_names("google_gmail", "ALLOWED_EMAIL_DOMAINS"),
-        allowed_hosted_domains_env=_google_domain_env_names("google_gmail", "ALLOWED_HOSTED_DOMAINS"),
+        allowed_email_domains_env=google_domain_env_names("google_gmail", "ALLOWED_EMAIL_DOMAINS"),
+        allowed_hosted_domains_env=google_domain_env_names("google_gmail", "ALLOWED_HOSTED_DOMAINS"),
         extra_auth_params={
             "access_type": "offline",
             "include_granted_scopes": "true",
             "prompt": "consent",
         },
         status_capabilities=("Gmail read/modify/compose",),
-        token_parser=_google_token_parser,
+        token_parser=google_token_parser,
     )

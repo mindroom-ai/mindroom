@@ -30,7 +30,7 @@ from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
-from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -447,9 +447,9 @@ def make_conversation_cache_mock() -> AsyncMock:
     return conversation_cache
 
 
-def make_event_cache_write_coordinator_mock(*, owner: object | None = None) -> _EventCacheWriteCoordinator:
+def make_event_cache_write_coordinator_mock(*, owner: object | None = None) -> EventCacheWriteCoordinator:
     """Return a coordinator-shaped runtime helper with the real synchronous queue contract."""
-    return _EventCacheWriteCoordinator(
+    return EventCacheWriteCoordinator(
         logger=MagicMock(),
         background_task_owner=object() if owner is None else owner,
     )

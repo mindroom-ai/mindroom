@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.authorization import is_authorized_sender
-from mindroom.commands.handler import _generate_welcome_message
+from mindroom.commands.handler import generate_welcome_message
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms, join_room
 from mindroom.matrix.invited_rooms_store import (
@@ -164,7 +164,7 @@ class BotRoomLifecycle:
 
         if not response.chunk:
             self._logger().info("Room is empty, sending welcome message", room_id=room_id)
-            welcome_msg = _generate_welcome_message(room_id, self._config(), self.deps.runtime_paths)
+            welcome_msg = generate_welcome_message(room_id, self._config(), self.deps.runtime_paths)
             await self.deps.send_response(
                 room_id=room_id,
                 reply_to_event_id=None,

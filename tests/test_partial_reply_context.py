@@ -42,7 +42,7 @@ from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
-    _RESTART_INTERRUPTED_RESPONSE_NOTE,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
     StreamingResponse,
 )
 from tests.conftest import (
@@ -274,7 +274,7 @@ class TestClassifyPartialReply:
         [
             f"Legacy partial\n\n{_CANCELLED_RESPONSE_NOTE}",
             f"Legacy partial\n\n{_INTERRUPTED_RESPONSE_NOTE}",
-            f"Legacy partial\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}",
+            f"Legacy partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}",
             "Legacy partial\n\n**[Response interrupted by an error: boom]**",
             "Legacy partial [cancelled]",
             "Legacy partial [error]",
@@ -309,7 +309,7 @@ class TestCleanPartialReplyBody:
         [
             (f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}", "Partial answer"),
             (f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}", "Partial answer"),
-            (f"Partial answer\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}", "Partial answer"),
+            (f"Partial answer\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}", "Partial answer"),
             ("Partial answer [cancelled]", "Partial answer"),
             ("Partial answer [error]", "Partial answer"),
             ("Partial answer\n\n**[Response interrupted by an error: boom]**", "Partial answer"),
@@ -331,7 +331,7 @@ class TestCleanPartialReplyBody:
             _render_normalized_interrupted_replay(f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}").encode("utf-8"),
             _render_normalized_interrupted_replay(f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}").encode("utf-8"),
             _render_normalized_interrupted_replay(
-                f"Partial answer\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}",
+                f"Partial answer\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}",
             ).encode("utf-8"),
         ]
 
@@ -509,7 +509,7 @@ class TestUnseenMessagesPartialReplies:
                 _make_visible_message(
                     event_id="e1",
                     sender=agent_id,
-                    body=f"Partial reply\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}",
+                    body=f"Partial reply\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}",
                     stream_status=STREAM_STATUS_STREAMING,
                     timestamp=599_000,
                 ),

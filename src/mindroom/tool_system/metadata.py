@@ -19,18 +19,18 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.registry_state import (
-    _BUILTIN_TOOL_METADATA,
-    _BUILTIN_TOOL_REGISTRY,
-    _PLUGIN_MODULE_PREFIX,
-    _PLUGIN_REGISTRATION_SCOPE,
-    _TOOL_REGISTRY,
+    BUILTIN_TOOL_METADATA,
+    BUILTIN_TOOL_REGISTRY,
+    PLUGIN_MODULE_PREFIX,
+    PLUGIN_REGISTRATION_SCOPE,
     TOOL_METADATA,
+    TOOL_REGISTRY,
     ToolMetadataValidationError,
-    _register_plugin_tool_metadata,
-    _resolved_tool_state,
-    _scoped_plugin_registration_owner,
-    _scoped_plugin_registration_store,
     register_builtin_tool_metadata,
+    register_plugin_tool_metadata,
+    resolved_tool_state,
+    scoped_plugin_registration_owner,
+    scoped_plugin_registration_store,
 )
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
 from mindroom.tool_system.worker_routing import (
@@ -507,7 +507,7 @@ def _build_tool_instance(
         raise ToolMetadataValidationError(msg)
 
     metadata = TOOL_METADATA[tool_name]
-    tool_class = _TOOL_REGISTRY[tool_name]()
+    tool_class = TOOL_REGISTRY[tool_name]()
     resolved_credentials_manager = _resolve_tool_credentials_manager(
         metadata,
         runtime_paths,
@@ -591,8 +591,8 @@ def get_tool_by_name(
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
-    if tool_name not in _TOOL_REGISTRY:
-        available = ", ".join(sorted(_TOOL_REGISTRY.keys()))
+    if tool_name not in TOOL_REGISTRY:
+        available = ", ".join(sorted(TOOL_REGISTRY.keys()))
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
         raise ToolMetadataValidationError(msg)
 
@@ -822,16 +822,16 @@ def register_tool_with_metadata(
         )
 
         validation_owner_module_name = getattr(
-            _PLUGIN_REGISTRATION_SCOPE,
+            PLUGIN_REGISTRATION_SCOPE,
             "owner_module_name",
             None,
         )
         if validation_owner_module_name is not None:
-            _register_plugin_tool_metadata(validation_owner_module_name, metadata)
+            register_plugin_tool_metadata(validation_owner_module_name, metadata)
             return func
 
-        if func.__module__.startswith(_PLUGIN_MODULE_PREFIX):
-            _register_plugin_tool_metadata(func.__module__, metadata)
+        if func.__module__.startswith(PLUGIN_MODULE_PREFIX):
+            register_plugin_tool_metadata(func.__module__, metadata)
             return func
 
         register_builtin_tool_metadata(metadata)
@@ -887,8 +887,8 @@ def _execute_validation_plugin_module(
     sys.modules[validation_module_name] = module
     try:
         with (
-            _scoped_plugin_registration_store(registrations_by_module),
-            _scoped_plugin_registration_owner(validation_module_name),
+            scoped_plugin_registration_store(registrations_by_module),
+            scoped_plugin_registration_owner(validation_module_name),
         ):
             spec.loader.exec_module(module)
     except Exception as exc:
@@ -924,8 +924,8 @@ def _resolved_tool_state_for_runtime(
 
     plugin_entries = config.plugins
     if not plugin_entries:
-        builtin_registry = _BUILTIN_TOOL_REGISTRY.copy()
-        builtin_metadata = _BUILTIN_TOOL_METADATA.copy()
+        builtin_registry = BUILTIN_TOOL_REGISTRY.copy()
+        builtin_metadata = BUILTIN_TOOL_METADATA.copy()
         mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
         _merge_mcp_tool_state(
             builtin_registry,
@@ -988,7 +988,7 @@ def _resolved_tool_state_for_runtime(
         validation_registrations.update(candidate_registrations)
         active_plugins.extend(candidate_active_plugins)
 
-    desired_registry, desired_metadata = _resolved_tool_state(active_plugins, validation_registrations)
+    desired_registry, desired_metadata = resolved_tool_state(active_plugins, validation_registrations)
     mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
     _merge_mcp_tool_state(
         desired_registry,

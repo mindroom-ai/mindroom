@@ -19,7 +19,7 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
-from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -141,7 +141,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -150,13 +150,13 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     try:
         plugins = load_plugins(config, runtime_paths_for(config))
         assert [plugin.name for plugin in plugins] == ["demo-plugin"]
-        assert "demo_plugin" in _TOOL_REGISTRY
+        assert "demo_plugin" in TOOL_REGISTRY
         tool = get_tool_by_name("demo_plugin", runtime_paths_for(config), worker_target=None)
         assert tool.name == "demo"
         assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -197,7 +197,7 @@ def test_resolved_tool_metadata_for_runtime_does_not_mutate_live_registry(tmp_pa
     config_path.write_text("agents: {}", encoding="utf-8")
     config_with_plugin = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
@@ -210,12 +210,12 @@ def test_resolved_tool_metadata_for_runtime_does_not_mutate_live_registry(tmp_pa
         )
         assert "demo_plugin" in resolved_metadata
         assert "demo_plugin" not in TOOL_METADATA
-        assert original_registry == _TOOL_REGISTRY
+        assert original_registry == TOOL_REGISTRY
         assert original_metadata == TOOL_METADATA
         assert original_module_cache == plugin_module._MODULE_IMPORT_CACHE
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -272,7 +272,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), config_path)
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -282,13 +282,13 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
         plugins = load_plugins(config, runtime_paths_for(config))
         assert [plugin.name for plugin in plugins] == ["demo-pkg"]
         assert plugins[0].root == plugin_root.resolve()
-        assert "demo_pkg_tool" in _TOOL_REGISTRY
+        assert "demo_pkg_tool" in TOOL_REGISTRY
         tool = get_tool_by_name("demo_pkg_tool", runtime_paths_for(config), worker_target=None)
         assert tool.name == "demo_pkg"
         assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -535,7 +535,7 @@ def test_load_plugins_skips_missing_plugin_directory_with_warning(
     mock_logger = MagicMock()
     missing_root = (tmp_path / "plugins" / "missing").resolve()
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
@@ -547,8 +547,8 @@ def test_load_plugins_skips_missing_plugin_directory_with_warning(
         assert load_plugins(Config(plugins=["./plugins/missing"]), runtime_paths) == []
         mock_logger.warning.assert_any_call("Plugin path does not exist, skipping", path=str(missing_root))
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -667,7 +667,7 @@ def test_load_plugins_warns_once_for_repeated_non_bundled_plugin_loads(
     config = Config(plugins=["./plugins/demo"])
 
     mock_logger = MagicMock()
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -686,8 +686,8 @@ def test_load_plugins_warns_once_for_repeated_non_bundled_plugin_loads(
         ]
         assert len(matching_calls) == 1
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -757,7 +757,7 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
@@ -774,7 +774,7 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
         with pytest.raises(ValueError, match="Unknown tool 'missing_tool'"):
             _bind_runtime_paths(bad_config, config_path)
 
-        assert "leaked_plugin_tool" not in _TOOL_REGISTRY
+        assert "leaked_plugin_tool" not in TOOL_REGISTRY
         assert "leaked_plugin_tool" not in TOOL_METADATA
 
         follow_up_config = Config.model_validate(
@@ -794,8 +794,8 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
         with pytest.raises(ValueError, match="Unknown tool 'leaked_plugin_tool'"):
             _bind_runtime_paths(follow_up_config, config_path)
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._MODULE_IMPORT_CACHE.clear()
@@ -852,19 +852,19 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
         "plugins": ["./plugins/demo"],
     }
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
     try:
         validated = Config.validate_with_runtime(authored_config, runtime_paths)
         assert validated.get_agent("assistant").tool_names == ["validated_plugin_tool"]
-        assert "validated_plugin_tool" not in _TOOL_REGISTRY
+        assert "validated_plugin_tool" not in TOOL_REGISTRY
         assert "validated_plugin_tool" not in TOOL_METADATA
         assert original_module_cache == plugin_module._MODULE_IMPORT_CACHE
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._MODULE_IMPORT_CACHE.clear()
@@ -958,7 +958,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
         },
     )
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
 
@@ -979,14 +979,14 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
             runtime_paths,
         )
         assert validated.get_agent("assistant").tool_names == ["helper_tool"]
-        assert "helper_tool" not in _TOOL_REGISTRY
+        assert "helper_tool" not in TOOL_REGISTRY
         assert "helper_tool" not in TOOL_METADATA
-        assert original_registry == _TOOL_REGISTRY
+        assert original_registry == TOOL_REGISTRY
         assert original_metadata == TOOL_METADATA
         assert original_module_cache == plugin_module._MODULE_IMPORT_CACHE
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._MODULE_IMPORT_CACHE.clear()
@@ -1025,7 +1025,7 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
     config_with_plugin = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
     config_without_plugin = _bind_runtime_paths(Config(plugins=[]), config_path)
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -1035,11 +1035,11 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
         assert [plugin.name for plugin in load_plugins(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
             "demo_plugin",
         ]
-        assert "removed_plugin_tool" in _TOOL_REGISTRY
+        assert "removed_plugin_tool" in TOOL_REGISTRY
         assert "removed_plugin_tool" in TOOL_METADATA
 
         assert load_plugins(config_without_plugin, runtime_paths_for(config_without_plugin)) == []
-        assert "removed_plugin_tool" not in _TOOL_REGISTRY
+        assert "removed_plugin_tool" not in TOOL_REGISTRY
         assert "removed_plugin_tool" not in TOOL_METADATA
 
         follow_up_config = Config.model_validate(
@@ -1059,8 +1059,8 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
         with pytest.raises(ValueError, match="Unknown tool 'removed_plugin_tool'"):
             _bind_runtime_paths(follow_up_config, config_path)
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -1102,7 +1102,7 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
     config_with_plugin = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
     config_without_plugin = _bind_runtime_paths(Config(plugins=[]), config_path)
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -1112,15 +1112,15 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
         assert [plugin.name for plugin in load_plugins(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
             "demo_plugin",
         ]
-        assert "toggled_plugin_tool" in _TOOL_REGISTRY
+        assert "toggled_plugin_tool" in TOOL_REGISTRY
 
         assert load_plugins(config_without_plugin, runtime_paths_for(config_without_plugin)) == []
-        assert "toggled_plugin_tool" not in _TOOL_REGISTRY
+        assert "toggled_plugin_tool" not in TOOL_REGISTRY
 
         assert [plugin.name for plugin in load_plugins(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
             "demo_plugin",
         ]
-        assert "toggled_plugin_tool" in _TOOL_REGISTRY
+        assert "toggled_plugin_tool" in TOOL_REGISTRY
 
         follow_up_config = Config.model_validate(
             {
@@ -1139,8 +1139,8 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
         bound = _bind_runtime_paths(follow_up_config, config_path)
         assert bound.get_agent("assistant").tool_names == ["toggled_plugin_tool"]
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -1156,7 +1156,7 @@ def test_load_plugins_preserves_metadata_only_built_in_tools(tmp_path: Path) -> 
     config_path.write_text("agents: {}", encoding="utf-8")
     config_without_plugins = _bind_runtime_paths(Config(plugins=[]), config_path)
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -1167,8 +1167,8 @@ def test_load_plugins_preserves_metadata_only_built_in_tools(tmp_path: Path) -> 
         for tool_name in ("memory", "delegate", "self_config", "compact_context"):
             assert tool_name in TOOL_METADATA
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -1210,7 +1210,7 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -1218,7 +1218,7 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
 
     try:
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo_plugin"]
-        assert "old_tool" in _TOOL_REGISTRY
+        assert "old_tool" in TOOL_REGISTRY
 
         tools_path.write_text(
             "from agno.tools import Toolkit\n"
@@ -1242,12 +1242,12 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
         os.utime(tools_path, (stat_result.st_atime, stat_result.st_mtime + 1))
 
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo_plugin"]
-        assert "old_tool" not in _TOOL_REGISTRY
+        assert "old_tool" not in TOOL_REGISTRY
         assert "old_tool" not in TOOL_METADATA
-        assert "new_tool" in _TOOL_REGISTRY
+        assert "new_tool" in TOOL_REGISTRY
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -1417,7 +1417,7 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -1425,7 +1425,7 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
 
     try:
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo_plugin"]
-        assert "renamed_tool" in _TOOL_REGISTRY
+        assert "renamed_tool" in TOOL_REGISTRY
 
         manifest_path.write_text(
             json.dumps({"name": "renamed_plugin", "tools_module": "tools.py", "skills": []}),
@@ -1435,7 +1435,7 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
         os.utime(manifest_path, (stat_result.st_atime, stat_result.st_mtime + 1))
 
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["renamed_plugin"]
-        assert "renamed_tool" in _TOOL_REGISTRY
+        assert "renamed_tool" in TOOL_REGISTRY
 
         follow_up_config = Config.model_validate(
             {
@@ -1454,8 +1454,8 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
         bound = _bind_runtime_paths(follow_up_config, config_path)
         assert bound.get_agent("assistant").tool_names == ["renamed_tool"]
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -1532,7 +1532,7 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
             "MINDROOM_NAMESPACE": "",
         },
     )
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -1555,8 +1555,8 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
             for call in mock_logger.warning.call_args_list
         )
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()
@@ -1615,7 +1615,7 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
     )
     config = Config(plugins=["./plugins/good", "./plugins/bad"])
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -1627,7 +1627,7 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
     try:
         plugins = load_plugins(config, runtime_paths)
         assert [plugin.name for plugin in plugins] == ["good_plugin"]
-        assert "good_plugin_tool" in _TOOL_REGISTRY
+        assert "good_plugin_tool" in TOOL_REGISTRY
         assert "good_plugin_tool" in TOOL_METADATA
         assert any(
             call.args == ("Failed to load plugin, skipping",)
@@ -1636,8 +1636,8 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
             for call in mock_logger.warning.call_args_list
         )
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()

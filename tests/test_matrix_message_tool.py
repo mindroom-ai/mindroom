@@ -685,7 +685,7 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
             new=AsyncMock(return_value="$file_root"),
         ) as mock_send_file,
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations._send_attachment_paths",
+            "mindroom.custom_tools.matrix_conversation_operations.send_attachment_paths",
             new=AsyncMock(return_value=(["$file_child"], None)),
         ) as mock_send_attachment_paths,
         tool_runtime_context(ctx),
@@ -925,7 +925,7 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
             new=AsyncMock(return_value=None),
         ) as mock_send_file,
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations._send_attachment_paths",
+            "mindroom.custom_tools.matrix_conversation_operations.send_attachment_paths",
             new=AsyncMock(return_value=([], None)),
         ) as mock_send_attachment_paths,
         tool_runtime_context(ctx),

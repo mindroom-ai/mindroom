@@ -161,6 +161,7 @@ def _catalog_private_importers() -> dict[str, set[str]]:
 
 
 def _private_registry_state_importers_outside_tool_system() -> set[tuple[str, str]]:
+    private_registry_state_exports = _private_registry_state_exports()
     importers: set[tuple[str, str]] = set()
     for py_path in SOURCE_ROOT.rglob("*.py"):
         if py_path.is_relative_to(SOURCE_ROOT / "tool_system"):
@@ -173,7 +174,7 @@ def _private_registry_state_importers_outside_tool_system() -> set[tuple[str, st
                 and _resolve_import_from_module(importer_module, node) == "mindroom.tool_system.registry_state"
             ):
                 for alias in node.names:
-                    if alias.name.startswith("_"):
+                    if alias.name in private_registry_state_exports:
                         importers.add((importer_module, alias.name))
             elif isinstance(node, ast.Import):
                 for alias in node.names:
@@ -291,7 +292,7 @@ def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:
 def test_private_registry_state_import_is_whitelisted_outside_tool_system() -> None:
     """Only the MCP registry may import private registry state directly outside tool_system."""
     assert _private_registry_state_importers_outside_tool_system() == {
-        ("mindroom.mcp.registry", "_TOOL_REGISTRY"),
+        ("mindroom.mcp.registry", "TOOL_REGISTRY"),
     }
 
 

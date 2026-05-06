@@ -51,7 +51,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import _shutdown_approval_store
 from mindroom.tool_system import tool_hooks
-from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     ToolRuntimeContext,
@@ -2639,7 +2639,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
         async def echo(self, text: str) -> str:
             return text.upper()
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
 
     @register_tool_with_metadata(
@@ -2729,8 +2729,8 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             ),
         ]
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
 
@@ -2912,7 +2912,7 @@ async def test_create_agent_prepends_bridge_to_real_tool_functions(tmp_path: Pat
             self.calls.append(text)
             return text
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
 
     @register_tool_with_metadata(
@@ -2964,8 +2964,8 @@ async def test_create_agent_prepends_bridge_to_real_tool_functions(tmp_path: Pat
         assert DemoToolkit.calls == []
         assert after_seen == [(config, runtime_paths_for(config), str(plugin_state_root), True)]
     finally:
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
 

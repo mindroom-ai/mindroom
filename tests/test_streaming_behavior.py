@@ -61,14 +61,14 @@ from mindroom.streaming import (
     is_interrupted_partial_reply,
     send_streaming_response,
 )
-from mindroom.streaming_delivery import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.streaming_delivery import (
-    _DeliveryRequest,
-    _drive_stream_delivery,
+    DeliveryRequest,
+    StreamDeliveryShutdownTimeoutError,
     _flush_phase_boundary_if_needed,
-    _shutdown_stream_delivery,
-    _StreamDeliveryShutdownTimeoutError,
+    drive_stream_delivery,
+    shutdown_stream_delivery,
 )
+from mindroom.streaming_delivery import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
@@ -164,17 +164,17 @@ async def _consume_streaming_chunks_for_test(
     response_stream: AsyncIterator[object],
     streaming: StreamingResponse,
 ) -> None:
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-    delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
+    delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+    delivery_task = asyncio.create_task(drive_stream_delivery(client, streaming, delivery_queue))
     try:
         await _consume_streaming_chunks_impl(response_stream, streaming, delivery_queue)
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
         delivery_task = None
         if shutdown_error is not None:
             raise shutdown_error
     finally:
         if delivery_task is not None:
-            cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            cleanup_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
             if cleanup_error is not None:
                 raise cleanup_error
 
@@ -937,8 +937,8 @@ class TestStreamingBehavior:
             second_yield_started.set()
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
 
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
         consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
 
         await first_send_started.wait()
@@ -948,7 +948,7 @@ class TestStreamingBehavior:
 
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
         assert shutdown_error is None
 
     @pytest.mark.asyncio
@@ -990,8 +990,8 @@ class TestStreamingBehavior:
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
 
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
         consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
 
         await first_send_started.wait()
@@ -999,7 +999,7 @@ class TestStreamingBehavior:
         await asyncio.sleep(0)
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
         assert shutdown_error is None
 
         assert mock_client.room_send.call_count == 1
@@ -1053,15 +1053,15 @@ class TestStreamingBehavior:
             await first_send_started.wait()
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
 
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
         consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
 
         await first_send_started.wait()
         await asyncio.sleep(0)
         allow_first_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
         assert shutdown_error is None
 
         assert mock_client.room_send.call_count == 2
@@ -1239,8 +1239,8 @@ class TestStreamingBehavior:
             second_yield_started.set()
             yield "after"
 
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
         consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
 
         await first_send_started.wait()
@@ -1250,7 +1250,7 @@ class TestStreamingBehavior:
 
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
         assert shutdown_error is None
 
     @pytest.mark.asyncio
@@ -1286,10 +1286,10 @@ class TestStreamingBehavior:
         streaming.accumulated_text = "\n\n🔧 `search_web` [1] ⏳\nx\n\n🔧 `save_file` [2] ⏳\n"
         streaming.chars_since_last_update = len(streaming.accumulated_text)
 
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
         delivery_queue.put_nowait(
-            _DeliveryRequest(
+            DeliveryRequest(
                 boundary_refresh=True,
                 prior_delta_at=100.0,
                 boundary_refresh_prior_delta_at=100.0,
@@ -1300,7 +1300,7 @@ class TestStreamingBehavior:
             patch("mindroom.streaming.time.time", return_value=100.0),
             patch("mindroom.streaming_delivery.time.time", return_value=100.0),
         ):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert mock_client.room_send.call_count == 1
@@ -1429,15 +1429,15 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.time.time", return_value=100.0):
             streaming._update("\n")
 
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
         await _flush_phase_boundary_if_needed(streaming, delivery_queue)
 
         with (
             patch("mindroom.streaming.time.time", return_value=101.0),
             patch("mindroom.streaming_delivery.time.time", return_value=101.0),
         ):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert mock_client.room_send.call_count == 0
@@ -1491,8 +1491,8 @@ class TestStreamingBehavior:
             second_yield_started.set()
             yield "B"
 
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
         streaming_times = iter([100.0, 100.0, 100.1, 100.2, 100.2, 100.2])
 
         with patch("mindroom.streaming.time.time", side_effect=lambda: next(streaming_times, 100.2)):
@@ -1505,7 +1505,7 @@ class TestStreamingBehavior:
             assert second_yield_started.is_set()
             allow_first_send_to_finish.set()
             await consume_task
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert mock_client.room_send.call_count == 2
@@ -1535,9 +1535,9 @@ class TestStreamingBehavior:
         streaming.accumulated_text = "hello"
         streaming.chars_since_last_update = len(streaming.accumulated_text)
 
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
-        delivery_queue.put_nowait(_DeliveryRequest(boundary_refresh=True))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue.put_nowait(DeliveryRequest(boundary_refresh=True))
 
         with (
             patch("mindroom.streaming.time.time", return_value=101.0),
@@ -1546,7 +1546,7 @@ class TestStreamingBehavior:
                 return_value=101.0,
             ),
         ):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert streaming.stream_started_at == 101.0
@@ -2989,7 +2989,7 @@ class TestStreamingBehavior:
                 "mindroom.streaming.edit_message_result",
                 new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit123", content_sent={})),
             ),
-            patch("mindroom.streaming._drain_worker_progress_events", new=lingering_drain),
+            patch("mindroom.streaming.drain_worker_progress_events", new=lingering_drain),
         ):
             outcome = await send_streaming_response(
                 client=mock_client,
@@ -3272,7 +3272,7 @@ class TestStreamingBehavior:
         delivery_task = asyncio.create_task(stuck_delivery())
         await task_started.wait()
 
-        shutdown_error = await _shutdown_stream_delivery(
+        shutdown_error = await shutdown_stream_delivery(
             delivery_queue,
             delivery_task,
             drain_timeout_seconds=0.01,
@@ -3302,7 +3302,7 @@ class TestStreamingBehavior:
         await task_started.wait()
         asyncio.get_running_loop().call_later(0.05, release_task.set)
 
-        shutdown_error = await _shutdown_stream_delivery(
+        shutdown_error = await shutdown_stream_delivery(
             delivery_queue,
             delivery_task,
             drain_timeout_seconds=0.1,
@@ -3339,13 +3339,13 @@ class TestStreamingBehavior:
         streaming.chars_since_last_update = len(streaming.accumulated_text)
         streaming._send_content = AsyncMock(return_value=True)
 
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
-        delivery_queue.put_nowait(_DeliveryRequest(prior_delta_at=100.0))
-        delivery_queue.put_nowait(_DeliveryRequest(prior_delta_at=105.0))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue.put_nowait(DeliveryRequest(prior_delta_at=100.0))
+        delivery_queue.put_nowait(DeliveryRequest(prior_delta_at=105.0))
 
         with patch("mindroom.streaming.time.time", return_value=105.02):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert streaming._send_content.await_count == 1
@@ -3372,15 +3372,15 @@ class TestStreamingBehavior:
         streaming.chars_since_last_update = len(streaming.accumulated_text)
 
         capture_completion = asyncio.get_running_loop().create_future()
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
-        delivery_queue.put_nowait(_DeliveryRequest(force_refresh=True))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue.put_nowait(DeliveryRequest(force_refresh=True))
         delivery_queue.put_nowait(
-            _DeliveryRequest(boundary_refresh=True, capture_completion=capture_completion),
+            DeliveryRequest(boundary_refresh=True, capture_completion=capture_completion),
         )
 
         with patch("mindroom.streaming.time.time", return_value=101.0):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert capture_completion.done()
@@ -3432,11 +3432,11 @@ class TestStreamingBehavior:
                 delivery_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await delivery_task
-            return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
+            return StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
 
         with (
-            patch("mindroom.streaming._consume_stream_with_progress_supervision", new=fail_stream_supervision),
-            patch("mindroom.streaming._shutdown_stream_delivery", new=timeout_shutdown),
+            patch("mindroom.streaming.consume_stream_with_progress_supervision", new=fail_stream_supervision),
+            patch("mindroom.streaming.shutdown_stream_delivery", new=timeout_shutdown),
             pytest.raises(
                 StreamingDeliveryError,
                 match="Timed out shutting down stream delivery controller",
@@ -4576,9 +4576,9 @@ class TestStreamingBehavior:
             ),
         )
 
-        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
-        delivery_queue.put_nowait(_DeliveryRequest(force_refresh=True, allow_empty_progress=True))
+        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue.put_nowait(DeliveryRequest(force_refresh=True, allow_empty_progress=True))
 
         async def response_stream() -> AsyncIterator[object]:
             await first_send_started.wait()
@@ -4594,7 +4594,7 @@ class TestStreamingBehavior:
             await asyncio.sleep(0)
             allow_first_send_to_finish.set()
             await consume_task
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert mock_client.room_send.call_count == 2

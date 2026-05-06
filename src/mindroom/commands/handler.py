@@ -124,7 +124,7 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
     return ""
 
 
-def _generate_welcome_message(room_id: str, config: Config, runtime_paths: RuntimePaths) -> str:
+def generate_welcome_message(room_id: str, config: Config, runtime_paths: RuntimePaths) -> str:
     """Generate the welcome message text for a room."""
     # Get list of configured agents for this room
     configured_agents = get_configured_agents_for_room(room_id, config, runtime_paths)
@@ -235,7 +235,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type == CommandType.HI:
         # Generate the welcome message for this room
-        response_text = _generate_welcome_message(room.room_id, context.config, context.runtime_paths)
+        response_text = generate_welcome_message(room.room_id, context.config, context.runtime_paths)
 
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]

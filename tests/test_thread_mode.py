@@ -23,7 +23,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.event_cache import ThreadCacheState
-from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
@@ -1301,7 +1301,7 @@ class TestExtractedModuleLoggerRebinding:
         event_cache = AsyncMock()
         event_cache.append_event.side_effect = RuntimeError("cache write failed")
         bot.event_cache = event_cache
-        bot.event_cache_write_coordinator = _EventCacheWriteCoordinator(
+        bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
             background_task_owner=bot._runtime_view,
         )
