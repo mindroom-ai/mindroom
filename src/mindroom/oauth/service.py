@@ -58,6 +58,23 @@ class OAuthConnectTarget:
     requester_id: str | None
 
 
+def oauth_credential_target_payload(
+    provider: OAuthProvider,
+    worker_target: ResolvedWorkerTarget | None,
+) -> dict[str, str]:
+    """Return serializable OAuth state payload for one credential target."""
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    worker_scope = worker_target.worker_scope if worker_target is not None else None
+    worker_key = worker_target.worker_key if worker_target is not None else None
+    return {
+        "provider": provider.id,
+        "credential_service": provider.credential_service,
+        "agent_name": agent_name or "",
+        "worker_scope": worker_scope or "unscoped",
+        "worker_key": worker_key or "",
+    }
+
+
 def _issue_oauth_connect_token(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
@@ -68,19 +85,13 @@ def _issue_oauth_connect_token(
         return None
     requester_id = worker_target.execution_identity.requester_id
 
-    connect_target = OAuthConnectTarget(
-        provider_id=provider.id,
-        credential_service=provider.credential_service,
-        agent_name=worker_target.routing_agent_name,
-        worker_scope=worker_target.worker_scope or "unscoped",
-        worker_key=worker_target.worker_key,
-        requester_id=requester_id,
-    )
+    payload = oauth_credential_target_payload(provider, worker_target)
+    payload["requester_id"] = requester_id or ""
     return issue_opaque_oauth_state(
         runtime_paths,
         kind=_OAUTH_CONNECT_TOKEN_KIND,
         ttl_seconds=_OAUTH_CONNECT_TOKEN_TTL_SECONDS,
-        data=_oauth_connect_target_payload(connect_target),
+        data=payload,
     )
 
 
@@ -134,18 +145,6 @@ def consume_oauth_connect_token(
         msg = "OAuth connect link target changed"
         raise OAuthProviderError(msg)
     return connect_target
-
-
-def _oauth_connect_target_payload(connect_target: OAuthConnectTarget) -> dict[str, str]:
-    """Return serializable OAuth state payload for one connect target."""
-    return {
-        "provider": connect_target.provider_id,
-        "credential_service": connect_target.credential_service,
-        "agent_name": connect_target.agent_name or "",
-        "worker_scope": connect_target.worker_scope,
-        "worker_key": connect_target.worker_key,
-        "requester_id": connect_target.requester_id or "",
-    }
 
 
 def _mindroom_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvider | None = None) -> str:

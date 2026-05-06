@@ -32,6 +32,7 @@ from mindroom.oauth.service import (
     OAuthConnectTarget,
     consume_oauth_connect_token,
     lookup_oauth_connect_token,
+    oauth_credential_target_payload,
     oauth_credentials_usable,
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
@@ -177,15 +178,7 @@ def _issue_authorization_url(
 
 
 def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsTarget) -> dict[str, str]:
-    worker_target = worker_target_for_credentials_target(target)
-    worker_key = worker_target.worker_key if worker_target is not None else None
-    return {
-        "provider": provider.id,
-        "credential_service": provider.credential_service,
-        "agent_name": target.agent_name or "",
-        "worker_scope": target.worker_scope or "unscoped",
-        "worker_key": worker_key or "",
-    }
+    return oauth_credential_target_payload(provider, worker_target_for_credentials_target(target))
 
 
 def _verify_connect_target_authorized(

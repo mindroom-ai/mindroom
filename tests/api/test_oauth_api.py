@@ -240,6 +240,45 @@ def _worker_key_for_matrix_user_scope(requester_id: str, worker_scope: WorkerSco
     return worker_key
 
 
+def test_oauth_credential_target_payload_matches_worker_target_fields() -> None:
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "general", execution_identity=identity)
+    assert worker_target is not None
+
+    payload = oauth_service.oauth_credential_target_payload(provider, worker_target)
+
+    assert payload == {
+        "provider": "google_drive",
+        "credential_service": "google_drive_oauth",
+        "agent_name": "general",
+        "worker_scope": "user_agent",
+        "worker_key": worker_target.worker_key,
+    }
+
+
+def test_oauth_credential_target_payload_represents_unscoped_target() -> None:
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+
+    payload = oauth_service.oauth_credential_target_payload(provider, None)
+
+    assert payload == {
+        "provider": "google_drive",
+        "credential_service": "google_drive_oauth",
+        "agent_name": "",
+        "worker_scope": "unscoped",
+        "worker_key": "",
+    }
+
+
 def test_plugin_config_registers_oauth_provider(tmp_path: Path) -> None:
     plugin_dir = tmp_path / "plugin"
     plugin_dir.mkdir()
