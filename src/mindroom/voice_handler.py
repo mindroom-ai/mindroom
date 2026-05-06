@@ -421,38 +421,11 @@ async def _process_transcription(
         )
 
         # Build the prompt for the AI
-        prompt = f"""You are a voice transcription normalizer for a Matrix chat bot system.
-Your task is to lightly normalize spoken transcriptions while preserving natural language and user intent.
-
-Available agents (use EXACT agent name after @):
-{agent_list}
-
-Available teams (use EXACT team name after @):
-{team_list}
-
-Examples of correct formatting:
-- User says "HomeAssistant turn on the fan" → "@home turn on the fan"  (NOT @homeassistant)
-- User says "research agent find papers on AI" → "@research find papers on AI"
-- User says "at research can you help me" → "@research can you help me"
-- User says "schedule something tomorrow" → "schedule something tomorrow"  (NOT a !command)
-
-Rules:
-1. ALWAYS use the EXACT agent name (the part before the parentheses) after @, NOT the display name
-   - If agent is listed as "@home (spoken as: HomeAssistant)", use "@home" NOT "@homeassistant"
-2. DEFAULT: keep natural language exactly as-is, except for minor ASR fixes and mention normalization
-3. NEVER rewrite speech into Matrix bot commands or invent leading ! prefixes
-4. Agent mentions come FIRST when just addressing them:
-   - "research agent, find papers" → "@research find papers"
-   - "ask the email agent to check mail" → "@email check mail"
-5. Fix common speech recognition errors (e.g., "at research" → "@research")
-6. Be smart about intent - "ask the research agent" means "@research"
-7. ONLY mention agents/teams listed above as available in this room
-8. If no relevant available agent/team is listed, do not add any @mention
-9. Never invent words, commands, or arguments that were not spoken
-
-Transcription: "{transcription}"
-
-Output the formatted message only, no explanation:"""
+        prompt = config.get_prompt("VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE").format(
+            agent_list=agent_list,
+            team_list=team_list,
+            transcription=transcription,
+        )
 
         # Get the AI model to process the transcription
         model = model_loading.get_model_instance(config, runtime_paths, config.voice.intelligence.model)

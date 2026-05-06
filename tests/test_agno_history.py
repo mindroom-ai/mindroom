@@ -983,6 +983,20 @@ async def test_compaction_call_timeout_raises_runtime_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compaction_summary_uses_configured_system_prompt() -> None:
+    """Compaction summaries should use the configured prompt text."""
+    model = RecordingModel(id="summary-model", provider="fake")
+
+    await _generate_compaction_summary(
+        model=model,
+        summary_input="Current prompt",
+        summary_prompt="Custom compaction instructions.",
+    )
+
+    assert model.seen_messages[0].content == "Custom compaction instructions."
+
+
+@pytest.mark.asyncio
 async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_cleanup() -> None:
     class _SlowToUnwindSummaryModel(FakeModel):
         def __init__(self, *, model_id: str, provider: str) -> None:

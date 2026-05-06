@@ -63,6 +63,7 @@ from mindroom.matrix_identifiers import (
     managed_space_alias_localpart,
 )
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
+from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
@@ -93,6 +94,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "toolkits",
     "knowledge_bases",
     "mcp_servers",
+    "prompts",
     "matrix_room_access",
     "matrix_space",
     "matrix_delivery",
@@ -342,6 +344,10 @@ class Config(BaseModel):
     plugins: list[PluginEntryConfig] = Field(default_factory=list, description="Plugin entries")
     debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug and diagnostic settings")
     avatars: AvatarConfig = Field(default_factory=AvatarConfig, description="Managed avatar generation settings")
+    prompts: dict[str, str] = Field(
+        default_factory=dict,
+        description="Built-in prompt overrides keyed by the uppercase global name from mindroom.prompts",
+    )
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     knowledge_bases: dict[str, KnowledgeBaseConfig] = Field(
@@ -411,6 +417,24 @@ class Config(BaseModel):
                 continue
             normalized_plugins.append(plugin_entry)
         return normalized_plugins
+
+    @field_validator("prompts")
+    @classmethod
+    def validate_prompt_overrides(cls, value: dict[str, str]) -> dict[str, str]:
+        """Ensure prompt overrides map to known built-in string prompt globals."""
+        unknown_names = sorted(set(value) - PROMPT_DEFAULT_NAMES)
+        if unknown_names:
+            allowed = ", ".join(sorted(PROMPT_DEFAULT_NAMES))
+            unknown = ", ".join(unknown_names)
+            msg = f"Unknown prompt override(s): {unknown}. Allowed prompt names: {allowed}"
+            raise ValueError(msg)
+        return value
+
+    def get_prompt(self, name: str) -> str:
+        """Return one configured prompt override or the built-in default."""
+        if name in self.prompts:
+            return self.prompts[name]
+        return PROMPT_DEFAULTS[name]
 
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:

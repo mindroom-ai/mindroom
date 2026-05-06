@@ -93,7 +93,7 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 | `voice_handler.py` | Voice message download, transcription, and command recognition |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `streaming.py` | Response streaming via progressive message edits |
-| `agent_prompts.py` | Rich built-in prompts for named agents (code, research, etc.) |
+| `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachment_media.py` | Convert attachment records to Agno media objects |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |

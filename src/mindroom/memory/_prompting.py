@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from mindroom.prompts import MEMORY_CONTEXT_PROMPT_TEMPLATE
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -15,17 +17,18 @@ if TYPE_CHECKING:
 _USER_TURN_TIME_PREFIX_RE = re.compile(r"^\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} [^\]]+\]\s")
 
 
-def format_memories_as_context(memories: list[MemoryResult], context_type: str = "agent") -> str:
+def format_memories_as_context(
+    memories: list[MemoryResult],
+    context_type: str = "agent",
+    *,
+    prompt_template: str = MEMORY_CONTEXT_PROMPT_TEMPLATE,
+) -> str:
     """Format memories into a context string."""
     if not memories:
         return ""
 
-    context_parts = [
-        f"[Automatically extracted {context_type} memories - may not be relevant to current context]",
-        f"Previous {context_type} memories that might be related:",
-    ]
-    context_parts.extend(f"- {memory.get('memory', '')}" for memory in memories)
-    return "\n".join(context_parts)
+    memory_lines = "\n".join(f"- {memory.get('memory', '')}" for memory in memories)
+    return prompt_template.format(context_type=context_type, memory_lines=memory_lines)
 
 
 def strip_user_turn_time_prefix(text: str) -> str:

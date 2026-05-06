@@ -60,15 +60,13 @@ class DelegateTools(Toolkit):
 
     def _build_instructions(self) -> str:
         """Build toolkit instructions listing available delegation targets."""
-        lines = ["You can delegate tasks to the following agents:"]
+        lines: list[str] = []
         for target_name in self._delegate_to:
             description = describe_agent(target_name, self._config)
-            lines.append(f"\n{description}")
-        lines.append(
-            "\nUse delegate_task to send a task to one of these agents. "
-            "The agent will execute the task independently and return its response.",
+            lines.append(description)
+        return self._config.get_prompt("DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE").format(
+            agent_descriptions="\n\n".join(lines),
         )
-        return "\n".join(lines)
 
     async def delegate_task(self, agent_name: str, task: str) -> str:
         """Delegate a task to another agent and return its response.

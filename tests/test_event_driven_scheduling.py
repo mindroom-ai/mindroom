@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
@@ -22,25 +23,24 @@ def _runtime_paths() -> object:
 
 
 @pytest.fixture
-def mock_config() -> MagicMock:
-    """Create a mock config with test agents."""
-    config = MagicMock()
-    config.agents = {
-        "email_assistant": MagicMock(),
-        "phone_agent": MagicMock(),
-        "crypto_agent": MagicMock(),
-        "notification_agent": MagicMock(),
-        "monitoring_agent": MagicMock(),
-        "ops_agent": MagicMock(),
-        "reddit_agent": MagicMock(),
-        "analyst": MagicMock(),
-        "ci_agent": MagicMock(),
-        "ticket_agent": MagicMock(),
-    }
-    config.models = {
-        "default": MagicMock(),
-    }
-    return config
+def mock_config() -> Config:
+    """Create a typed config with test agents."""
+    agent_names = (
+        "email_assistant",
+        "phone_agent",
+        "crypto_agent",
+        "notification_agent",
+        "monitoring_agent",
+        "ops_agent",
+        "reddit_agent",
+        "analyst",
+        "ci_agent",
+        "ticket_agent",
+    )
+    return Config(
+        agents={name: {"display_name": name.replace("_", " ").title()} for name in agent_names},
+        models={"default": {"provider": "openai", "id": "gpt-5.4"}},
+    )
 
 
 @pytest.mark.asyncio
@@ -53,7 +53,7 @@ class TestEventDrivenScheduling:
         self,
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
-        mock_config: MagicMock,
+        mock_config: Config,
     ) -> None:
         """Test converting 'if email urgent' to polling schedule."""
         # Setup
@@ -98,7 +98,7 @@ class TestEventDrivenScheduling:
         self,
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
-        mock_config: MagicMock,
+        mock_config: Config,
     ) -> None:
         """Test converting Bitcoin price condition to polling schedule."""
         # Setup
@@ -135,7 +135,7 @@ class TestEventDrivenScheduling:
         self,
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
-        mock_config: MagicMock,
+        mock_config: Config,
     ) -> None:
         """Test converting server monitoring condition to polling schedule."""
         # Setup
@@ -172,7 +172,7 @@ class TestEventDrivenScheduling:
         self,
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
-        mock_config: MagicMock,
+        mock_config: Config,
     ) -> None:
         """Test converting build failure event to polling schedule."""
         # Setup
@@ -209,7 +209,7 @@ class TestEventDrivenScheduling:
         self,
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
-        mock_config: MagicMock,
+        mock_config: Config,
     ) -> None:
         """Test converting Reddit mention event to polling schedule."""
         # Setup
@@ -246,7 +246,7 @@ class TestEventDrivenScheduling:
         self,
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
-        mock_config: MagicMock,
+        mock_config: Config,
     ) -> None:
         """Test converting boss email event with immediate urgency."""
         # Setup
@@ -283,7 +283,7 @@ class TestEventDrivenScheduling:
         self,
         mock_agent_class: MagicMock,
         mock_get_model: MagicMock,  # noqa: ARG002
-        mock_config: MagicMock,
+        mock_config: Config,
     ) -> None:
         """Test that the prompt includes event-driven examples."""
         # Setup

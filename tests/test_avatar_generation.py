@@ -13,6 +13,13 @@ from google.genai import types
 import mindroom.constants as constants_mod
 from mindroom import avatar_generation as generate_avatars
 from mindroom.matrix import avatar as avatar_module
+from mindroom.prompts import (
+    AVATAR_AGENT_SYSTEM_PROMPT,
+    AVATAR_CHARACTER_STYLE,
+    AVATAR_ROOM_STYLE,
+    AVATAR_ROOM_SYSTEM_PROMPT,
+    AVATAR_TEAM_SYSTEM_PROMPT,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -110,9 +117,9 @@ def test_resolve_avatar_prompt_settings_applies_overrides_and_defaults(tmp_path:
 
     assert prompt_settings.character_style == "custom character style"
     assert prompt_settings.room_system_prompt == "custom room system prompt"
-    assert prompt_settings.room_style == generate_avatars._ROOM_STYLE
-    assert prompt_settings.agent_system_prompt == generate_avatars._AGENT_SYSTEM_PROMPT
-    assert prompt_settings.team_system_prompt == generate_avatars._TEAM_SYSTEM_PROMPT
+    assert prompt_settings.room_style == AVATAR_ROOM_STYLE
+    assert prompt_settings.agent_system_prompt == AVATAR_AGENT_SYSTEM_PROMPT
+    assert prompt_settings.team_system_prompt == AVATAR_TEAM_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
@@ -478,11 +485,11 @@ async def test_generate_prompt_uses_gemini_prompt_model() -> None:
         ),
     )
 
-    assert prompt == f"{generate_avatars._CHARACTER_STYLE}, teal and copper, visor eyes"
+    assert prompt == f"{AVATAR_CHARACTER_STYLE}, teal and copper, visor eyes"
     kwargs = generate_content.await_args.kwargs
     assert kwargs["model"] == generate_avatars._PROMPT_MODEL
     assert kwargs["contents"] == "Agent name: research\nRole: Finds information\nType: agents"
-    assert kwargs["config"].system_instruction == generate_avatars._AGENT_SYSTEM_PROMPT
+    assert kwargs["config"].system_instruction == AVATAR_AGENT_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
@@ -500,9 +507,9 @@ async def test_generate_prompt_uses_room_style_for_spaces() -> None:
         ),
     )
 
-    assert prompt == f"{generate_avatars._ROOM_STYLE}, deep blue, doorway outline"
+    assert prompt == f"{AVATAR_ROOM_STYLE}, deep blue, doorway outline"
     kwargs = generate_content.await_args.kwargs
-    assert kwargs["config"].system_instruction == generate_avatars._ROOM_SYSTEM_PROMPT
+    assert kwargs["config"].system_instruction == AVATAR_ROOM_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio

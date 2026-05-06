@@ -19,6 +19,8 @@ from agno.models.response import ModelResponse
 from agno.utils.http import get_default_async_client, get_default_sync_client
 from openai import AsyncOpenAI, OpenAI
 
+from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -33,7 +35,6 @@ _CODEX_REFRESH_URL = "https://auth.openai.com/oauth/token"
 _CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _CODEX_REFRESH_SKEW_SECONDS = 30
 _CODEX_MODEL_PREFIX = "openai-codex/"
-_CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
 _CODEX_UNSUPPORTED_REQUEST_PARAMS = {"max_output_tokens", "temperature"}
 _CODEX_PROMPT_CACHE_KEY_PREFIX = "mindroom"
 _CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
@@ -273,6 +274,7 @@ class CodexResponses(OpenAIResponses):
     store: bool = False
     codex_home: str | None = None
     prompt_cache_key: str | None = None
+    default_instructions: str = CODEX_DEFAULT_INSTRUCTIONS
 
     def __post_init__(self) -> None:
         """Normalize LLM-plugin-style model IDs before Agno uses the model id."""
@@ -301,7 +303,7 @@ class CodexResponses(OpenAIResponses):
 
     def _instructions_text(self) -> str:
         instructions = [self.system_prompt, *(self.instructions or [])]
-        return "\n\n".join(instruction for instruction in instructions if instruction) or _CODEX_DEFAULT_INSTRUCTIONS
+        return "\n\n".join(instruction for instruction in instructions if instruction) or self.default_instructions
 
     def _prompt_cache_key(self) -> str | None:
         return self.prompt_cache_key

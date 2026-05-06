@@ -951,8 +951,12 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
             agent = prepared_run.agent
             run_input = prepared_run.run_input
             unseen_event_ids = prepared_run.unseen_event_ids
+            inline_media_fallback_prompt = config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
             if agent.model is not None:
-                ai_runtime.install_queued_message_notice_hook(agent.model)
+                ai_runtime.install_queued_message_notice_hook(
+                    agent.model,
+                    notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
+                )
 
             run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
             metadata = build_matrix_run_metadata(
@@ -1015,7 +1019,10 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=str(e),
                             )
-                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
+                                run_input,
+                                fallback_prompt=inline_media_fallback_prompt,
+                            )
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
@@ -1034,7 +1041,10 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                                 agent=agent_name,
                                 error=error_text,
                             )
-                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
+                                run_input,
+                                fallback_prompt=inline_media_fallback_prompt,
+                            )
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
@@ -1446,8 +1456,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             run_input = prepared_run.run_input
             unseen_event_ids = prepared_run.unseen_event_ids
             prepared_context_input_tokens = prepared_run.prepared_history.estimated_context_tokens
+            inline_media_fallback_prompt = config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
             if agent.model is not None:
-                ai_runtime.install_queued_message_notice_hook(agent.model)
+                ai_runtime.install_queued_message_notice_hook(
+                    agent.model,
+                    notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
+                )
 
             run_extra_content = build_prepared_history_metadata_content(prepared_run.prepared_history)
             metadata = build_matrix_run_metadata(
@@ -1538,7 +1552,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             log_message="Retrying streaming AI response without inline media after validation error",
                             agent_name=agent_name,
                         ):
-                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
+                            attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
+                                run_input,
+                                fallback_prompt=inline_media_fallback_prompt,
+                            )
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
@@ -1547,7 +1564,10 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         return
 
                     if state.retry_requested:
-                        attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(run_input)
+                        attempt_prompt = ai_runtime.append_inline_media_fallback_to_run_input(
+                            run_input,
+                            fallback_prompt=inline_media_fallback_prompt,
+                        )
                         attempt_media_inputs = MediaInputs()
                         attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                         continue

@@ -70,7 +70,7 @@ This domain is responsible for making tool execution explicit and legible.
 
 This domain owns agent construction, routing, team collaboration, prompt composition, and agent-level decision flow.
 
-Representative modules include `agents.py`, `routing.py`, `teams.py`, and `agent_prompts.py`.
+Representative modules include `agents.py`, `routing.py`, `teams.py`, and `prompts.py`.
 
 This domain decides who should act and how specialized agents collaborate.
 

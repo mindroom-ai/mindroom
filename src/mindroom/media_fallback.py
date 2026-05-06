@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
+
 if TYPE_CHECKING:
     from mindroom.media_inputs import MediaInputs
 
@@ -31,13 +33,12 @@ def should_retry_without_inline_media(error: Exception | str, media_inputs: Medi
     return _is_media_validation_error_text(str(error))
 
 
-def append_inline_media_fallback_prompt(full_prompt: str) -> str:
+def append_inline_media_fallback_prompt(
+    full_prompt: str,
+    *,
+    fallback_prompt: str = INLINE_MEDIA_FALLBACK_PROMPT,
+) -> str:
     """Append one-time guidance when inline media had to be dropped."""
     if _INLINE_MEDIA_FALLBACK_MARKER in full_prompt:
         return full_prompt
-    return (
-        f"{full_prompt.rstrip()}\n\n"
-        f"{_INLINE_MEDIA_FALLBACK_MARKER} "
-        "The model rejected inline attachments for this turn. "
-        "Use available attachment IDs and tools to inspect files instead."
-    )
+    return f"{full_prompt.rstrip()}\n\n{fallback_prompt}"

@@ -775,41 +775,11 @@ async def _parse_workflow_schedule(
     assert available_agents, "No agents available for scheduling"
     agent_list = ", ".join(f"@{a.username}" for a in available_agents)
 
-    prompt = f"""Parse this scheduling request into a structured workflow.
-
-Current time (UTC): {current_time.isoformat()}Z
-Request: "{request}"
-
-Your task is to:
-1. Determine if this is a one-time task or recurring (cron)
-2. Extract the schedule/timing
-3. Create a message that mentions the appropriate agents
-4. Set is_conditional=true only when the request is event-based or conditional
-
-Available agents: {agent_list}
-
-IMPORTANT: Event-based and conditional requests:
-When the request depends on an external event or condition rather than a fixed time:
-1. Convert to an appropriate recurring (cron) schedule for polling
-2. Include BOTH the condition check AND the action in the message
-3. Choose polling frequency based on urgency and type
-4. Set is_conditional to true
-
-Important rules:
-- Set is_conditional=false for normal time-based schedules
-- For conditional/event-based requests, ALWAYS include the check condition in the message
-- Mention relevant agents with @ only when needed
-- Convert time expressions to UTC for the schedule, but DO NOT include them in the message
-- Remove time phrases like "in 15 seconds" from the message itself
-- If schedule_type is "once", you MUST provide execute_at
-- If schedule_type is "cron", you MUST provide cron_schedule
-
-Examples of event/condition phrasing to include in the message (do not include times in these examples):
-- @email_assistant Check for emails containing 'urgent'. If found, @phone_agent notify the user.
-- @crypto_agent Check Bitcoin price. If below $40,000, @notification_agent alert the user.
-- @monitoring_agent Check server CPU usage. If above 80%, @ops_agent scale up the servers.
-- @reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points.
-"""
+    prompt = config.get_prompt("WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE").format(
+        current_time=current_time.isoformat(),
+        request=request,
+        agent_list=agent_list,
+    )
 
     model = model_loading.get_model_instance(config, runtime_paths, "default")
 

@@ -22,7 +22,6 @@ from agno.session import AgentSession
 from agno.tools.function import Function
 from pydantic import ValidationError
 
-from mindroom import agent_prompts
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
@@ -45,6 +44,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.prompts import HIDDEN_TOOL_CALLS_PROMPT, OPENAI_COMPAT_HISTORY_GUIDANCE
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
@@ -186,6 +186,24 @@ def _patch_published_knowledge(
     monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)
 
 
+def test_agent_identity_prompt_can_be_overridden_from_config() -> None:
+    """Agent identity prompt assembly should honor the configured template override."""
+    config = _test_config()
+    config.prompts = {
+        "AGENT_IDENTITY_CONTEXT_TEMPLATE": (
+            "## Custom Identity\n"
+            "Name={display_name}; Matrix={matrix_id}; Provider={model_provider}; Model={model_id}.\n"
+            "{openai_compat_history_guidance}"
+        ),
+    }
+
+    agent = _create_agent_for_test("general", config)
+
+    assert "## Custom Identity" in agent.role
+    assert "Name=GeneralAgent;" in agent.role
+    assert "## Your Identity" not in agent.role
+
+
 def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> None:
     """OpenAI-compatible prompt guidance should be opt-in at agent construction time."""
     config = _test_config()
@@ -197,8 +215,8 @@ def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> N
         include_openai_compat_guidance=True,
     )
 
-    assert agent_prompts._OPENAI_COMPAT_HISTORY_GUIDANCE not in matrix_agent.role
-    assert agent_prompts._OPENAI_COMPAT_HISTORY_GUIDANCE in openai_compat_agent.role
+    assert OPENAI_COMPAT_HISTORY_GUIDANCE not in matrix_agent.role
+    assert OPENAI_COMPAT_HISTORY_GUIDANCE in openai_compat_agent.role
 
 
 def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
@@ -326,7 +344,7 @@ def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None: 
 
     agent = _create_agent_for_test("general", config=config)
 
-    assert agent_prompts.HIDDEN_TOOL_CALLS_PROMPT in agent.instructions
+    assert HIDDEN_TOOL_CALLS_PROMPT in agent.instructions
 
 
 @pytest.mark.parametrize(

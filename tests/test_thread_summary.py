@@ -12,13 +12,14 @@ import pytest
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from pydantic import ValidationError
 
+from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixDeliveryConfig
 from mindroom.constants import RuntimePaths
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
-    _SUMMARY_INSTRUCTIONS,
     _TRUNCATION_SAMPLE_SIZE,
     THREAD_SUMMARY_MAX_LENGTH,
     ThreadSummaryWriteError,
@@ -334,14 +335,16 @@ def _mock_config(
     first_threshold: int = 5,
     subsequent_interval: int = 10,
     summary_temperature: float | None = 0.2,
-) -> MagicMock:
-    config = MagicMock()
-    config.defaults.thread_summary_model = model_name
-    config.defaults.thread_summary_first_threshold = first_threshold
-    config.defaults.thread_summary_subsequent_interval = subsequent_interval
-    config.defaults.thread_summary_temperature = summary_temperature
-    config.matrix_delivery = MatrixDeliveryConfig()
-    return config
+) -> Config:
+    return Config(
+        defaults={
+            "thread_summary_model": model_name,
+            "thread_summary_first_threshold": first_threshold,
+            "thread_summary_subsequent_interval": subsequent_interval,
+            "thread_summary_temperature": summary_temperature,
+        },
+        matrix_delivery=MatrixDeliveryConfig(),
+    )
 
 
 def _mock_runtime_paths() -> MagicMock:
@@ -1529,7 +1532,7 @@ class TestGenerateSummary:
 
     async def test_prompt_good_examples_are_stable_and_within_hard_limit(self) -> None:
         """Prompt GOOD examples should be short and avoid transient-status wording."""
-        instructions = "\n".join(_SUMMARY_INSTRUCTIONS)
+        instructions = THREAD_SUMMARY_INSTRUCTIONS
 
         for example in _EXPECTED_GOOD_PROMPT_EXAMPLES:
             assert example in instructions

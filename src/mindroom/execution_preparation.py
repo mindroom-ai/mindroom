@@ -37,6 +37,7 @@ from mindroom.history import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
+from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
 from mindroom.timing import timed
 
@@ -53,27 +54,14 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_DEFAULT_UNSEEN_MESSAGES_HEADER = "Messages since your last response:"
-_INTERRUPTED_PARTIAL_REPLY_HEADER = (
-    "Messages since your last response:\n"
-    "Your previous response was interrupted before completion. "
-    "The partial content below may be incomplete. Continue from where you left off if appropriate."
-)
-_IN_PROGRESS_PARTIAL_REPLY_HEADER = (
-    "Messages since your last response:\n"
-    "Your previous response is still being delivered. Do NOT repeat or redo that work. "
-    "The partial content is shown below for context only."
-)
-_MIXED_PARTIAL_REPLY_HEADER = (
-    "Messages since your last response:\n"
-    "Some partial content from your previous response is still being delivered, so do NOT repeat or redo that work. "
-    "Other partial content was interrupted before completion and may be incomplete. "
-    "Continue from where you left off if appropriate."
-)
 _PARTIAL_REPLY_SENDER_LABELS = {
     "interrupted": "You (interrupted reply draft)",
     "in_progress": "You (reply still streaming)",
 }
+
+
+def _configured_prompt(config: Config | None, name: str) -> str:
+    return config.get_prompt(name) if config is not None else PROMPT_DEFAULTS[name]
 
 
 class _PartialReplyKind(str, Enum):
@@ -304,15 +292,19 @@ def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
     return isinstance(original_sender, str) and bool(original_sender)
 
 
-def _build_unseen_messages_header(partial_reply_kinds: set[_PartialReplyKind]) -> str:
+def _build_unseen_messages_header(
+    partial_reply_kinds: set[_PartialReplyKind],
+    *,
+    config: Config | None = None,
+) -> str:
     """Choose the unseen-context guidance for the partial-reply mix present."""
     if not partial_reply_kinds:
-        return _DEFAULT_UNSEEN_MESSAGES_HEADER
+        return _configured_prompt(config, "DEFAULT_UNSEEN_MESSAGES_HEADER")
     if partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}:
-        return _INTERRUPTED_PARTIAL_REPLY_HEADER
+        return _configured_prompt(config, "INTERRUPTED_PARTIAL_REPLY_HEADER")
     if partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}:
-        return _IN_PROGRESS_PARTIAL_REPLY_HEADER
-    return _MIXED_PARTIAL_REPLY_HEADER
+        return _configured_prompt(config, "IN_PROGRESS_PARTIAL_REPLY_HEADER")
+    return _configured_prompt(config, "MIXED_PARTIAL_REPLY_HEADER")
 
 
 def _context_message_from_visible_message(
@@ -362,13 +354,14 @@ def _messages_with_capped_context(
     *,
     context_messages: Sequence[Message],
     current_sender_id: str | None,
+    config: Config | None = None,
     static_token_budget: int,
     estimate_static_tokens_fn: Callable[[str], int],
     render_messages_text_fn: Callable[[Sequence[Message]], str],
 ) -> tuple[Message, ...]:
     """Return the newest context-message suffix that fits the total static token budget."""
     selected_context: list[Message] = []
-    current_only_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
+    current_only_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id, config=config)
     current_only_tokens = estimate_static_tokens_fn(render_messages_text_fn(current_only_messages))
     if current_only_tokens > static_token_budget:
         return current_only_messages
@@ -379,6 +372,7 @@ def _messages_with_capped_context(
             prompt,
             context_messages=candidate_context,
             current_sender_id=current_sender_id,
+            config=config,
         )
         if estimate_static_tokens_fn(render_messages_text_fn(candidate_messages)) > static_token_budget:
             break
@@ -387,6 +381,7 @@ def _messages_with_capped_context(
         prompt,
         context_messages=selected_context,
         current_sender_id=current_sender_id,
+        config=config,
     )
 
 
@@ -395,6 +390,7 @@ def _messages_with_current_prompt(
     *,
     context_messages: Sequence[Message] = (),
     current_sender_id: str | None = None,
+    config: Config | None = None,
 ) -> tuple[Message, ...]:
     """Return canonical live request messages with the current user turn last."""
     messages = [message.model_copy(deep=True) for message in context_messages]
@@ -402,8 +398,8 @@ def _messages_with_current_prompt(
         _build_matrix_prompt_with_history(
             prompt,
             [],
-            header="Previous conversation in this thread:",
-            prompt_intro="Current message:\n",
+            header=_configured_prompt(config, "PREVIOUS_CONVERSATION_THREAD_HEADER"),
+            prompt_intro=_configured_prompt(config, "CURRENT_MESSAGE_PROMPT_INTRO"),
             current_sender=current_sender_id,
         )
         if current_sender_id is not None
@@ -438,6 +434,7 @@ def _build_unseen_context_messages(
     active_event_ids: Collection[str],
     response_sender_id: str | None,
     current_sender_id: str | None = None,
+    config: Config | None = None,
 ) -> tuple[tuple[Message, ...], list[str]]:
     """Return canonical request messages for unseen thread context plus the current turn."""
     unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
@@ -453,7 +450,7 @@ def _build_unseen_context_messages(
     )
     if partial_reply_kinds:
         context_messages = (
-            Message(role="user", content=_build_unseen_messages_header(partial_reply_kinds)),
+            Message(role="user", content=_build_unseen_messages_header(partial_reply_kinds, config=config)),
             *context_messages,
         )
     return (
@@ -461,6 +458,7 @@ def _build_unseen_context_messages(
             prompt,
             context_messages=context_messages,
             current_sender_id=current_sender_id,
+            config=config,
         ),
         _get_unseen_event_ids_for_metadata(
             unseen_messages,
@@ -475,6 +473,7 @@ def _build_thread_history_messages(
     *,
     response_sender_id: str | None,
     current_sender_id: str | None = None,
+    config: Config | None = None,
     max_messages: int | None = None,
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
@@ -484,7 +483,7 @@ def _build_thread_history_messages(
 ) -> tuple[Message, ...]:
     """Return canonical request messages for fallback full-thread replay."""
     if not thread_history:
-        return _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
+        return _messages_with_current_prompt(prompt, current_sender_id=current_sender_id, config=config)
     context_messages = _context_messages_from_visible_messages(
         thread_history,
         response_sender_id=response_sender_id,
@@ -501,6 +500,7 @@ def _build_thread_history_messages(
             prompt,
             context_messages=context_messages,
             current_sender_id=current_sender_id,
+            config=config,
             static_token_budget=static_token_budget,
             estimate_static_tokens_fn=estimate_static_tokens_fn,
             render_messages_text_fn=render_messages_text_fn,
@@ -509,6 +509,7 @@ def _build_thread_history_messages(
         prompt,
         context_messages=context_messages,
         current_sender_id=current_sender_id,
+        config=config,
     )
 
 
@@ -670,6 +671,7 @@ async def _prepare_execution_context_common(
         fallback_thread_history,
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
+        config=config,
         max_messages=thread_history_render_limits.max_messages if thread_history_render_limits else None,
         max_message_length=(thread_history_render_limits.max_message_length if thread_history_render_limits else None),
         missing_sender_label=(
@@ -680,7 +682,7 @@ async def _prepare_execution_context_common(
         render_messages_text_fn=render_messages_text_fn,
     )
 
-    provisional_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
+    provisional_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id, config=config)
     if reply_to_event_id and thread_history:
         provisional_messages, _ = _build_unseen_context_messages(
             prompt,
@@ -690,11 +692,12 @@ async def _prepare_execution_context_common(
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
+            config=config,
         )
 
     prepared_scope_history = await prepare_scope_history_fn(render_messages_text_fn(provisional_messages))
 
-    final_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id)
+    final_messages = _messages_with_current_prompt(prompt, current_sender_id=current_sender_id, config=config)
     if reply_to_event_id and thread_history:
         final_messages, unseen_event_ids = _build_unseen_context_messages(
             prompt,
@@ -704,6 +707,7 @@ async def _prepare_execution_context_common(
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
+            config=config,
         )
     else:
         unseen_event_ids = []

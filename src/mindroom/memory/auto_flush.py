@@ -450,20 +450,15 @@ async def _extract_memory_summary(
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
     existing_block = (
-        f"\nExisting memory snippets (avoid duplicates):\n{existing_context}\n"
+        config.get_prompt("MEMORY_EXISTING_SNIPPETS_TEMPLATE").format(existing_context=existing_context)
         if existing_context
-        else "\nExisting memory snippets: (none)\n"
+        else config.get_prompt("MEMORY_NO_EXISTING_SNIPPETS")
     )
     excerpt = "\n".join(lines)
-    prompt = (
-        "Extract only durable memories from this conversation excerpt.\n"
-        "Keep only stable facts, explicit preferences, decisions, commitments, and action items.\n"
-        "Skip chit-chat, temporary statements, and one-off tool output.\n"
-        f"If nothing should be stored, output exactly: {extractor.no_reply_token}\n"
-        "Output plain lines only, one memory per line, no commentary.\n"
-        f"{existing_block}\n"
-        "Conversation excerpt:\n"
-        f"{excerpt}\n"
+    prompt = config.get_prompt("MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE").format(
+        no_reply_token=extractor.no_reply_token,
+        existing_block=existing_block,
+        excerpt=excerpt,
     )
 
     model_name = config.get_entity_model_name(agent_name)

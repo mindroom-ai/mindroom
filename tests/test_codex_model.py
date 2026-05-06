@@ -371,6 +371,7 @@ def test_get_model_instance_supports_codex_provider(tmp_path: Path) -> None:
             ),
         },
         agents={},
+        prompts={"CODEX_DEFAULT_INSTRUCTIONS": "Custom Codex default instructions."},
     )
 
     model = get_model_instance(config, runtime_paths)
@@ -378,4 +379,5 @@ def test_get_model_instance_supports_codex_provider(tmp_path: Path) -> None:
     assert isinstance(model, CodexResponses)
     assert model.id == "gpt-5.5"
     assert model.store is False
+    assert model.get_request_params()["instructions"] == "Custom Codex default instructions."
     assert str(model.base_url) == _CODEX_BASE_URL

@@ -407,10 +407,18 @@ async def build_memory_prompt_parts(
             timing_scope,
         )
         if agent_entrypoint:
-            session_preamble = f"[File memory entrypoint (agent)]\n{agent_entrypoint}"
+            session_preamble = f"{config.get_prompt('FILE_MEMORY_ENTRYPOINT_HEADER')}\n{agent_entrypoint}"
         context_type = "agent file"
 
-    turn_context = format_memories_as_context(agent_memories, context_type) if agent_memories else ""
+    turn_context = (
+        format_memories_as_context(
+            agent_memories,
+            context_type,
+            prompt_template=config.get_prompt("MEMORY_CONTEXT_PROMPT_TEMPLATE"),
+        )
+        if agent_memories
+        else ""
+    )
     return MemoryPromptParts(
         session_preamble=session_preamble,
         turn_context=turn_context,

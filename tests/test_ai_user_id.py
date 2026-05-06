@@ -6047,6 +6047,12 @@ class TestUserIdPassthrough:
         second = append_inline_media_fallback_prompt(first)
         assert first == second
 
+        custom = append_inline_media_fallback_prompt(
+            initial_prompt,
+            fallback_prompt="[Inline media unavailable for this model]\nCustom retry guidance.",
+        )
+        assert "Custom retry guidance." in custom
+
     @pytest.mark.asyncio
     async def test_ai_response_does_not_retry_without_media_validation_match(self, tmp_path: Path) -> None:
         """Non-media failures should not trigger inline-media retry even when media is present."""

@@ -249,46 +249,6 @@ async def _recover_last_summary_count(
     return best_count
 
 
-_SUMMARY_INSTRUCTIONS = [
-    "You are a thread summary writer.",
-    "Produce a single concise summary line describing the DURABLE TOPIC of a chat thread.",
-    "",
-    "GOAL:",
-    "The summary must describe what the thread is fundamentally about: its subject, goal, or work item.",
-    "It must remain accurate whether the thread has 5 messages or 50+.",
-    "",
-    "RULES:",
-    "- One line only, plain text only.",
-    "- Under 160 characters is preferred.",
-    "- Hard max 300 characters after normalization.",
-    '- Prefer stable noun phrases such as "Fixing X", "Review of Y", "Discussion of Z", '
-    '"Live test of A", or "Investigation of B".',
-    "- Start with 1-2 emojis representing the topic category.",
-    "- Include a ticket, issue, or PR number when it helps identify the enduring subject.",
-    "- Lead with the main work item or topic, not the latest state update.",
-    "- Do NOT include transient state.",
-    "- Specifically avoid approval or merge status, round or attempt numbers, test counts "
-    'or pass/fail tallies, progress markers like "in progress" or "awaiting review", and '
-    'temporal phrases like "currently" or "just landed".',
-    "- If the thread is a test or review, say what is being tested or reviewed, not whether it passed.",
-    "- Write a NOVEL summary in your own words.",
-    "- Do NOT copy, quote, or truncate any message from the thread.",
-    '- No quotes, no prefixes like "Summary:", and no trailing punctuation.',
-    "",
-    "BAD -> GOOD EXAMPLES:",
-    '- "\u2705 PR #548 approved after round 13 fixes, 25 bugs found" -> '
-    '"\U0001f9f5 Review of PR #548 session persistence hooks"',
-    '- "\U0001f9ec ISSUE-148: live e2e test of matrix cache invalidate-and-refetch \u2014 '
-    'thread context and post-restart cache persistence confirmed working" -> '
-    '"\U0001f9ea ISSUE-148 matrix cache invalidate-and-refetch live test"',
-    '- "\U0001f9ea Attachment cache test in progress \u2014 bot retrieving first line of '
-    'uploaded test file" -> "\U0001f9ea Attachment cache live test"',
-    '- "\u2705 ISSUE-083: thread-goal plugin e2e test \u2014 all 4 operations passed '
-    'successfully" -> "\U0001f9ea ISSUE-083 thread-goal plugin end-to-end test"',
-    '- "\U0001f331 Bot echo test \u2014 three seed prompts sent and correctly replied" '
-    '-> "\U0001f501 Bot echo/reply verification test"',
-]
-
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
 _TRUNCATION_SAMPLE_SIZE = 3
 
@@ -336,10 +296,10 @@ async def _generate_summary(
     conversation = _build_conversation_text(thread_history)
     session_hash = hashlib.sha256(conversation.encode()).hexdigest()[:8]
 
-    prompt = f"<thread_messages>\n{conversation}\n</thread_messages>\n\nSummarize the above thread."
+    prompt = config.get_prompt("THREAD_SUMMARY_USER_PROMPT_TEMPLATE").format(conversation=conversation)
     agent = Agent(
         name="ThreadSummarizer",
-        instructions=list(_SUMMARY_INSTRUCTIONS),
+        instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS").splitlines(),
         model=model,
         output_schema=_ThreadSummary,
         telemetry=False,

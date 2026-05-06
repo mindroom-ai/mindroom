@@ -48,6 +48,7 @@ from mindroom.history.types import (
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
@@ -74,33 +75,6 @@ _EXCERPT_METADATA_OMIT_KEYS = frozenset(
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 type _ToolDefinition = dict[str, object]
-_COMPACTION_SUMMARY_PROMPT = """\
-You are updating a durable conversation handoff summary for a future model call.
-
-You will receive:
-1. An optional <previous_summary> block that already contains everything summarized before this compaction.
-2. A <new_conversation> block containing only the runs that became old enough to compact in this pass.
-
-Your job is to produce one merged handoff summary as plain text.
-Return only the summary text.
-
-Rules:
-- Preserve all still-relevant information from <previous_summary>.
-- Add only the new information from <new_conversation>.
-- Keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
-- Never paraphrase away exact technical details such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
-- Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
-- Do not invent facts.
-- If a section has no content, write `None.`
-
-Write a plain-text summary in exactly this markdown structure:
-## Goal
-## Constraints
-## Progress
-## Decisions
-## Next Steps
-## Critical Context
-"""
 
 
 class _CompactionProviderTimeoutError(Exception):
@@ -291,6 +265,7 @@ async def compact_scope_history(
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
     reserve_tokens: int,
+    summary_prompt: str = COMPACTION_SUMMARY_PROMPT,
     timing_scope: str | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
@@ -350,6 +325,7 @@ async def compact_scope_history(
         before_tokens=before_tokens,
         runs_before=before_run_count,
         threshold_tokens=threshold_tokens,
+        summary_prompt=summary_prompt,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
         collect_compaction_hook_messages=collect_compaction_hook_messages,
@@ -446,6 +422,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     lifecycle_notice_event_id: str | None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     collect_compaction_hook_messages: bool,
+    summary_prompt: str = COMPACTION_SUMMARY_PROMPT,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
     timing_scope: str | None = None,
 ) -> _CompactionRewriteResult | None:
@@ -528,6 +505,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
             session_id=session_id,
             scope=scope,
             history_settings=history_settings,
+            summary_prompt=summary_prompt,
             timing_scope=timing_scope,
         )
         included_runs = new_summary.included_runs
@@ -1038,6 +1016,7 @@ async def _generate_compaction_summary_with_retry(
     session_id: str,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
+    summary_prompt: str,
     timing_scope: str | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, retrying once with a smaller input when safe."""
@@ -1063,6 +1042,7 @@ async def _generate_compaction_summary_with_retry(
             summary = await _generate_compaction_summary(
                 model=model,
                 summary_input=summary_input,
+                summary_prompt=summary_prompt,
                 timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
                 timing_scope=timing_scope,
             )
@@ -1142,6 +1122,7 @@ async def _generate_compaction_summary(
     *,
     model: Model,
     summary_input: str,
+    summary_prompt: str = COMPACTION_SUMMARY_PROMPT,
     timeout_seconds: float | None = None,
     timing_scope: str | None = None,
 ) -> SessionSummary:
@@ -1152,7 +1133,7 @@ async def _generate_compaction_summary(
         try:
             return await model.aresponse(
                 messages=[
-                    Message(role="system", content=_COMPACTION_SUMMARY_PROMPT),
+                    Message(role="system", content=summary_prompt),
                     Message(role="user", content=summary_input),
                 ],
             )

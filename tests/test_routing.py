@@ -233,6 +233,41 @@ class TestAIRouting:
                 assert "general" in mock_agent.arun.call_args[0][0]
 
     @pytest.mark.asyncio
+    async def test_suggest_agent_uses_router_prompt_override(self) -> None:
+        """Router selection should use the configured prompt template override."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+                    "general": AgentConfig(display_name="General", rooms=[]),
+                },
+                router=RouterConfig(model="default"),
+                prompts={
+                    "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": (
+                        "CUSTOM ROUTER\nAgents:\n{agents_info}\nMessage={message}\n"
+                    ),
+                },
+            ),
+        )
+
+        with patch("mindroom.model_loading.get_model_instance"):
+            mock_agent = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.content = _AgentSuggestion(agent_name="general", reasoning="Custom route")
+            mock_agent.arun.return_value = mock_response
+
+            with patch("mindroom.routing.Agent", return_value=mock_agent):
+                agents = [
+                    MatrixID(username="mindroom_calculator", domain="localhost"),
+                    MatrixID(username="mindroom_general", domain="localhost"),
+                ]
+                result = await suggest_agent_for_message("Hello", agents, config)
+
+        assert result == "general"
+        assert mock_agent.arun.call_args.args[0].startswith("CUSTOM ROUTER")
+        assert "Message=Hello" in mock_agent.arun.call_args.args[0]
+
+    @pytest.mark.asyncio
     async def test_suggest_agent_with_thread_context(self) -> None:
         """Test agent suggestion with thread history."""
         # Create config with the agents we're testing

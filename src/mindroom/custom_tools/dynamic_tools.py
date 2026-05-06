@@ -33,11 +33,7 @@ class DynamicToolsToolkit(Toolkit):
         self._session_id = session_id
         super().__init__(
             name="dynamic_tools",
-            instructions=(
-                "Manage optional toolkits for this session. "
-                "Use list_toolkits() when unsure. "
-                "load_tools() and unload_tools() apply on the next request in the same session."
-            ),
+            instructions=config.get_prompt("DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS"),
             tools=[self.list_toolkits, self.load_tools, self.unload_tools],
         )
 

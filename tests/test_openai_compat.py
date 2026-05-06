@@ -34,7 +34,6 @@ from starlette.requests import ClientDisconnect
 from mindroom import constants
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
-from mindroom.ai_runtime import _QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_compat import (
@@ -55,6 +54,7 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
 from mindroom.tool_approval import _shutdown_approval_store
@@ -4268,7 +4268,7 @@ class TestTeamCompletion:
                     messages=[
                         Message(
                             role="user",
-                            content=_QUEUED_MESSAGE_NOTICE_TEXT,
+                            content=QUEUED_MESSAGE_NOTICE_TEXT,
                             provider_data={"mindroom_queued_message_notice": True},
                         ),
                     ],
@@ -4279,7 +4279,7 @@ class TestTeamCompletion:
                             messages=[
                                 Message(
                                     role="user",
-                                    content=_QUEUED_MESSAGE_NOTICE_TEXT,
+                                    content=QUEUED_MESSAGE_NOTICE_TEXT,
                                     provider_data={"mindroom_queued_message_notice": True},
                                 ),
                             ],

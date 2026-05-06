@@ -1,0 +1,33 @@
+"""Tests for configurable built-in prompt overrides."""
+
+from __future__ import annotations
+
+import pytest
+from pydantic import ValidationError
+
+from mindroom.config.main import Config
+
+
+def test_config_accepts_known_prompt_override() -> None:
+    """Prompt overrides accept known globals and return configured text."""
+    config = Config.model_validate(
+        {
+            "prompts": {
+                "AGENT_IDENTITY_CONTEXT_TEMPLATE": "Custom identity for {display_name}.",
+            },
+        },
+    )
+
+    assert config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE") == "Custom identity for {display_name}."
+
+
+def test_config_rejects_unknown_prompt_override() -> None:
+    """Unknown prompt override names fail config validation."""
+    with pytest.raises(ValidationError, match="Unknown prompt override"):
+        Config.model_validate(
+            {
+                "prompts": {
+                    "NOT_A_REAL_PROMPT": "Custom prompt.",
+                },
+            },
+        )

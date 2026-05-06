@@ -570,29 +570,10 @@ async def _select_team_mode(
         TeamMode.COORDINATE or TeamMode.COLLABORATE
 
     """
-    prompt = f"""Determine the best team collaboration mode for this task.
-
-Task: {message}
-Agents: {", ".join(agent_names)}
-
-Team Modes (from Agno documentation):
-- "coordinate": Team leader delegates tasks to members and synthesizes their outputs.
-               The leader decides whether to send tasks sequentially or in parallel based on what's appropriate.
-- "collaborate": All team members are given the SAME task and work on it simultaneously.
-                The leader synthesizes all their outputs into a cohesive response.
-
-Decision Guidelines:
-- Use "coordinate" when agents need to do DIFFERENT subtasks (whether sequential or parallel)
-- Use "collaborate" when you want ALL agents working on the SAME problem for diverse perspectives
-
-Examples:
-- "Email me then call me" → coordinate (different tasks: email agent sends email, phone agent makes call)
-- "Get weather and news" → coordinate (different tasks: weather agent gets weather, news agent gets news)
-- "Research this topic and analyze the data" → coordinate (different subtasks for each agent)
-- "What do you think about X?" → collaborate (all agents provide their perspective on the same question)
-- "Brainstorm solutions" → collaborate (all agents work on the same brainstorming task)
-
-Return the mode and a one-sentence reason why."""
+    prompt = config.get_prompt("TEAM_MODE_SELECTION_PROMPT_TEMPLATE").format(
+        message=message,
+        agent_names=", ".join(agent_names),
+    )
 
     model = model_loading.get_model_instance(config, runtime_paths, "default")
     agent = Agent(
@@ -1312,7 +1293,10 @@ def _create_team_instance(
     model = model_loading.get_model_instance(config, runtime_paths, model_name or "default")
     # Coordinate-mode tool calls run through the shared team model in v1.
     # Member-agent models are intentionally not wrapped here.
-    ai_runtime.install_queued_message_notice_hook(model)
+    ai_runtime.install_queued_message_notice_hook(
+        model,
+        notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
+    )
     if configured_team_name is not None and configured_team_name in config.teams:
         history_settings = config.get_entity_history_settings(configured_team_name)
     else:
@@ -1663,6 +1647,7 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
             cleaned_response: RunOutput | TeamRunOutput | None = None
             attempt_prompt = prompt
             attempt_media_inputs = media_inputs
+            inline_media_fallback_prompt = orchestrator.config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
             try:
                 for retried_without_inline_media in (False, True):
                     response = None
@@ -1683,7 +1668,10 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                                 scope_context=scope_context,
                                 entity_name=configured_team_name or team_name,
                             )
-                            attempt_prompt = append_inline_media_fallback_prompt(prompt)
+                            attempt_prompt = append_inline_media_fallback_prompt(
+                                prompt,
+                                fallback_prompt=inline_media_fallback_prompt,
+                            )
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
@@ -1714,7 +1702,10 @@ async def team_response(  # noqa: C901, PLR0912, PLR0915
                                 scope_context=scope_context,
                                 entity_name=configured_team_name or team_name,
                             )
-                            attempt_prompt = append_inline_media_fallback_prompt(prompt)
+                            attempt_prompt = append_inline_media_fallback_prompt(
+                                prompt,
+                                fallback_prompt=inline_media_fallback_prompt,
+                            )
                             attempt_media_inputs = MediaInputs()
                             attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                             continue
@@ -2030,6 +2021,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             media_inputs = media or MediaInputs()
             attempt_prompt = prepared_prompt
             attempt_media_inputs = media_inputs
+            inline_media_fallback_prompt = orchestrator.config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT")
 
             visible_per_member: dict[str, str] = {}
             visible_consensus: str = ""
@@ -2256,7 +2248,10 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                         scope_context=scope_context,
                                         entity_name=team_label,
                                     )
-                                    attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
+                                    attempt_prompt = append_inline_media_fallback_prompt(
+                                        prepared_prompt,
+                                        fallback_prompt=inline_media_fallback_prompt,
+                                    )
                                     attempt_media_inputs = MediaInputs()
                                     attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                                     retry_requested = True
@@ -2298,7 +2293,10 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                                     scope_context=scope_context,
                                     entity_name=team_label,
                                 )
-                                attempt_prompt = append_inline_media_fallback_prompt(prepared_prompt)
+                                attempt_prompt = append_inline_media_fallback_prompt(
+                                    prepared_prompt,
+                                    fallback_prompt=inline_media_fallback_prompt,
+                                )
                                 attempt_media_inputs = MediaInputs()
                                 attempt_run_id = ai_runtime.next_retry_run_id(run_id)
                                 retry_requested = True

@@ -61,18 +61,13 @@ async def suggest_agent(
 
         agents_info = "\n\n".join(agent_descriptions)
 
-        prompt = f"""Decide which agent should respond to this message.
-
-Available agents and their capabilities:
-
-{agents_info}
-
-Message: "{message}"
-
-Choose the most appropriate agent based on their role, tools, and instructions."""
+        prompt = config.get_prompt("ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE").format(
+            agents_info=agents_info,
+            message=message,
+        )
 
         if thread_context:
-            context = "Previous messages:\n"
+            context = f"{config.get_prompt('ROUTER_THREAD_CONTEXT_HEADER')}\n"
             for msg in thread_context[-3:]:  # Last 3 messages
                 sender = msg.sender
                 body = msg.body[:100]

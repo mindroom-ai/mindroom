@@ -27,7 +27,6 @@ from agno.team._run import _cleanup_and_store
 from agno.utils.message import get_text_from_message
 
 from mindroom.agents import create_agent
-from mindroom.ai_runtime import _QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -46,6 +45,7 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
+from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,
@@ -121,7 +121,7 @@ def _prepared_team_execution_context(
 def _queued_notice_message() -> Message:
     return Message(
         role="user",
-        content=_QUEUED_MESSAGE_NOTICE_TEXT,
+        content=QUEUED_MESSAGE_NOTICE_TEXT,
         provider_data={"mindroom_queued_message_notice": True},
     )
 
@@ -132,7 +132,7 @@ def _has_queued_notice(messages: list[Message] | None) -> bool:
             isinstance(message.provider_data, dict)
             and message.provider_data.get("mindroom_queued_message_notice") is True
         )
-        or message.content == _QUEUED_MESSAGE_NOTICE_TEXT
+        or message.content == QUEUED_MESSAGE_NOTICE_TEXT
         for message in messages or []
     )
 
@@ -464,7 +464,7 @@ async def test_team_response_fallback_run_output_cleans_queued_notice_before_for
 
     assert "Recovered team response" in response
     assert "RunOutput(" not in response
-    assert _QUEUED_MESSAGE_NOTICE_TEXT not in response
+    assert QUEUED_MESSAGE_NOTICE_TEXT not in response
 
 
 @pytest.mark.asyncio

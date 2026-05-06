@@ -26,6 +26,13 @@ from mindroom.matrix.rooms import get_room_id
 from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
+from mindroom.prompts import (
+    AVATAR_AGENT_SYSTEM_PROMPT,
+    AVATAR_CHARACTER_STYLE,
+    AVATAR_ROOM_STYLE,
+    AVATAR_ROOM_SYSTEM_PROMPT,
+    AVATAR_TEAM_SYSTEM_PROMPT,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,60 +48,6 @@ _PROMPT_MODEL = "gemini-3.1-flash-lite-preview"
 # Gemini 3.1 Flash Image Preview is the current Google image-generation model.
 _IMAGE_MODEL = "gemini-3.1-flash-image-preview"
 _ROOT_SPACE_AVATAR_NAME = "root_space"
-
-_CHARACTER_STYLE = "professional AI avatar portrait, abstract geometric silhouette, premium product-render aesthetic, refined materials, subtle depth, precise lighting, centered composition, restrained but distinctive color palette, modern enterprise technology brand language, calm intelligent presence, abstract interface motifs, no text, not cartoonish, not childish"
-
-_ROOM_STYLE = "minimalist wayfinding icon, precise geometry, strong silhouette, centered symbol, solid or restrained gradient background, contemporary enterprise technology design language, subtle depth, highly legible at small size, no text, not playful, not sticker-like"
-
-_TEAM_SYSTEM_PROMPT = """You are creating distinctive visual elements for a professional AI team avatar.
-Given a team's name and purpose, suggest visual elements that feel advanced, credible, and memorable:
-- A refined color system with one or two main colors
-- A core geometric motif or silhouette
-- A subtle interface, signal, or network detail
-- A unifying emblem, structure, or arrangement that suggests collaboration
-- Optional material or lighting cues
-Output visual elements as a comma-separated list.
-Example: "deep teal and graphite, interlocking geometric forms, thin orbital light rings, shared central core, brushed metal accents"
-Avoid mascots, toy-like characters, exaggerated expressions, or whimsical accessories.
-Make each team feel like part of one cohesive MindRoom identity system while remaining distinct."""
-
-_AGENT_SYSTEM_PROMPT = """You are creating distinctive visual elements for a professional AI agent avatar.
-Given an agent's name and role, suggest visual elements that communicate expertise and personality through form, color, and motif:
-- A distinctive but restrained color palette
-- A signature geometric or architectural form
-- A subtle interface, signal, or instrument detail related to the role
-- A clear mood such as focused, analytical, decisive, calm, or exploratory
-- Optional lighting or material cues
-Output visual elements as a comma-separated list.
-Examples:
-- Researcher: "teal and graphite, precise radial scan motif, layered data planes, cool rim lighting, focused presence"
-- Operations: "amber and charcoal, structured grid framework, status indicators, robust protective framing, steady presence"
-Avoid mascots, toy-like characters, comic exaggeration, or whimsical accessories.
-Keep it polished, modern, and credible."""
-
-_ROOM_SYSTEM_PROMPT = """You are creating a refined, minimalist icon design for a room avatar.
-Given a room's purpose, suggest a simple icon and distinctive color system:
-- ONE strong background color or restrained duotone
-- ONE simple symbol that represents the room's purpose
-- Clean geometry and a strong silhouette
-Output as: "background color, icon description"
-
-IMPORTANT:
-- Keep every room clearly distinct in color and symbol.
-- Prefer confident, professional colors rather than novelty shades.
-- Think product icon, wayfinding symbol, or control-room tile.
-
-Examples:
-- Lobby: "deep blue background, doorway outline with soft inner glow"
-- Research: "slate teal background, layered lens or scan ring"
-- Docs: "cool gray background, structured document sheet"
-- Ops: "burnt orange background, segmented control dial"
-- Communication: "indigo background, speech contour with signal lines"
-- Finance: "forest green background, stacked bar glyph"
-- Home: "warm graphite background, house outline with centered node"
-
-Avoid childish, sticker-like, or overly decorative designs.
-Make each room instantly recognizable at small sizes."""
 
 _ROOM_PURPOSES = {
     "lobby": "Central meeting space, entrance and welcome area",
@@ -203,23 +156,27 @@ def _has_missing_managed_avatars(config: Config, runtime_paths: constants.Runtim
 
 def _resolve_avatar_prompt_settings(config: Config) -> _AvatarPromptSettings:
     """Resolve avatar prompt settings from config with built-in fallbacks."""
-    prompts = config.avatars.prompts
+    avatar_prompt_overrides = config.avatars.prompts
     return _AvatarPromptSettings(
-        character_style=_CHARACTER_STYLE
-        if prompts is None or prompts.character_style is None
-        else prompts.character_style,
-        room_style=_ROOM_STYLE if prompts is None or prompts.room_style is None else prompts.room_style,
+        character_style=config.get_prompt("AVATAR_CHARACTER_STYLE")
+        if avatar_prompt_overrides is None or avatar_prompt_overrides.character_style is None
+        else avatar_prompt_overrides.character_style,
+        room_style=config.get_prompt("AVATAR_ROOM_STYLE")
+        if avatar_prompt_overrides is None or avatar_prompt_overrides.room_style is None
+        else avatar_prompt_overrides.room_style,
         agent_system_prompt=(
-            _AGENT_SYSTEM_PROMPT
-            if prompts is None or prompts.agent_system_prompt is None
-            else prompts.agent_system_prompt
+            config.get_prompt("AVATAR_AGENT_SYSTEM_PROMPT")
+            if avatar_prompt_overrides is None or avatar_prompt_overrides.agent_system_prompt is None
+            else avatar_prompt_overrides.agent_system_prompt
         ),
         team_system_prompt=(
-            _TEAM_SYSTEM_PROMPT if prompts is None or prompts.team_system_prompt is None else prompts.team_system_prompt
+            config.get_prompt("AVATAR_TEAM_SYSTEM_PROMPT")
+            if avatar_prompt_overrides is None or avatar_prompt_overrides.team_system_prompt is None
+            else avatar_prompt_overrides.team_system_prompt
         ),
-        room_system_prompt=_ROOM_SYSTEM_PROMPT
-        if prompts is None or prompts.room_system_prompt is None
-        else prompts.room_system_prompt,
+        room_system_prompt=config.get_prompt("AVATAR_ROOM_SYSTEM_PROMPT")
+        if avatar_prompt_overrides is None or avatar_prompt_overrides.room_system_prompt is None
+        else avatar_prompt_overrides.room_system_prompt,
     )
 
 
@@ -230,11 +187,11 @@ async def _generate_prompt(
 ) -> str:
     """Generate an image prompt based on the entity's role using AI."""
     resolved_prompt_settings = prompt_settings or _AvatarPromptSettings(
-        character_style=_CHARACTER_STYLE,
-        room_style=_ROOM_STYLE,
-        agent_system_prompt=_AGENT_SYSTEM_PROMPT,
-        team_system_prompt=_TEAM_SYSTEM_PROMPT,
-        room_system_prompt=_ROOM_SYSTEM_PROMPT,
+        character_style=AVATAR_CHARACTER_STYLE,
+        room_style=AVATAR_ROOM_STYLE,
+        agent_system_prompt=AVATAR_AGENT_SYSTEM_PROMPT,
+        team_system_prompt=AVATAR_TEAM_SYSTEM_PROMPT,
+        room_system_prompt=AVATAR_ROOM_SYSTEM_PROMPT,
     )
     if target.entity_type in {"rooms", "spaces"}:
         system_prompt = resolved_prompt_settings.room_system_prompt

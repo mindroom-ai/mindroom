@@ -649,6 +649,7 @@ async def _run_scope_compaction(
         replay_window_tokens=execution_plan.replay_window_tokens,
         threshold_tokens=execution_plan.trigger_threshold_tokens,
         reserve_tokens=execution_plan.reserve_tokens,
+        summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
         timing_scope=timing_scope,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,

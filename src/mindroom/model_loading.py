@@ -158,6 +158,9 @@ def get_model_instance(
     if model_api_key:
         extra_kwargs["api_key"] = model_api_key
 
+    if _canonical_provider(provider) in {"codex", "openai_codex"}:
+        extra_kwargs.setdefault("default_instructions", config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"))
+
     model = _create_model_for_provider(
         provider,
         model_id,
