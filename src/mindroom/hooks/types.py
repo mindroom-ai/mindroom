@@ -21,6 +21,7 @@ EVENT_COMPACTION_BEFORE = "compaction:before"
 EVENT_COMPACTION_AFTER = "compaction:after"
 EVENT_SCHEDULE_FIRED = "schedule:fired"
 EVENT_REACTION_RECEIVED = "reaction:received"
+EVENT_ROOM_MEMBER_JOINED = "room:member_joined"
 EVENT_CONFIG_RELOADED = "config:reloaded"
 EVENT_SESSION_STARTED = "session:started"
 EVENT_TOOL_BEFORE_CALL = "tool:before_call"
@@ -42,6 +43,7 @@ BUILTIN_EVENT_NAMES = frozenset(
         EVENT_COMPACTION_AFTER,
         EVENT_SCHEDULE_FIRED,
         EVENT_REACTION_RECEIVED,
+        EVENT_ROOM_MEMBER_JOINED,
         EVENT_CONFIG_RELOADED,
         EVENT_SESSION_STARTED,
         EVENT_TOOL_BEFORE_CALL,
@@ -49,7 +51,7 @@ BUILTIN_EVENT_NAMES = frozenset(
     },
 )
 _RESERVED_EVENT_NAMESPACES = frozenset(
-    {"message", "system", "agent", "bot", "compaction", "schedule", "reaction", "config", "session", "tool"},
+    {"message", "system", "agent", "bot", "compaction", "schedule", "reaction", "room", "config", "session", "tool"},
 )
 _EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$")
 _DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
@@ -61,6 +63,7 @@ _DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
     EVENT_MESSAGE_AFTER_RESPONSE: 3000,
     EVENT_MESSAGE_CANCELLED: 3000,
     EVENT_REACTION_RECEIVED: 500,
+    EVENT_ROOM_MEMBER_JOINED: 3000,
     EVENT_SCHEDULE_FIRED: 1000,
     EVENT_AGENT_STARTED: 5000,
     EVENT_AGENT_STOPPED: 5000,

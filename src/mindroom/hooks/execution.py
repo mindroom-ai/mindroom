@@ -24,6 +24,7 @@ from .context import (
     MessageReceivedContext,
     ReactionReceivedContext,
     ResponseDraft,
+    RoomMemberJoinedContext,
     ScheduleFiredContext,
     SessionHookContext,
     SystemEnrichContext,
@@ -76,7 +77,7 @@ def _scope_room_ids(context: _HookExecutionContext) -> tuple[str, ...]:  # noqa:
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
         return (envelope.room_id,)
-    if isinstance(context, ScheduleFiredContext | ReactionReceivedContext):
+    if isinstance(context, ScheduleFiredContext | ReactionReceivedContext | RoomMemberJoinedContext):
         return (context.room_id,)
     if isinstance(context, AgentLifecycleContext):
         return context.rooms

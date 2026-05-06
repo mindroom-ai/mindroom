@@ -546,6 +546,21 @@ class ReactionReceivedContext(HookContext):
 
 
 @dataclass(slots=True)
+class RoomMemberJoinedContext(HookContext):
+    """Context for room:member_joined hooks."""
+
+    room_id: str
+    event_id: str
+    user_id: str
+    sender_id: str
+    display_name: str | None
+    avatar_url: str | None
+    membership: str
+    prev_membership: str | None
+    first_join: bool
+
+
+@dataclass(slots=True)
 class ConfigReloadedContext(HookContext):
     """Context for config:reloaded hooks."""
 

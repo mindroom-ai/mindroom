@@ -24,6 +24,7 @@ from mindroom.hooks import (
     EVENT_AGENT_STOPPED,
     EVENT_BOT_READY,
     EVENT_REACTION_RECEIVED,
+    EVENT_ROOM_MEMBER_JOINED,
     AgentLifecycleContext,
     EnrichmentItem,
     HookContextSupport,
@@ -31,6 +32,7 @@ from mindroom.hooks import (
     HookRegistryState,
     MessageEnvelope,
     ReactionReceivedContext,
+    RoomMemberJoinedContext,
     emit,
     send_hook_message,
 )
@@ -85,6 +87,7 @@ from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
+from .matrix.room_member_joins import RoomMemberJoin, room_member_join_from_event
 from .media_inputs import MediaInputs
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
@@ -274,6 +277,7 @@ class AgentBot:
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _startup_thread_prewarm_task: asyncio.Task[None] | None
+    _room_member_callback_registered: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _invited_rooms: set[str]
@@ -304,6 +308,7 @@ class AgentBot:
         self._sync_trust_state = SyncTrustState.COLD
         self._sync_checkpoint: SyncCheckpoint | None = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
+        self._room_member_callback_registered = False
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
@@ -748,6 +753,25 @@ class AgentBot:
         )
         await emit(self.hook_registry, EVENT_REACTION_RECEIVED, context)
 
+    async def _emit_room_member_joined_hooks(self, join: RoomMemberJoin) -> None:
+        """Emit room:member_joined for one live human Matrix room join."""
+        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+            return
+
+        context = RoomMemberJoinedContext(
+            **self._hook_context_support.base_kwargs(EVENT_ROOM_MEMBER_JOINED, join.event_id),
+            room_id=join.room_id,
+            event_id=join.event_id,
+            user_id=join.user_id,
+            sender_id=join.sender_id,
+            display_name=join.display_name,
+            avatar_url=join.avatar_url,
+            membership=join.membership,
+            prev_membership=join.prev_membership,
+            first_join=join.first_join,
+        )
+        await emit(self.hook_registry, EVENT_ROOM_MEMBER_JOINED, context)
+
     async def _emit_agent_lifecycle_event(
         self,
         event_name: str,
@@ -1014,6 +1038,19 @@ class AgentBot:
             return None
         return time.monotonic() - self._last_sync_monotonic
 
+    def _register_room_member_callback_after_initial_sync(self) -> None:
+        """Start listening for live member joins after startup history is drained."""
+        if self.agent_name != ROUTER_AGENT_NAME or self._room_member_callback_registered:
+            return
+        client = self.client
+        if client is None:
+            return
+        client.add_event_callback(
+            _create_task_wrapper(self._on_room_member, owner=self._runtime_view),
+            nio.RoomMemberEvent,
+        )
+        self._room_member_callback_registered = True
+
     async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
@@ -1044,6 +1081,7 @@ class AgentBot:
         self._first_sync_done = True
 
         if first_sync_response:
+            self._register_room_member_callback_after_initial_sync()
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
             orchestrator = self.orchestrator
             if orchestrator is not None:
@@ -1218,6 +1256,7 @@ class AgentBot:
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
+        self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
         await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)
 
@@ -1375,6 +1414,25 @@ class AgentBot:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
         async with self._conversation_resolver.turn_thread_cache_scope():
             await self._handle_reaction_inner(room, event)
+
+    async def _on_room_member(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
+        """Expose live human room joins to router-owned hooks."""
+        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done:
+            return
+        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+            return
+
+        join = room_member_join_from_event(
+            room,
+            event,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            storage_root=self.runtime_paths.storage_root,
+        )
+        if join is None:
+            return
+
+        await self._emit_room_member_joined_hooks(join)
 
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""

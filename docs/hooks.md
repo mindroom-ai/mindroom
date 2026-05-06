@@ -158,6 +158,7 @@ async def block_secret_reads(ctx):
 | `compaction:after` | Observer | `CompactionHookContext` | After compaction is persisted, with before/after token counts and the generated summary | None (frozen) |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
+| `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, and `bot_accounts` | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
@@ -170,6 +171,8 @@ Use `message:final_response_transform` for one text-only best-effort replacement
 For `compaction:before` and `compaction:after`, `ctx.messages` contains raw `agno.models.message.Message` objects from the compacted session payload.
 MindRoom does not sanitize attachments, media, tool calls, tool args, provider metadata, citations, reasoning fields, metrics, references, or extra Pydantic fields before these hooks run.
 For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
+`room:member_joined` is emitted once per room/user pair using MindRoom's durable tracking state under `mindroom_data/tracking/`.
+This makes it suitable for lobby-based onboarding hooks that should create or invite a private agent only once.
 
 ### Default timeouts
 
@@ -183,6 +186,7 @@ For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explic
 | `message:after_response` | 3000 |
 | `message:cancelled` | 3000 |
 | `reaction:received` | 500 |
+| `room:member_joined` | 3000 |
 | `schedule:fired` | 1000 |
 | `agent:started` | 5000 |
 | `agent:stopped` | 5000 |
@@ -411,7 +415,7 @@ Each item still carries a `cache_policy`, but system enrichment uses it to contr
 ## Custom events
 
 Plugins can define and emit namespaced custom events.
-Built-in namespaces (`message:*`, `system:*`, `agent:*`, `bot:*`, `schedule:*`, `reaction:*`, `config:*`, `tool:*`) are reserved.
+Built-in namespaces (`message:*`, `system:*`, `agent:*`, `bot:*`, `schedule:*`, `reaction:*`, `room:*`, `config:*`, `tool:*`) are reserved.
 
 ### Defining a custom event hook
 
@@ -442,7 +446,7 @@ If you are writing internal code or tests and already have an explicit `HookRegi
 
 - Pattern: `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`
 - Must contain at least one colon separator
-- Reserved namespaces: `message`, `system`, `agent`, `bot`, `schedule`, `reaction`, `config`, `tool`
+- Reserved namespaces: `message`, `system`, `agent`, `bot`, `schedule`, `reaction`, `room`, `config`, `tool`
 - Custom events run in observer mode (`emit()`)
 - Recursion guard: nested emissions stop at depth 3
 
@@ -597,6 +601,18 @@ ResponseResult(
     delivery_kind: str,  # "sent" or "edited"
     response_kind: str,
     envelope: MessageEnvelope,
+)
+
+RoomMemberJoinedContext(
+    room_id: str,
+    event_id: str,
+    user_id: str,
+    sender_id: str,
+    display_name: str | None,
+    avatar_url: str | None,
+    membership: str,
+    prev_membership: str | None,
+    first_join: bool,
 )
 
 ToolBeforeCallContext(
