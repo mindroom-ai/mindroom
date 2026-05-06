@@ -810,6 +810,64 @@ def test_kubernetes_backend_evict_removes_only_own_key_from_tenant_auth_secret(t
     assert tenant_secret.data[other_worker_id] == "preexisting"
 
 
+def test_kubernetes_backend_reapply_without_encryption_removes_worker_secret_key(tmp_path: Path) -> None:
+    """Reapplying a worker Secret after disabling encryption should remove stale key data."""
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    encrypted_runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+        process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    backend, _apps_api, core_api = _backend(runtime_paths=encrypted_runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    assert CREDENTIALS_ENCRYPTION_KEY_ENV in core_api.secrets[handle.worker_id].data
+
+    unencrypted_runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend.runtime_paths = unencrypted_runtime_paths
+    backend._resources.runtime_paths = unencrypted_runtime_paths
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    assert CREDENTIALS_ENCRYPTION_KEY_ENV not in core_api.secrets[handle.worker_id].data
+    assert any(
+        name == handle.worker_id and body.get("data", {}).get(CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+        for name, body in core_api.patched_secret_bodies
+    )
+
+
+def test_kubernetes_backend_reapply_without_encryption_removes_shared_secret_key(tmp_path: Path) -> None:
+    """Reapplying a shared Secret entry after disabling encryption should remove stale worker key data."""
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    encrypted_runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+        process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    auth_secret_name = "mindroom-worker-auth-demo"  # noqa: S105
+    backend, _apps_api, core_api = _backend(runtime_paths=encrypted_runtime_paths, auth_secret_name=auth_secret_name)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    encryption_secret_key = f"{handle.worker_id}.credentials-encryption-key"
+    assert encryption_secret_key in core_api.secrets[auth_secret_name].data
+
+    unencrypted_runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend.runtime_paths = unencrypted_runtime_paths
+    backend._resources.runtime_paths = unencrypted_runtime_paths
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    assert encryption_secret_key not in core_api.secrets[auth_secret_name].data
+    assert any(
+        name == auth_secret_name and body.get("data", {}).get(encryption_secret_key) is None
+        for name, body in core_api.patched_secret_bodies
+    )
+
+
 def test_kubernetes_backend_startup_failure_removes_key_from_tenant_auth_secret(tmp_path: Path) -> None:
     """Failing to apply the worker Deployment should release the tenant-Secret key."""
     runtime_paths = resolve_primary_runtime_paths(

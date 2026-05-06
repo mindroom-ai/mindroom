@@ -685,19 +685,23 @@ class KubernetesResourceManager:
             string_data[constants.CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
         return string_data
 
-    def _worker_auth_secret_data(self, *, worker_token: str) -> dict[str, str]:
-        return {
+    def _worker_auth_secret_data(self, *, worker_token: str) -> dict[str, str | None]:
+        secret_data: dict[str, str | None] = {
             name: _secret_data_value(value)
             for name, value in self._worker_auth_secret_string_data(worker_token=worker_token).items()
         }
+        if self._credentials_encryption_key() is None:
+            secret_data[constants.CREDENTIALS_ENCRYPTION_KEY_ENV] = None
+        return secret_data
 
-    def _shared_auth_secret_data(self, *, worker_id: str, worker_token: str) -> dict[str, str]:
-        secret_data = {worker_id: _secret_data_value(worker_token)}
+    def _shared_auth_secret_data(self, *, worker_id: str, worker_token: str) -> dict[str, str | None]:
+        secret_data: dict[str, str | None] = {worker_id: _secret_data_value(worker_token)}
         credentials_encryption_key = self._credentials_encryption_key()
+        encryption_key_secret_key = _worker_credentials_encryption_key_secret_key(worker_id)
         if credentials_encryption_key is not None:
-            secret_data[_worker_credentials_encryption_key_secret_key(worker_id)] = _secret_data_value(
-                credentials_encryption_key,
-            )
+            secret_data[encryption_key_secret_key] = _secret_data_value(credentials_encryption_key)
+        else:
+            secret_data[encryption_key_secret_key] = None
         return secret_data
 
     def _deployment_manifest(
