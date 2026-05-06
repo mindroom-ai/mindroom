@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from agno.culture.manager import CultureManager
 from agno.db.base import BaseDb, SessionType
+from agno.knowledge.knowledge import Knowledge
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
@@ -54,7 +55,6 @@ from mindroom.workspaces import ensure_workspace_template
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from agno.knowledge.knowledge import Knowledge
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
     from agno.skills import Skills
@@ -1178,7 +1178,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     _log_toolkits_without_unique_model_functions(tools, agent_name=agent_name)
 
     knowledge_enabled = bool(config.get_agent_knowledge_base_ids(agent_name)) and knowledge is not None
-    knowledge_sources = knowledge_source_descriptions(cast("Knowledge | None", knowledge)) if knowledge_enabled else ()
+    knowledge_sources = (
+        knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
+    )
     culture_storage_root = resolved_storage_path
     cache_private_culture = False
     if agent_runtime.is_private:

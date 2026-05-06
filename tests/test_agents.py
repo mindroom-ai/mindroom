@@ -2919,6 +2919,64 @@ def test_agent_knowledge_search_tool_description_excludes_unavailable_sources(tm
     assert "legal" not in description
 
 
+def test_agent_accepts_custom_knowledge_protocol_without_source_metadata(tmp_path: Path) -> None:
+    """Custom knowledge implementations need not expose Agno Knowledge metadata fields."""
+
+    def search_knowledge_base(query: str) -> str:
+        """Search the custom knowledge backend."""
+        return f"custom result for {query}"
+
+    class CustomKnowledge:
+        def build_context(self, **_kwargs: object) -> str:
+            return "Use the custom knowledge backend."
+
+        def get_tools(self, **_kwargs: object) -> list[object]:
+            return [search_knowledge_base]
+
+        async def aget_tools(self, **_kwargs: object) -> list[object]:
+            return [search_knowledge_base]
+
+    config = _test_config()
+    config.agents["general"].knowledge_bases = ["custom"]
+    config.knowledge_bases = {
+        "custom": KnowledgeBaseConfig(
+            description="Custom protocol-backed search.",
+            path="./knowledge_docs/custom",
+        ),
+    }
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+
+    agent = _create_agent_for_test("general", config, knowledge=CustomKnowledge())
+
+    assert agent.knowledge is not None
+
+
+def test_config_rejects_knowledge_base_ids_with_source_metadata_separator() -> None:
+    """Knowledge base IDs must not collide with the source-description transport."""
+    base_id = "foo: bar"
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "knowledge_bases keys must not contain the reserved source description separator ': '; "
+            f"invalid keys: {base_id}",
+        ),
+    ):
+        Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    knowledge_bases=[base_id],
+                ),
+            },
+            knowledge_bases={
+                base_id: KnowledgeBaseConfig(
+                    path="./knowledge_docs/research",
+                    watch=False,
+                ),
+            },
+        )
+
+
 @pytest.mark.parametrize("base_id", ["", ".", "..", "group/research"])
 def test_config_rejects_knowledge_base_ids_that_are_not_normal_single_path_components(base_id: str) -> None:
     """Knowledge base IDs must stay single-component and avoid dot-segment aliases."""

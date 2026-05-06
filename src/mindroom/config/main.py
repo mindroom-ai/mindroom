@@ -647,6 +647,19 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_knowledge_base_ids_do_not_use_source_separator(self) -> Config:
+        """Reject knowledge base IDs that collide with source-description metadata."""
+        invalid_ids = sorted(base_id for base_id in self.knowledge_bases if ": " in base_id)
+        if invalid_ids:
+            formatted = ", ".join(invalid_ids)
+            msg = (
+                "knowledge_bases keys must not contain the reserved source description separator ': '; "
+                f"invalid keys: {formatted}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_knowledge_base_ids_are_path_safe(self) -> Config:
         """Reject knowledge base IDs that would create nested or overlapping alias paths."""
         invalid_ids = sorted(

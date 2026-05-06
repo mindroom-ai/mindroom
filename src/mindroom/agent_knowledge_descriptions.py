@@ -43,9 +43,9 @@ def _source_description_from_line(line: str) -> KnowledgeSourceDescription | Non
     )
 
 
-def knowledge_source_descriptions(knowledge: Knowledge | None) -> tuple[KnowledgeSourceDescription, ...]:
+def knowledge_source_descriptions(knowledge: Knowledge) -> tuple[KnowledgeSourceDescription, ...]:
     """Return the resolved queryable knowledge sources one agent can search."""
-    if knowledge is None or knowledge.name is None:
+    if knowledge.name is None:
         return ()
 
     if knowledge.description is not None and "\n" in knowledge.description:
