@@ -10,7 +10,7 @@ from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.presence import is_user_online
-from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source
+from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source, log_cancelled_response
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -53,29 +53,6 @@ class ResponseAttemptRequest:
     run_id: str | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     on_cancelled: Callable[[str], None] | None = None
-
-
-def log_cancelled_response(
-    logger: structlog.stdlib.BoundLogger,
-    *,
-    exc: asyncio.CancelledError,
-    message_id: str | None,
-    restart_message: str,
-    user_stop_message: str,
-    interrupted_message: str,
-) -> None:
-    """Log one CancelledError with the right provenance label."""
-    cancel_source = classify_cancel_source(exc)
-    if cancel_source == "sync_restart":
-        logger.info(restart_message, message_id=message_id)
-    elif cancel_source == "user_stop":
-        logger.info(user_stop_message, message_id=message_id)
-    else:
-        logger.warning(
-            interrupted_message,
-            message_id=message_id,
-            exc_info=(type(exc), exc, exc.__traceback__),
-        )
 
 
 @dataclass(frozen=True)

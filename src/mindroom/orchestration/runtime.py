@@ -17,6 +17,7 @@ from mindroom.cancellation import (
     USER_STOP_CANCEL_MSG,
     CancelSource,
     cancel_failure_reason,
+    classify_cancel_source,
     request_task_cancel,
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
@@ -33,6 +34,8 @@ from mindroom.runtime_state import set_runtime_starting
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
+
+    import structlog
 
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
@@ -64,6 +67,7 @@ __all__ = [
     "create_temp_user",
     "is_permanent_startup_error",
     "is_sync_restart_cancel",
+    "log_cancelled_response",
     "matrix_sync_startup_timeout_seconds",
     "request_task_cancel",
     "retry_delay_seconds",
@@ -74,20 +78,32 @@ __all__ = [
 ]
 
 
-def classify_cancel_source(exc: asyncio.CancelledError) -> CancelSource:
-    """Return the visible cancellation provenance for one CancelledError."""
-    if len(exc.args) == 0:
-        return "interrupted"
-    if exc.args[0] == USER_STOP_CANCEL_MSG:
-        return "user_stop"
-    if exc.args[0] == SYNC_RESTART_CANCEL_MSG:
-        return "sync_restart"
-    return "interrupted"
-
-
 def is_sync_restart_cancel(exc: asyncio.CancelledError) -> bool:
     """Return whether one cancellation was caused by a sync restart."""
     return classify_cancel_source(exc) == "sync_restart"
+
+
+def log_cancelled_response(
+    logger: structlog.stdlib.BoundLogger,
+    *,
+    exc: asyncio.CancelledError,
+    message_id: str | None,
+    restart_message: str,
+    user_stop_message: str,
+    interrupted_message: str,
+) -> None:
+    """Log one CancelledError with the right provenance label."""
+    cancel_source = classify_cancel_source(exc)
+    if cancel_source == "sync_restart":
+        logger.info(restart_message, message_id=message_id)
+    elif cancel_source == "user_stop":
+        logger.info(user_stop_message, message_id=message_id)
+    else:
+        logger.warning(
+            interrupted_message,
+            message_id=message_id,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
 
 
 def matrix_sync_startup_timeout_seconds(runtime_paths: RuntimePaths) -> float:

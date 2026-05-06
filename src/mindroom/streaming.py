@@ -31,6 +31,7 @@ from mindroom.orchestration.runtime import (
     CancelSource,
     cancel_failure_reason,
     classify_cancel_source,
+    log_cancelled_response,
 )
 from mindroom.streaming_delivery import (
     DeliveryRequest,
@@ -240,25 +241,6 @@ def build_cancelled_response_update(
     if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
         return note, stream_status
     return f"{stripped_text}\n\n{note}", stream_status
-
-
-def _log_stream_cancellation(
-    *,
-    exc: asyncio.CancelledError,
-    cancel_source: Literal["user_stop", "sync_restart", "interrupted"],
-    message_id: str | None,
-) -> None:
-    """Log one streaming cancellation with its resolved provenance."""
-    if cancel_source == "sync_restart":
-        logger.info("Streaming response interrupted by sync restart", message_id=message_id)
-    elif cancel_source == "user_stop":
-        logger.info("Streaming response cancelled by user", message_id=message_id)
-    else:
-        logger.warning(
-            "Streaming response interrupted — traceback for diagnosis",
-            message_id=message_id,
-            exc_info=(type(exc), exc, exc.__traceback__),
-        )
 
 
 @dataclass(frozen=True)
@@ -1154,7 +1136,14 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                         terminal_status="cancelled",
                         tool_trace_collector=tool_trace_collector,
                     ) from delivery_cleanup_error
-            _log_stream_cancellation(exc=exc, cancel_source=cancel_source, message_id=streaming.event_id)
+            log_cancelled_response(
+                logger,
+                exc=exc,
+                message_id=streaming.event_id,
+                restart_message="Streaming response interrupted by sync restart",
+                user_stop_message="Streaming response cancelled by user",
+                interrupted_message="Streaming response interrupted — traceback for diagnosis",
+            )
             transport_outcome = await streaming.finalize(client, cancel_source=cancel_source)
             raise StreamingDeliveryError(
                 exc,
