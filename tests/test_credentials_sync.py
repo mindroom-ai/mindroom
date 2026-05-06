@@ -8,7 +8,7 @@ import pytest
 
 from mindroom import constants as constants_mod
 from mindroom import credentials_sync as credentials_sync_mod
-from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, CredentialsManager
+from mindroom.credentials import CREDENTIALS_ENCRYPTION_KEY_ENV, SHARED_CREDENTIALS_PATH_ENV, CredentialsManager
 from mindroom.credentials_sync import (
     _ENV_TO_SERVICE_MAP,
     get_api_key_for_provider,
@@ -456,6 +456,7 @@ class TestCredentialsSync:
             config_path=config_path,
             storage_path=tmp_path,
             process_env={
+                CREDENTIALS_ENCRYPTION_KEY_ENV: "encryption-key-material",
                 "MINDROOM_CREDENTIAL_SEEDS_JSON": seed_json,
                 "MINDROOM_CREDENTIAL_SEEDS_FILE": str(seed_file),
             },
@@ -473,6 +474,7 @@ class TestCredentialsSync:
         ]
 
         for runtime_env in runtime_envs:
+            assert CREDENTIALS_ENCRYPTION_KEY_ENV not in runtime_env
             assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in runtime_env
             assert "MINDROOM_CREDENTIAL_SEEDS_FILE" not in runtime_env
 
