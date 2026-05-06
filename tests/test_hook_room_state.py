@@ -19,6 +19,7 @@ from mindroom.hooks import (
     build_hook_room_state_putter,
     build_hook_room_state_querier,
 )
+from mindroom.hooks.state import _put_hook_room_state, _query_hook_room_state
 from mindroom.hooks.types import EVENT_MESSAGE_RECEIVED
 from mindroom.logging_config import get_logger
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -78,6 +79,41 @@ def _lifecycle_context(
 
 
 # -- build_hook_room_state_querier tests --
+
+
+@pytest.mark.asyncio
+async def test_query_hook_room_state_helper_with_state_key_returns_content() -> None:
+    """Low-level hook state query helper preserves single-event lookup semantics."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    resp = MagicMock(spec=nio.RoomGetStateEventResponse)
+    resp.content = {"tags": {"pending-restart": True}}
+    client.room_get_state_event.return_value = resp
+
+    result = await _query_hook_room_state(client, "!room:localhost", "com.mindroom.thread.tags", "$thread1")
+
+    assert result == {"tags": {"pending-restart": True}}
+    client.room_get_state_event.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        "$thread1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_query_hook_room_state_helper_without_state_key_returns_filtered_dict() -> None:
+    """Low-level hook state query helper preserves full-state filtering semantics."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    resp = MagicMock(spec=nio.RoomGetStateResponse)
+    resp.events = [
+        {"type": "com.mindroom.thread.tags", "state_key": "$t1", "content": {"tags": {"pending": True}}},
+        {"type": "m.room.name", "state_key": "", "content": {"name": "Lobby"}},
+    ]
+    client.room_get_state.return_value = resp
+
+    result = await _query_hook_room_state(client, "!room:localhost", "com.mindroom.thread.tags", None)
+
+    assert result == {"$t1": {"tags": {"pending": True}}}
+    client.room_get_state.assert_awaited_once_with("!room:localhost")
 
 
 @pytest.mark.asyncio
@@ -254,6 +290,23 @@ async def test_lifecycle_context_query_room_state_delegates(tmp_path: object) ->
 
 
 # -- build_hook_room_state_putter tests --
+
+
+@pytest.mark.asyncio
+async def test_put_hook_room_state_helper_returns_false_on_matrix_error() -> None:
+    """Low-level hook state put helper preserves Matrix-error handling."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
+
+    result = await _put_hook_room_state(client, "!room:localhost", "com.mindroom.thread.tags", "$thread1", {})
+
+    assert result is False
+    client.room_put_state.assert_awaited_once_with(
+        "!room:localhost",
+        "com.mindroom.thread.tags",
+        {},
+        state_key="$thread1",
+    )
 
 
 @pytest.mark.asyncio
