@@ -50,6 +50,7 @@ ANNOTATION_WORKER_STATUS = "mindroom.ai/worker-status"
 ANNOTATION_STATE_SUBPATH = "mindroom.ai/state-subpath"
 _ANNOTATION_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
 _ANNOTATION_RUNNER_TOKEN_HASH = "mindroom.ai/runner-token-hash"  # noqa: S105
+_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH = "mindroom.ai/credentials-encryption-key-hash"
 _ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
@@ -206,6 +207,13 @@ def _worker_auth_token_hash(shared_token: str | None, worker_key: str) -> str | 
     if token is None:
         return None
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _credentials_encryption_key_hash(encryption_key: str | None) -> str | None:
+    """Return a stable non-secret marker for the credential encryption key."""
+    if encryption_key is None:
+        return None
+    return hashlib.sha256(encryption_key.encode("utf-8")).hexdigest()
 
 
 def _secret_data_value(value: str) -> str:
@@ -716,6 +724,9 @@ class KubernetesResourceManager:
             msg = "A worker auth token is required for Kubernetes workers."
             raise WorkerBackendError(msg)
         template_annotations[_ANNOTATION_RUNNER_TOKEN_HASH] = token_hash
+        credentials_key_hash = _credentials_encryption_key_hash(self._credentials_encryption_key())
+        if credentials_key_hash is not None:
+            template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH] = credentials_key_hash
         template_metadata = {
             "labels": worker_labels,
             "annotations": template_annotations,
@@ -875,9 +886,7 @@ class KubernetesResourceManager:
         }
 
     def _credentials_encryption_key(self) -> str | None:
-        credentials_encryption_key = self.config.extra_env.get(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
-        if credentials_encryption_key is None:
-            credentials_encryption_key = self.runtime_paths.env_value(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
+        credentials_encryption_key = self.runtime_paths.env_value(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
         if credentials_encryption_key is None:
             return None
         normalized_key = credentials_encryption_key.strip()

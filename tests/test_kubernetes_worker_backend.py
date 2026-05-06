@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import threading
 import time
@@ -35,6 +36,7 @@ from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, KubernetesWorkerBackendConfig
 from mindroom.workers.backends.kubernetes_resources import (
+    _ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH,
     _ANNOTATION_RUNNER_TOKEN_HASH,
     _ANNOTATION_STARTUP_MANIFEST_HASH,
     _ANNOTATION_TEMPLATE_HASH,
@@ -660,6 +662,74 @@ def test_kubernetes_worker_startup_manifest_omits_credentials_encryption_key(tmp
     assert core_api.created_secret_bodies[0]["stringData"][CREDENTIALS_ENCRYPTION_KEY_ENV] == encryption_key
     assert encryption_key not in json.dumps(deployment)
     assert encryption_key not in json.dumps(startup_manifest)
+
+
+def test_kubernetes_worker_credentials_encryption_key_uses_runtime_source_not_extra_env(tmp_path: Path) -> None:
+    """Worker credential encryption should use the same runtime key source as CredentialsManager."""
+    runtime_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    extra_env_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+        process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: runtime_key},
+    )
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        extra_env={CREDENTIALS_ENCRYPTION_KEY_ENV: extra_env_key},
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    startup_manifest = _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)
+    assert core_api.created_secret_bodies[0]["stringData"][CREDENTIALS_ENCRYPTION_KEY_ENV] == runtime_key
+    assert extra_env_key not in json.dumps(deployment)
+    assert extra_env_key not in json.dumps(core_api.created_secret_bodies)
+    assert extra_env_key not in json.dumps(startup_manifest)
+
+
+def test_kubernetes_worker_credentials_encryption_key_rotation_changes_template_hash(tmp_path: Path) -> None:
+    """Rotating the credential encryption key should restart workers without exposing the key."""
+    first_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    second_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii")
+
+    def deployment_for_key(encryption_key: str) -> dict[str, object]:
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=tmp_path / f"mindroom-test-storage-{encryption_key[:4]}",
+            process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+        )
+        backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+        return apps_api.created_bodies[0]
+
+    first_deployment = deployment_for_key(first_key)
+    second_deployment = deployment_for_key(second_key)
+    first_template_annotations = first_deployment["spec"]["template"]["metadata"]["annotations"]
+    second_template_annotations = second_deployment["spec"]["template"]["metadata"]["annotations"]
+
+    assert (
+        first_template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH]
+        == hashlib.sha256(
+            first_key.encode("utf-8"),
+        ).hexdigest()
+    )
+    assert (
+        second_template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH]
+        == hashlib.sha256(
+            second_key.encode("utf-8"),
+        ).hexdigest()
+    )
+    assert (
+        first_template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH]
+        != (second_template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH])
+    )
+    assert (
+        first_deployment["metadata"]["annotations"][_ANNOTATION_TEMPLATE_HASH]
+        != (second_deployment["metadata"]["annotations"][_ANNOTATION_TEMPLATE_HASH])
+    )
+    assert first_key not in json.dumps(first_deployment)
+    assert second_key not in json.dumps(second_deployment)
 
 
 def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -> None:
