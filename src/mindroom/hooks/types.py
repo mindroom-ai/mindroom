@@ -77,6 +77,21 @@ _DEFAULT_CUSTOM_EVENT_TIMEOUT_MS = 1000
 EnrichmentCachePolicy = Literal["stable", "volatile"]
 
 
+def format_hook_source(plugin_name: str, event_name: str) -> str:
+    """Return one serialized hook provenance tag."""
+    return f"{plugin_name}:{event_name}"
+
+
+def split_hook_source(hook_source: str | None) -> tuple[str | None, str | None]:
+    """Return ``(plugin_name, event_name)`` from one serialized hook provenance tag."""
+    if not isinstance(hook_source, str):
+        return None, None
+    plugin_name, _, source_event_name = hook_source.partition(":")
+    if not plugin_name or not source_event_name:
+        return None, None
+    return plugin_name, source_event_name
+
+
 class HookMessageSender(Protocol):
     """Async sender protocol used by hook contexts for Matrix relays."""
 

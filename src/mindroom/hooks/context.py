@@ -17,7 +17,13 @@ from .state import (
     chain_hook_room_state_putters,
     chain_hook_room_state_queriers,
 )
-from .types import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, EnrichmentCachePolicy, EnrichmentItem
+from .types import (
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
+    EnrichmentCachePolicy,
+    EnrichmentItem,
+    format_hook_source,
+)
 
 
 class _UnsetType:
@@ -91,7 +97,6 @@ async def _send_bound_message(
     if message_sender is None:
         logger.warning("send_message called but no sender registered")
         return None
-    source_hook = f"{plugin_name}:{event_name}"
     resolved_extra_content = dict(extra_content or {})
     if requester_id:
         resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
@@ -101,7 +106,7 @@ async def _send_bound_message(
         room_id,
         text,
         thread_id,
-        source_hook,
+        format_hook_source(plugin_name, event_name),
         resolved_extra_content or None,
         trigger_dispatch=trigger_dispatch,
     )
@@ -762,7 +767,7 @@ def _requester_id_for_hook_send(
     trigger_dispatch: bool = False,
 ) -> str | None:
     """Return the requester identity to preserve on hook-originated sends."""
-    envelope = _message_envelope_for_hook_context(context)
+    envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
         requester_id = envelope.requester_id
     elif isinstance(context, ScheduleFiredContext):
@@ -785,7 +790,7 @@ def _message_received_depth_for_hook_send(context: object) -> int:
 
 def _current_message_received_depth(context: object) -> int:
     """Return the inbound synthetic hook-chain depth for one hook context."""
-    envelope = _message_envelope_for_hook_context(context)
+    envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
         return envelope.message_received_depth
     if isinstance(context, CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext):
@@ -793,7 +798,7 @@ def _current_message_received_depth(context: object) -> int:
     return 0
 
 
-def _message_envelope_for_hook_context(context: object) -> MessageEnvelope | None:
+def message_envelope_for_hook_context(context: object) -> MessageEnvelope | None:
     """Return the message envelope carried by one hook context when present."""
     if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
         return context.envelope

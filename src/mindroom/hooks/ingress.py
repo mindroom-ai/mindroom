@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom.dispatch_source import is_automation_source_kind
 
 from .types import EVENT_MESSAGE_RECEIVED
+from .types import split_hook_source as _split_hook_source
 
 if TYPE_CHECKING:
     from .context import MessageEnvelope
@@ -21,16 +22,6 @@ class HookIngressPolicy:
     skip_message_received_plugin_names: frozenset[str] = frozenset()
     bypass_unmentioned_agent_gate: bool = False
     allow_full_dispatch: bool = True
-
-
-def _split_hook_source(hook_source: str | None) -> tuple[str | None, str | None]:
-    """Return ``(plugin_name, event_name)`` from one serialized hook source tag."""
-    if not isinstance(hook_source, str):
-        return None, None
-    plugin_name, _, source_event_name = hook_source.partition(":")
-    if not plugin_name or not source_event_name:
-        return None, None
-    return plugin_name, source_event_name
 
 
 def hook_ingress_policy(envelope: MessageEnvelope) -> HookIngressPolicy:

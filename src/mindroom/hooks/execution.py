@@ -12,17 +12,14 @@ from typing import TYPE_CHECKING, cast
 from mindroom.logging_config import get_logger
 
 from .context import (
-    AfterResponseContext,
     AgentLifecycleContext,
     BeforeResponseContext,
-    CancelledResponseContext,
     CompactionHookContext,
     CustomEventContext,
     FinalResponseDraft,
     FinalResponseTransformContext,
     HookContext,
     MessageEnrichContext,
-    MessageEnvelope,
     MessageReceivedContext,
     ReactionReceivedContext,
     ResponseDraft,
@@ -31,6 +28,7 @@ from .context import (
     SystemEnrichContext,
     ToolAfterCallContext,
     ToolBeforeCallContext,
+    message_envelope_for_hook_context,
 )
 from .types import EVENT_MESSAGE_RECEIVED, EnrichmentItem, RegisteredHook, default_timeout_ms_for_event
 
@@ -59,7 +57,7 @@ class _HookInvocationResult:
 def _scope_agent_name(context: _HookExecutionContext) -> str | None:
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         return context.agent_name
-    envelope = _context_scope_envelope(context)
+    envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
         return envelope.agent_name
     if isinstance(context, MessageEnrichContext | SystemEnrichContext):
@@ -74,7 +72,7 @@ def _scope_agent_name(context: _HookExecutionContext) -> str | None:
 def _scope_room_ids(context: _HookExecutionContext) -> tuple[str, ...]:  # noqa: PLR0911
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
         return (context.room_id,) if context.room_id else ()
-    envelope = _context_scope_envelope(context)
+    envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
         return (envelope.room_id,)
     if isinstance(context, ScheduleFiredContext | ReactionReceivedContext):
@@ -102,18 +100,6 @@ def _hook_in_scope(hook: RegisteredHook, context: _HookExecutionContext) -> bool
             return False
 
     return True
-
-
-def _context_scope_envelope(context: _HookExecutionContext) -> MessageEnvelope | None:
-    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
-        return context.envelope
-    if isinstance(context, BeforeResponseContext | FinalResponseTransformContext):
-        return context.draft.envelope
-    if isinstance(context, AfterResponseContext):
-        return context.result.envelope
-    if isinstance(context, CancelledResponseContext):
-        return context.info.envelope
-    return None
 
 
 def _context_logger(hook: RegisteredHook) -> object:
