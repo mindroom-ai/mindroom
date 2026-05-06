@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 import mindroom.tool_approval as approval_module
+from mindroom.approval_events import parse_approval_datetime
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     _MAX_REMEMBERED_TERMINAL_CARD_IDS,
@@ -2141,6 +2142,17 @@ def test_pending_approval_preserves_distinct_requester_and_approver() -> None:
 
     assert pending.requester_id == "@requester:localhost"
     assert pending.approver_user_id == "@approver:localhost"
+
+
+def test_parse_approval_datetime_preserves_approval_timestamp_contract() -> None:
+    assert parse_approval_datetime(None) is None
+    assert parse_approval_datetime("2030-01-01T10:00:00+02:00") == datetime.fromisoformat(
+        "2030-01-01T10:00:00+02:00",
+    )
+    assert parse_approval_datetime("2030-01-01T10:00:00") == datetime(2030, 1, 1, 10, tzinfo=UTC)
+
+    with pytest.raises(ValueError, match="Invalid isoformat string"):
+        parse_approval_datetime("not-a-datetime")
 
 
 def test_approval_arguments_preview_marks_sanitizer_truncation() -> None:
