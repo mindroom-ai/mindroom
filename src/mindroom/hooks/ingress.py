@@ -12,8 +12,6 @@ from .types import EVENT_MESSAGE_RECEIVED, split_hook_source
 if TYPE_CHECKING:
     from .context import MessageEnvelope
 
-_split_hook_source = split_hook_source
-
 
 @dataclass(frozen=True, slots=True)
 class HookIngressPolicy:
@@ -30,7 +28,7 @@ def hook_ingress_policy(envelope: MessageEnvelope) -> HookIngressPolicy:
     if envelope.source_kind not in {"hook", "hook_dispatch"}:
         return HookIngressPolicy()
 
-    plugin_name, source_event_name = _split_hook_source(envelope.hook_source)
+    plugin_name, source_event_name = split_hook_source(envelope.hook_source)
     policy = HookIngressPolicy(
         bypass_unmentioned_agent_gate=envelope.source_kind == "hook_dispatch",
     )
