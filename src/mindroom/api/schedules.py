@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import asdict
+from datetime import datetime  # noqa: TC003 - Pydantic resolves postponed annotations at runtime.
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from croniter import CroniterError, croniter
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -13,18 +13,18 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user
 from mindroom.scheduling import (
-    SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR,
-    CronSchedule,
+    ScheduledTaskReadModel,
     ScheduledTaskRecord,
-    ScheduledWorkflow,
+    build_edited_scheduled_workflow,
+    build_scheduled_task_read_model,
     cancel_scheduled_task,
     get_scheduled_task,
     get_scheduled_tasks_for_room,
     save_edited_scheduled_task,
+    scheduled_task_read_sort_key,
 )
 
 if TYPE_CHECKING:
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
-logger = get_logger(__name__)
 
 
 class ScheduledTaskResponse(BaseModel):
@@ -100,135 +99,10 @@ def _configured_room_ids(runtime_config: Config, runtime_paths: RuntimePaths) ->
     return list(dict.fromkeys(resolved_rooms))
 
 
-def _cron_schedule_from_expression(cron_expression: str) -> CronSchedule:
-    """Convert and validate a cron expression into a CronSchedule."""
-    raw_expression = cron_expression.strip()
-    fields = raw_expression.split()
-    if len(fields) != 5:
-        msg = "Cron expression must have exactly 5 fields: minute hour day month weekday"
-        raise ValueError(msg)
-
-    # Validate expression syntax
-    croniter(raw_expression, datetime.now(UTC))
-    minute, hour, day, month, weekday = fields
-    return CronSchedule(minute=minute, hour=hour, day=day, month=month, weekday=weekday)
-
-
-def _to_response_task(
-    task: ScheduledTaskRecord,
-    runtime_paths: RuntimePaths,
-) -> ScheduledTaskResponse:
-    """Map an internal scheduled task record to the API response model."""
-    workflow = task.workflow
-    cron_expression = workflow.cron_schedule.to_cron_string() if workflow.cron_schedule else None
-    cron_description = workflow.cron_schedule.to_natural_language() if workflow.cron_schedule else None
-
-    next_run_at: datetime | None = None
-    if workflow.schedule_type == "once":
-        next_run_at = workflow.execute_at
-    elif cron_expression:
-        try:
-            next_run_at = croniter(cron_expression, datetime.now(UTC)).get_next(datetime)
-        except CroniterError:
-            logger.warning(
-                "Failed to compute next run time for scheduled task",
-                task_id=task.task_id,
-                cron_expression=cron_expression,
-            )
-
+def _to_response_task(task: ScheduledTaskReadModel, runtime_paths: RuntimePaths) -> ScheduledTaskResponse:
     return ScheduledTaskResponse(
-        task_id=task.task_id,
-        room_id=task.room_id,
         room_alias=get_room_alias_from_id(task.room_id, runtime_paths=runtime_paths),
-        status=task.status,
-        schedule_type=workflow.schedule_type,
-        execute_at=workflow.execute_at,
-        next_run_at=next_run_at,
-        cron_expression=cron_expression,
-        cron_description=cron_description,
-        description=workflow.description,
-        message=workflow.message,
-        thread_id=workflow.thread_id,
-        new_thread=workflow.new_thread,
-        created_by=workflow.created_by,
-        created_at=task.created_at,
-    )
-
-
-def _task_sort_key(task: ScheduledTaskResponse) -> tuple[int, datetime]:
-    """Sort pending tasks first, then by next execution time."""
-    status_rank = 0 if task.status == "pending" else 1
-    scheduled_time = task.next_run_at or datetime.max.replace(tzinfo=UTC)
-    return (status_rank, scheduled_time)
-
-
-def _resolve_schedule_fields(
-    request: UpdateScheduleRequest,
-    existing_workflow: ScheduledWorkflow,
-) -> tuple[Literal["once", "cron"], datetime | None, CronSchedule | None]:
-    """Resolve and validate schedule-related updates for a task edit."""
-    if request.schedule_type and request.schedule_type != existing_workflow.schedule_type:
-        raise HTTPException(
-            status_code=400,
-            detail=SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR,
-        )
-
-    schedule_type = existing_workflow.schedule_type
-    if schedule_type == "once":
-        if request.cron_expression is not None:
-            raise HTTPException(status_code=400, detail="cron_expression is only valid for cron schedules")
-        execute_at = request.execute_at or existing_workflow.execute_at
-        if execute_at is None:
-            raise HTTPException(status_code=400, detail="execute_at is required for one-time schedules")
-        return (schedule_type, execute_at, None)
-
-    if request.execute_at is not None:
-        raise HTTPException(status_code=400, detail="execute_at is only valid for one-time schedules")
-
-    cron_schedule = existing_workflow.cron_schedule
-    if request.cron_expression is not None:
-        try:
-            cron_schedule = _cron_schedule_from_expression(request.cron_expression)
-        except (ValueError, CroniterError) as e:
-            raise HTTPException(status_code=400, detail=f"Invalid cron expression: {e!s}") from e
-    if cron_schedule is None:
-        raise HTTPException(status_code=400, detail="cron_expression is required for cron schedules")
-    return (schedule_type, None, cron_schedule)
-
-
-def _resolve_message_fields(
-    request: UpdateScheduleRequest,
-    existing_workflow: ScheduledWorkflow,
-) -> tuple[str, str]:
-    """Resolve and validate message/description fields for a task edit."""
-    message_source = request.message if request.message is not None else existing_workflow.message
-    message = message_source.strip()
-    if not message:
-        raise HTTPException(status_code=400, detail="message cannot be empty")
-
-    description_source = request.description if request.description is not None else existing_workflow.description
-    description = description_source.strip() or message
-    return (message, description)
-
-
-def _build_updated_workflow(
-    request: UpdateScheduleRequest,
-    existing_workflow: ScheduledWorkflow,
-    resolved_room_id: str,
-) -> ScheduledWorkflow:
-    """Build an updated workflow from validated edit inputs."""
-    schedule_type, execute_at, cron_schedule = _resolve_schedule_fields(request, existing_workflow)
-    message, description = _resolve_message_fields(request, existing_workflow)
-    return ScheduledWorkflow(
-        schedule_type=schedule_type,
-        execute_at=execute_at,
-        cron_schedule=cron_schedule,
-        message=message,
-        description=description,
-        created_by=existing_workflow.created_by,
-        thread_id=existing_workflow.thread_id,
-        room_id=resolved_room_id,
-        new_thread=existing_workflow.new_thread,
+        **asdict(task),
     )
 
 
@@ -263,19 +137,22 @@ async def list_schedules(
 
     client = await _get_router_client(runtime_paths)
     try:
-        tasks: list[ScheduledTaskResponse] = []
+        tasks: list[ScheduledTaskReadModel] = []
         for resolved_room_id in room_ids:
-            room_tasks = await get_scheduled_tasks_for_room(
+            room_tasks: list[ScheduledTaskRecord] = await get_scheduled_tasks_for_room(
                 client=client,
                 room_id=resolved_room_id,
                 include_non_pending=include_cancelled,
             )
-            tasks.extend(_to_response_task(task, runtime_paths) for task in room_tasks)
+            tasks.extend(build_scheduled_task_read_model(task) for task in room_tasks)
     finally:
         await client.close()
 
-    tasks.sort(key=_task_sort_key)
-    return ListSchedulesResponse(timezone=runtime_config.timezone, tasks=tasks)
+    tasks.sort(key=scheduled_task_read_sort_key)
+    return ListSchedulesResponse(
+        timezone=runtime_config.timezone,
+        tasks=[_to_response_task(task, runtime_paths) for task in tasks],
+    )
 
 
 @router.put("/{task_id}", response_model=ScheduledTaskResponse)
@@ -294,8 +171,16 @@ async def update_schedule(
         if not existing_task:
             raise HTTPException(status_code=404, detail=f"Task `{task_id}` not found")
 
-        updated_workflow = _build_updated_workflow(request, existing_task.workflow, resolved_room_id)
         try:
+            updated_workflow = build_edited_scheduled_workflow(
+                existing_task.workflow,
+                room_id=resolved_room_id,
+                message=request.message,
+                description=request.description,
+                schedule_type=request.schedule_type,
+                execute_at=request.execute_at,
+                cron_expression=request.cron_expression,
+            )
             updated_task = await save_edited_scheduled_task(
                 client=client,
                 room_id=resolved_room_id,
@@ -306,7 +191,7 @@ async def update_schedule(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"{e!s}") from e
 
-        return _to_response_task(updated_task, runtime_paths)
+        return _to_response_task(build_scheduled_task_read_model(updated_task), runtime_paths)
     finally:
         await client.close()
 
