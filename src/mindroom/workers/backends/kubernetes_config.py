@@ -111,7 +111,7 @@ def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
 
 
 @dataclass(frozen=True, slots=True)
-class _KubernetesWorkerBackendConfig:
+class KubernetesWorkerBackendConfig:
     """Resolved environment-backed configuration for the Kubernetes provider."""
 
     namespace: str
@@ -140,7 +140,7 @@ class _KubernetesWorkerBackendConfig:
     auth_secret_name: str | None
 
     @classmethod
-    def from_runtime(cls, runtime_paths: RuntimePaths) -> _KubernetesWorkerBackendConfig:
+    def from_runtime(cls, runtime_paths: RuntimePaths) -> KubernetesWorkerBackendConfig:
         """Build Kubernetes worker configuration from one explicit runtime context."""
         env = runtime_env_values(runtime_paths)
         namespace = _read_env(env, _NAMESPACE_ENV) or _read_env(env, _POD_NAMESPACE_ENV) or "default"
@@ -202,7 +202,7 @@ def kubernetes_backend_config_signature(
     storage_root: Path | None = None,
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
-    config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     extra_annotations_json = json.dumps(config.extra_annotations, sort_keys=True, separators=(",", ":"))

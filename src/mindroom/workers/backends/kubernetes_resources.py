@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from mindroom.workers.models import WorkerStatus
 
-    from .kubernetes_config import _KubernetesWorkerBackendConfig
+    from .kubernetes_config import KubernetesWorkerBackendConfig
 
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
 _READY_POLL_INTERVAL_SECONDS = 1.0
@@ -293,7 +293,7 @@ class KubernetesResourceManager:
         self,
         *,
         runtime_paths: RuntimePaths,
-        config: _KubernetesWorkerBackendConfig,
+        config: KubernetesWorkerBackendConfig,
         auth_token: str | None,
         storage_root: Path,
         tool_validation_snapshot: dict[str, dict[str, object]],

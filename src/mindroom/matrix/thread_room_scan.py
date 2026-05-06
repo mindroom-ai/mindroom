@@ -66,7 +66,7 @@ async def _lookup_thread_id_from_conversation_cache(
     return await conversation_cache.get_thread_id_for_event(room_id, event_id)
 
 
-async def _fetch_event_info_from_conversation_cache(
+async def fetch_event_info_from_conversation_cache(
     conversation_cache: RoomScanConversationCache,
     room_id: str,
     event_id: str,
@@ -82,7 +82,7 @@ async def _fetch_event_info_from_conversation_cache(
     )
 
 
-def _room_scan_membership_access_for_client(
+def room_scan_membership_access_for_client(
     client: nio.AsyncClient,
     *,
     conversation_cache: RoomScanConversationCache | None,
@@ -102,7 +102,7 @@ def _room_scan_membership_access_for_client(
             return await fetch_event_info(lookup_room_id, lookup_event_id)
         if conversation_cache is None:
             return None
-        return await _fetch_event_info_from_conversation_cache(
+        return await fetch_event_info_from_conversation_cache(
             conversation_cache,
             lookup_room_id,
             lookup_event_id,
@@ -122,6 +122,6 @@ def _room_scan_membership_access_for_client(
 
 __all__ = [
     "RoomScanConversationCache",
-    "_fetch_event_info_from_conversation_cache",
-    "_room_scan_membership_access_for_client",
+    "fetch_event_info_from_conversation_cache",
+    "room_scan_membership_access_for_client",
 ]

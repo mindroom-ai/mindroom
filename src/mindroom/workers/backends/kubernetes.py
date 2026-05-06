@@ -21,7 +21,7 @@ from mindroom.workers.models import (
 )
 
 from . import kubernetes_resources as resources
-from .kubernetes_config import _KubernetesWorkerBackendConfig, kubernetes_backend_config_signature
+from .kubernetes_config import KubernetesWorkerBackendConfig, kubernetes_backend_config_signature
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "KubernetesWorkerBackend",
-    "_KubernetesWorkerBackendConfig",
+    "KubernetesWorkerBackendConfig",
     "kubernetes_backend_config_signature",
 ]
 
@@ -252,7 +252,7 @@ class KubernetesWorkerBackend:
         self,
         *,
         runtime_paths: RuntimePaths,
-        config: _KubernetesWorkerBackendConfig,
+        config: KubernetesWorkerBackendConfig,
         auth_token: str | None,
         storage_root: Path,
         tool_validation_snapshot: dict[str, dict[str, object]],
@@ -304,7 +304,7 @@ class KubernetesWorkerBackend:
         """Construct a backend instance from one explicit runtime context."""
         return cls(
             runtime_paths=runtime_paths,
-            config=_KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
+            config=KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
             auth_token=auth_token,
             storage_root=storage_root,
             tool_validation_snapshot=tool_validation_snapshot,

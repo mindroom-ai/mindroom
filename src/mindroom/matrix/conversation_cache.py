@@ -38,7 +38,7 @@ from mindroom.matrix.thread_membership import (
     lookup_thread_id_from_conversation_cache,
     resolve_event_thread_id,
 )
-from mindroom.matrix.thread_room_scan import _room_scan_membership_access_for_client
+from mindroom.matrix.thread_room_scan import room_scan_membership_access_for_client
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Collection
@@ -111,7 +111,7 @@ async def resolve_thread_root_event_id_for_client(
         event_info,
         event_id=normalized_event_id,
         allow_current_root=True,
-        access=_room_scan_membership_access_for_client(
+        access=room_scan_membership_access_for_client(
             client,
             conversation_cache=conversation_cache,
             fetch_event_info=lambda lookup_room_id, lookup_event_id: fetch_event_info_for_client(

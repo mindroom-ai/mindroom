@@ -31,7 +31,6 @@ __all__ = [
     "ThreadLiveWritePolicy",
     "ThreadOutboundWritePolicy",
     "ThreadSyncWritePolicy",
-    "_collect_sync_timeline_cache_updates",
 ]
 
 
