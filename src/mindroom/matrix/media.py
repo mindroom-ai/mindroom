@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, TypeGuard
@@ -94,6 +95,26 @@ def upload_content_uri(upload_result: object) -> str | None:
     if isinstance(upload_response, nio.UploadResponse) and upload_response.content_uri:
         return str(upload_response.content_uri)
     return None
+
+
+async def upload_media_bytes(
+    client: nio.AsyncClient,
+    upload_bytes: bytes,
+    *,
+    content_type: str,
+    filename: str,
+) -> tuple[nio.UploadResponse | nio.UploadError, dict[str, object] | None]:
+    """Upload an in-memory byte payload through nio's callback-based upload API."""
+
+    def data_provider(_monitor: object, _data: object) -> io.BytesIO:
+        return io.BytesIO(upload_bytes)
+
+    return await client.upload(
+        data_provider=data_provider,
+        content_type=content_type,
+        filename=filename,
+        filesize=len(upload_bytes),
+    )
 
 
 def _event_id_for_log(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str | None:

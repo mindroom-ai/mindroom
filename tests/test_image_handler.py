@@ -15,6 +15,7 @@ from mindroom.matrix.media import (
     extract_media_caption,
     resolve_image_mime_type,
     upload_content_uri,
+    upload_media_bytes,
 )
 
 
@@ -87,6 +88,31 @@ class TestUploadContentUri:
     def test_non_upload_response_returns_none(self) -> None:
         """Upload errors and unrelated objects should not produce an MXC URI."""
         assert upload_content_uri(object()) is None
+
+
+class TestUploadMediaBytes:
+    """Test Matrix byte payload upload helper."""
+
+    @pytest.mark.asyncio
+    async def test_upload_media_bytes_uses_nio_data_provider(self) -> None:
+        """The helper should preserve nio's callback-shaped upload contract."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/media"})
+        client.upload.return_value = (response, {})
+
+        result = await upload_media_bytes(
+            client,
+            b"payload",
+            content_type="text/plain",
+            filename="message.txt",
+        )
+
+        assert result == (response, {})
+        upload_call = client.upload.call_args
+        assert upload_call.kwargs["content_type"] == "text/plain"
+        assert upload_call.kwargs["filename"] == "message.txt"
+        assert upload_call.kwargs["filesize"] == 7
+        assert upload_call.kwargs["data_provider"](None, None).read() == b"payload"
 
 
 class TestDownloadImage:
