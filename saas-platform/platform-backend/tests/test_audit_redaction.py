@@ -30,3 +30,33 @@ def test_redact_audit_details_recurses_and_matches_case_insensitive_headers() ->
             "nested": [{"clientSecret": REDACTED}, {"safe": "kept"}],
         },
     }
+
+
+def test_redact_audit_details_redacts_free_form_secret_strings() -> None:
+    """Audit text fields should not leak bearer material under ordinary keys."""
+    details = {
+        "message": "Authorization: Bearer auth-secret",
+        "error": "api_key=api-secret",
+        "nested": ["password=pw-secret", {"note": "client_secret=client-secret"}],
+    }
+
+    assert redact_audit_details(details) == {
+        "message": f"Authorization: Bearer {REDACTED}",
+        "error": f"api_key={REDACTED}",
+        "nested": [f"password={REDACTED}", {"note": f"client_secret={REDACTED}"}],
+    }
+
+
+def test_redact_audit_details_redacts_oauth_url_and_query_values() -> None:
+    """OAuth callback codes and states should be masked in URLs and query containers."""
+    details = {
+        "callback_url": "https://example.test/cb?code=code-secret&state=state-secret&keep=1",
+        "signed_url": "https://user:pass-secret@example.test/file?signature=sig-secret&name=file",
+        "query_params": {"code": "code-secret", "state": "state-secret", "keep": "1"},
+    }
+
+    assert redact_audit_details(details) == {
+        "callback_url": f"https://example.test/cb?code={REDACTED}&state={REDACTED}&keep=1",
+        "signed_url": f"https://user:***@example.test/file?signature={REDACTED}&name=file",
+        "query_params": {"code": REDACTED, "state": REDACTED, "keep": "1"},
+    }

@@ -6,14 +6,18 @@ import logging
 import logging.config
 import os
 from datetime import UTC, datetime
+from io import StringIO
 from typing import TYPE_CHECKING
 
 import structlog
 
-from mindroom.redaction import redact_log_event
+from mindroom.redaction import redact_log_event, redact_sensitive_text
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
+    from typing import TextIO
+
+    from structlog.typing import ExceptionRenderer, ExcInfo
 
     from mindroom.constants import RuntimePaths
 
@@ -52,6 +56,38 @@ class _NioValidationFilter(logging.Filter):
                 # Similar harmless warning for room_id
                 return False
         return True
+
+
+class _RedactingExceptionFormatter:
+    """Render exceptions normally, then redact credential-bearing text."""
+
+    def __init__(self, formatter: ExceptionRenderer) -> None:
+        self._formatter = formatter
+
+    def __call__(self, sio: TextIO, exc_info: ExcInfo) -> None:
+        buffer = StringIO()
+        self._formatter(buffer, exc_info)
+        sio.write(redact_sensitive_text(buffer.getvalue()))
+
+
+_MISSING = object()
+
+
+def _redact_log_event_preserving_exc_info(
+    logger: object,
+    method_name: str,
+    event_dict: dict[str, object],
+) -> dict[str, object]:
+    """Redact event fields without replacing raw exc_info before console rendering."""
+    exc_info = event_dict.get("exc_info", _MISSING)
+    if exc_info is _MISSING:
+        return redact_log_event(logger, method_name, event_dict)
+
+    redacted_input = dict(event_dict)
+    redacted_input.pop("exc_info")
+    redacted = redact_log_event(logger, method_name, redacted_input)
+    redacted["exc_info"] = exc_info
+    return redacted
 
 
 def _normalize_log_level(level: str) -> str:
@@ -135,7 +171,7 @@ def setup_logging(
         structlog.stdlib.add_log_level,
         structlog.stdlib.ExtraAdder(),
         timestamper,
-        redact_log_event,
+        _redact_log_event_preserving_exc_info,
     ]
     log_format = os.getenv("MINDROOM_LOG_FORMAT", "text").strip().lower()
     renderer_name = "json" if log_format == "json" else "text"
@@ -146,19 +182,22 @@ def setup_logging(
 
     text_processors = [
         structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-        structlog.processors.ExceptionRenderer(),
-        redact_log_event,
-        structlog.dev.ConsoleRenderer(colors=False),
+        _redact_log_event_preserving_exc_info,
+        structlog.dev.ConsoleRenderer(
+            colors=False,
+            exception_formatter=_RedactingExceptionFormatter(structlog.dev.plain_traceback),
+        ),
     ]
     colored_processors = [
         structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-        structlog.processors.ExceptionRenderer(),
-        redact_log_event,
+        _redact_log_event_preserving_exc_info,
         structlog.dev.ConsoleRenderer(
             colors=True,
-            exception_formatter=structlog.dev.RichTracebackFormatter(
-                # The locals can be very large, so we hide them by default
-                show_locals=False,
+            exception_formatter=_RedactingExceptionFormatter(
+                structlog.dev.RichTracebackFormatter(
+                    # The locals can be very large, so we hide them by default
+                    show_locals=False,
+                ),
             ),
         ),
     ]

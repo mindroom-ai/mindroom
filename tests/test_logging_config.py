@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import warnings
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
@@ -38,6 +39,11 @@ def _last_stderr_payload(capsys: pytest.CaptureFixture[str]) -> dict[str, object
 
 def _raise_value_error() -> NoReturn:
     msg = "boom"
+    raise ValueError(msg)
+
+
+def _raise_secret_value_error() -> NoReturn:
+    msg = "api_key=api-secret"
     raise ValueError(msg)
 
 
@@ -302,6 +308,35 @@ def test_setup_logging_text_mode_does_not_emit_json(
     assert "text_mode_event" in line
     with pytest.raises(json.JSONDecodeError):
         json.loads(line)
+
+
+def test_setup_logging_text_mode_redacts_exception_tracebacks_without_pretty_exception_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Text mode should keep pretty exception formatting without leaking exception secrets."""
+    monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            _raise_secret_value_error()
+        except ValueError:
+            get_logger("tests.logging").exception(
+                "test_exception",
+                authorization="Bearer auth-secret",
+            )
+
+    output = capsys.readouterr().err
+
+    assert not any("format_exc_info" in str(warning.message) for warning in caught)
+    assert "ValueError" in output
+    assert "api-secret" not in output
+    assert "auth-secret" not in output
+    assert "***redacted***" in output
 
 
 def test_setup_logging_json_mode_renders_exception_field_for_exc_info_true(
