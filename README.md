@@ -329,6 +329,7 @@ export ANTHROPIC_API_KEY=your-key-here
 ```yaml
 knowledge_bases:
   engineering_docs:
+    description: Internal engineering docs, ADRs, deployment runbooks, and coding conventions.
     path: ./knowledge_docs
     watch: false  # Direct external edits require reindex; API/dashboard mutations still schedule refresh.
 

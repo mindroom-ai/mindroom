@@ -13,7 +13,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from agno.agent import Agent
 from agno.db.in_memory import InMemoryDb
+from agno.knowledge.knowledge import Knowledge
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
+from agno.run import RunContext
+from agno.run.agent import RunOutput
+from agno.session import AgentSession
+from agno.tools.function import Function
 from pydantic import ValidationError
 
 from mindroom import agent_prompts
@@ -2784,6 +2789,77 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     )
 
     assert config.agents["calculator"].knowledge_bases == ["research"]
+
+
+def test_knowledge_base_config_preserves_description() -> None:
+    """Knowledge bases should carry a user-authored description."""
+    config = Config(
+        agents={
+            "calculator": AgentConfig(
+                display_name="CalculatorAgent",
+                knowledge_bases=["research"],
+            ),
+        },
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                description="Research plans, experiment notes, and decision records.",
+                path="./knowledge_docs/research",
+                watch=False,
+            ),
+        },
+    )
+
+    assert config.knowledge_bases["research"].description == ("Research plans, experiment notes, and decision records.")
+
+
+def test_agent_knowledge_search_tool_description_lists_configured_sources(tmp_path: Path) -> None:
+    """The model-facing knowledge search tool should explain what each source contains."""
+    config = _test_config()
+    config.agents["general"].knowledge_bases = ["engineering", "product"]
+    config.knowledge_bases = {
+        "engineering": KnowledgeBaseConfig(
+            description="Architecture docs, ADRs, deployment runbooks, and coding conventions.",
+            path="./knowledge_docs/engineering",
+        ),
+        "product": KnowledgeBaseConfig(
+            description="Product requirements, feature specs, roadmap notes, and user-facing behavior decisions.",
+            path="./knowledge_docs/product",
+        ),
+    }
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+
+    agent = _create_agent_for_test("general", config, knowledge=Knowledge())
+    run_output = RunOutput(
+        run_id="run-knowledge-description",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-knowledge-description",
+        input="hello",
+        content="ok",
+    )
+    run_context = RunContext(run_id="run-knowledge-description", session_id="session-knowledge-description")
+    session = AgentSession(
+        session_id="session-knowledge-description",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    search_tools = [
+        tool
+        for tool in agent.get_tools(run_output, run_context, session)
+        if isinstance(tool, Function) and tool.name == "search_knowledge_base"
+    ]
+
+    assert len(search_tools) == 1
+    description = search_tools[0].description
+    assert description is not None
+    assert "Search this agent's configured knowledge bases" in description
+    assert "- engineering: Architecture docs, ADRs, deployment runbooks, and coding conventions." in description
+    assert (
+        "- product: Product requirements, feature specs, roadmap notes, and user-facing behavior decisions."
+        in description
+    )
 
 
 @pytest.mark.parametrize("base_id", ["", ".", "..", "group/research"])

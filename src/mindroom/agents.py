@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, cast
 from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
 
-from agno.agent import Agent
 from agno.culture.manager import CultureManager
 from agno.db.base import BaseDb, SessionType
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
@@ -19,6 +18,12 @@ from agno.run.team import TeamRunOutput
 import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
+from mindroom.agent_knowledge_descriptions import (
+    KnowledgeToolDescribingAgent as Agent,
+)
+from mindroom.agent_knowledge_descriptions import (
+    knowledge_source_descriptions,
+)
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
@@ -59,6 +64,7 @@ if TYPE_CHECKING:
     from agno.team import Team
     from agno.tools.toolkit import Toolkit
 
+    from mindroom.agent_knowledge_descriptions import KnowledgeSourceDescription
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
@@ -925,7 +931,13 @@ def _load_agent_skills(
 
 @timed("system_prompt_assembly.agent_create.agent_init")
 def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
-    return Agent(**agent_kwargs)
+    knowledge_sources = cast(
+        "tuple[KnowledgeSourceDescription, ...]",
+        agent_kwargs.pop("knowledge_sources", ()),
+    )
+    agent = Agent(**agent_kwargs)
+    agent.knowledge_sources = knowledge_sources
+    return agent
 
 
 @timed("system_prompt_assembly.agent_create")
@@ -1169,6 +1181,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     _log_toolkits_without_unique_model_functions(tools, agent_name=agent_name)
 
     knowledge_enabled = bool(config.get_agent_knowledge_base_ids(agent_name)) and knowledge is not None
+    knowledge_sources = knowledge_source_descriptions(agent_name, config) if knowledge_enabled else ()
     culture_storage_root = resolved_storage_path
     cache_private_culture = False
     if agent_runtime.is_private:
@@ -1244,6 +1257,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         learning=_resolve_agent_learning(agent_config, defaults, learning_storage),
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
+        knowledge_sources=knowledge_sources,
         search_knowledge=knowledge_enabled,
         add_history_to_context=True,
         add_session_summary_to_context=True,

@@ -47,6 +47,10 @@ class KnowledgeGitConfig(BaseModel):
 class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
+    description: str = Field(
+        default="",
+        description="Short description of what this knowledge base contains, shown to agents in knowledge-search tool metadata",
+    )
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(
         default=True,

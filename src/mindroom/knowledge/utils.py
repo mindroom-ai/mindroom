@@ -85,6 +85,15 @@ class _AsyncKnowledgeVectorDb(_KnowledgeVectorDb, Protocol):
     ) -> list[Document]: ...
 
 
+def _apply_knowledge_metadata(base_id: str, knowledge: Knowledge, config: Config) -> None:
+    """Attach configured source metadata to one queryable Knowledge handle."""
+    if not isinstance(knowledge, Knowledge):
+        return
+    base_config = config.get_knowledge_base_config(base_id)
+    knowledge.name = base_id
+    knowledge.description = base_config.description.strip() or None
+
+
 def _lookup_knowledge_for_base(
     base_id: str,
     *,
@@ -364,6 +373,8 @@ def resolve_agent_knowledge_access(
         if lookup is not None and availability is KnowledgeAvailability.READY:
             availability = _ready_index_effective_availability(lookup, config)
         knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
+        if knowledge is not None:
+            _apply_knowledge_metadata(base_id, knowledge, config)
         if refresh_scheduler is not None:
             availability = _schedule_refresh_for_availability(
                 refresh_scheduler,
@@ -614,8 +625,14 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
     ]
     if not vector_db_sources:
         return None
+    source_descriptions = [
+        f"{knowledge.name}: {knowledge.description}"
+        for knowledge in knowledges
+        if isinstance(knowledge, Knowledge) and knowledge.description
+    ]
     return Knowledge(
         name=f"{agent_name}_multi_knowledge",
+        description="\n".join(source_descriptions) if source_descriptions else None,
         vector_db=_MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
         max_results=max(knowledge.max_results for knowledge in knowledges),
     )

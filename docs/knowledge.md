@@ -39,6 +39,7 @@ Add a knowledge base and assign it to an agent:
 ```yaml
 knowledge_bases:
   docs:
+    description: Product documentation, support notes, and internal operating procedures
     path: ./knowledge_docs
     watch: false
     chunk_size: 5000
@@ -65,6 +66,7 @@ Use a non-empty single path component such as `docs` or `company_docs`, not `""`
 ```yaml
 knowledge_bases:
   my_docs:
+    description: Product documentation, support notes, and internal operating procedures
     path: ./knowledge_docs/my_docs   # Folder containing documents
     watch: false                      # Direct external edits require reindex; API mutations still schedule refresh
     chunk_size: 5000                  # Max characters per chunk
@@ -73,6 +75,7 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `description` | string | `""` | Short description of what the knowledge base contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant |
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
@@ -89,6 +92,7 @@ Use `agents.<name>.private.knowledge` when one shared agent definition should in
 ```yaml
 knowledge_bases:
   company_docs:
+    description: Shared company policies, project notes, and operating procedures
     path: ./company_docs
     watch: false
 
@@ -102,6 +106,7 @@ agents:
       root: mind_data
       template_dir: ./mind_template
       knowledge:
+        description: Requester-private notes, preferences, and working memory for this agent
         path: memory
         watch: false
     knowledge_bases: [company_docs]

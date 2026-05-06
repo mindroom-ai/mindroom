@@ -1227,6 +1227,7 @@ class Config(BaseModel):
             raise ValueError(msg)
 
         return KnowledgeBaseConfig(
+            description=private_knowledge.description,
             path=knowledge_path,
             watch=private_knowledge.watch,
             chunk_size=private_knowledge.chunk_size,

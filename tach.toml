@@ -59,6 +59,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.agent_knowledge_descriptions",
     "mindroom.agent_descriptions",
     "mindroom.agent_storage",
     "mindroom.agent_prompts",
@@ -93,6 +94,11 @@ visibility = [
     "mindroom.custom_tools.delegate",
     "mindroom.routing",
 ]
+
+[[modules]]
+path = "mindroom.agent_knowledge_descriptions"
+depends_on = []
+visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.agent_storage"

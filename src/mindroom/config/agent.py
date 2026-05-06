@@ -61,6 +61,10 @@ class AgentPrivateKnowledgeConfig(BaseModel):
         default=True,
         description="Whether to index private agent knowledge for this private agent instance",
     )
+    description: str = Field(
+        default="",
+        description="Short description of what this private knowledge contains, shown to agents in knowledge-search tool metadata",
+    )
     path: str | None = Field(
         default=None,
         description="Path to a private knowledge directory relative to the private root",
