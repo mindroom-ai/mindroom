@@ -16,6 +16,7 @@ Avoid broad base classes or universal helpers unless two or more narrow extracti
 
 | Cluster | Status | PR | Branch | Gate | Verification |
 | --- | --- | --- | --- | --- | --- |
+| WORK-001 / rank 1: Worker API response DTOs and serializers | Draft PR opened; accepted by line gate | [#896](https://github.com/mindroom-ai/mindroom/pull/896) | `refactor/worker-api-responses` | Production net `-7` lines | Focused API pytest: 3 passed; `uv run pre-commit run --files ...` |
 | STORE-009 / rank 5: Attachment output-path schema | Draft PR opened; accepted by line gate | [#892](https://github.com/mindroom-ai/mindroom/pull/892) | `refactor/attachment-output-path-schema` | Production net `-5` lines | `uv run pytest tests/test_tool_output_files.py tests/test_attachments_tool.py -q --no-cov -n 0`; `uv run pre-commit run --files ...` |
 | FLOW-005 / rank 2: Approval datetime parser | Draft PR opened; accepted by line gate | [#893](https://github.com/mindroom-ai/mindroom/pull/893) | `refactor/approval-datetime-parser` | Production net `-3` lines | `uv run pytest tests/test_tool_approval.py -n 0 --no-cov`; `uv sync --all-extras`; `uv run pre-commit run --files ...` |
 | FLOW-006 / rank 3: Matrix reaction content builder | Draft PR opened; accepted by line gate | [#894](https://github.com/mindroom-ai/mindroom/pull/894) | `refactor/matrix-reaction-content-builder` | Production net `-31` lines | Focused pytest: 5 passed; `uv run pre-commit run --files ...` |
