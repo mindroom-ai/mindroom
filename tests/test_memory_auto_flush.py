@@ -764,6 +764,29 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
     assert captured["session_id"] == "session-alice"
 
 
+def test_load_agent_session_uses_canonical_session_helper(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto-flush should not locally coerce raw Agno session payloads."""
+    storage = object()
+    sentinel = object()
+
+    def _fake_create_session_storage(*_args: object, **_kwargs: object) -> object:
+        return storage
+
+    monkeypatch.setattr("mindroom.memory.auto_flush.create_session_storage", _fake_create_session_storage)
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush.get_agent_session",
+        lambda actual_storage, session_id: (
+            sentinel if actual_storage is storage and session_id == "session-1" else None
+        ),
+        raising=False,
+    )
+
+    assert _load_agent_session(config, runtime_paths_for(config), "general", "session-1") is sentinel
+
+
 def test_reprioritize_private_sessions_stays_within_private_scope(tmp_path: Path) -> None:
     """Private auto-flush reprioritization must not cross requester boundaries."""
     config = _private_auto_flush_config(tmp_path)

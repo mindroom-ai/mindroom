@@ -11,11 +11,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from agno.agent import Agent
-from agno.db.base import SessionType
-from agno.session.agent import AgentSession
 
 from mindroom import model_loading
-from mindroom.agent_storage import create_session_storage
+from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.runtime_resolution import resolve_agent_execution
@@ -24,6 +22,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from agno.session.agent import AgentSession
 
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryAutoFlushConfig
@@ -335,15 +335,6 @@ def reprioritize_auto_flush_sessions(
     _notify_workers()
 
 
-def _coerce_agent_session(raw_session: object) -> AgentSession | None:
-    if isinstance(raw_session, AgentSession):
-        return raw_session
-    if isinstance(raw_session, dict):
-        session_payload = cast("dict[str, Any]", raw_session)
-        return AgentSession.from_dict(session_payload)
-    return None
-
-
 def _load_agent_session(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -358,8 +349,7 @@ def _load_agent_session(
         runtime_paths,
         execution_identity=execution_identity,
     )
-    raw_session = storage.get_session(session_id, SessionType.AGENT)
-    return _coerce_agent_session(raw_session)
+    return get_agent_session(storage, session_id)
 
 
 def _entry_priority_key(entry: _FlushSessionEntry, now: int) -> tuple[int, int]:
