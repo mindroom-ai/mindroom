@@ -44,7 +44,7 @@ from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import ScheduledWorkflow
-from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
@@ -272,7 +272,7 @@ def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
         runtime_paths,
     )
 
-    original_registry = _TOOL_REGISTRY.copy()
+    original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
     original_plugin_roots = _get_plugin_skill_roots()
     original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
@@ -292,8 +292,8 @@ def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
         for module_name in list(sys.modules):
             if module_name == "plugins.workloop" or module_name.startswith("plugins.workloop."):
                 sys.modules.pop(module_name, None)
-        _TOOL_REGISTRY.clear()
-        _TOOL_REGISTRY.update(original_registry)
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
         plugin_module._PLUGIN_CACHE.clear()

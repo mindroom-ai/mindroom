@@ -16,7 +16,7 @@ from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.plugins import _load_plugin_module
+from mindroom.tool_system.plugins import load_plugin_module
 
 if TYPE_CHECKING:
     from mindroom.api.config_lifecycle import ApiSnapshot
@@ -91,7 +91,7 @@ def _load_plugin_oauth_providers(
         if plugin_base.oauth_module_path is None:
             continue
         try:
-            module = _load_plugin_module(
+            module = load_plugin_module(
                 plugin_base.name,
                 plugin_base.root,
                 plugin_base.oauth_module_path,

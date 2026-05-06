@@ -6,12 +6,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from mindroom.api.sandbox_runner import (
-    _app_runner_token,
-    _app_runtime_config,
-    _app_runtime_paths,
-    _load_config_from_startup_runtime,
-    _startup_runner_token_from_env,
+    app_runner_token,
+    app_runtime_config,
+    app_runtime_paths,
     initialize_sandbox_runner_app,
+    load_config_from_startup_runtime,
+    startup_runner_token_from_env,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
 
@@ -19,13 +19,13 @@ from mindroom.api.sandbox_runner import router as sandbox_runner_router
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
-        runtime_paths = _app_runtime_paths(app)
+        runtime_paths = app_runtime_paths(app)
     except TypeError:
-        runtime_paths, config = _load_config_from_startup_runtime()
-        runner_token = _startup_runner_token_from_env()
+        runtime_paths, config = load_config_from_startup_runtime()
+        runner_token = startup_runner_token_from_env()
     else:
-        config = _app_runtime_config(app)
-        runner_token = _app_runner_token(app)
+        config = app_runtime_config(app)
+        runner_token = app_runner_token(app)
     initialize_sandbox_runner_app(
         app,
         runtime_paths,

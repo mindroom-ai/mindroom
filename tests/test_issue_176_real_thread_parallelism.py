@@ -7,14 +7,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 
 ROOM_ID = "!issue-176:localhost"
 THREAD_A_ID = "$thread-a:localhost"
 THREAD_B_ID = "$thread-b:localhost"
 
 
-async def _assert_sibling_threads_start_concurrently(coord: _EventCacheWriteCoordinator) -> None:
+async def _assert_sibling_threads_start_concurrently(coord: EventCacheWriteCoordinator) -> None:
     started_a = asyncio.Event()
     started_b = asyncio.Event()
     release_a = asyncio.Event()
@@ -62,7 +62,7 @@ async def _assert_sibling_threads_start_concurrently(coord: _EventCacheWriteCoor
         await asyncio.gather(first, second, return_exceptions=True)
 
 
-async def _assert_room_update_blocks_later_thread(coord: _EventCacheWriteCoordinator) -> None:
+async def _assert_room_update_blocks_later_thread(coord: EventCacheWriteCoordinator) -> None:
     started_a = asyncio.Event()
     started_b = asyncio.Event()
     release_a = asyncio.Event()
@@ -113,7 +113,7 @@ async def _assert_room_update_blocks_later_thread(coord: _EventCacheWriteCoordin
 @pytest.mark.asyncio
 async def test_issue_176_network_bound_sibling_thread_updates_run_in_parallel() -> None:
     """Different-thread updates should overlap when the slow work is outside SQLite."""
-    coord = _EventCacheWriteCoordinator(
+    coord = EventCacheWriteCoordinator(
         logger=MagicMock(),
         background_task_owner=object(),
     )

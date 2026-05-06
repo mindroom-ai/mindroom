@@ -377,7 +377,7 @@ def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
     return status if isinstance(status, str) else None
 
 
-def _record_latest_thread_edit(
+def record_latest_thread_edit(
     event: nio.RoomMessageText | nio.RoomMessageNotice,
     *,
     event_info: EventInfo,
@@ -398,7 +398,7 @@ def _record_latest_thread_edit(
     return True
 
 
-async def _apply_latest_edits_to_messages(
+async def apply_latest_edits_to_messages(
     client: nio.AsyncClient,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
@@ -466,7 +466,7 @@ async def resolve_latest_visible_messages(
             continue
 
         event_info = EventInfo.from_event(event.source)
-        if _record_latest_thread_edit(
+        if record_latest_thread_edit(
             event,
             event_info=event_info,
             latest_edits_by_original_event_id=latest_edits_by_original_event_id,
@@ -487,7 +487,7 @@ async def resolve_latest_visible_messages(
             latest_event_id=event.event_id,
         )
 
-    await _apply_latest_edits_to_messages(
+    await apply_latest_edits_to_messages(
         client,
         messages_by_event_id=messages_by_event_id,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
@@ -498,10 +498,12 @@ async def resolve_latest_visible_messages(
 
 __all__ = [
     "ResolvedVisibleMessage",
+    "apply_latest_edits_to_messages",
     "bundled_replacement_body",
     "extract_visible_edit_body",
     "extract_visible_message",
     "message_preview",
+    "record_latest_thread_edit",
     "replace_visible_message",
     "resolve_latest_visible_messages",
     "resolve_visible_event_source",

@@ -219,7 +219,7 @@ def _resolve_attachment_file_paths(
     return resolved_paths, newly_registered_attachment_ids, None
 
 
-def _resolve_send_attachments(
+def resolve_send_attachments(
     context: ToolRuntimeContext,
     *,
     attachment_ids: list[str],
@@ -245,7 +245,7 @@ def _resolve_send_attachments(
     return attachment_paths, resolved_attachment_ids, newly_registered_attachment_ids, None
 
 
-async def _send_attachment_paths(
+async def send_attachment_paths(
     context: ToolRuntimeContext,
     *,
     room_id: str,
@@ -289,7 +289,7 @@ async def send_context_attachments(
 ) -> tuple[_AttachmentSendResult | None, str | None]:
     """Resolve and send context-scoped attachments to Matrix."""
     attachment_paths, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = (
-        _resolve_send_attachments(
+        resolve_send_attachments(
             context,
             attachment_ids=attachment_ids,
             attachment_file_paths=attachment_file_paths,
@@ -317,7 +317,7 @@ async def send_context_attachments(
             destination_error,
         )
 
-    attachment_event_ids, send_error = await _send_attachment_paths(
+    attachment_event_ids, send_error = await send_attachment_paths(
         context,
         room_id=effective_room_id,
         thread_id=effective_thread_id,

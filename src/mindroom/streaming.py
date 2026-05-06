@@ -33,16 +33,16 @@ from mindroom.orchestration.runtime import (
     classify_cancel_source,
 )
 from mindroom.streaming_delivery import (
+    DeliveryRequest,
+    NonTerminalDeliveryError,
+    StreamDeliveryShutdownTimeoutError,
     StreamInputChunk,
-    _consume_stream_with_progress_supervision,
-    _DeliveryRequest,
-    _drain_worker_progress_events,
-    _drive_stream_delivery,
-    _NonTerminalDeliveryError,
-    _raise_progress_delivery_error,
-    _shutdown_stream_delivery,
-    _shutdown_worker_progress_drain,
-    _StreamDeliveryShutdownTimeoutError,
+    consume_stream_with_progress_supervision,
+    drain_worker_progress_events,
+    drive_stream_delivery,
+    raise_progress_delivery_error,
+    shutdown_stream_delivery,
+    shutdown_worker_progress_drain,
 )
 from mindroom.streaming_warmup import WorkerWarmupState
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
@@ -63,6 +63,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "PROGRESS_PLACEHOLDER",
+    "RESTART_INTERRUPTED_RESPONSE_NOTE",
     "SYNC_RESTART_CANCEL_MSG",
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
@@ -81,7 +82,7 @@ _PROGRESS_PLACEHOLDER = "Thinking..."
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
 _CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
 _INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
-_RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
+RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 
@@ -140,7 +141,7 @@ def _build_streaming_delivery_error(
 
 def _raise_nonterminal_delivery_error(error: Exception) -> NoReturn:
     """Raise one wrapped non-terminal delivery error for unified rollback handling."""
-    raise _NonTerminalDeliveryError(error) from error
+    raise NonTerminalDeliveryError(error) from error
 
 
 def _complete_capture_completions(capture_completions: tuple[asyncio.Future[None], ...]) -> None:
@@ -168,7 +169,7 @@ def is_interrupted_partial_reply(text: object) -> bool:
         (
             _CANCELLED_RESPONSE_NOTE,
             _INTERRUPTED_RESPONSE_NOTE,
-            _RESTART_INTERRUPTED_RESPONSE_NOTE,
+            RESTART_INTERRUPTED_RESPONSE_NOTE,
             " [cancelled]",
             " [error]",
         ),
@@ -184,7 +185,7 @@ def clean_partial_reply_text(text: str) -> str:
         " [error]",
         _CANCELLED_RESPONSE_NOTE,
         _INTERRUPTED_RESPONSE_NOTE,
-        _RESTART_INTERRUPTED_RESPONSE_NOTE,
+        RESTART_INTERRUPTED_RESPONSE_NOTE,
     ):
         if cleaned.endswith(marker):
             cleaned = cleaned[: -len(marker)].rstrip()
@@ -201,8 +202,8 @@ def build_restart_interrupted_body(text: str) -> str:
     """Return restart-note text for a stale in-progress message body."""
     stripped_text = text.rstrip()
     if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
-        return _RESTART_INTERRUPTED_RESPONSE_NOTE
-    return f"{stripped_text}\n\n{_RESTART_INTERRUPTED_RESPONSE_NOTE}"
+        return RESTART_INTERRUPTED_RESPONSE_NOTE
+    return f"{stripped_text}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
 
 
 @dataclass(frozen=True)
@@ -1098,40 +1099,40 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         await streaming.update_content(header, client)
 
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+    delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
     progress_task: asyncio.Task[None] | None = None
     delivery_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
     transport_outcome: StreamTransportOutcome | None = None
     with worker_progress_pump_scope(loop, worker_progress_queue) as pump:
-        delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
+        delivery_task = asyncio.create_task(drive_stream_delivery(client, streaming, delivery_queue))
         progress_task = asyncio.create_task(
-            _drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),
+            drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),
         )
         try:
-            await _consume_stream_with_progress_supervision(
+            await consume_stream_with_progress_supervision(
                 response_stream,
                 streaming,
                 progress_task,
                 delivery_task,
                 delivery_queue,
             )
-            progress_error = await _shutdown_worker_progress_drain(pump, progress_task)
+            progress_error = await shutdown_worker_progress_drain(pump, progress_task)
             if progress_error is None:
                 progress_task = None
-            delivery_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            delivery_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
             if delivery_error is None:
                 delivery_task = None
             if progress_error is not None:
-                _raise_progress_delivery_error(progress_error)
+                raise_progress_delivery_error(progress_error)
             if delivery_error is not None:
                 _raise_nonterminal_delivery_error(delivery_error)
         except asyncio.CancelledError as exc:
             cancel_source = classify_cancel_source(exc)
-            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
+            cleanup_error = await shutdown_worker_progress_drain(pump, progress_task)
             if cleanup_error is None:
                 progress_task = None
-            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            delivery_cleanup_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
             if delivery_cleanup_error is None:
                 delivery_task = None
             if cleanup_error is not None:
@@ -1144,7 +1145,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                     "Stream delivery controller raised during cancellation cleanup",
                     error=str(delivery_cleanup_error),
                 )
-                if isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
+                if isinstance(delivery_cleanup_error, StreamDeliveryShutdownTimeoutError):
                     streaming.restore_last_delivered_state()
                     raise _build_streaming_delivery_error(
                         streaming,
@@ -1163,12 +1164,12 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 transport_outcome=transport_outcome,
             ) from exc
         except Exception as exc:
-            delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
+            delivery_error = exc.error if isinstance(exc, NonTerminalDeliveryError) else exc
             logger.exception("Streaming response failed", error=str(delivery_error))
-            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
+            cleanup_error = await shutdown_worker_progress_drain(pump, progress_task)
             if cleanup_error is None:
                 progress_task = None
-            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            delivery_cleanup_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
             if delivery_cleanup_error is None:
                 delivery_task = None
             if cleanup_error is not None and cleanup_error is not delivery_error:
@@ -1182,9 +1183,9 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                     error=str(delivery_cleanup_error),
                 )
             shutdown_timeout = None
-            if isinstance(delivery_error, _StreamDeliveryShutdownTimeoutError):
+            if isinstance(delivery_error, StreamDeliveryShutdownTimeoutError):
                 shutdown_timeout = delivery_error
-            elif isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
+            elif isinstance(delivery_cleanup_error, StreamDeliveryShutdownTimeoutError):
                 shutdown_timeout = delivery_cleanup_error
             if shutdown_timeout is not None:
                 streaming.restore_last_delivered_state()
@@ -1195,7 +1196,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                     terminal_status="error",
                     tool_trace_collector=tool_trace_collector,
                 ) from shutdown_timeout
-            if isinstance(exc, _NonTerminalDeliveryError):
+            if isinstance(exc, NonTerminalDeliveryError):
                 streaming.restore_last_delivered_state()
             transport_outcome = await streaming.finalize(client, error=delivery_error)
             raise StreamingDeliveryError(
@@ -1208,13 +1209,13 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         else:
             transport_outcome = await streaming.finalize(client)
         finally:
-            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
+            cleanup_error = await shutdown_worker_progress_drain(pump, progress_task)
             if cleanup_error is not None:
                 logger.warning(
                     "Worker progress drain raised during final cleanup",
                     error=str(cleanup_error),
                 )
-            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            delivery_cleanup_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
             if delivery_cleanup_error is not None:
                 logger.warning(
                     "Stream delivery controller raised during final cleanup",

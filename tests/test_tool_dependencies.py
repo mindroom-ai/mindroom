@@ -24,8 +24,8 @@ from mindroom.tool_system.dependencies import (
     install_command_for_current_python,
 )
 from mindroom.tool_system.metadata import (
-    _TOOL_REGISTRY,
     TOOL_METADATA,
+    TOOL_REGISTRY,
     SetupType,
     ToolCategory,
     ToolMetadata,
@@ -54,7 +54,7 @@ def test_all_tools_can_be_imported() -> None:
     """Test that all registered tools can be imported from the registry."""
     failed = []
 
-    for tool_name, factory in _TOOL_REGISTRY.items():
+    for tool_name, factory in TOOL_REGISTRY.items():
         metadata = TOOL_METADATA.get(tool_name)
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
 
@@ -188,7 +188,7 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
             raise ImportError(msg)
         return DummyToolkit
 
-    _TOOL_REGISTRY[tool_name] = flaky_factory
+    TOOL_REGISTRY[tool_name] = flaky_factory
     TOOL_METADATA[tool_name] = ToolMetadata(
         name=tool_name,
         display_name="Auto Install Test Tool",
@@ -209,7 +209,7 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
         assert isinstance(tool, DummyToolkit)
         assert calls["count"] == 2
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -232,7 +232,7 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
         msg = "dependency missing forever"
         raise ImportError(msg)
 
-    _TOOL_REGISTRY[tool_name] = failing_factory
+    TOOL_REGISTRY[tool_name] = failing_factory
     TOOL_METADATA[tool_name] = ToolMetadata(
         name=tool_name,
         display_name="Auto Install Failure Tool",
@@ -252,7 +252,7 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
         with pytest.raises(ImportError, match="dependency missing forever"):
             get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None)
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 

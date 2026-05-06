@@ -9,7 +9,7 @@ from mindroom.history.compaction import (
     resolve_compaction_runtime_settings,
     resolve_effective_compaction_threshold,
 )
-from mindroom.history.types import CompactionDecision, ResolvedHistoryExecutionPlan, _CompactionAvailabilityReason
+from mindroom.history.types import CompactionAvailabilityReason, CompactionDecision, ResolvedHistoryExecutionPlan
 from mindroom.token_budget import compute_compaction_input_budget
 
 if TYPE_CHECKING:
@@ -190,7 +190,7 @@ def _resolve_summary_input_budget(
     *,
     compaction_context_window: int | None,
     reserve_tokens: int,
-) -> tuple[int | None, _CompactionAvailabilityReason | None]:
+) -> tuple[int | None, CompactionAvailabilityReason | None]:
     if compaction_context_window is None:
         return None, "no_context_window"
 

@@ -20,7 +20,7 @@ from mindroom.constants import RuntimePaths, env_key_for_provider
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
-from .config import _activate_cli_runtime, _load_config_quiet, console
+from .config import activate_cli_runtime, console, load_config_quiet
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -42,7 +42,7 @@ def doctor() -> None:
     failed = 0
     warnings = 0
 
-    runtime_paths = _activate_cli_runtime()
+    runtime_paths = activate_cli_runtime()
     config_path = runtime_paths.config_path
 
     # 1. Config file exists
@@ -118,7 +118,7 @@ def _check_config_exists(config_path: Path) -> tuple[int, int, int]:
 def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int, int, int]:
     """Validate config file. Returns (config_or_none, passed, failed, warnings)."""
     try:
-        config = _load_config_quiet(runtime_paths=runtime_paths)
+        config = load_config_quiet(runtime_paths=runtime_paths)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         issues = "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
         console.print(f"[red]✗[/red] Config invalid: {issues}")

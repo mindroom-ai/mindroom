@@ -17,7 +17,7 @@ import typer
 
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
-from .config import _activate_cli_runtime, console
+from .config import activate_cli_runtime, console
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -73,7 +73,7 @@ def local_stack_setup(
     ),
 ) -> None:
     """Start local Synapse + MindRoom Cinny using Docker only."""
-    runtime_paths = _activate_cli_runtime()
+    runtime_paths = activate_cli_runtime()
     _require_supported_platform()
     _require_binary("docker", "Docker is required but was not found in PATH.")
 

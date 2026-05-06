@@ -2198,13 +2198,7 @@ exclusive = true
 [[interfaces]]
 expose = ["EventCacheWriteCoordinator"]
 from = ["mindroom.matrix.cache.write_coordinator"]
-visibility = ["mindroom.matrix.cache"]
-exclusive = true
-
-[[interfaces]]
-expose = ["_EventCacheWriteCoordinator"]
-from = ["mindroom.matrix.cache.write_coordinator"]
-visibility = ["mindroom.runtime_support"]
+visibility = ["mindroom.matrix.cache", "mindroom.runtime_support"]
 exclusive = true
 
 [[interfaces]]
@@ -2332,11 +2326,11 @@ from = ["mindroom.matrix.client_delivery"]
 [[interfaces]]
 expose = [
     "ResolvedVisibleMessage",
-    "_apply_latest_edits_to_messages",
-    "_record_latest_thread_edit",
+    "apply_latest_edits_to_messages",
     "extract_visible_edit_body",
     "extract_visible_message",
     "message_preview",
+    "record_latest_thread_edit",
     "replace_visible_message",
     "resolve_visible_event_source",
     "resolve_latest_visible_messages",
@@ -2347,7 +2341,7 @@ from = ["mindroom.matrix.client_visible_messages"]
 
 [[interfaces]]
 expose = [
-    "_fetch_thread_event_sources_via_room_messages",
+    "fetch_thread_event_sources_via_room_messages",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "fetch_dispatch_thread_history",
@@ -2460,22 +2454,22 @@ from = ["mindroom.tool_system.catalog"]
 expose = [
     "TOOL_METADATA",
     "ToolMetadataValidationError",
-    "_BUILTIN_TOOL_METADATA",
-    "_BUILTIN_TOOL_REGISTRY",
-    "_PLUGIN_MODULE_PREFIX",
-    "_PLUGIN_REGISTRATION_SCOPE",
-    "_TOOL_REGISTRY",
-    "_capture_tool_registry_snapshot",
-    "_clear_plugin_tool_registrations",
-    "_locked_tool_registry_state",
-    "_register_plugin_tool_metadata",
-    "_resolved_tool_state",
-    "_restore_plugin_tool_registrations",
-    "_restore_tool_registry_snapshot",
-    "_scoped_plugin_registration_store",
-    "_scoped_plugin_registration_owner",
-    "_snapshot_plugin_tool_registrations",
-    "_synchronize_plugin_tools",
+    "BUILTIN_TOOL_METADATA",
+    "BUILTIN_TOOL_REGISTRY",
+    "PLUGIN_MODULE_PREFIX",
+    "PLUGIN_REGISTRATION_SCOPE",
+    "TOOL_REGISTRY",
+    "capture_tool_registry_snapshot",
+    "clear_plugin_tool_registrations",
+    "locked_tool_registry_state",
+    "register_plugin_tool_metadata",
+    "resolved_tool_state",
+    "restore_plugin_tool_registrations",
+    "restore_tool_registry_snapshot",
+    "scoped_plugin_registration_store",
+    "scoped_plugin_registration_owner",
+    "snapshot_plugin_tool_registrations",
+    "synchronize_plugin_tools",
     "register_builtin_tool_metadata",
 ]
 from = ["mindroom.tool_system.registry_state"]

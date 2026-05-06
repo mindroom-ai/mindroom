@@ -45,8 +45,8 @@ from mindroom.constants import (
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import HookRegistry
 from mindroom.tool_system.metadata import (
-    _TOOL_REGISTRY,
     TOOL_METADATA,
+    TOOL_REGISTRY,
     ConfigField,
     ToolCategory,
     ToolInitOverrideError,
@@ -435,7 +435,7 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
         assert marker not in str(proxy_result)
         assert proxy_result["mindroom_tool_output"]["status"] == "saved_to_file"
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -665,7 +665,7 @@ async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_
         assert marker not in str(response.result)
         assert response.result["mindroom_tool_output"]["status"] == "saved_to_file"
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -751,7 +751,7 @@ async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path:
         assert not (worker_paths.workspace / "tool-results/worker.json").exists()
         assert response.result["mindroom_tool_output"]["path"] == "tool-results/worker.json"
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -806,7 +806,7 @@ def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.Monkey
         assert captured["json"]["tool_config_overrides"] == {"label": "from-config"}
         assert "tool_init_overrides" not in captured["json"]
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 

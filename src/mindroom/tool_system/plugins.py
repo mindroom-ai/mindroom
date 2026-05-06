@@ -14,14 +14,14 @@ from mindroom.hooks import HookRegistry, iter_module_hooks
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.registry_state import (
-    _capture_tool_registry_snapshot,
-    _clear_plugin_tool_registrations,
-    _locked_tool_registry_state,
-    _restore_plugin_tool_registrations,
-    _restore_tool_registry_snapshot,
-    _scoped_plugin_registration_owner,
-    _snapshot_plugin_tool_registrations,
-    _synchronize_plugin_tools,
+    capture_tool_registry_snapshot,
+    clear_plugin_tool_registrations,
+    locked_tool_registry_state,
+    restore_plugin_tool_registrations,
+    restore_tool_registry_snapshot,
+    scoped_plugin_registration_owner,
+    snapshot_plugin_tool_registrations,
+    synchronize_plugin_tools,
 )
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 
@@ -96,12 +96,12 @@ def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
         for plugin in plugins
         if plugin.tools_module_path is not None
     ]
-    _synchronize_plugin_tools(active_tool_modules)
+    synchronize_plugin_tools(active_tool_modules)
 
 
 def deactivate_plugins() -> PluginReloadResult:
     """Clear live plugin-derived tools, skills, and hooks."""
-    with _locked_tool_registry_state():
+    with locked_tool_registry_state():
         _sync_loaded_plugin_tools([])
         set_plugin_skill_roots([])
         _clear_oauth_provider_cache_after_plugin_change()
@@ -122,7 +122,7 @@ def load_plugins(
     """Load plugins from config and register their tools and skills."""
     import mindroom.tools  # noqa: F401, PLC0415
 
-    with _locked_tool_registry_state():
+    with locked_tool_registry_state():
         plugin_entries = config.plugins
         if not plugin_entries:
             _sync_loaded_plugin_tools([])
@@ -136,16 +136,16 @@ def load_plugins(
             runtime_paths,
             skip_broken_plugins=skip_broken_plugins,
         )
-        snapshot = _capture_tool_registry_snapshot()
+        snapshot = capture_tool_registry_snapshot()
         try:
             plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
 
             for plugin_base, plugin_entry, plugin_order in plugin_bases:
-                plugin_snapshot = _capture_tool_registry_snapshot()
+                plugin_snapshot = capture_tool_registry_snapshot()
                 try:
                     plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
                 except Exception as exc:
-                    _restore_tool_registry_snapshot(plugin_snapshot)
+                    restore_tool_registry_snapshot(plugin_snapshot)
                     if not skip_broken_plugins:
                         raise
                     plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
@@ -161,7 +161,7 @@ def load_plugins(
             if set_skill_roots:
                 set_plugin_skill_roots(skill_roots)
         except Exception:
-            _restore_tool_registry_snapshot(snapshot)
+            restore_tool_registry_snapshot(snapshot)
             raise
 
         return plugins
@@ -224,9 +224,9 @@ def prepare_plugin_reload(
     skip_broken_plugins: bool = False,
 ) -> _PreparedPluginReload:
     """Build one fresh plugin snapshot without mutating the live runtime."""
-    with _locked_tool_registry_state():
+    with locked_tool_registry_state():
         package_roots = {cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()}
-        previous_snapshot = _capture_tool_registry_snapshot()
+        previous_snapshot = capture_tool_registry_snapshot()
         previous_plugin_skill_roots = tuple(get_plugin_skill_roots())
         try:
             _clear_plugin_reload_caches()
@@ -235,11 +235,11 @@ def prepare_plugin_reload(
             return _PreparedPluginReload(
                 hook_registry=HookRegistry.from_plugins(plugins),
                 active_plugin_names=tuple(plugin.name for plugin in plugins),
-                tool_registry_snapshot=_capture_tool_registry_snapshot(),
+                tool_registry_snapshot=capture_tool_registry_snapshot(),
                 plugin_skill_roots=tuple(get_plugin_skill_roots()),
             )
         finally:
-            _restore_tool_registry_snapshot(previous_snapshot)
+            restore_tool_registry_snapshot(previous_snapshot)
             set_plugin_skill_roots(previous_plugin_skill_roots)
 
 
@@ -250,13 +250,13 @@ def apply_prepared_plugin_reload(
     cancel_existing_tasks: bool = False,
 ) -> PluginReloadResult:
     """Commit one previously prepared plugin runtime snapshot."""
-    with _locked_tool_registry_state():
+    with locked_tool_registry_state():
         if cancel_existing_tasks:
             package_roots = {
                 cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
             }
             cancelled_task_count = _cancel_plugin_module_tasks(package_roots)
-        _restore_tool_registry_snapshot(prepared_reload.tool_registry_snapshot)
+        restore_tool_registry_snapshot(prepared_reload.tool_registry_snapshot)
         set_plugin_skill_roots(prepared_reload.plugin_skill_roots)
     return PluginReloadResult(
         hook_registry=prepared_reload.hook_registry,
@@ -338,10 +338,10 @@ def _materialize_plugin(
     entry_config: PluginEntryConfig,
     plugin_order: int,
 ) -> _Plugin:
-    tools_module = _load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
+    tools_module = load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
     hooks_module_path = plugin.hooks_module_path or plugin.tools_module_path
     hooks_module = (
-        _load_plugin_module(plugin.name, plugin.root, hooks_module_path, kind="hooks") if hooks_module_path else None
+        load_plugin_module(plugin.name, plugin.root, hooks_module_path, kind="hooks") if hooks_module_path else None
     )
     if hooks_module is None and plugin.hooks_module_path is None:
         hooks_module = tools_module
@@ -374,10 +374,10 @@ def _prepare_plugin_tool_module_reload(
     for candidate_module_name in {module_name, cached.module_name if cached is not None else None}:
         if candidate_module_name is None:
             continue
-        previous_registrations_by_module_name[candidate_module_name] = _snapshot_plugin_tool_registrations(
+        previous_registrations_by_module_name[candidate_module_name] = snapshot_plugin_tool_registrations(
             candidate_module_name,
         )
-        _clear_plugin_tool_registrations(candidate_module_name)
+        clear_plugin_tool_registrations(candidate_module_name)
     return previous_registrations_by_module_name
 
 
@@ -390,7 +390,7 @@ def _restore_failed_plugin_tool_module_reload(
     """Restore cached tool registrations and module imports after one failed reload."""
     sys.modules.pop(module_name, None)
     for restored_module_name, registrations in previous_registrations_by_module_name.items():
-        _restore_plugin_tool_registrations(restored_module_name, registrations)
+        restore_plugin_tool_registrations(restored_module_name, registrations)
     if cached is not None:
         plugin_imports._MODULE_IMPORT_CACHE[module_path] = cached
         sys.modules[cached.module_name] = cached.module
@@ -398,13 +398,14 @@ def _restore_failed_plugin_tool_module_reload(
         plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
 
 
-def _load_plugin_module(
+def load_plugin_module(
     plugin_name: str,
     plugin_root: Path,
     module_path: Path | None,
     *,
     kind: str,
 ) -> ModuleType | None:
+    """Load a plugin module from a configured plugin root."""
     if module_path is None:
         return None
     try:
@@ -439,7 +440,7 @@ def _load_plugin_module(
     sys.modules[module_name] = module
     try:
         if kind == "tools":
-            with _scoped_plugin_registration_owner(module_name):
+            with scoped_plugin_registration_owner(module_name):
                 _exec_plugin_source(module_path, module)
         else:
             _exec_plugin_source(module_path, module)

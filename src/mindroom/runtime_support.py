@@ -12,7 +12,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_redaction import redact_postgres_connection_info
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.tool_system.dependencies import ensure_optional_deps
 
 if TYPE_CHECKING:
@@ -66,7 +66,7 @@ class OwnedRuntimeSupport:
     """Concrete event-cache services owned by one runtime lifecycle."""
 
     event_cache: ConversationEventCache
-    event_cache_write_coordinator: _EventCacheWriteCoordinator
+    event_cache_write_coordinator: EventCacheWriteCoordinator
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry
     event_cache_identity: _EventCacheRuntimeIdentity
 
@@ -136,7 +136,7 @@ def build_owned_runtime_support(
     cache_identity = _event_cache_runtime_identity(cache_config, runtime_paths)
     return OwnedRuntimeSupport(
         event_cache=_build_event_cache(cache_config, runtime_paths),
-        event_cache_write_coordinator=_EventCacheWriteCoordinator(
+        event_cache_write_coordinator=EventCacheWriteCoordinator(
             logger=logger,
             background_task_owner=background_task_owner,
         ),

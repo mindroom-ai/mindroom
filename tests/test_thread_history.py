@@ -31,7 +31,7 @@ from mindroom.matrix.cache.thread_history_result import (
     THREAD_HISTORY_SOURCE_HOMESERVER,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
-from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage, RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_delivery import build_threaded_edit_content as _build_threaded_edit_content_impl
 from mindroom.matrix.client_thread_history import (
@@ -2265,13 +2265,13 @@ class TestThreadHistoryCache:
         client: nio.AsyncClient,
         event_cache: SqliteEventCache,
         runtime_started_at: float,
-    ) -> tuple[MatrixConversationCache, _EventCacheWriteCoordinator]:
+    ) -> tuple[MatrixConversationCache, EventCacheWriteCoordinator]:
         runtime_paths = test_runtime_paths(tmp_path)
         config = bind_runtime_paths(
             Config(agents={"general": AgentConfig(display_name="General Agent")}),
             runtime_paths,
         )
-        coordinator = _EventCacheWriteCoordinator(logger=MagicMock(), background_task_owner=object())
+        coordinator = EventCacheWriteCoordinator(logger=MagicMock(), background_task_owner=object())
         runtime = BotRuntimeState(
             client=client,
             config=config,

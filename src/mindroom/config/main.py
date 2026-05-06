@@ -220,7 +220,7 @@ def _normalize_optional_config_sections(data: dict[str, object]) -> None:
         data["plugins"] = []
 
 
-def _normalized_config_data(data: object) -> object:
+def normalized_config_data(data: object) -> object:
     """Return config input with legacy optional sections normalized."""
     if not isinstance(data, dict):
         return data
@@ -424,7 +424,7 @@ class Config(BaseModel):
     @classmethod
     def validate_raw_root_config(cls, data: object) -> object:
         """Normalize optional root sections before nested model validation."""
-        return _normalized_config_data(data)
+        return normalized_config_data(data)
 
     @field_validator("plugins", mode="before")
     @classmethod
@@ -931,7 +931,7 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool = False,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
-        config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
+        config = cls.model_validate(normalized_config_data(data), context={"runtime_paths": runtime_paths})
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
 

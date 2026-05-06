@@ -20,13 +20,13 @@ from mindroom.frontend_assets import ensure_frontend_dist_dir
 
 from .banner import make_banner
 from .config import (
-    _activate_cli_runtime,
-    _check_env_keys,
-    _format_validation_errors,
-    _load_config_quiet,
-    _print_config_search_locations,
+    activate_cli_runtime,
+    check_env_keys,
     config_app,
     console,
+    format_validation_errors,
+    load_config_quiet,
+    print_config_search_locations,
 )
 from .doctor import doctor
 from .local_stack import local_stack_setup
@@ -128,12 +128,12 @@ def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
         raise typer.Exit(1)
 
     try:
-        config = _load_config_quiet(
+        config = load_config_quiet(
             runtime_paths=runtime_paths,
             tolerate_plugin_load_errors=True,
         )
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        _format_validation_errors(exc, config_path)
+        format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
 
     return config
@@ -148,11 +148,11 @@ async def _run(
     api_host: str,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
-    runtime_paths = _activate_cli_runtime(storage_path=storage_path)
+    runtime_paths = activate_cli_runtime(storage_path=storage_path)
     config = _load_active_config_or_exit(runtime_paths)
 
     # Check for missing API keys
-    _check_env_keys(config, runtime_paths=runtime_paths)
+    check_env_keys(config, runtime_paths=runtime_paths)
 
     console.print(make_banner())
     console.print()
@@ -202,7 +202,7 @@ def avatars_generate(
     ),
 ) -> None:
     """Generate missing managed avatar files in the workspace."""
-    runtime_paths = _activate_cli_runtime()
+    runtime_paths = activate_cli_runtime()
     _load_active_config_or_exit(runtime_paths)
 
     try:
@@ -223,7 +223,7 @@ def avatars_sync(
     ),
 ) -> None:
     """Sync configured room and root-space avatars to Matrix using the initialized router account."""
-    runtime_paths = _activate_cli_runtime()
+    runtime_paths = activate_cli_runtime()
     _load_active_config_or_exit(runtime_paths)
 
     try:
@@ -278,7 +278,7 @@ def connect(
         console.print("[red]Error:[/red] Invalid pair code format. Expected ABCD-EFGH.")
         raise typer.Exit(1)
 
-    runtime_paths = _activate_cli_runtime(path)
+    runtime_paths = activate_cli_runtime(path)
     resolved_provisioning_url = (
         provisioning_url or runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "https://mindroom.chat"
     ).strip()
@@ -388,7 +388,7 @@ def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
     console.print("Quick start:")
     console.print("  [cyan]mindroom config init[/cyan]    Create a starter config")
     console.print("  [cyan]mindroom config edit[/cyan]    Edit your config\n")
-    _print_config_search_locations(process_env, title="Config search locations (first match wins):")
+    print_config_search_locations(process_env, title="Config search locations (first match wins):")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 
 

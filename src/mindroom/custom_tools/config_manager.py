@@ -41,7 +41,7 @@ def _is_known_tool_entry(tool_name: str, tool_metadata: dict[str, ToolMetadata])
     return tool_name in tool_metadata
 
 
-def _preserve_tool_overrides(
+def preserve_tool_overrides(
     existing_entries: list[ToolConfigEntry],
     updated_tool_names: list[str],
 ) -> list[ToolConfigEntry]:
@@ -80,7 +80,7 @@ def validate_knowledge_bases(
     return f"Error: Unknown knowledge bases: {invalid}. Available knowledge bases: {available}."
 
 
-def _save_runtime_validated_config(config: Config, runtime_paths: RuntimePaths) -> None:
+def save_runtime_validated_config(config: Config, runtime_paths: RuntimePaths) -> None:
     """Revalidate the full config against the active runtime before writing it."""
     validated = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     config_lifecycle.persist_runtime_validated_config(validated, runtime_paths)
@@ -644,7 +644,7 @@ class ConfigManagerTools(Toolkit):
             config.agents[agent_name] = new_agent
 
             # Save config
-            _save_runtime_validated_config(config, self.runtime_paths)
+            save_runtime_validated_config(config, self.runtime_paths)
 
             # Build success message
             tools_str = ", ".join(tools) if tools else "None"
@@ -717,7 +717,7 @@ class ConfigManagerTools(Toolkit):
                 changes.append(f"Role -> {role}")
 
             if tools is not None and tools != agent.tool_names:
-                agent.tools = _preserve_tool_overrides(agent.tools, tools)
+                agent.tools = preserve_tool_overrides(agent.tools, tools)
                 changes.append(f"Tools -> {', '.join(tools) if tools else '(empty)'}")
 
             if instructions is not None and instructions != agent.instructions:
@@ -759,7 +759,7 @@ class ConfigManagerTools(Toolkit):
                 return "No changes made. All provided values are the same as current configuration."
 
             # Save config
-            _save_runtime_validated_config(config, self.runtime_paths)
+            save_runtime_validated_config(config, self.runtime_paths)
 
             return f"✅ Successfully updated agent '{agent_name}'!\n\n**Changes:**\n" + "\n".join(
                 f"- {c}" for c in changes
@@ -808,7 +808,7 @@ class ConfigManagerTools(Toolkit):
             config.teams[team_name] = new_team
 
             # Save config
-            _save_runtime_validated_config(config, self.runtime_paths)
+            save_runtime_validated_config(config, self.runtime_paths)
 
             return (
                 f"✅ Successfully created team '{team_name}'!\n\n"

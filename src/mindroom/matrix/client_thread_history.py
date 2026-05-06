@@ -28,8 +28,8 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
-    _apply_latest_edits_to_messages,
-    _record_latest_thread_edit,
+    apply_latest_edits_to_messages,
+    record_latest_thread_edit,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_and_resolve_message, resolve_event_source_content
@@ -287,12 +287,12 @@ async def _resolve_thread_history_from_event_sources_timed(
         if bundled_replacement_source is not None:
             bundled_replacement = nio.Event.parse_event(bundled_replacement_source)
             if isinstance(bundled_replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-                _record_latest_thread_edit(
+                record_latest_thread_edit(
                     bundled_replacement,
                     event_info=EventInfo.from_event(bundled_replacement.source),
                     latest_edits_by_original_event_id=latest_edits_by_original_event_id,
                 )
-        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and _record_latest_thread_edit(
+        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_latest_thread_edit(
             event,
             event_info=event_info,
             latest_edits_by_original_event_id=latest_edits_by_original_event_id,
@@ -312,7 +312,7 @@ async def _resolve_thread_history_from_event_sources_timed(
             else _snapshot_message_dict(event, trusted_sender_ids=trusted_sender_ids)
         )
 
-    await _apply_latest_edits_to_messages(
+    await apply_latest_edits_to_messages(
         client,
         messages_by_event_id=messages_by_event_id,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
@@ -993,7 +993,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
 ) -> _ThreadHistoryFetchResult:
     """Fetch all thread messages by scanning room history pages."""
     fetch_started = time.perf_counter()
-    scan_result = await _fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
+    scan_result = await fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
     resolution_started = time.perf_counter()
     history, sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
         client,
@@ -1027,7 +1027,7 @@ def _record_scanned_room_message_source(
         return False
 
     event_info = EventInfo.from_event(event.source)
-    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and _record_latest_thread_edit(
+    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_latest_thread_edit(
         event,
         event_info=event_info,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
@@ -1078,7 +1078,7 @@ async def _resolve_scanned_thread_message_sources(
     }
 
 
-async def _fetch_thread_event_sources_via_room_messages(
+async def fetch_thread_event_sources_via_room_messages(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -1194,6 +1194,7 @@ __all__ = [
     "ThreadRoomScanRootNotFoundError",
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
+    "fetch_thread_event_sources_via_room_messages",
     "fetch_thread_history",
     "fetch_thread_snapshot",
     "get_room_threads_page",

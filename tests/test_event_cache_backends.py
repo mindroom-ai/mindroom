@@ -24,7 +24,7 @@ from mindroom.matrix.cache.postgres_event_cache import (
     _PostgresEventCacheRuntime,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.write_coordinator import _EventCacheWriteCoordinator
+from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
     StartupThreadPrewarmRegistry,
@@ -940,7 +940,7 @@ async def test_event_cache_startup_backend_unavailable_retries_without_disabling
     logger = get_logger("tests.event_cache_backends")
     support = OwnedRuntimeSupport(
         event_cache=cast("ConversationEventCache", cache),
-        event_cache_write_coordinator=_EventCacheWriteCoordinator(logger=logger),
+        event_cache_write_coordinator=EventCacheWriteCoordinator(logger=logger),
         startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
         event_cache_identity=_event_cache_runtime_identity(cache_config, runtime_paths),
     )

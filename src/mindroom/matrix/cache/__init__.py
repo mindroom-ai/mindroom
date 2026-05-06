@@ -13,7 +13,7 @@ Developer note:
 
 Package boundary:
 - `mindroom.matrix.cache` is the package-level import surface for cache-facing contracts and shared helpers used above the cache package.
-- `SqliteEventCache`, `PostgresEventCache`, and `_EventCacheWriteCoordinator` remain private concrete services used by `runtime_support.py` through their concrete owner modules.
+- `SqliteEventCache`, `PostgresEventCache`, and `EventCacheWriteCoordinator` remain private concrete services used by `runtime_support.py` through their concrete owner modules.
 - `MatrixConversationCache` remains the higher-level conversation read/write facade above the cache package and may use specific cache helper submodules through narrow Tach visibility.
 
 Main invariants:

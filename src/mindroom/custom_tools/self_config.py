@@ -12,8 +12,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import (
-    _preserve_tool_overrides,
-    _save_runtime_validated_config,
+    preserve_tool_overrides,
+    save_runtime_validated_config,
     validate_knowledge_bases,
 )
 from mindroom.logging_config import get_logger
@@ -157,7 +157,7 @@ class SelfConfigTools(Toolkit):
             ("display_name", display_name),
             ("role", role),
             ("instructions", instructions),
-            ("tools", _preserve_tool_overrides(agent.tools, tools) if tools is not None else None),
+            ("tools", preserve_tool_overrides(agent.tools, tools) if tools is not None else None),
             ("model", model),
             ("rooms", rooms),
             ("markdown", markdown),
@@ -208,7 +208,7 @@ class SelfConfigTools(Toolkit):
 
         config.agents[self.agent_name] = validated_agent
         try:
-            _save_runtime_validated_config(config, self.runtime_paths)
+            save_runtime_validated_config(config, self.runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:

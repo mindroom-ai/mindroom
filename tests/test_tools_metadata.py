@@ -34,15 +34,15 @@ from mindroom.tool_system.metadata import (
     serialize_tool_validation_snapshot,
 )
 from mindroom.tool_system.registry_state import (
-    _PLUGIN_MODULE_PREFIX,
-    _TOOL_REGISTRY,
+    PLUGIN_MODULE_PREFIX,
     TOOL_METADATA,
-    _capture_tool_registry_snapshot,
-    _restore_tool_registry_snapshot,
+    TOOL_REGISTRY,
+    capture_tool_registry_snapshot,
+    restore_tool_registry_snapshot,
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 
-_BASE_TOOL_REGISTRY = _TOOL_REGISTRY.copy()
+_BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
 _SKIP_PARALLEL_FACTORY_IMPORTS = {"daytona", "openbb"}
 _OPTIONAL_TOOL_IMPORTS = frozenset({"telegram"})
@@ -50,8 +50,8 @@ _OPTIONAL_TOOL_IMPORTS = frozenset({"telegram"})
 
 def _restore_builtin_tool_metadata_state() -> None:
     """Reset tool registries to the built-in metadata snapshot."""
-    _TOOL_REGISTRY.clear()
-    _TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
+    TOOL_REGISTRY.clear()
+    TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
     TOOL_METADATA.clear()
     TOOL_METADATA.update(_BASE_TOOL_METADATA)
 
@@ -113,7 +113,7 @@ def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
         exported_names = {tool["name"] for tool in export_tools_metadata()}
         assert tool_name not in exported_names
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
         _restore_builtin_tool_metadata_state()
 
@@ -137,7 +137,7 @@ def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch
     snapshot_modules = SnapshotOnlyModules(sys.modules.copy())
     monkeypatch.setattr(metadata_module.sys, "modules", snapshot_modules)
 
-    snapshot = _capture_tool_registry_snapshot()
+    snapshot = capture_tool_registry_snapshot()
     assert isinstance(snapshot.plugin_modules, dict)
 
     module_name = _execute_validation_plugin_module("demo", plugin_root, module_path, {})
@@ -191,8 +191,8 @@ def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(
         def copy(self) -> dict[str, ModuleType]:
             return dict(self)
 
-    snapshot = _capture_tool_registry_snapshot()
-    leaked_module_name = f"{_PLUGIN_MODULE_PREFIX}leaked"
+    snapshot = capture_tool_registry_snapshot()
+    leaked_module_name = f"{PLUGIN_MODULE_PREFIX}leaked"
     assert leaked_module_name not in snapshot.plugin_modules
 
     leaked_module = ModuleType(leaked_module_name)
@@ -202,7 +202,7 @@ def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(
     snapshot_modules[leaked_module_name] = leaked_module
     monkeypatch.setattr(metadata_module.sys, "modules", snapshot_modules)
 
-    _restore_tool_registry_snapshot(snapshot)
+    restore_tool_registry_snapshot(snapshot)
 
     assert leaked_module_name not in metadata_module.sys.modules
 
@@ -242,7 +242,7 @@ def test_registered_tools_declare_managed_init_args_for_explicit_constructor_inp
     """Built-in tools must opt in explicitly instead of relying on hidden constructor inference."""
     managed_arg_names = {managed_arg.value for managed_arg in ToolManagedInitArg}
 
-    for tool_name, tool_factory in _TOOL_REGISTRY.items():
+    for tool_name, tool_factory in TOOL_REGISTRY.items():
         metadata = TOOL_METADATA[tool_name]
         if tool_name in _SKIP_PARALLEL_FACTORY_IMPORTS:
             continue
@@ -265,7 +265,7 @@ def test_registered_tools_declare_managed_init_args_for_explicit_constructor_inp
         )
 
     for tool_name, metadata in TOOL_METADATA.items():
-        if tool_name not in _TOOL_REGISTRY:
+        if tool_name not in TOOL_REGISTRY:
             assert metadata.managed_init_args == (), (
                 f"{tool_name} is metadata-only and should not declare managed init args: "
                 f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
@@ -305,7 +305,7 @@ def test_get_tool_by_name_does_not_infer_hidden_constructor_kwargs(tmp_path: Pat
                 worker_target=None,
             )
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -367,7 +367,7 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
             worker_key=None,
         )
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -411,7 +411,7 @@ def test_validate_authored_overrides_accepts_declared_field_types_and_nulls() ->
             "endpoint": "https://example.com",
         }
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -442,7 +442,7 @@ def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_field
             config_path_prefix="agents.code.tools[0]",
         ) == {"workspace_id": _AUTHORED_OVERRIDE_INHERIT}
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -476,7 +476,7 @@ def test_validate_authored_overrides_accepts_string_lists_for_text_fields_with_a
             config_path_prefix="agents.code.tools[0]",
         ) == {"patterns": "GITEA_*, WHISPER_URL"}
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 
@@ -534,7 +534,7 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
                 config_path_prefix="agents.code.tools[0]",
             )
     finally:
-        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
 
 

@@ -11,8 +11,8 @@ from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id
 from mindroom.custom_tools.attachments import (
-    _resolve_send_attachments,
-    _send_attachment_paths,
+    resolve_send_attachments,
+    send_attachment_paths,
     send_context_attachments,
 )
 from mindroom.interactive import (
@@ -203,7 +203,7 @@ class MatrixMessageOperations:
             attachment_count = len(attachment_ids) + len(attachment_file_paths)
             if text is None and attachment_count > 1 and effective_thread_id is None and not room_mode:
                 attachment_paths, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = (
-                    _resolve_send_attachments(
+                    resolve_send_attachments(
                         context,
                         attachment_ids=attachment_ids,
                         attachment_file_paths=attachment_file_paths,
@@ -252,7 +252,7 @@ class MatrixMessageOperations:
 
                 attachment_event_ids = [first_attachment_event_id]
                 attachment_thread_id = first_attachment_event_id
-                remaining_attachment_event_ids, send_error = await _send_attachment_paths(
+                remaining_attachment_event_ids, send_error = await send_attachment_paths(
                     context,
                     room_id=room_id,
                     thread_id=attachment_thread_id,

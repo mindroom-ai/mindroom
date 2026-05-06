@@ -31,12 +31,13 @@ GOOGLE_IDENTITY_SCOPES = (
 )
 
 
-def _google_token_parser(
+def google_token_parser(
     provider: OAuthProvider,
     token_response: Mapping[str, Any],
     client_config: OAuthClientConfig,
     _runtime_paths: RuntimePaths,
 ) -> OAuthTokenResult:
+    """Parse a Google OAuth token response into shared token data."""
     access_token = token_response.get("access_token")
     refresh_token = token_response.get("refresh_token")
     id_token = token_response.get("id_token")
@@ -99,6 +100,7 @@ def _google_token_parser(
     return OAuthTokenResult(token_data=token_data, claims=claims, claims_verified=True)
 
 
-def _google_domain_env_names(provider_id: str, suffix: str) -> tuple[str, ...]:
+def google_domain_env_names(provider_id: str, suffix: str) -> tuple[str, ...]:
+    """Return provider-specific environment variable names for Google domain settings."""
     prefix = provider_id.upper()
     return (f"{prefix}_{suffix}", f"MINDROOM_OAUTH_{prefix}_{suffix}")
