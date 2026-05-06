@@ -31,7 +31,7 @@ GOOGLE_IDENTITY_SCOPES = (
 )
 
 
-def google_token_parser(
+def _google_token_parser(
     provider: OAuthProvider,
     token_response: Mapping[str, Any],
     client_config: OAuthClientConfig,
@@ -100,7 +100,40 @@ def google_token_parser(
     return OAuthTokenResult(token_data=token_data, claims=claims, claims_verified=True)
 
 
-def google_domain_env_names(provider_id: str, suffix: str) -> tuple[str, ...]:
+def _google_domain_env_names(provider_id: str, suffix: str) -> tuple[str, ...]:
     """Return provider-specific environment variable names for Google domain settings."""
     prefix = provider_id.upper()
     return (f"{prefix}_{suffix}", f"MINDROOM_OAUTH_{prefix}_{suffix}")
+
+
+def _google_oauth_provider(
+    *,
+    provider_id: str,
+    display_name: str,
+    scopes: tuple[str, ...],
+    credential_service: str,
+    tool_config_service: str,
+    client_config_services: tuple[str, ...],
+    status_capabilities: tuple[str, ...],
+) -> OAuthProvider:
+    """Return a Google OAuth provider with shared Google OAuth defaults."""
+    return OAuthProvider(
+        id=provider_id,
+        display_name=display_name,
+        authorization_url="https://accounts.google.com/o/oauth2/v2/auth",
+        token_url="https://oauth2.googleapis.com/token",  # noqa: S106
+        scopes=scopes,
+        credential_service=credential_service,
+        tool_config_service=tool_config_service,
+        client_config_services=client_config_services,
+        shared_client_config_services=("google_oauth_client",),
+        allowed_email_domains_env=_google_domain_env_names(provider_id, "ALLOWED_EMAIL_DOMAINS"),
+        allowed_hosted_domains_env=_google_domain_env_names(provider_id, "ALLOWED_HOSTED_DOMAINS"),
+        extra_auth_params={
+            "access_type": "offline",
+            "include_granted_scopes": "true",
+            "prompt": "consent",
+        },
+        status_capabilities=status_capabilities,
+        token_parser=_google_token_parser,
+    )
