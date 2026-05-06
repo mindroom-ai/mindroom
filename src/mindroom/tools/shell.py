@@ -19,7 +19,12 @@ from typing import Annotated, cast
 from agno.tools.toolkit import Toolkit
 from pydantic import BeforeValidator
 
-from mindroom.constants import WORKSPACE_HOME_CONTRACT_ENV_NAMES, RuntimePaths, shell_execution_runtime_env_values
+from mindroom.constants import (
+    WORKSPACE_HOME_CONTRACT_ENV_NAMES,
+    RuntimePaths,
+    shell_execution_runtime_env_values,
+    workspace_home_identity_env,
+)
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import (
     ConfigField,
@@ -133,11 +138,7 @@ def _workspace_home_contract_env_from_process_env(base_process_env: dict[str, st
     if not workspace or base_process_env.get("HOME") != workspace:
         return {}
 
-    expected_identity = {
-        "XDG_CONFIG_HOME": str(Path(workspace) / ".config"),
-        "XDG_DATA_HOME": str(Path(workspace) / ".local" / "share"),
-        "XDG_STATE_HOME": str(Path(workspace) / ".local" / "state"),
-    }
+    expected_identity = workspace_home_identity_env(workspace)
     if any(base_process_env.get(name) != value for name, value in expected_identity.items()):
         return {}
 

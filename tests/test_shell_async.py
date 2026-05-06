@@ -14,9 +14,9 @@ from unittest.mock import patch
 import pytest
 from agno.tools.function import Function, FunctionCall, FunctionExecutionResult
 
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tools.shell import _process_registry, shell_tools
+from mindroom.tools.shell import _process_registry, _workspace_home_contract_env_from_process_env, shell_tools
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -600,6 +600,38 @@ async def test_sweep_stale_records(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Env passthrough
 # ---------------------------------------------------------------------------
+
+
+def test_workspace_home_identity_env_builds_shell_identity_fragment(tmp_path: Path) -> None:
+    """The shared workspace HOME fragment should use stable workspace-relative XDG paths."""
+    workspace = tmp_path / "workspace"
+
+    assert workspace_home_identity_env(workspace) == {
+        "HOME": str(workspace),
+        "MINDROOM_AGENT_WORKSPACE": str(workspace),
+        "XDG_CONFIG_HOME": str(workspace / ".config"),
+        "XDG_DATA_HOME": str(workspace / ".local" / "share"),
+        "XDG_STATE_HOME": str(workspace / ".local" / "state"),
+    }
+
+
+def test_workspace_home_contract_env_requires_full_identity_fragment(tmp_path: Path) -> None:
+    """Shell subprocesses should forward the workspace contract only when identity is coherent."""
+    workspace = tmp_path / "workspace"
+    base_env = {
+        **workspace_home_identity_env(workspace),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "PIP_CACHE_DIR": str(tmp_path / "cache" / "pip"),
+        "UV_CACHE_DIR": str(tmp_path / "cache" / "uv"),
+        "PYTHONPYCACHEPREFIX": str(tmp_path / "cache" / "pycache"),
+        "VIRTUAL_ENV": str(tmp_path / "venv"),
+    }
+
+    assert _workspace_home_contract_env_from_process_env(base_env) == base_env
+
+    mismatched_env = dict(base_env)
+    mismatched_env["XDG_DATA_HOME"] = str(tmp_path / "other-data")
+    assert _workspace_home_contract_env_from_process_env(mismatched_env) == {}
 
 
 @pytest.mark.asyncio

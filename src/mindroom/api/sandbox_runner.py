@@ -633,15 +633,7 @@ def _workspace_home_contract_env(
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
 ) -> dict[str, str]:
     """Build the env contract for an already-resolved worker workspace."""
-    env = {
-        "HOME": str(workspace),
-        "MINDROOM_AGENT_WORKSPACE": str(workspace),
-        "XDG_CONFIG_HOME": str(workspace / ".config"),
-        "XDG_DATA_HOME": str(workspace / ".local" / "share"),
-        "XDG_STATE_HOME": str(workspace / ".local" / "state"),
-    }
-    env.update(_worker_owned_env(prepared))
-    return env
+    return constants.workspace_home_identity_env(workspace) | _worker_owned_env(prepared)
 
 
 def _worker_owned_env(prepared: sandbox_worker_prep.PreparedWorkerRequest | None) -> dict[str, str]:
