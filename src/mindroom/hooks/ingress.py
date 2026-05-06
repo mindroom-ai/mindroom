@@ -7,11 +7,12 @@ from typing import TYPE_CHECKING
 
 from mindroom.dispatch_source import is_automation_source_kind
 
-from .types import EVENT_MESSAGE_RECEIVED
-from .types import split_hook_source as _split_hook_source
+from .types import EVENT_MESSAGE_RECEIVED, split_hook_source
 
 if TYPE_CHECKING:
     from .context import MessageEnvelope
+
+_split_hook_source = split_hook_source
 
 
 @dataclass(frozen=True, slots=True)
