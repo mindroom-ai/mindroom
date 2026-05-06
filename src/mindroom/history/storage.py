@@ -85,9 +85,20 @@ def clear_force_compaction_state(
     state: HistoryScopeState,
 ) -> HistoryScopeState:
     """Clear the next-run force flag in one session scope."""
-    cleared_state = replace(state, force_compact_before_next_run=False)
-    write_scope_state(session, scope, cleared_state)
-    return cleared_state
+    return set_force_compaction_state(session, scope, state, force=False)
+
+
+def set_force_compaction_state(
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    state: HistoryScopeState,
+    *,
+    force: bool,
+) -> HistoryScopeState:
+    """Set the next-run force flag in one session scope."""
+    next_state = replace(state, force_compact_before_next_run=force)
+    write_scope_state(session, scope, next_state)
+    return next_state
 
 
 def add_pending_force_compaction_scope(

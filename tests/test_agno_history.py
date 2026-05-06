@@ -85,6 +85,7 @@ from mindroom.history.runtime import (
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
+    set_force_compaction_state,
     update_scope_seen_event_ids,
     write_scope_state,
 )
@@ -5581,6 +5582,34 @@ def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
 
     assert read_scope_seen_event_ids(session, scope) == {"event-1"}
+
+
+def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:
+    _config, _runtime_paths_value = _make_config(tmp_path)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    session = _session("session-1")
+    state = HistoryScopeState(
+        last_summary_model="summary-model",
+        last_compacted_run_count=3,
+    )
+
+    forced_state = set_force_compaction_state(session, scope, state, force=True)
+
+    assert forced_state == HistoryScopeState(
+        last_summary_model="summary-model",
+        last_compacted_run_count=3,
+        force_compact_before_next_run=True,
+    )
+    assert read_scope_state(session, scope) == forced_state
+
+    cleared_state = set_force_compaction_state(session, scope, forced_state, force=False)
+
+    assert cleared_state == HistoryScopeState(
+        last_summary_model="summary-model",
+        last_compacted_run_count=3,
+        force_compact_before_next_run=False,
+    )
+    assert read_scope_state(session, scope) == cleared_state
 
 
 def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path) -> None:
