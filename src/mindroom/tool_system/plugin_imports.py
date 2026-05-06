@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
@@ -20,6 +21,7 @@ logger = get_logger(__name__)
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WARNED_PLUGIN_MESSAGES: set[tuple[str, Path]] = set()
+_PreparedPluginModule = tuple[ModuleType, Any, dict[str, ModuleType | None]] | None
 
 
 class PluginValidationError(ValueError):
@@ -404,3 +406,14 @@ def _restore_plugin_package_chain(previous_packages: dict[str, ModuleType | None
             sys.modules.pop(package_name, None)
         else:
             sys.modules[package_name] = previous_module
+
+
+def _prepare_module(name: str, root: Path, path: Path, module_name: str) -> _PreparedPluginModule:
+    previous_packages = _snapshot_plugin_package_chain(name, root, path)
+    _install_plugin_package_chain(name, root, path)
+    if (spec := util.spec_from_file_location(module_name, path)) is None or spec.loader is None:
+        _restore_plugin_package_chain(previous_packages)
+        return None
+
+    module = sys.modules[module_name] = util.module_from_spec(spec)
+    return module, spec.loader, previous_packages
