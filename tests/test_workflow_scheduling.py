@@ -418,7 +418,7 @@ class TestExecuteScheduledWorkflow:
 
         conversation_cache = _conversation_cache(latest_thread_event_id="$latest456")
         with patch(
-            "mindroom.scheduling.send_message_result",
+            "mindroom.hooks.sender._send_message_result",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$event123",
@@ -474,7 +474,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch(
-            "mindroom.scheduling.send_message_result",
+            "mindroom.hooks.sender._send_message_result",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$event456",
@@ -541,7 +541,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch(
-            "mindroom.scheduling.send_message_result",
+            "mindroom.hooks.sender._send_message_result",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$event789",
@@ -586,7 +586,7 @@ class TestExecuteScheduledWorkflow:
             ],
         )
 
-        with patch("mindroom.scheduling.send_message_result", new=mock_send):
+        with patch("mindroom.hooks.sender._send_message_result", new=mock_send):
             # Should not raise, but log error
             await _execute_scheduled_workflow(
                 client,
@@ -619,7 +619,7 @@ class TestExecuteScheduledWorkflow:
 
         with (
             patch(
-                "mindroom.scheduling.send_message_result",
+                "mindroom.hooks.sender._send_message_result",
                 new=AsyncMock(
                     side_effect=[
                         None,
@@ -658,7 +658,7 @@ class TestExecuteScheduledWorkflow:
             room_id=None,  # No room ID
         )
 
-        with patch("mindroom.scheduling.send_message_result", new=AsyncMock()) as mock_send:
+        with patch("mindroom.hooks.sender._send_message_result", new=AsyncMock()) as mock_send:
             await _execute_scheduled_workflow(
                 client,
                 workflow,

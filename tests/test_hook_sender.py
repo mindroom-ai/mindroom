@@ -41,6 +41,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.execution import emit
 from mindroom.hooks.sender import HookMessageSender as SenderAlias
+from mindroom.hooks.sender import send_and_track_message
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
@@ -81,6 +82,44 @@ def _config(tmp_path: Path) -> Config:
 def test_hooks_package_reexports_hook_message_sender() -> None:
     """The public hooks package should keep exporting HookMessageSender."""
     assert HookMessageSender is SenderAlias
+
+
+@pytest.mark.asyncio
+async def test_send_and_track_message_records_delivered_content(tmp_path: Path) -> None:
+    """Shared send tracking should cache the exact content returned by delivery."""
+    config = _config(tmp_path)
+    content = {"msgtype": "m.text", "body": "already built"}
+    delivered_content = {"msgtype": "m.text", "body": "already built", "server": "normalized"}
+    conversation_cache = MagicMock()
+
+    async def mock_send(
+        _client: object,
+        _room_id: str,
+        _content: dict[str, object],
+        *,
+        config: Config,
+    ) -> object:
+        assert isinstance(config, Config)
+        return delivered_matrix_event("$tracked", delivered_content)
+
+    with patch("mindroom.hooks.sender._send_message_result", side_effect=mock_send) as mock_send_result:
+        delivered = await send_and_track_message(
+            AsyncMock(),
+            "!room:localhost",
+            content,
+            config,
+            conversation_cache,
+        )
+
+    assert delivered is not None
+    assert delivered.event_id == "$tracked"
+    mock_send_result.assert_awaited_once()
+    assert mock_send_result.await_args.args[2] is content
+    conversation_cache.notify_outbound_message.assert_called_once_with(
+        "!room:localhost",
+        "$tracked",
+        delivered_content,
+    )
 
 
 def _plugin(name: str, callbacks: list[object]) -> object:
