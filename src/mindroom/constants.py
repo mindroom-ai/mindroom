@@ -181,6 +181,19 @@ WORKER_RUNTIME_ENV_NAMES = frozenset(
 WORKSPACE_HOME_CONTRACT_ENV_NAMES = _WORKSPACE_HOME_IDENTITY_ENV_NAMES | WORKER_RUNTIME_ENV_NAMES
 
 
+def workspace_home_identity_env(workspace: Path | str) -> dict[str, str]:
+    """Build the workspace HOME identity env fragment."""
+    workspace_text = str(workspace)
+    workspace_path = Path(workspace_text)
+    return {
+        "HOME": workspace_text,
+        "MINDROOM_AGENT_WORKSPACE": workspace_text,
+        "XDG_CONFIG_HOME": str(workspace_path / ".config"),
+        "XDG_DATA_HOME": str(workspace_path / ".local" / "share"),
+        "XDG_STATE_HOME": str(workspace_path / ".local" / "state"),
+    }
+
+
 def is_workspace_env_overlay_name_allowed(name: str) -> bool:
     """Return whether one env var name may be returned from `.mindroom/worker-env.sh`.
 
