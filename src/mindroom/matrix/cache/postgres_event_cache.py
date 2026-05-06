@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import psycopg
 
 from mindroom.logging_config import get_logger
+from mindroom.timing import milliseconds
 
 from . import postgres_event_cache_events, postgres_event_cache_threads
 from .event_batching import group_lookup_events_by_room
@@ -604,7 +605,7 @@ class _PostgresEventCacheRuntime:
                     room_id=room_id,
                     namespace=self._namespace,
                     operation=operation,
-                    wait_time_ms=round(wait_time * 1000, 2),
+                    wait_time_ms=milliseconds(wait_time, ndigits=2),
                 )
             yield
         finally:

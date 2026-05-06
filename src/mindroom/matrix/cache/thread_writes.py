@@ -20,7 +20,7 @@ from mindroom.matrix.thread_bookkeeping import (
     ThreadMutationResolver,
     is_thread_affecting_relation,
 )
-from mindroom.timing import emit_timing_event, timing_enabled
+from mindroom.timing import elapsed_ms_since, emit_timing_event, timing_enabled
 
 from .event_normalization import normalize_event_source_for_cache, normalize_nio_event_for_cache
 
@@ -768,7 +768,7 @@ class ThreadLiveWritePolicy:
                 thread_id,
                 reason="live_thread_mutation",
             )
-            append_metrics["invalidate_ms"] = round((time.perf_counter() - invalidate_started) * 1000, 1)
+            append_metrics["invalidate_ms"] = elapsed_ms_since(invalidate_started, clock=time.perf_counter)
             append_started = time.perf_counter()
             appended = await self._cache_ops.append_event_to_cache(
                 room_id,
@@ -776,7 +776,7 @@ class ThreadLiveWritePolicy:
                 event_source,
                 context="live",
             )
-            append_metrics["append_ms"] = round((time.perf_counter() - append_started) * 1000, 1)
+            append_metrics["append_ms"] = elapsed_ms_since(append_started, clock=time.perf_counter)
             append_metrics["appended"] = appended
             if not appended:
                 fallback_invalidate_started = time.perf_counter()
@@ -785,9 +785,9 @@ class ThreadLiveWritePolicy:
                     thread_id,
                     reason="live_append_failed",
                 )
-                append_metrics["append_failure_invalidate_ms"] = round(
-                    (time.perf_counter() - fallback_invalidate_started) * 1000,
-                    1,
+                append_metrics["append_failure_invalidate_ms"] = elapsed_ms_since(
+                    fallback_invalidate_started,
+                    clock=time.perf_counter,
                 )
             return appended
 
@@ -815,8 +815,8 @@ class ThreadLiveWritePolicy:
                 event_id=event.event_id,
                 impact_state="threaded",
                 impact_resolution_ms=impact_resolution_ms,
-                queue_and_update_ms=round((time.perf_counter() - queue_started) * 1000, 1),
-                total_ms=round((time.perf_counter() - started) * 1000, 1),
+                queue_and_update_ms=elapsed_ms_since(queue_started, clock=time.perf_counter),
+                total_ms=elapsed_ms_since(started, clock=time.perf_counter),
                 outcome=outcome,
                 **append_metrics,
             )
@@ -835,7 +835,7 @@ class ThreadLiveWritePolicy:
             event_id=event.event_id,
             event_info=event_info,
         )
-        impact_resolution_ms = round((time.perf_counter() - impact_started) * 1000, 1)
+        impact_resolution_ms = elapsed_ms_since(impact_started, clock=time.perf_counter)
         room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"
         if impact.state is MutationThreadImpactState.ROOM_LEVEL:
             self._cache_ops.logger.debug(
@@ -850,7 +850,7 @@ class ThreadLiveWritePolicy:
                 event_id=event.event_id,
                 impact_state="room_level",
                 impact_resolution_ms=impact_resolution_ms,
-                total_ms=round((time.perf_counter() - started) * 1000, 1),
+                total_ms=elapsed_ms_since(started, clock=time.perf_counter),
                 outcome="non_threaded_skip",
             )
             return
@@ -871,8 +871,8 @@ class ThreadLiveWritePolicy:
                 event_id=event.event_id,
                 impact_state="unknown",
                 impact_resolution_ms=impact_resolution_ms,
-                invalidate_ms=round((time.perf_counter() - invalidate_started) * 1000, 1),
-                total_ms=round((time.perf_counter() - started) * 1000, 1),
+                invalidate_ms=elapsed_ms_since(invalidate_started, clock=time.perf_counter),
+                total_ms=elapsed_ms_since(started, clock=time.perf_counter),
                 outcome="room_invalidated",
             )
             return

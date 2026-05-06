@@ -29,7 +29,7 @@ from .dispatch_source import (
     is_voice_event,
 )
 from .logging_config import get_logger
-from .timing import emit_elapsed_timing, event_timing_scope
+from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -248,12 +248,12 @@ class CoalescingGate:
         if not gate.queue:
             return None
         oldest_enqueue_time = min(queued.pending_event.enqueue_time for queued in gate.queue)
-        return round((time.time() - oldest_enqueue_time) * 1000, 1)
+        return elapsed_ms_since(oldest_enqueue_time, clock=time.time)
 
     @staticmethod
     def _oldest_pending_events_age_ms(pending_events: list[PendingEvent]) -> float:
         oldest_enqueue_time = min(pending_event.enqueue_time for pending_event in pending_events)
-        return round((time.time() - oldest_enqueue_time) * 1000, 1)
+        return elapsed_ms_since(oldest_enqueue_time, clock=time.time)
 
     @staticmethod
     def _source_event_ids(pending_events: list[PendingEvent]) -> list[str]:
@@ -332,7 +332,7 @@ class CoalescingGate:
             source_kind=source_kind,
             pending_count=self._gate_work_count(gate),
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
-            duration_ms=round((time.monotonic() - enqueue_start) * 1000, 1),
+            duration_ms=elapsed_ms_since(enqueue_start),
         )
 
     def _log_enqueued_event(
@@ -386,7 +386,7 @@ class CoalescingGate:
         flush_start: float,
         outcome: str,
     ) -> None:
-        duration_ms = round((time.monotonic() - flush_start) * 1000, 1)
+        duration_ms = elapsed_ms_since(flush_start)
         log_context = {
             **flush_context,
             "duration_ms": duration_ms,
@@ -760,5 +760,5 @@ class CoalescingGate:
                 oldest_pending_age_ms=(
                     self._oldest_pending_age_ms(resolved_gate) if resolved_gate is not None else None
                 ),
-                duration_ms=round((time.monotonic() - drain_start) * 1000, 1),
+                duration_ms=elapsed_ms_since(drain_start),
             )

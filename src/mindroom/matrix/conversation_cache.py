@@ -39,6 +39,7 @@ from mindroom.matrix.thread_membership import (
     resolve_event_thread_id,
 )
 from mindroom.matrix.thread_room_scan import room_scan_membership_access_for_client
+from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection
@@ -749,7 +750,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id=room_id,
             threads_warmed=threads_warmed,
             threads_failed=threads_failed,
-            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            elapsed_ms=elapsed_ms_since(started_at, clock=time.perf_counter),
         )
         return completed
 

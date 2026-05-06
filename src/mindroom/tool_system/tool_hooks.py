@@ -28,7 +28,7 @@ from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.sync_bridge_state import sync_tool_bridge_blocked_loop
-from mindroom.timing import emit_timing_event
+from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_approval import ToolApprovalCall, ToolApprovalScriptError, request_tool_approval_for_call
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -551,7 +551,7 @@ async def _maybe_block_for_before_hooks(
         tool_name=tool_name,
         agent_name=resolved_context.agent_name or None,
         declined=before_context.declined,
-        duration_ms=round((time.perf_counter() - before_hooks_started_at) * 1000, 2),
+        duration_ms=elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2),
     )
     if not before_context.declined:
         return None

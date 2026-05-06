@@ -13,6 +13,7 @@ from mindroom.matrix.cache.thread_history_result import (
     ThreadHistoryResult,
     thread_history_result,
 )
+from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -100,7 +101,7 @@ class ThreadReadPolicy:
         queue_wait_started: float,
     ) -> ThreadHistoryResult:
         async def load() -> ThreadHistoryResult:
-            coordinator_queue_wait_ms = round((time.perf_counter() - queue_wait_started) * 1000, 1)
+            coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
             thread_history = await fetcher(
                 room_id,
                 thread_id,

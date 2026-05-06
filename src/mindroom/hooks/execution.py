@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.logging_config import get_logger
+from mindroom.timing import elapsed_ms_since
 
 from .context import (
     AgentLifecycleContext,
@@ -195,7 +196,7 @@ async def _invoke_hook(hook: RegisteredHook, context: _HookExecutionContext) -> 
         async with asyncio.timeout(timeout_seconds):
             result = await hook.callback(context)
     except Exception:
-        duration_ms = round((time.monotonic() - started_at) * 1000, 2)
+        duration_ms = elapsed_ms_since(started_at, ndigits=2)
         context.logger.exception(
             "Hook execution failed",
             correlation_id=context.correlation_id,
@@ -204,7 +205,7 @@ async def _invoke_hook(hook: RegisteredHook, context: _HookExecutionContext) -> 
         )
         return _HookInvocationResult(succeeded=False)
 
-    duration_ms = round((time.monotonic() - started_at) * 1000, 2)
+    duration_ms = elapsed_ms_since(started_at, ndigits=2)
     context.logger.debug(
         "Hook execution succeeded",
         correlation_id=context.correlation_id,
