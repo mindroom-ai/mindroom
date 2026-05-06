@@ -47,12 +47,7 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.config.main import Config
-    from mindroom.history import (
-        CompactionDecision,
-        CompactionLifecycle,
-        CompactionOutcome,
-        CompactionReplyOutcome,
-    )
+    from mindroom.history import CompactionDecision, CompactionLifecycle, CompactionOutcome, CompactionReplyOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.timing import DispatchPipelineTiming
 

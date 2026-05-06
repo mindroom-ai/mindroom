@@ -12,10 +12,7 @@ from mindroom.api.config_lifecycle import validate_and_persist_config_payload
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
-from mindroom.custom_tools.config_manager import (
-    preserve_tool_overrides,
-    validate_knowledge_bases,
-)
+from mindroom.custom_tools.config_manager import preserve_tool_overrides, validate_knowledge_bases
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 

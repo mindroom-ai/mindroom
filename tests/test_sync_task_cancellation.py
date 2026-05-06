@@ -12,11 +12,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.cancellation import (
-    SYNC_RESTART_CANCEL_MSG,
-    USER_STOP_CANCEL_MSG,
-    _cancel_failure_reason,
-)
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, _cancel_failure_reason
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.orchestration import runtime as runtime_helpers

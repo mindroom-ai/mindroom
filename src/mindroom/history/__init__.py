@@ -6,9 +6,7 @@ from mindroom.history.compaction import (
     normalize_compaction_budget_tokens,
     team_tool_definition_payloads_for_logging,
 )
-from mindroom.history.manual import (
-    request_compaction_before_next_reply,
-)
+from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.runtime import (
     PreparedScopeHistory,

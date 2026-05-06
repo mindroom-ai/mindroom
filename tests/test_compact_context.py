@@ -327,11 +327,9 @@ async def test_compact_context_closes_scope_storage_after_budget_error(tmp_path:
         execution_identity=identity,
     )
 
-    with (
-        patch(
-            "mindroom.history.manual.open_scope_session_context",
-            return_value=_patched_scope_context(scope_context),
-        ),
+    with patch(
+        "mindroom.history.manual.open_scope_session_context",
+        return_value=_patched_scope_context(scope_context),
     ):
         result = await tool.compact_context(agent=_agent())
 
@@ -358,11 +356,9 @@ async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path
         execution_identity=_execution_identity(),
     )
 
-    with (
-        patch(
-            "mindroom.history.manual.open_scope_session_context",
-            return_value=_patched_scope_context(scope_context),
-        ),
+    with patch(
+        "mindroom.history.manual.open_scope_session_context",
+        return_value=_patched_scope_context(scope_context),
     ):
         result = await tool.compact_context(agent=_agent())
 

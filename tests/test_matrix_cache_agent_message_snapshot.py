@@ -7,10 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.matrix.cache import (
-    AgentMessageSnapshot,
-    ConversationEventCache,
-)
+from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache
 from mindroom.matrix.cache.agent_message_snapshot import AgentMessageSnapshotUnavailable
 
 if TYPE_CHECKING:

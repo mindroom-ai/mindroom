@@ -24,10 +24,7 @@ from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents
-from mindroom.orchestration.plugin_watch import (
-    _drop_unconfigured_plugin_root_snapshots,
-    watch_plugins_task,
-)
+from mindroom.orchestration.plugin_watch import _drop_unconfigured_plugin_root_snapshots, watch_plugins_task
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.orchestrator import _ConfigReloadDrainState, _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.tool_system.plugins import PluginReloadResult

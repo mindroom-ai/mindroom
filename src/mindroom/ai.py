@@ -70,11 +70,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed
-from mindroom.tool_system.events import (
-    StreamingToolTracker,
-    complete_pending_tool_block,
-    format_tool_combined,
-)
+from mindroom.tool_system.events import StreamingToolTracker, complete_pending_tool_block, format_tool_combined
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence

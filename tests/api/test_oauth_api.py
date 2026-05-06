@@ -23,19 +23,12 @@ from mindroom.api import auth, main
 from mindroom.api.oauth import router as oauth_router
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.oauth import (
-    OAuthClaimValidationError,
-    OAuthProvider,
-)
+from mindroom.oauth import OAuthClaimValidationError, OAuthProvider
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
-from mindroom.oauth.providers import (
-    OAuthClientConfig,
-    OAuthTokenResult,
-    _OAuthClaimValidationContext,
-)
+from mindroom.oauth.providers import OAuthClientConfig, OAuthTokenResult, _OAuthClaimValidationContext
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_credentials_satisfy_identity_policy
 from mindroom.tool_system import plugin_imports
