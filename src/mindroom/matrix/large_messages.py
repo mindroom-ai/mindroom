@@ -27,6 +27,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.media import upload_content_uri
 from mindroom.matrix.message_builder import markdown_to_html
 
 logger = get_logger(__name__)
@@ -373,11 +374,11 @@ async def _upload_text_as_mxc(  # noqa: C901
             )
             return None, None
 
-        if not upload_result.content_uri:
+        mxc_uri = upload_content_uri(upload_result)
+        if mxc_uri is None:
             logger.error("Upload response missing content_uri")
             return None, None
 
-        mxc_uri = str(upload_result.content_uri)
         file_info["url"] = mxc_uri
 
     except Exception:

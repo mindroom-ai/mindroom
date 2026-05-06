@@ -10,7 +10,12 @@ from agno.media import Image
 from agno.utils.models.claude import _format_image_for_message
 
 from mindroom.matrix import image_handler
-from mindroom.matrix.media import _sniff_image_mime_type, extract_media_caption, resolve_image_mime_type
+from mindroom.matrix.media import (
+    _sniff_image_mime_type,
+    extract_media_caption,
+    resolve_image_mime_type,
+    upload_content_uri,
+)
 
 
 class TestExtractCaption:
@@ -55,6 +60,33 @@ class TestExtractCaption:
         """Both body and filename absent/empty."""
         event = self._make_event(body="")
         assert extract_media_caption(event, default="[Attached image]") == "[Attached image]"
+
+
+class TestUploadContentUri:
+    """Test Matrix upload response normalization."""
+
+    def test_direct_upload_response_returns_content_uri(self) -> None:
+        """A direct nio upload response should expose its MXC URI."""
+        response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/media"})
+
+        assert upload_content_uri(response) == "mxc://server/media"
+
+    def test_tuple_upload_response_returns_first_response_content_uri(self) -> None:
+        """The tuple shape returned by nio upload should normalize through its first item."""
+        response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/media"})
+
+        assert upload_content_uri((response, {"unused": True})) == "mxc://server/media"
+
+    def test_missing_content_uri_returns_none(self) -> None:
+        """Upload responses without content_uri should be treated as failed uploads."""
+        response = MagicMock(spec=nio.UploadResponse)
+        response.content_uri = ""
+
+        assert upload_content_uri(response) is None
+
+    def test_non_upload_response_returns_none(self) -> None:
+        """Upload errors and unrelated objects should not produce an MXC URI."""
+        assert upload_content_uri(object()) is None
 
 
 class TestDownloadImage:

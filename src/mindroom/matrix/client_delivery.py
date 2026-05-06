@@ -19,6 +19,7 @@ from nio.exceptions import OlmTrustError
 from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import prepare_large_message
+from mindroom.matrix.media import upload_content_uri
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
@@ -328,13 +329,11 @@ async def _upload_file_as_mxc(
         logger.exception("Failed uploading Matrix file", path=str(file_path))
         return None, None
 
-    upload_result = upload_response[0] if isinstance(upload_response, tuple) else upload_response
-
-    if not isinstance(upload_result, nio.UploadResponse) or not upload_result.content_uri:
-        logger.error("Failed file upload response", path=str(file_path), response=str(upload_result))
+    mxc_uri = upload_content_uri(upload_response)
+    if mxc_uri is None:
+        logger.error("Failed file upload response", path=str(file_path), response=str(upload_response))
         return None, None
 
-    mxc_uri = str(upload_result.content_uri)
     upload_payload: dict[str, Any] = {"info": info}
     if encrypted_file_payload is not None:
         encrypted_file_payload["url"] = mxc_uri

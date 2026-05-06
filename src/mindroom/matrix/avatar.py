@@ -7,6 +7,7 @@ from pathlib import Path
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.media import upload_content_uri
 
 logger = get_logger(__name__)
 
@@ -76,11 +77,12 @@ async def _upload_avatar_file(
         logger.error("avatar_upload_failed", path=str(avatar_path), error=str(upload_response))
         return None
 
-    if not upload_response.content_uri:
+    mxc_uri = upload_content_uri(upload_response)
+    if mxc_uri is None:
         logger.error("avatar_upload_missing_content_uri", path=str(avatar_path))
         return None
 
-    return str(upload_response.content_uri)
+    return mxc_uri
 
 
 async def _set_avatar_from_file(

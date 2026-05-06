@@ -88,6 +88,14 @@ def parse_matrix_media_dispatch_event_source(
     return parsed_event if is_matrix_media_dispatch_event(parsed_event) else None
 
 
+def upload_content_uri(upload_result: object) -> str | None:
+    """Return the MXC URI from a direct or tuple-shaped nio upload response."""
+    upload_response = upload_result[0] if isinstance(upload_result, tuple) else upload_result
+    if isinstance(upload_response, nio.UploadResponse) and upload_response.content_uri:
+        return str(upload_response.content_uri)
+    return None
+
+
 def _event_id_for_log(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str | None:
     event_id = event.event_id
     return event_id if isinstance(event_id, str) else None
