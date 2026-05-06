@@ -12,6 +12,15 @@ For each cluster, open the listed reports, verify the current source still match
 Prefer one small PR per cluster.
 Avoid broad base classes or universal helpers unless two or more narrow extractions have already proven the shape.
 
+## Living Status
+
+| Cluster | Status | PR | Branch | Gate | Verification |
+| --- | --- | --- | --- | --- | --- |
+| STORE-009 / rank 5: Attachment output-path schema | Draft PR opened; accepted by line gate | [#892](https://github.com/mindroom-ai/mindroom/pull/892) | `refactor/attachment-output-path-schema` | Production net `-5` lines | `uv run pytest tests/test_tool_output_files.py tests/test_attachments_tool.py -q --no-cov -n 0`; `uv run pre-commit run --files ...` |
+| FLOW-005 / rank 2: Approval datetime parser | Draft PR opened; accepted by line gate | [#893](https://github.com/mindroom-ai/mindroom/pull/893) | `refactor/approval-datetime-parser` | Production net `-3` lines | `uv run pytest tests/test_tool_approval.py -n 0 --no-cov`; `uv sync --all-extras`; `uv run pre-commit run --files ...` |
+| FLOW-006 / rank 3: Matrix reaction content builder | Draft PR opened; accepted by line gate | [#894](https://github.com/mindroom-ai/mindroom/pull/894) | `refactor/matrix-reaction-content-builder` | Production net `-31` lines | Focused pytest: 5 passed; `uv run pre-commit run --files ...` |
+| CFG-002 / rank 4: Config search-location rendering | Draft PR opened; accepted as roughly flat with duplicated rendering removed | [#895](https://github.com/mindroom-ai/mindroom/pull/895) | `refactor/config-search-location-rendering` | Production net `+6` lines | Focused CLI pytest: 14 passed; `uv run pre-commit run --files ...` |
+
 ## PR Queue
 
 | Rank | Cluster | Area | Confidence | Risk | First PR |
