@@ -194,6 +194,32 @@ def workspace_home_identity_env(workspace: Path | str) -> dict[str, str]:
     }
 
 
+def subprocess_path_with_prepends(
+    current_path: str | None,
+    *,
+    prepend_entries: tuple[str, ...] = (),
+) -> str | None:
+    """Return a PATH value with prepended entries first and duplicate entries removed."""
+    if current_path is None and not prepend_entries:
+        return current_path
+
+    path_entries = [entry for entry in prepend_entries if entry]
+    if current_path:
+        path_entries.extend(entry for entry in current_path.split(os.pathsep) if entry)
+
+    if not path_entries:
+        return current_path
+
+    deduped_entries: list[str] = []
+    seen_entries: set[str] = set()
+    for entry in path_entries:
+        if entry in seen_entries:
+            continue
+        seen_entries.add(entry)
+        deduped_entries.append(entry)
+    return os.pathsep.join(deduped_entries)
+
+
 def is_workspace_env_overlay_name_allowed(name: str) -> bool:
     """Return whether one env var name may be returned from `.mindroom/worker-env.sh`.
 

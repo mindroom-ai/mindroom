@@ -41,6 +41,7 @@ from mindroom.constants import (
     sandbox_shell_execution_runtime_env_values,
     shell_execution_runtime_env_values,
     shell_extra_env_values,
+    subprocess_path_with_prepends,
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import HookRegistry
@@ -1469,13 +1470,13 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
 
 def test_shell_subprocess_path_keeps_existing_path_without_prepend() -> None:
     """Shell PATH normalization should preserve the base PATH when nothing is prepended."""
-    assert shell_tool_module._shell_subprocess_path("/usr/local/bin:/usr/bin:/bin") == "/usr/local/bin:/usr/bin:/bin"
+    assert subprocess_path_with_prepends("/usr/local/bin:/usr/bin:/bin") == "/usr/local/bin:/usr/bin:/bin"
 
 
 def test_shell_subprocess_path_uses_only_prepend_entries_for_empty_path() -> None:
     """Configured path entries should still be available when PATH is empty."""
     assert (
-        shell_tool_module._shell_subprocess_path(
+        subprocess_path_with_prepends(
             "",
             prepend_entries=("/opt/custom/bin", "/opt/worker/bin"),
         )
@@ -1486,7 +1487,7 @@ def test_shell_subprocess_path_uses_only_prepend_entries_for_empty_path() -> Non
 def test_shell_subprocess_path_prepends_configured_entries_and_dedupes() -> None:
     """Configured path entries should stay first without duplicating existing PATH entries."""
     assert (
-        shell_tool_module._shell_subprocess_path(
+        subprocess_path_with_prepends(
             "/usr/bin:/opt/existing/bin:/bin",
             prepend_entries=("/opt/custom/bin", "/opt/existing/bin"),
         )

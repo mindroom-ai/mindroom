@@ -23,6 +23,7 @@ from mindroom.constants import (
     WORKSPACE_HOME_CONTRACT_ENV_NAMES,
     RuntimePaths,
     shell_execution_runtime_env_values,
+    subprocess_path_with_prepends,
     workspace_home_identity_env,
 )
 from mindroom.logging_config import get_logger
@@ -106,32 +107,6 @@ def _shell_path_prepend_entries(shell_path_prepend: str | None) -> tuple[str, ..
     return tuple(part.strip() for part in re.split(r"[\n,]+", shell_path_prepend) if part.strip())
 
 
-def _shell_subprocess_path(
-    current_path: str | None,
-    *,
-    prepend_entries: tuple[str, ...] = (),
-) -> str | None:
-    """Return the PATH value for shell subprocesses."""
-    if current_path is None and not prepend_entries:
-        return current_path
-
-    path_entries = [entry for entry in prepend_entries if entry]
-    if current_path:
-        path_entries.extend(entry for entry in current_path.split(os.pathsep) if entry)
-
-    if not path_entries:
-        return current_path
-
-    deduped_entries: list[str] = []
-    seen_entries: set[str] = set()
-    for entry in path_entries:
-        if entry in seen_entries:
-            continue
-        seen_entries.add(entry)
-        deduped_entries.append(entry)
-    return os.pathsep.join(deduped_entries)
-
-
 def _workspace_home_contract_env_from_process_env(base_process_env: dict[str, str]) -> dict[str, str]:
     """Return MindRoom-owned workspace env only when the full workspace contract is present."""
     workspace = base_process_env.get("MINDROOM_AGENT_WORKSPACE")
@@ -159,7 +134,7 @@ def _shell_subprocess_env(
     if base_process_env is not None:
         env.update(_workspace_home_contract_env_from_process_env(base_process_env))
 
-    path_value = _shell_subprocess_path(
+    path_value = subprocess_path_with_prepends(
         env.get("PATH"),
         prepend_entries=_shell_path_prepend_entries(shell_path_prepend),
     )

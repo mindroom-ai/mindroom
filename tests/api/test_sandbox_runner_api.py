@@ -1234,8 +1234,9 @@ def test_worker_subprocess_env_preserves_parent_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker subprocesses should keep PATH without re-exporting tool config env vars."""
-    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    """Worker subprocesses should prepend the worker venv once and keep parent PATH."""
+    paths = local_workers_module._local_worker_state_paths_for_root(tmp_path / "worker")
+    monkeypatch.setenv("PATH", f"{paths.venv_dir}/bin:/usr/local/bin:/usr/bin:/bin")
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -1247,12 +1248,10 @@ def test_worker_subprocess_env_preserves_parent_path(
         f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n",
         encoding="utf-8",
     )
-    paths = local_workers_module._local_worker_state_paths_for_root(tmp_path / "worker")
 
     env = sandbox_exec_module.worker_subprocess_env(paths)
 
-    assert env["PATH"].startswith(f"{paths.venv_dir}/bin:")
-    assert env["PATH"].endswith("/usr/local/bin:/usr/bin:/bin")
+    assert env["PATH"] == f"{paths.venv_dir}/bin:/usr/local/bin:/usr/bin:/bin"
     assert "GOOGLE_CLOUD_PROJECT" not in env
     assert "GOOGLE_CLOUD_LOCATION" not in env
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in env

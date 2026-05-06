@@ -256,8 +256,10 @@ def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env["PYTHONPYCACHEPREFIX"] = str(paths.cache_dir / "pycache")
     env["VIRTUAL_ENV"] = str(paths.venv_dir)
 
-    current_path = env.get("PATH", "")
-    env["PATH"] = f"{paths.venv_dir / 'bin'}:{current_path}" if current_path else str(paths.venv_dir / "bin")
+    env["PATH"] = constants.subprocess_path_with_prepends(
+        env.get("PATH"),
+        prepend_entries=(str(paths.venv_dir / "bin"),),
+    ) or str(paths.venv_dir / "bin")
 
     python_path_parts = [str(_project_src_path()), *_current_runtime_site_packages()]
     existing_python_path = env.get("PYTHONPATH", "")
