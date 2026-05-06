@@ -2225,6 +2225,7 @@ def test_approval_hostname_normalization_uses_exact_display_host(value: str, exp
         "[bad",
         "http:///path",
         "file:///etc/passwd",
+        "http://evil.com\\@good.com/path",
         "/path/to/socket",
     ],
 )
@@ -2249,6 +2250,55 @@ async def test_invalid_domain_grant_is_denied_without_matrix_card(tmp_path: Path
     assert decision.status == "denied"
     assert decision.reason == "Cannot approve network access without an exact hostname."
     sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invalid_domain_grant_is_denied_before_auto_approved_tool_continues(tmp_path: Path) -> None:
+    arguments = {"approval_kind": "domain_grant", "hostname": "http:///path", "ttl_seconds": 60}
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is not None
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access without an exact hostname."
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_rejects_malformed_url_even_with_exact_hostname(tmp_path: Path) -> None:
+    arguments = {
+        "approval_kind": "domain_grant",
+        "hostname": "good.com",
+        "url": "http://evil.com\\@good.com/path",
+        "ttl_seconds": 60,
+    }
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is not None
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access without an exact hostname."
 
 
 def test_domain_grant_approval_payload_uses_normalized_hostname_and_warning() -> None:
@@ -2330,7 +2380,7 @@ async def test_domain_grant_arguments_are_normalized_before_tool_continues(tmp_p
 
     assert decision is None
     assert arguments["hostname"] == "sub.example.com"
-    assert arguments["normalized_hostname"] == "sub.example.com"
+    assert "normalized_hostname" not in arguments
 
 
 def test_approval_arguments_preview_marks_nested_sanitizer_truncation() -> None:

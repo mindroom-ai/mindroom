@@ -203,6 +203,8 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
 
 
 def _split_approval_hostname_value(raw: str) -> SplitResult | None:
+    if "\\" in raw:
+        return None
     if "://" in raw or raw.startswith("//"):
         parsed = urlsplit(raw)
         return parsed if parsed.netloc else None
@@ -285,7 +287,7 @@ def _is_domain_grant_request(tool_name: str, arguments: dict[str, Any]) -> bool:
 
 
 def _normalize_approval_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Normalize domain-grant arguments before rendering or granting policy."""
+    """Normalize only existing runtime arguments before granting policy."""
     normalized_arguments = dict(arguments)
     if not _is_domain_grant_approval(tool_name, normalized_arguments):
         return normalized_arguments
@@ -297,8 +299,19 @@ def _normalize_approval_arguments(tool_name: str, arguments: dict[str, Any]) -> 
     host_key = _first_argument_key(normalized_arguments, _HOSTNAME_ARGUMENT_KEYS)
     if host_key is not None:
         normalized_arguments[host_key] = normalized_hostname
-    normalized_arguments["normalized_hostname"] = normalized_hostname
     return normalized_arguments
+
+
+def _invalid_domain_grant_reason(tool_name: str, arguments: dict[str, Any]) -> str | None:
+    if not _is_domain_grant_request(tool_name, arguments):
+        return None
+    if _domain_grant_hostname(arguments) is None:
+        return _INVALID_DOMAIN_GRANT_REASON
+    for key in (*_HOSTNAME_ARGUMENT_KEYS, *_URL_ARGUMENT_KEYS):
+        value = arguments.get(key)
+        if value is not None and _normalize_approval_hostname(value) is None:
+            return _INVALID_DOMAIN_GRANT_REASON
+    return None
 
 
 def _approval_reason(arguments: dict[str, Any]) -> str:
@@ -434,12 +447,9 @@ class _ApprovalManager:
         requested_at = _utcnow()
         expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
         approval_arguments = _normalize_approval_arguments(tool_name, arguments)
-        invalid_domain_grant = (
-            _is_domain_grant_request(tool_name, approval_arguments)
-            and _domain_grant_hostname(approval_arguments) is None
-        )
-        if invalid_domain_grant:
-            return self._new_decision(status="denied", reason=_INVALID_DOMAIN_GRANT_REASON, resolved_by=None)
+        invalid_domain_grant_reason = _invalid_domain_grant_reason(tool_name, approval_arguments)
+        if invalid_domain_grant_reason is not None:
+            return self._new_decision(status="denied", reason=invalid_domain_grant_reason, resolved_by=None)
         event_arguments, arguments_truncated = _build_event_arguments_preview(approval_arguments)
         content = self._pending_event_content(
             approval_id=approval_id,

@@ -240,6 +240,9 @@ async def request_tool_approval_for_call(call: ToolApprovalCall) -> ApprovalDeci
     if normalized_arguments != call.arguments:
         call.arguments.clear()
         call.arguments.update(normalized_arguments)
+    invalid_domain_grant_reason = approval_manager._invalid_domain_grant_reason(call.tool_name, call.arguments)
+    if invalid_domain_grant_reason is not None:
+        return _terminal_decision("denied", invalid_domain_grant_reason)
     policy_arguments = deepcopy(call.arguments)
     requires_approval, timeout_seconds = await evaluate_tool_approval(
         call.config,
