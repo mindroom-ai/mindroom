@@ -51,6 +51,47 @@ class MinimalModel(Model):
         return response
 
 
+class _FakeDriveRequest:
+    def __init__(self, response: dict[str, object]) -> None:
+        self._response = response
+
+    def execute(self) -> dict[str, object]:
+        return self._response
+
+
+class _FakeDriveFilesResource:
+    def __init__(self) -> None:
+        self.list_kwargs: dict[str, object] | None = None
+        self.get_kwargs: dict[str, object] | None = None
+
+    def list(self, **kwargs: object) -> _FakeDriveRequest:
+        self.list_kwargs = kwargs
+        return _FakeDriveRequest({"files": [], "nextPageToken": None})
+
+    def get(self, **kwargs: object) -> _FakeDriveRequest:
+        self.get_kwargs = kwargs
+        return _FakeDriveRequest(
+            {
+                "id": kwargs["fileId"],
+                "name": "Shared folder",
+                "mimeType": "application/vnd.google-apps.folder",
+                "webViewLink": "https://drive.google.com/drive/folders/example",
+            },
+        )
+
+
+class _FakeDriveService:
+    def __init__(self) -> None:
+        self.files_resource = _FakeDriveFilesResource()
+
+    def files(self) -> _FakeDriveFilesResource:
+        return self.files_resource
+
+
+class _ValidCredentials:
+    valid = True
+
+
 def _runtime_paths_with_google_drive_client(
     tmp_path: Path,
     process_env: dict[str, str] | None = None,
@@ -438,3 +479,55 @@ def test_google_drive_blank_numeric_config_uses_tool_default(tmp_path: Path) -> 
 
     assert isinstance(tool, GoogleDriveTools)
     assert tool.max_read_size == 10485760
+
+
+def test_google_drive_search_includes_shared_drive_parameters(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    cursor = "next-page"
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_ValidCredentials(),
+    )
+    service = _FakeDriveService()
+    tool.service = service
+
+    result = json.loads(
+        tool.search_files(
+            query="'folder-id' in parents",
+            max_results=3,
+            page_token=cursor,
+        ),
+    )
+
+    assert result["count"] == 0
+    assert service.files_resource.list_kwargs == {
+        "q": "('folder-id' in parents) and trashed=false",
+        "pageSize": 3,
+        "orderBy": "modifiedTime desc",
+        "fields": tool.SEARCH_FIELDS,
+        "includeItemsFromAllDrives": True,
+        "supportsAllDrives": True,
+        "corpora": "allDrives",
+        "pageToken": cursor,
+    }
+
+
+def test_google_drive_read_metadata_supports_shared_drive_files(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_ValidCredentials(),
+    )
+    service = _FakeDriveService()
+    tool.service = service
+
+    result = json.loads(tool.read_file("shared-drive-folder-id"))
+
+    assert result["error"] == "Cannot read application/vnd.google-apps.folder as text. Use download_file instead."
+    assert service.files_resource.get_kwargs == {
+        "fileId": "shared-drive-folder-id",
+        "fields": tool.READ_METADATA_FIELDS,
+        "supportsAllDrives": True,
+    }

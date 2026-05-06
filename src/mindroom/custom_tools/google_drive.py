@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import json
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
+from agno.tools.google.drive import authenticate
+from agno.utils.log import log_error
+from googleapiclient.errors import HttpError
 
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.logging_config import get_logger
@@ -86,3 +90,48 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
 
     def _should_fallback_to_original_auth(self) -> bool:
         return google_service_account_configured(self.service_account_path, self._runtime_paths)
+
+    def _get_file_metadata(self, file_id: str, fields: str) -> dict[str, Any]:
+        service = cast("Any", self.service)
+        return service.files().get(fileId=file_id, fields=fields, supportsAllDrives=True).execute()
+
+    @authenticate
+    def search_files(self, query: str | None = None, max_results: int = 10, page_token: str | None = None) -> str:
+        """Search Google Drive using a query expression, including files in Shared Drives."""
+        if max_results < 1:
+            return json.dumps({"error": "max_results must be greater than 0"})
+
+        try:
+            service = cast("Any", self.service)
+            if self.include_trashed:
+                effective_query = query or ""
+            elif query:
+                effective_query = f"({query}) and trashed=false"
+            else:
+                effective_query = "trashed=false"
+            list_kwargs: dict[str, Any] = {
+                "q": effective_query,
+                "pageSize": max_results,
+                "orderBy": "modifiedTime desc",
+                "fields": self.SEARCH_FIELDS,
+                "includeItemsFromAllDrives": True,
+                "supportsAllDrives": True,
+                "corpora": "allDrives",
+            }
+            if page_token:
+                list_kwargs["pageToken"] = page_token
+            results = service.files().list(**list_kwargs).execute()
+            files = results.get("files", [])
+            return json.dumps(
+                {
+                    "query": effective_query,
+                    "files": files,
+                    "count": len(files),
+                    "nextPageToken": results.get("nextPageToken"),
+                },
+            )
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            log_error(f"Could not search Google Drive files: {exc}")
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
