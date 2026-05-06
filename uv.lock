@@ -4243,7 +4243,7 @@ dev = [
     { name = "markdown-gfm-admonition" },
     { name = "pre-commit", specifier = ">=4.2" },
     { name = "pre-commit-uv", specifier = ">=4.1.4" },
-    { name = "privata", specifier = ">=0.1.7" },
+    { name = "privata", specifier = ">=0.2.0" },
     { name = "pytest", specifier = ">=8.4.1" },
     { name = "pytest-asyncio", specifier = ">=1.1" },
     { name = "pytest-cov", specifier = ">=6.2.1" },
@@ -6039,11 +6039,11 @@ wheels = [
 
 [[package]]
 name = "privata"
-version = "0.1.7"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f5/47/0d8678f9691e676fbaaa849a2996407faebeb7c9e228d19cd6bade866b39/privata-0.1.7.tar.gz", hash = "sha256:4d0b6493f6f7827e025933a6b52ff6e353ddc0cbd39e98ea2edecdb94403863f", size = 63288, upload-time = "2026-05-06T01:10:48.881Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1d/cf/2718134675043c14d3422ed5102ab49247ab2327748fc56deff35da1287a/privata-0.2.0.tar.gz", hash = "sha256:19752d0f27769c736acc0e70ab91b0c686549bc93326cd4f2804aa7f5802b208", size = 64315, upload-time = "2026-05-06T02:34:01.28Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/de/ea7e4f3306487fc915b3cdffae1368fd64e7eabd7f6632c527f6eb5788da/privata-0.1.7-py3-none-any.whl", hash = "sha256:b4f83d3b2c107c663053228c124ea11fccabe1e3bdc7ae1932b55963aa8d375a", size = 15543, upload-time = "2026-05-06T01:10:47.255Z" },
+    { url = "https://files.pythonhosted.org/packages/27/68/f16ede7bd586950bd431c6b6ac282c8405af09bc6b550c94376f4f7dc5ac/privata-0.2.0-py3-none-any.whl", hash = "sha256:b35621e706f898c8d559e10190fd58c9bd53f7b758382b5aa3aeab92a57f94a8", size = 16118, upload-time = "2026-05-06T02:34:00.097Z" },
 ]
 
 [[package]]
