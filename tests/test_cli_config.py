@@ -20,7 +20,7 @@ from typer.testing import CliRunner
 
 import mindroom.constants as constants_module
 from mindroom.agents import ensure_default_agent_workspaces
-from mindroom.cli.config import _activate_cli_runtime
+from mindroom.cli.config import _activate_cli_runtime, _format_config_search_locations
 from mindroom.cli.main import _load_active_config_or_exit, app
 from mindroom.config.main import Config
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
@@ -57,6 +57,22 @@ def _invoke_with_runtime(
     if env:
         command_env.update(env)
     return cast("object", runner.invoke(app, args, env=command_env, **kwargs))
+
+
+def test_format_config_search_locations_numbers_paths_and_statuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Config search-location rendering should include numbers and existence status."""
+    monkeypatch.chdir(tmp_path)
+    existing = tmp_path / "config.yaml"
+    existing.write_text("agents: {}\n", encoding="utf-8")
+    missing = tmp_path / "missing.yaml"
+
+    lines = _format_config_search_locations({"MINDROOM_CONFIG_PATH": str(missing)})
+
+    assert lines[0] == f"  1. {missing.resolve()} ([dim]not found[/dim])"
+    assert lines[1] == f"  2. {existing.resolve()} ([green]exists[/green])"
 
 
 def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(

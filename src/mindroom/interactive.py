@@ -19,6 +19,7 @@ import nio
 from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.identity import is_agent_id
+from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -734,13 +735,7 @@ async def add_reaction_buttons(
         reaction_response = await client.room_send(
             room_id=room_id,
             message_type="m.reaction",
-            content={
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": event_id,
-                    "key": emoji_char,
-                },
-            },
+            content=build_reaction_content(event_id, emoji_char),
             ignore_unverified_devices=ignore_unverified_devices_for_config(config),
         )
         if not isinstance(reaction_response, nio.RoomSendResponse):

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from mindroom.matrix.message_builder import build_matrix_edit_content, build_thread_relation, markdown_to_html
+from mindroom.matrix.message_builder import (
+    build_matrix_edit_content,
+    build_reaction_content,
+    build_thread_relation,
+    markdown_to_html,
+)
 
 
 def test_build_thread_relation_returns_fallback_reply_relation() -> None:
@@ -32,6 +37,17 @@ def test_build_matrix_edit_content_wraps_replacement_content() -> None:
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
         },
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+    }
+
+
+def test_build_reaction_content_returns_annotation_relation() -> None:
+    """Reaction content construction should be shared at send sites."""
+    assert build_reaction_content("$event", "✅") == {
+        "m.relates_to": {
+            "rel_type": "m.annotation",
+            "event_id": "$event",
+            "key": "✅",
+        },
     }
 
 
