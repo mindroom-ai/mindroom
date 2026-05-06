@@ -33,7 +33,7 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import reset_matrix_sync_health
-from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.identity import MatrixID, managed_account_user_id
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -46,7 +46,6 @@ from mindroom.matrix.stale_stream_cleanup import (
     auto_resume_interrupted_threads,
     cleanup_stale_streaming_messages,
 )
-from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, create_agent_user
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 from mindroom.mcp.manager import MCPServerManager
@@ -1543,16 +1542,14 @@ class _MultiAgentOrchestrator:
             return authorized_user_ids
         assert router_bot.client is not None
 
-        state = matrix_state_for_runtime(self.runtime_paths)
-        user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
-        if config.mindroom_user is None or not user_account:
-            return authorized_user_ids
-
         server_name = extract_server_name_from_homeserver(
             constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
             runtime_paths=self.runtime_paths,
         )
-        user_id = MatrixID.from_username(user_account.username, server_name).full_id
+        user_id = managed_account_user_id(INTERNAL_USER_ACCOUNT_KEY, server_name, self.runtime_paths)
+        if config.mindroom_user is None or user_id is None:
+            return authorized_user_ids
+
         authorized_user_ids.discard(user_id)
         for room_id in joined_rooms:
             room_members = await get_room_members(router_bot.client, room_id)

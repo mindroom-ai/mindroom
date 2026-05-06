@@ -11732,7 +11732,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestrator.invite_to_room", mock_invite),
-            patch("mindroom.orchestrator.matrix_state_for_runtime", return_value=MatrixState()),
         ):
             await orchestrator._ensure_room_invitations()
 
@@ -11779,7 +11778,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestrator.invite_to_room", mock_invite),
-            patch("mindroom.orchestrator.matrix_state_for_runtime", return_value=MatrixState()),
         ):
             await orchestrator._ensure_room_invitations()
 
@@ -11810,6 +11808,7 @@ class TestMultiAgentOrchestrator:
 
         state = MatrixState()
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, "legacy_internal_user", "legacy-password")
+        state.save(runtime_paths=orchestrator.runtime_paths)
 
         async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> set[str]:
             return {"@mindroom_general:localhost", "@mindroom_router:localhost"}
@@ -11821,7 +11820,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestrator.invite_to_room", mock_invite),
-            patch("mindroom.orchestrator.matrix_state_for_runtime", return_value=state),
         ):
             await orchestrator._ensure_room_invitations()
 
@@ -11858,7 +11856,6 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!ad-hoc:localhost"])),
             patch("mindroom.orchestrator.get_room_members", new=AsyncMock()) as mock_get_room_members,
             patch("mindroom.orchestrator.invite_to_room", AsyncMock()) as mock_invite,
-            patch("mindroom.orchestrator.matrix_state_for_runtime", return_value=MatrixState()),
         ):
             await orchestrator._ensure_room_invitations()
 

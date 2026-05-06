@@ -17,6 +17,8 @@ from mindroom.matrix.identity import (
     _ThreadStateKey,
     extract_agent_name,
     is_agent_id,
+    managed_account_key,
+    managed_account_user_id,
     parse_current_matrix_user_id,
     parse_historical_matrix_user_id,
     try_parse_historical_matrix_user_id,
@@ -308,6 +310,20 @@ class TestHelperFunctions:
             == "general"
         )
         assert is_agent_id(f"@mindroom_general_oldns:{domain}", self.config, runtime_paths) is True
+
+    def test_managed_account_user_id_resolves_persisted_username(self, tmp_path: Path) -> None:
+        """Managed account user-id resolution should preserve persisted username drift."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
+        runtime_paths = runtime_paths_for(self.config)
+        domain = self.config.get_domain(runtime_paths)
+        account_key = managed_account_key("general")
+        state = MatrixState()
+        state.add_account(account_key, "mindroom_general_oldns", "pw", domain=domain)
+        state.save(runtime_paths=runtime_paths)
+
+        assert account_key == "agent_general"
+        assert managed_account_user_id(account_key, domain, runtime_paths) == f"@mindroom_general_oldns:{domain}"
+        assert managed_account_user_id(managed_account_key("missing"), domain, runtime_paths) is None
 
     def test_matrix_id_agent_name_trusts_persisted_current_username_drift(self, tmp_path: Path) -> None:
         """MatrixID.agent_name should use the same live drift-aware identity seam."""

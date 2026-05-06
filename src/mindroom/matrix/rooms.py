@@ -23,7 +23,7 @@ from mindroom.matrix.client_room_admin import (
     leave_room,
 )
 from mindroom.matrix.client_session import matrix_client
-from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.state import MatrixRoom, MatrixState, matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.matrix_identifiers import (
@@ -553,7 +553,10 @@ async def ensure_user_in_rooms(
         return
 
     server_name = extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
-    user_id = MatrixID.from_username(user_account.username, server_name).full_id
+    user_id = managed_account_user_id(INTERNAL_USER_ACCOUNT_KEY, server_name, runtime_paths)
+    if user_id is None:
+        logger.warning("No user account found, skipping user room membership")
+        return
 
     # Create a client for the user to join rooms
     async with matrix_client(homeserver, runtime_paths, user_id=user_id) as user_client:
