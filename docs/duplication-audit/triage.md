@@ -16,6 +16,21 @@ Avoid broad base classes or universal helpers unless two or more narrow extracti
 
 | Cluster | Status | PR | Branch | Gate | Verification |
 | --- | --- | --- | --- | --- | --- |
+| CFG-001 / rank 6: CLI `.env` mutation helpers | In progress with Confucius the 5th (`019dfb3e-9720-7963-95ba-e0926cc6e049`) | Pending | `refactor/cli-env-file-helpers` | Pending | Pending |
+| CFG-003 / rank 7: Config validation helpers | In progress with Rawls the 5th (`019dfb3e-979d-7072-845f-cad086c7add1`) | Pending | `refactor/config-validation-helpers` | Pending | Pending |
+| CRED-001 / rank 8: Google service-account fallback | In progress with Bohr the 5th (`019dfb3e-983c-72a3-bd79-a725e5fbc363`) | Pending | `refactor/google-service-account-fallback` | Pending | Pending |
+| STORE-003 / rank 9: Agent session coercion cleanup | In progress with Goodall the 5th (`019dfb3e-989d-7b01-876c-5203a0c8329d`) | Pending | `refactor/agent-session-coercion` | Pending | Pending |
+| API-001 / rank 10: API snapshot publishing | In progress with Nietzsche the 5th (`019dfb3e-98f3-7cc1-a760-8b9e89b961e3`) | Pending | `refactor/api-snapshot-publishing` | Pending | Pending |
+| STORE-001 / rank 11: Knowledge index metadata codec | In progress with Cicero the 5th (`019dfb3e-994d-7db3-acb6-54f6f1841569`) | Pending | `refactor/knowledge-index-metadata` | Pending | Pending |
+| FLOW-001 / rank 12: Scheduled task restore parsing | Queued; waiting for local subagent slot | Pending | `refactor/scheduled-task-restore-parsing` | Pending | Pending |
+| API-003 / rank 13: Credentials worker-target resolver | Queued; waiting for local subagent slot | Pending | `refactor/credentials-worker-target` | Pending | Pending |
+| CRED-002 / rank 14: Google OAuth provider factory skeleton | Queued; waiting for local subagent slot | Pending | `refactor/google-oauth-provider-factory` | Pending | Pending |
+| MAT-003 / rank 15: Matrix thread and visible-event helpers | Queued; waiting for local subagent slot | Pending | `refactor/matrix-thread-visible-helpers` | Pending | Pending |
+| WORK-002 / rank 16: Worker lifecycle pure helpers | Queued; waiting for local subagent slot | Pending | `refactor/worker-lifecycle-helpers` | Pending | Pending |
+| TOOL-001 / rank 17: Plugin import transaction cleanup | Queued; waiting for local subagent slot | Pending | `refactor/plugin-import-transactions` | Pending | Pending |
+| MAT-001 / rank 18: Matrix cache backend policy | Queued; waiting for local subagent slot | Pending | `refactor/matrix-cache-policy` | Pending | Pending |
+| CORE-001 / rank 19: Streaming tool tracking | Queued; waiting for local subagent slot | Pending | `refactor/streaming-tool-tracker` | Pending | Pending |
+| WORK-003/WORK-004 / rank 20: Subprocess env and sandbox attachment protocol | Queued; waiting for local subagent slot | Pending | `refactor/sandbox-env-protocol` | Pending | Pending |
 | WORK-001 / rank 1: Worker API response DTOs and serializers | Draft PR opened; accepted by line gate | [#896](https://github.com/mindroom-ai/mindroom/pull/896) | `refactor/worker-api-responses` | Production net `-7` lines | Focused API pytest: 3 passed; `uv run pre-commit run --files ...` |
 | STORE-009 / rank 5: Attachment output-path schema | Draft PR opened; accepted by line gate | [#892](https://github.com/mindroom-ai/mindroom/pull/892) | `refactor/attachment-output-path-schema` | Production net `-5` lines | `uv run pytest tests/test_tool_output_files.py tests/test_attachments_tool.py -q --no-cov -n 0`; `uv run pre-commit run --files ...` |
 | FLOW-005 / rank 2: Approval datetime parser | Draft PR opened; accepted by line gate | [#893](https://github.com/mindroom-ai/mindroom/pull/893) | `refactor/approval-datetime-parser` | Production net `-3` lines | `uv run pytest tests/test_tool_approval.py -n 0 --no-cov`; `uv sync --all-extras`; `uv run pre-commit run --files ...` |
