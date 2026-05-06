@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from threading import Lock
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+_ROOM_MEMBER_JOIN_LOCKS: dict[Path, Lock] = {}
+_ROOM_MEMBER_JOIN_LOCKS_LOCK = Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,17 @@ class RoomMemberJoin:
 def _room_member_join_tracking_path(storage_root: Path) -> Path:
     """Return the durable path for room-member join de-duplication."""
     return storage_root / "tracking" / "room_member_joins.json"
+
+
+def _lock_for_room_member_join_path(path: Path) -> Lock:
+    """Return the in-process lock guarding one tracking file."""
+    resolved_path = path.resolve()
+    with _ROOM_MEMBER_JOIN_LOCKS_LOCK:
+        lock = _ROOM_MEMBER_JOIN_LOCKS.get(resolved_path)
+        if lock is None:
+            lock = Lock()
+            _ROOM_MEMBER_JOIN_LOCKS[resolved_path] = lock
+        return lock
 
 
 def _load_room_member_joins(path: Path) -> dict[str, set[str]]:
@@ -92,14 +106,15 @@ def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> None:
 def _mark_room_member_join_seen(storage_root: Path, *, room_id: str, user_id: str) -> bool:
     """Record one room/user pair and return whether it was first seen."""
     path = _room_member_join_tracking_path(storage_root)
-    seen = _load_room_member_joins(path)
-    room_user_ids = seen.setdefault(room_id, set())
-    if user_id in room_user_ids:
-        return False
+    with _lock_for_room_member_join_path(path):
+        seen = _load_room_member_joins(path)
+        room_user_ids = seen.setdefault(room_id, set())
+        if user_id in room_user_ids:
+            return False
 
-    room_user_ids.add(user_id)
-    _save_room_member_joins(path, seen)
-    return True
+        room_user_ids.add(user_id)
+        _save_room_member_joins(path, seen)
+        return True
 
 
 def room_member_join_from_event(

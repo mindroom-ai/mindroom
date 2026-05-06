@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
@@ -14,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
+from mindroom.matrix import room_member_joins
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, test_runtime_paths
 
@@ -159,6 +162,56 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
     assert context.avatar_url == "mxc://localhost/alice"
     assert context.first_join is True
     assert context.matrix_admin is not None
+
+
+@pytest.mark.asyncio
+async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent duplicate joins should still produce one hook payload."""
+    bot = _router_bot(tmp_path)
+    room = _room()
+    save_started = threading.Event()
+    release_save = threading.Event()
+    original_save = room_member_joins._save_room_member_joins
+
+    def delayed_save(path: Path, seen: dict[str, set[str]]) -> None:
+        save_started.set()
+        assert release_save.wait(timeout=2.0)
+        original_save(path, seen)
+
+    monkeypatch.setattr(room_member_joins, "_save_room_member_joins", delayed_save)
+
+    first_task = asyncio.create_task(
+        asyncio.to_thread(
+            room_member_joins.room_member_join_from_event,
+            room,
+            _room_member_event(event_id="$join1"),
+            config=bot.config,
+            runtime_paths=bot.runtime_paths,
+            storage_root=bot.runtime_paths.storage_root,
+        ),
+    )
+    assert await asyncio.to_thread(save_started.wait, 2.0)
+    second_task = asyncio.create_task(
+        asyncio.to_thread(
+            room_member_joins.room_member_join_from_event,
+            room,
+            _room_member_event(event_id="$join2"),
+            config=bot.config,
+            runtime_paths=bot.runtime_paths,
+            storage_root=bot.runtime_paths.storage_root,
+        ),
+    )
+    await asyncio.sleep(0.05)
+    release_save.set()
+
+    results = await asyncio.gather(first_task, second_task)
+
+    joins = [result for result in results if result is not None]
+    assert len(joins) == 1
+    assert joins[0].event_id == "$join1"
 
 
 @pytest.mark.asyncio
