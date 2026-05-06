@@ -1145,6 +1145,7 @@ path = "mindroom.matrix.cache.postgres_event_cache_threads"
 depends_on = [
     "mindroom.matrix.cache.event_cache",
     "mindroom.matrix.cache.event_normalization",
+    "mindroom.matrix.cache.postgres_cursor",
     "mindroom.matrix.cache.postgres_event_cache_events",
 ]
 
@@ -1193,7 +1194,16 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.cache.postgres_event_cache_events"
 depends_on = [
+    "mindroom.matrix.cache.postgres_cursor",
     "mindroom.matrix.event_info",
+]
+
+[[modules]]
+path = "mindroom.matrix.cache.postgres_cursor"
+depends_on = []
+visibility = [
+    "mindroom.matrix.cache.postgres_event_cache_events",
+    "mindroom.matrix.cache.postgres_event_cache_threads",
 ]
 
 [[modules]]

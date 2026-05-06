@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, Any, LiteralString
+from typing import TYPE_CHECKING, Any
 
 from .event_cache import ThreadCacheState
 from .event_normalization import normalize_event_source_for_cache
+from .postgres_cursor import fetchall, fetchone
 from .postgres_event_cache_events import (
     delete_cached_events,
     delete_event_edit_rows,
@@ -33,31 +34,6 @@ _INCREMENTAL_THREAD_REVALIDATION_REASONS = frozenset(
 )
 
 
-async def _fetchone(
-    db: AsyncConnection,
-    query: LiteralString,
-    params: tuple[object, ...],
-) -> tuple[Any, ...] | None:
-    cursor = await db.execute(query, params)
-    try:
-        return await cursor.fetchone()
-    finally:
-        await cursor.close()
-
-
-async def _fetchall(
-    db: AsyncConnection,
-    query: LiteralString,
-    params: tuple[object, ...],
-) -> list[tuple[Any, ...]]:
-    cursor = await db.execute(query, params)
-    try:
-        rows = await cursor.fetchall()
-        return [tuple(row) for row in rows]
-    finally:
-        await cursor.close()
-
-
 async def load_thread_events(
     db: AsyncConnection,
     *,
@@ -66,7 +42,7 @@ async def load_thread_events(
     thread_id: str,
 ) -> list[dict[str, Any]] | None:
     """Return cached events for one thread sorted by timestamp."""
-    rows = await _fetchall(
+    rows = await fetchall(
         db,
         """
         SELECT event_json
@@ -89,7 +65,7 @@ async def load_recent_room_thread_ids(
     limit: int,
 ) -> list[str]:
     """Return thread IDs for one room ordered by the newest locally cached event timestamp."""
-    rows = await _fetchall(
+    rows = await fetchall(
         db,
         """
         SELECT thread_id
@@ -112,7 +88,7 @@ async def _load_thread_cache_state_row(
     thread_id: str,
 ) -> tuple[float | None, float | None, str | None, float | None, str | None] | None:
     """Return one raw thread-cache-state row joined with room invalidation state."""
-    row = await _fetchone(
+    row = await fetchone(
         db,
         """
         SELECT
@@ -545,7 +521,7 @@ async def append_existing_thread_event(
         return False
 
     serialized_event = serialize_cached_event(event_id, normalized_event)
-    row = await _fetchone(
+    row = await fetchone(
         db,
         """
         SELECT 1
@@ -632,7 +608,7 @@ async def _thread_event_ids_for_thread(
     thread_id: str,
 ) -> list[str]:
     """Return cached event IDs currently stored for one thread."""
-    rows = await _fetchall(
+    rows = await fetchall(
         db,
         """
         SELECT event_id
@@ -651,7 +627,7 @@ async def _thread_event_ids_for_room(
     room_id: str,
 ) -> list[str]:
     """Return cached event IDs currently stored for every thread in one room."""
-    rows = await _fetchall(
+    rows = await fetchall(
         db,
         """
         SELECT event_id
