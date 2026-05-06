@@ -125,13 +125,20 @@ def room_member_join_from_event(
     config: Config,
     runtime_paths: RuntimePaths,
     storage_root: Path,
+    require_previous_membership: bool = False,
 ) -> RoomMemberJoin | None:
     """Return hook payload data for one live human join event, or None when ignored."""
     if event.membership != "join" or event.prev_membership == "join":
         return None
+    if require_previous_membership and event.prev_membership is None:
+        return None
 
     user_id = event.state_key
-    if extract_agent_name(user_id, config, runtime_paths) is not None or user_id in config.bot_accounts:
+    if (
+        extract_agent_name(user_id, config, runtime_paths) is not None
+        or user_id in config.bot_accounts
+        or user_id == config.get_mindroom_user_id(runtime_paths)
+    ):
         return None
 
     first_join = _mark_room_member_join_seen(storage_root, room_id=room.room_id, user_id=user_id)
@@ -174,6 +181,7 @@ def room_member_joins_from_sync_state(
                 config=config,
                 runtime_paths=runtime_paths,
                 storage_root=storage_root,
+                require_previous_membership=True,
             )
             if join is not None:
                 joins.append(join)

@@ -95,9 +95,14 @@ def _sync_response_with_state(room_id: str, events: list[object]) -> nio.SyncRes
     return cast("nio.SyncResponse", response)
 
 
-def _router_bot(tmp_path: Path, *, bot_accounts: list[str] | None = None) -> AgentBot:
+def _router_bot(
+    tmp_path: Path,
+    *,
+    bot_accounts: list[str] | None = None,
+    mindroom_user: dict[str, str] | None = None,
+) -> AgentBot:
     runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(Config(bot_accounts=bot_accounts or []), runtime_paths)
+    config = bind_runtime_paths(Config(bot_accounts=bot_accounts or [], mindroom_user=mindroom_user), runtime_paths)
     bot = AgentBot(_router_user(), tmp_path, config=config, runtime_paths=runtime_paths)
     bot.client = MagicMock()
     bot.client.homeserver = "http://localhost:8008"
@@ -226,6 +231,38 @@ async def test_router_emits_room_member_joined_from_sync_state_after_initial_syn
 
 
 @pytest.mark.asyncio
+async def test_router_ignores_sync_state_member_snapshot_without_previous_membership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sync state snapshots without a membership transition should not trigger onboarding."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot,
+        "_sync_cache_result_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [_room_member_event(event_id="$snapshot-join", prev_membership=None)],
+        ),
+    )
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
 async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -295,18 +332,25 @@ async def test_room_member_joined_ignores_initial_sync_history(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_room_member_joined_ignores_bot_accounts_and_agents(tmp_path: Path) -> None:
-    """Configured bots and MindRoom agents should not trigger human onboarding hooks."""
+    """Configured bots and internal MindRoom users should not trigger human onboarding hooks."""
     seen: list[str] = []
 
     @hook(EVENT_ROOM_MEMBER_JOINED)
     async def joined(ctx: RoomMemberJoinedContext) -> None:
         seen.append(ctx.user_id)
 
-    bot = _router_bot(tmp_path, bot_accounts=["@bridge:localhost"])
+    bot = _router_bot(
+        tmp_path,
+        bot_accounts=["@bridge:localhost"],
+        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+    )
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    internal_user_id = bot.config.get_mindroom_user_id(bot.runtime_paths)
+    assert internal_user_id is not None
 
     await bot._on_room_member(_room(), _room_member_event(event_id="$bridge", user_id="@bridge:localhost"))
     await bot._on_room_member(_room(), _room_member_event(event_id="$agent", user_id="@mindroom_router:localhost"))
+    await bot._on_room_member(_room(), _room_member_event(event_id="$internal", user_id=internal_user_id))
 
     assert seen == []
 

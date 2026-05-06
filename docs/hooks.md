@@ -158,7 +158,7 @@ async def block_secret_reads(ctx):
 | `compaction:after` | Observer | `CompactionHookContext` | After compaction is persisted, with before/after token counts and the generated summary | None (frozen) |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
-| `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, and `bot_accounts` | None (frozen) |
+| `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
@@ -415,7 +415,7 @@ Each item still carries a `cache_policy`, but system enrichment uses it to contr
 ## Custom events
 
 Plugins can define and emit namespaced custom events.
-Built-in namespaces (`message:*`, `system:*`, `agent:*`, `bot:*`, `schedule:*`, `reaction:*`, `room:*`, `config:*`, `tool:*`) are reserved.
+Built-in namespaces (`message:*`, `system:*`, `agent:*`, `bot:*`, `compaction:*`, `schedule:*`, `reaction:*`, `room:*`, `config:*`, `session:*`, `tool:*`) are reserved.
 
 ### Defining a custom event hook
 
@@ -446,7 +446,7 @@ If you are writing internal code or tests and already have an explicit `HookRegi
 
 - Pattern: `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`
 - Must contain at least one colon separator
-- Reserved namespaces: `message`, `system`, `agent`, `bot`, `schedule`, `reaction`, `room`, `config`, `tool`
+- Reserved namespaces: `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, `tool`
 - Custom events run in observer mode (`emit()`)
 - Recursion guard: nested emissions stop at depth 3
 
