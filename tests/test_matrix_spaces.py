@@ -473,6 +473,32 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -> None:  # noqa: ANN001
+    """Root Space invitations should skip users already in the Space."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.config = _config_with_runtime_paths(
+        tmp_path,
+        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+        matrix_space={"enabled": True},
+        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+        authorization={"global_users": ["@owner:example.com"]},
+    )
+    router_bot = MagicMock()
+    router_bot.client = AsyncMock()
+    orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+    internal_user_id = orchestrator.config.get_mindroom_user_id(orchestrator.runtime_paths)
+
+    with (
+        patch("mindroom.orchestrator.ensure_root_space", new=AsyncMock(return_value="!space:localhost")),
+        patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value={internal_user_id})),
+        patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
+    ):
+        await orchestrator._ensure_root_space({"lobby": "!lobby:localhost"})
+
+    mock_invite.assert_awaited_once_with(router_bot.client, "!space:localhost", "@owner:example.com")
+
+
+@pytest.mark.asyncio
 async def test_setup_rooms_and_memberships_runs_root_space_after_each_room_reconciliation(tmp_path) -> None:  # noqa: ANN001
     """Space reconciliation should happen as a post-room phase during startup."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))

@@ -1500,13 +1500,15 @@ class _MultiAgentOrchestrator:
 
         current_members = await get_room_members(router_bot.client, root_space_id)
         for user_id in sorted(invite_user_ids):
-            if user_id in current_members:
-                continue
-            success = await invite_to_room(router_bot.client, root_space_id, user_id)
-            if success:
-                logger.info("invited_user_to_root_space", user_id=user_id, room_id=root_space_id)
-            else:
-                logger.warning("invite_user_to_root_space_failed", user_id=user_id, room_id=root_space_id)
+            log_context = {"user_id": user_id, "room_id": root_space_id}
+            await self._invite_user_if_missing(
+                root_space_id,
+                user_id,
+                current_members,
+                success_message="invited_user_to_root_space",
+                failure_message="invite_user_to_root_space_failed",
+                log_context=log_context,
+            )
 
     async def _invite_user_if_missing(
         self,
@@ -1516,6 +1518,7 @@ class _MultiAgentOrchestrator:
         *,
         success_message: str,
         failure_message: str,
+        log_context: dict[str, str] | None = None,
     ) -> None:
         """Invite one user if they are not already a member."""
         router_bot = self._router_bot()
@@ -1526,10 +1529,10 @@ class _MultiAgentOrchestrator:
             return
         success = await invite_to_room(router_bot.client, room_id, user_id)
         if success:
-            logger.info(success_message)
+            logger.info(success_message, **(log_context or {}))
             current_members.add(user_id)
         else:
-            logger.warning(failure_message)
+            logger.warning(failure_message, **(log_context or {}))
 
     async def _invite_internal_user_to_rooms(
         self,
