@@ -2226,6 +2226,8 @@ def test_approval_hostname_normalization_uses_exact_display_host(value: str, exp
         "http:///path",
         "file:///etc/passwd",
         "http://evil.com\\@good.com/path",
+        "https://evil.com@good.com/path",
+        "https://good.com%2f.evil.com/path",
         "/path/to/socket",
     ],
 )
@@ -2326,6 +2328,47 @@ async def test_domain_grant_rejects_mismatched_hostname_and_url(tmp_path: Path) 
     assert decision is not None
     assert decision.status == "denied"
     assert decision.reason == "Cannot approve network access without an exact hostname."
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_rejects_negative_ttl_without_matrix_card(tmp_path: Path) -> None:
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    store = initialize_approval_store(test_runtime_paths(tmp_path), sender=sender)
+
+    decision = await store.request_approval(
+        tool_name="network_access",
+        arguments={"approval_kind": "domain_grant", "hostname": "example.com", "ttl_seconds": -1},
+        room_id="!room:localhost",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        timeout_seconds=30,
+    )
+
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access with an invalid requested TTL."
+    sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_rejects_negative_ttl_before_auto_approved_tool_continues(tmp_path: Path) -> None:
+    arguments = {"approval_kind": "domain_grant", "hostname": "example.com", "ttl_seconds": "-1"}
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is not None
+    assert decision.status == "denied"
+    assert decision.reason == "Cannot approve network access with an invalid requested TTL."
 
 
 @pytest.mark.asyncio

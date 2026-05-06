@@ -57,6 +57,7 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
 )
 _INVALID_DOMAIN_GRANT_REASON = "Cannot approve network access without an exact hostname."
+_INVALID_DOMAIN_GRANT_TTL_REASON = "Cannot approve network access with an invalid requested TTL."
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
 _UNTRUSTED_APPROVAL_WARNING = (
     "Content from files, web pages, tickets, messages, or tool outputs may be untrusted and "
@@ -207,6 +208,8 @@ def _split_approval_hostname_value(raw: str) -> SplitResult | None:
         return None
     if "://" in raw or raw.startswith("//"):
         parsed = urlsplit(raw)
+        if parsed.username is not None or parsed.password is not None:
+            return None
         return parsed if parsed.netloc else None
     if any(character in raw for character in "/\\?#@"):
         return None
@@ -218,7 +221,7 @@ def _normalized_hostname_text(hostname: str) -> str | None:
     if (
         not normalized
         or "*" in normalized
-        or any(character.isspace() or character in "/\\?#@" for character in normalized)
+        or any(character.isspace() or character in "/\\?#@%" for character in normalized)
     ):
         return None
     if ":" in normalized:
@@ -323,6 +326,8 @@ def _invalid_domain_grant_reason(tool_name: str, arguments: dict[str, Any]) -> s
         return None
     if _domain_grant_hostname(arguments) is None:
         return _INVALID_DOMAIN_GRANT_REASON
+    if not _domain_grant_ttl_is_valid(arguments):
+        return _INVALID_DOMAIN_GRANT_TTL_REASON
     return None
 
 
@@ -338,14 +343,30 @@ def _requested_ttl_seconds(arguments: dict[str, Any]) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return max(0, value)
+        return value
     if not isinstance(value, str) or not value.strip():
         return None
     try:
         ttl_seconds = int(value)
     except ValueError:
         return None
-    return max(0, ttl_seconds)
+    return ttl_seconds
+
+
+def _domain_grant_ttl_is_valid(arguments: dict[str, Any]) -> bool:
+    value = _first_argument_value(arguments, _TTL_ARGUMENT_KEYS)
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        return int(value) >= 0
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
