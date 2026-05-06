@@ -15,6 +15,12 @@ spec:
   podSelector:
     matchLabels:
       customer: {{ .Values.customer | quote }}
+    matchExpressions:
+    - key: app
+      operator: In
+      values:
+      - mindroom
+      - synapse
   policyTypes:
   - Ingress
   - Egress
@@ -23,14 +29,6 @@ spec:
   - ports:
     - port: 8765    # MindRoom runtime (bundled dashboard + API)
     - port: 8008    # synapse HTTP
-  # Allow the primary runtime to reach dedicated worker pods.
-  - from:
-    - podSelector:
-        matchLabels:
-          app: mindroom
-          customer: {{ .Values.customer | quote }}
-    ports:
-    - port: {{ $workerPort }}
   egress:
   # Allow intra-instance traffic between MindRoom and Synapse pods.
   - to:
@@ -51,3 +49,54 @@ spec:
   - ports:
     - port: 80
     - port: 443
+{{- if eq $workerBackend "kubernetes" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: instance-worker-traffic-controls-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app.kubernetes.io/name: mindroom-instance-worker
+    customer: {{ .Values.customer | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: mindroom
+      app.kubernetes.io/name: mindroom-worker
+      customer: {{ .Values.customer | quote }}
+      mindroom.ai/component: worker
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow the primary runtime to reach dedicated worker runner ports.
+  - from:
+    - podSelector:
+        matchLabels:
+          app: mindroom
+          customer: {{ .Values.customer | quote }}
+    ports:
+    - port: {{ $workerPort }}
+  egress:
+  # Allow DNS.
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  # Allow workers to reach only in-instance runtime services by default.
+  - to:
+    - podSelector:
+        matchLabels:
+          customer: {{ .Values.customer | quote }}
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - mindroom
+          - synapse
+    ports:
+    - port: 8008
+    - port: 8765
+{{- end }}

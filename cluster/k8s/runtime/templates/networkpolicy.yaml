@@ -17,6 +17,7 @@ spec:
       {{- end }}
   policyTypes:
     - Ingress
+    - Egress
   ingress:
     - from:
         - namespaceSelector:
@@ -28,4 +29,12 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.workers.kubernetes.port }}
+  egress:
+    # Static external worker egress is intentionally empty by default.
+    # Use deployment-specific dynamic grants for exact external hostnames.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
 {{- end }}

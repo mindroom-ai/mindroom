@@ -82,12 +82,44 @@ def _resource(docs: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any
 def test_instance_chart_worker_network_policy_allows_runner_ingress_only_from_control_plane() -> None:
     """Worker runner ingress should not allow every pod carrying the instance label."""
     docs = _render_instance_chart()
-    policy = _resource(docs, "NetworkPolicy", "instance-traffic-controls-demo")
+    policy = _resource(docs, "NetworkPolicy", "instance-worker-traffic-controls-demo")
     worker_rule = next(
         rule for rule in policy["spec"]["ingress"] if any(port.get("port") == 8766 for port in rule.get("ports", []))
     )
 
     assert worker_rule["from"] == [{"podSelector": {"matchLabels": {"app": "mindroom", "customer": "demo"}}}]
+
+
+def test_instance_chart_worker_network_policy_has_no_static_external_egress() -> None:
+    """Dedicated workers should not inherit broad external HTTP/HTTPS egress by default."""
+    docs = _render_instance_chart()
+    primary_policy = _resource(docs, "NetworkPolicy", "instance-traffic-controls-demo")
+    worker_policy = _resource(docs, "NetworkPolicy", "instance-worker-traffic-controls-demo")
+
+    assert primary_policy["spec"]["podSelector"] == {
+        "matchLabels": {"customer": "demo"},
+        "matchExpressions": [{"key": "app", "operator": "In", "values": ["mindroom", "synapse"]}],
+    }
+    assert worker_policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    assert worker_policy["spec"]["egress"] == [
+        {
+            "ports": [
+                {"port": 53, "protocol": "UDP"},
+                {"port": 53, "protocol": "TCP"},
+            ],
+        },
+        {
+            "to": [
+                {
+                    "podSelector": {
+                        "matchLabels": {"customer": "demo"},
+                        "matchExpressions": [{"key": "app", "operator": "In", "values": ["mindroom", "synapse"]}],
+                    },
+                },
+            ],
+            "ports": [{"port": 8008}, {"port": 8765}],
+        },
+    ]
 
 
 def test_instance_chart_disables_service_links_for_dynamic_worker_pods_by_default() -> None:
@@ -187,6 +219,22 @@ def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> 
         "app.kubernetes.io/managed-by": "mindroom",
         "app.kubernetes.io/name": "mindroom-worker",
     }
+
+
+def test_runtime_chart_worker_network_policy_has_empty_static_external_egress() -> None:
+    """Runtime chart dynamic workers should start without broad external egress."""
+    docs = _render_runtime_chart()
+    policy = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")
+
+    assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    assert policy["spec"]["egress"] == [
+        {
+            "ports": [
+                {"port": 53, "protocol": "UDP"},
+                {"port": 53, "protocol": "TCP"},
+            ],
+        },
+    ]
 
 
 def test_runtime_chart_disables_service_links_for_dynamic_worker_pods_by_default() -> None:
