@@ -259,6 +259,11 @@ def test_timing_enabled_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert timing_enabled() is True
 
 
+def test_elapsed_ms_between_rounds_to_one_decimal_place() -> None:
+    """Elapsed-millisecond conversion should use the shared one-decimal policy."""
+    assert timing_module._elapsed_ms_between(1.0, 1.23456) == 234.6
+
+
 def test_timed_routes_elapsed_logging_through_shared_helper(monkeypatch: pytest.MonkeyPatch) -> None:
     """timed() should delegate timing_elapsed event shaping to emit_elapsed_timing()."""
     monkeypatch.setenv("MINDROOM_TIMING", "1")

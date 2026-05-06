@@ -37,6 +37,10 @@ def timing_enabled() -> bool:
     return _is_enabled()
 
 
+def _elapsed_ms_between(start: float, end: float) -> float:
+    return round((end - start) * 1000, 1)
+
+
 type _TimingMetadataValue = str | int | float | bool
 
 _PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
@@ -110,7 +114,7 @@ class DispatchPipelineTiming:
         end = self.marks.get(end_label)
         if start is None or end is None:
             return None
-        return round((end - start) * 1000, 1)
+        return _elapsed_ms_between(start, end)
 
     def emit_summary(self, logger: BoundLogger, *, outcome: str) -> None:
         """Log one structured end-to-end timing summary."""
@@ -195,7 +199,7 @@ def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
     emit_timing_event(
         "timing_elapsed",
         label=label,
-        duration_ms=round((time.monotonic() - start) * 1000, 1),
+        duration_ms=_elapsed_ms_between(start, time.monotonic()),
         **event_data,
     )
 
