@@ -38,13 +38,14 @@ def test_mcp_server_config_rejects_invalid_transport_mix() -> None:
 
 def test_mcp_server_config_rejects_overlapping_filters() -> None:
     """Reject overlapping include and exclude tool filters."""
-    with pytest.raises(ValueError, match="include_tools and exclude_tools overlap"):
+    with pytest.raises(ValueError, match="MCP include_tools and exclude_tools overlap") as exc_info:
         MCPServerConfig(
             transport="stdio",
             command="npx",
-            include_tools=["echo"],
-            exclude_tools=["echo"],
+            include_tools=["ping", "echo"],
+            exclude_tools=["echo", "ping"],
         )
+    assert str(exc_info.value.errors()[0]["ctx"]["error"]) == "MCP include_tools and exclude_tools overlap: echo, ping"
 
 
 def test_mcp_server_config_normalizes_tool_filters() -> None:

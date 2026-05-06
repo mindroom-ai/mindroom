@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from mindroom.mcp.config import validate_mcp_tool_filter_overlap
 from mindroom.mcp.errors import MCPError
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, require_mcp_server_manager
 from mindroom.tool_system.catalog import (
@@ -94,10 +95,8 @@ def validate_mcp_agent_overrides(tool_name: str, overrides: dict[str, object]) -
 
     include_tools = cast("list[str]", overrides.get("include_tools", []))
     exclude_tools = cast("list[str]", overrides.get("exclude_tools", []))
-    overlap = sorted(set(include_tools) & set(exclude_tools))
-    if overlap:
-        msg = f"Invalid per-agent override for '{tool_name}': include_tools and exclude_tools overlap: {', '.join(overlap)}"
-        raise ValueError(msg)
+    message = f"Invalid per-agent override for '{tool_name}': include_tools and exclude_tools overlap"
+    validate_mcp_tool_filter_overlap(include_tools, exclude_tools, message=message)
 
     timeout_seconds = overrides.get("call_timeout_seconds")
     if timeout_seconds is not None and (

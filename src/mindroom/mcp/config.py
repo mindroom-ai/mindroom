@@ -39,6 +39,13 @@ def validate_mcp_function_name(value: str, *, subject: str) -> str:
     return value
 
 
+def validate_mcp_tool_filter_overlap(include_tools: list[str], exclude_tools: list[str], *, message: str) -> None:
+    """Reject tool names that appear in both include and exclude filters."""
+    if overlap := sorted(set(include_tools) & set(exclude_tools)):
+        msg = f"{message}: {', '.join(overlap)}"
+        raise ValueError(msg)
+
+
 def normalize_mcp_server_id(server_id: str) -> str:
     """Validate and normalize one MCP server id."""
     return _validate_mcp_identifier(server_id, subject="MCP server id")
@@ -82,14 +89,6 @@ class MCPServerConfig(BaseModel):
                 normalized.append(stripped)
         return normalized
 
-    def _validate_tool_filters(self) -> None:
-        include_tools = set(self.include_tools)
-        exclude_tools = set(self.exclude_tools)
-        overlap = sorted(include_tools & exclude_tools)
-        if overlap:
-            msg = f"MCP include_tools and exclude_tools overlap: {', '.join(overlap)}"
-            raise ValueError(msg)
-
     def _validate_stdio_transport(self) -> None:
         if not self.command or not self.command.strip():
             msg = "stdio MCP servers require a non-empty command"
@@ -121,7 +120,11 @@ class MCPServerConfig(BaseModel):
     @model_validator(mode="after")
     def validate_transport_fields(self) -> Self:
         """Validate the transport-specific config shape."""
-        self._validate_tool_filters()
+        validate_mcp_tool_filter_overlap(
+            self.include_tools,
+            self.exclude_tools,
+            message="MCP include_tools and exclude_tools overlap",
+        )
 
         if self.transport == "stdio":
             self._validate_stdio_transport()

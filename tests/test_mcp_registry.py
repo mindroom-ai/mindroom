@@ -16,6 +16,7 @@ from mindroom.mcp.registry import (
     mcp_tool_name,
     resolved_mcp_tool_state,
     sync_mcp_tool_registry,
+    validate_mcp_agent_overrides,
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
@@ -300,3 +301,31 @@ def test_mcp_tool_names_are_shared_only(tmp_path: Path) -> None:
 
     assert mcp_server_id_from_tool_name("mcp_demo") == "demo"
     assert supports_tool_name_for_worker_scope("mcp_demo", "user") is False
+
+
+def test_validate_mcp_agent_overrides_rejects_overlapping_filters_with_exact_message() -> None:
+    """Preserve the public per-agent MCP filter-overlap error."""
+    with pytest.raises(ValueError, match="include_tools and exclude_tools overlap") as exc_info:
+        validate_mcp_agent_overrides(
+            "mcp_demo",
+            {
+                "include_tools": ["ping", "echo"],
+                "exclude_tools": ["echo", "ping"],
+            },
+        )
+
+    assert (
+        str(exc_info.value)
+        == "Invalid per-agent override for 'mcp_demo': include_tools and exclude_tools overlap: echo, ping"
+    )
+
+
+def test_validate_mcp_agent_overrides_rejects_invalid_call_timeout_with_exact_message() -> None:
+    """Keep per-agent timeout validation behavior independent from filter validation."""
+    with pytest.raises(ValueError, match="expected a number greater than 0") as exc_info:
+        validate_mcp_agent_overrides("mcp_demo", {"call_timeout_seconds": 0})
+
+    assert (
+        str(exc_info.value)
+        == "Invalid per-agent override for 'mcp_demo.call_timeout_seconds': expected a number greater than 0"
+    )
