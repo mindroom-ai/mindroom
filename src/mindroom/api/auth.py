@@ -414,9 +414,9 @@ def _verified_trusted_upstream_identity(
         return user_id, email
 
     verified_user_id = jwt_identity.user_id or jwt_identity.email
-    if not secrets.compare_digest(user_id, verified_user_id):
+    if user_id != verified_user_id:
         raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
-    if email is not None and not secrets.compare_digest(email, jwt_identity.email):
+    if email is not None and email != jwt_identity.email:
         raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
     if settings.email_header is None and email is None:
         email = jwt_identity.email
