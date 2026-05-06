@@ -308,11 +308,15 @@ def _request_or_current_snapshot(request: Request) -> ApiSnapshot:
 def _published_snapshot(
     snapshot: ApiSnapshot,
     *,
+    increment_generation: bool = True,
+    runtime_paths: constants.RuntimePaths | None = None,
     config_data: dict[str, Any] | None = None,
     runtime_config: Config | None | object = _UNSET,
     config_load_result: ConfigLoadResult | None | object = _UNSET,
+    auth_state: object = _UNSET,
 ) -> ApiSnapshot:
     """Return one new published snapshot with an incremented generation."""
+    updated_runtime_paths = snapshot.runtime_paths if runtime_paths is None else runtime_paths
     updated_config_data = snapshot.config_data if config_data is None else config_data
     updated_runtime_config = (
         snapshot.runtime_config if runtime_config is _UNSET else cast("Config | None", runtime_config)
@@ -322,12 +326,15 @@ def _published_snapshot(
         if config_load_result is _UNSET
         else cast("ConfigLoadResult | None", config_load_result)
     )
+    updated_auth_state = snapshot.auth_state if auth_state is _UNSET else auth_state
     return replace(
         snapshot,
-        generation=snapshot.generation + 1,
+        generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
+        runtime_paths=updated_runtime_paths,
         config_data=updated_config_data,
         runtime_config=updated_runtime_config,
         config_load_result=updated_load_result,
+        auth_state=updated_auth_state,
     )
 
 
