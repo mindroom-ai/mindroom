@@ -293,6 +293,7 @@ def test_private_registry_state_import_is_whitelisted_outside_tool_system() -> N
     """Only the MCP registry may import private registry state directly outside tool_system."""
     assert _private_registry_state_importers_outside_tool_system() == {
         ("mindroom.mcp.registry", "TOOL_REGISTRY"),
+        ("mindroom.mcp.registry", "reconcile_dynamic_tool_state"),
     }
 
 

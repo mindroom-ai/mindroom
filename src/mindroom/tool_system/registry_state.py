@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.tool_system import plugin_imports
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterable, Iterator, Mapping
     from pathlib import Path
     from types import ModuleType
 
@@ -138,16 +138,46 @@ def resolved_tool_state(
     return desired_registry, desired_metadata
 
 
+def reconcile_dynamic_tool_state(
+    current_registry: dict[str, Callable[[], type[Toolkit]]],
+    current_metadata: dict[str, ToolMetadata],
+    desired_registry: Mapping[str, Callable[[], type[Toolkit]]],
+    desired_metadata: Mapping[str, ToolMetadata],
+    *,
+    owned_tool_names: Iterable[str],
+    collision_error: Callable[[str], Exception],
+) -> set[str]:
+    """Replace one owned dynamic namespace in shared registry state."""
+    desired_tool_names = {*desired_registry, *desired_metadata}
+    owned_tool_names = set(owned_tool_names)
+    existing_non_owned_tool_names = {*current_registry, *current_metadata} - owned_tool_names
+    conflicting_tool_names = sorted(desired_tool_names & existing_non_owned_tool_names)
+    if conflicting_tool_names:
+        raise collision_error(conflicting_tool_names[0])
+    for tool_name in sorted(owned_tool_names - desired_tool_names):
+        current_registry.pop(tool_name, None)
+        current_metadata.pop(tool_name, None)
+    for tool_name in desired_tool_names - set(desired_registry):
+        current_registry.pop(tool_name, None)
+    current_registry.update(desired_registry)
+    current_metadata.update(desired_metadata)
+    return desired_tool_names
+
+
 def synchronize_plugin_tools(active_plugins: list[tuple[str, str]]) -> None:
     """Rebuild the active plugin tool overlay from cached per-module registrations."""
     desired_registry, desired_metadata = resolved_tool_state(
         active_plugins,
         _PLUGIN_TOOL_METADATA_BY_MODULE,
     )
-    TOOL_REGISTRY.clear()
-    TOOL_REGISTRY.update(desired_registry)
-    TOOL_METADATA.clear()
-    TOOL_METADATA.update(desired_metadata)
+    reconcile_dynamic_tool_state(
+        TOOL_REGISTRY,
+        TOOL_METADATA,
+        desired_registry,
+        desired_metadata,
+        owned_tool_names={*TOOL_REGISTRY, *TOOL_METADATA},
+        collision_error=ValueError,
+    )
 
 
 def _reject_plugin_builtin_tool_collision(tool_name: str) -> None:

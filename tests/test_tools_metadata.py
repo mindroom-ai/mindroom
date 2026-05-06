@@ -3,6 +3,7 @@
 import inspect
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import Never
@@ -38,6 +39,7 @@ from mindroom.tool_system.registry_state import (
     TOOL_METADATA,
     TOOL_REGISTRY,
     capture_tool_registry_snapshot,
+    reconcile_dynamic_tool_state,
     restore_tool_registry_snapshot,
 )
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
@@ -54,6 +56,61 @@ def _restore_builtin_tool_metadata_state() -> None:
     TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
     TOOL_METADATA.clear()
     TOOL_METADATA.update(_BASE_TOOL_METADATA)
+
+
+def test_reconcile_dynamic_tool_state_replaces_only_owned_entries() -> None:
+    """Dynamic registry reconciliation should preserve unrelated tools and remove stale owned entries."""
+    factory = TOOL_REGISTRY["shell"]
+    replacement_factory = TOOL_REGISTRY["python"]
+    unrelated_metadata = replace(TOOL_METADATA["shell"], name="unrelated")
+    stale_metadata = replace(TOOL_METADATA["shell"], name="stale_owned")
+    desired_metadata = replace(TOOL_METADATA["python"], name="owned")
+    metadata_only = replace(TOOL_METADATA["shell"], name="metadata_only")
+    current_registry = {
+        "unrelated": factory,
+        "stale_owned": factory,
+        "owned": factory,
+        "metadata_only": factory,
+    }
+    current_metadata = {
+        "unrelated": unrelated_metadata,
+        "stale_owned": stale_metadata,
+        "owned": stale_metadata,
+        "metadata_only": stale_metadata,
+    }
+
+    reconciled_tool_names = reconcile_dynamic_tool_state(
+        current_registry,
+        current_metadata,
+        {"owned": replacement_factory},
+        {"owned": desired_metadata, "metadata_only": metadata_only},
+        owned_tool_names={"stale_owned", "owned", "metadata_only"},
+        collision_error=ValueError,
+    )
+
+    assert reconciled_tool_names == {"owned", "metadata_only"}
+    assert current_registry == {"unrelated": factory, "owned": replacement_factory}
+    assert current_metadata == {
+        "unrelated": unrelated_metadata,
+        "owned": desired_metadata,
+        "metadata_only": metadata_only,
+    }
+
+
+def test_reconcile_dynamic_tool_state_rejects_non_owned_collisions() -> None:
+    """Desired dynamic entries must not overwrite tools outside the owned namespace."""
+    factory = TOOL_REGISTRY["shell"]
+    metadata = replace(TOOL_METADATA["shell"], name="shared")
+
+    with pytest.raises(ValueError, match="shared collision"):
+        reconcile_dynamic_tool_state(
+            {"shared": factory},
+            {"shared": metadata},
+            {"shared": factory},
+            {"shared": metadata},
+            owned_tool_names=set(),
+            collision_error=lambda tool_name: ValueError(f"{tool_name} collision"),
+        )
 
 
 def test_export_tools_metadata_json() -> None:
