@@ -25,6 +25,12 @@ class PendingApproval:
     tool_name: str
     arguments_preview: dict[str, Any]
     arguments_preview_truncated: bool
+    approval_type: str
+    approval_reason: str
+    approval_warning: str
+    request_context: dict[str, Any]
+    normalized_hostname: str | None
+    requested_ttl_seconds: int | None
     timeout_seconds: int
     created_at_ms: int
     thread_id: str | None = None
@@ -66,6 +72,15 @@ class PendingApproval:
         requester_id = _content_str(content, "requester_id") or ""
         thread_id = _content_str(content, "thread_id")
         agent_name = _content_str(content, "agent_name")
+        approval_type = _content_str(content, "approval_type") or "tool_action"
+        approval_reason = _content_str(content, "approval_reason") or ""
+        approval_warning = _content_str(content, "approval_warning") or ""
+        request_context = content.get("request_context")
+        if not isinstance(request_context, dict):
+            request_context = {}
+        requested_ttl_seconds = content.get("requested_ttl_seconds")
+        if isinstance(requested_ttl_seconds, bool) or not isinstance(requested_ttl_seconds, int):
+            requested_ttl_seconds = None
 
         return cls(
             approval_id=approval_id,
@@ -77,6 +92,12 @@ class PendingApproval:
             tool_name=tool_name,
             arguments_preview=cast("dict[str, Any]", arguments),
             arguments_preview_truncated=bool(content.get("arguments_truncated")),
+            approval_type=approval_type,
+            approval_reason=approval_reason,
+            approval_warning=approval_warning,
+            request_context=cast("dict[str, Any]", request_context),
+            normalized_hostname=_content_str(content, "normalized_hostname"),
+            requested_ttl_seconds=requested_ttl_seconds,
             timeout_seconds=timeout_seconds,
             created_at_ms=created_at_ms,
             thread_id=thread_id,

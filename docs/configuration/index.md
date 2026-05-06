@@ -43,6 +43,8 @@ If MindRoom restarts before a tool call is approved, the live tool call is cance
 On startup, MindRoom attempts to mark recent unresolved approval cards sent by the current router as expired.
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
+For network domain grants, approve only when the normalized hostname, requested TTL, requesting agent/tool, and concise reason match the action you intend to allow.
+Treat content copied from files, web pages, tickets, messages, or tool outputs as untrusted context rather than approval justification by itself.
 
 ```yaml
 tool_approval:
