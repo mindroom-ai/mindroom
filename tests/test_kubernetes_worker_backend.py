@@ -636,27 +636,39 @@ def test_kubernetes_worker_startup_manifest_omits_credentials_encryption_key(tmp
         storage_path=tmp_path / "mindroom-test-storage",
         process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
     )
-    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
     worker_key = _TEST_SCOPED_WORKER_KEY_A
 
-    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+    handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
     deployment = apps_api.created_bodies[0]
     container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    env_by_name = {env["name"]: env for env in container["env"]}
     startup_manifest = _load_startup_manifest(backend, worker_key=worker_key)
     committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
 
-    assert env_values[CREDENTIALS_ENCRYPTION_KEY_ENV] == encryption_key
+    assert env_by_name[CREDENTIALS_ENCRYPTION_KEY_ENV] == {
+        "name": CREDENTIALS_ENCRYPTION_KEY_ENV,
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": handle.worker_id,
+                "key": CREDENTIALS_ENCRYPTION_KEY_ENV,
+            },
+        },
+    }
     assert committed_runtime.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert core_api.created_secret_bodies[0]["stringData"][CREDENTIALS_ENCRYPTION_KEY_ENV] == encryption_key
+    assert encryption_key not in json.dumps(deployment)
     assert encryption_key not in json.dumps(startup_manifest)
 
 
 def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -> None:
     """Shared-namespace charts should need RBAC only for one tenant-owned Secret."""
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
+        process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
     )
     auth_secret_name = "mindroom-worker-auth-demo"  # noqa: S105
     backend, apps_api, core_api = _backend(runtime_paths=runtime_paths, auth_secret_name=auth_secret_name)
@@ -676,19 +688,37 @@ def test_kubernetes_backend_can_use_one_precreated_auth_secret(tmp_path: Path) -
             },
         },
     }
+    assert env_by_name[CREDENTIALS_ENCRYPTION_KEY_ENV] == {
+        "name": CREDENTIALS_ENCRYPTION_KEY_ENV,
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": auth_secret_name,
+                "key": f"{handle.worker_id}.credentials-encryption-key",
+            },
+        },
+    }
+    assert encryption_key not in json.dumps(deployment)
     assert core_api.created_secret_bodies == []
+    expected_secret_data = _encoded_secret_data(
+        {
+            handle.worker_id: handle.auth_token,
+            f"{handle.worker_id}.credentials-encryption-key": encryption_key,
+        },
+    )
     assert core_api.patched_secret_bodies[0] == (
         auth_secret_name,
-        {"data": _encoded_secret_data({handle.worker_id: handle.auth_token})},
+        {"data": expected_secret_data},
     )
-    assert core_api.secrets[auth_secret_name].data == _encoded_secret_data({handle.worker_id: handle.auth_token})
+    assert core_api.secrets[auth_secret_name].data == expected_secret_data
 
 
 def test_kubernetes_backend_evict_removes_only_own_key_from_tenant_auth_secret(tmp_path: Path) -> None:
     """Evicting one worker should null out only its key in the shared tenant Secret."""
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
+        process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
     )
     auth_secret_name = "mindroom-worker-auth-demo"  # noqa: S105
     backend, _apps_api, core_api = _backend(runtime_paths=runtime_paths, auth_secret_name=auth_secret_name)
@@ -701,11 +731,12 @@ def test_kubernetes_backend_evict_removes_only_own_key_from_tenant_auth_secret(t
     assert core_api.deleted_secret_names == []
     delete_patch = (
         auth_secret_name,
-        {"data": {handle.worker_id: None}},
+        {"data": {handle.worker_id: None, f"{handle.worker_id}.credentials-encryption-key": None}},
     )
     assert delete_patch in core_api.patched_secret_bodies
     tenant_secret = core_api.secrets[auth_secret_name]
     assert handle.worker_id not in tenant_secret.data
+    assert f"{handle.worker_id}.credentials-encryption-key" not in tenant_secret.data
     assert tenant_secret.data[other_worker_id] == "preexisting"
 
 
@@ -728,7 +759,10 @@ def test_kubernetes_backend_startup_failure_removes_key_from_tenant_auth_secret(
     with pytest.raises(WorkerBackendError):
         backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
-    delete_patch = (auth_secret_name, {"data": {worker_id: None}})
+    delete_patch = (
+        auth_secret_name,
+        {"data": {worker_id: None, f"{worker_id}.credentials-encryption-key": None}},
+    )
     assert delete_patch in core_api.patched_secret_bodies
     assert worker_id not in core_api.secrets[auth_secret_name].data
 
@@ -775,7 +809,10 @@ def test_kubernetes_backend_shared_auth_secret_cleanup_ignores_missing_secret(tm
     evicted = backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=False, now=20.0)
 
     assert evicted is None
-    assert (auth_secret_name, {"data": {handle.worker_id: None}}) in core_api.patched_secret_bodies
+    assert (
+        auth_secret_name,
+        {"data": {handle.worker_id: None, f"{handle.worker_id}.credentials-encryption-key": None}},
+    ) in core_api.patched_secret_bodies
 
 
 def test_kubernetes_backend_recreates_worker_when_startup_manifest_changes(tmp_path: Path) -> None:

@@ -64,6 +64,7 @@ _CONTAINER_NAME = "sandbox-runner"
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
+_CREDENTIALS_ENCRYPTION_KEY_SECRET_SUFFIX = "credentials-encryption-key"  # noqa: S105
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +210,10 @@ def _worker_auth_token_hash(shared_token: str | None, worker_key: str) -> str | 
 
 def _secret_data_value(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+
+def _worker_credentials_encryption_key_secret_key(worker_id: str) -> str:
+    return f"{worker_id}.{_CREDENTIALS_ENCRYPTION_KEY_SECRET_SUFFIX}"
 
 
 def parse_annotation_float(annotations: dict[str, str], key: str, default: float) -> float:
@@ -368,7 +373,7 @@ class KubernetesResourceManager:
         if self.config.auth_secret_name is not None:
             self._patch_secret_merge(
                 self.config.auth_secret_name,
-                {"data": {worker_id: _secret_data_value(worker_token)}},
+                {"data": self._shared_auth_secret_data(worker_id=worker_id, worker_token=worker_token)},
             )
             return
         manifest = self._auth_secret_manifest(worker_key=worker_key, worker_id=worker_id)
@@ -454,7 +459,12 @@ class KubernetesResourceManager:
             try:
                 self._patch_secret_merge(
                     self.config.auth_secret_name,
-                    {"data": {secret_name: None}},
+                    {
+                        "data": {
+                            secret_name: None,
+                            _worker_credentials_encryption_key_secret_key(secret_name): None,
+                        },
+                    },
                 )
             except self._api_exception as exc:
                 if exc.status != 404:
@@ -644,7 +654,7 @@ class KubernetesResourceManager:
             "kind": "Secret",
             "metadata": metadata,
             "type": "Opaque",
-            "stringData": {SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: worker_token},
+            "stringData": self._worker_auth_secret_string_data(worker_token=worker_token),
         }
 
     def _auth_secret_patch(self, *, worker_key: str, worker_id: str) -> dict[str, object]:
@@ -657,8 +667,30 @@ class KubernetesResourceManager:
         return {
             "metadata": metadata,
             "type": "Opaque",
-            "data": {SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: _secret_data_value(worker_token)},
+            "data": self._worker_auth_secret_data(worker_token=worker_token),
         }
+
+    def _worker_auth_secret_string_data(self, *, worker_token: str) -> dict[str, str]:
+        string_data = {SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: worker_token}
+        credentials_encryption_key = self._credentials_encryption_key()
+        if credentials_encryption_key is not None:
+            string_data[constants.CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
+        return string_data
+
+    def _worker_auth_secret_data(self, *, worker_token: str) -> dict[str, str]:
+        return {
+            name: _secret_data_value(value)
+            for name, value in self._worker_auth_secret_string_data(worker_token=worker_token).items()
+        }
+
+    def _shared_auth_secret_data(self, *, worker_id: str, worker_token: str) -> dict[str, str]:
+        secret_data = {worker_id: _secret_data_value(worker_token)}
+        credentials_encryption_key = self._credentials_encryption_key()
+        if credentials_encryption_key is not None:
+            secret_data[_worker_credentials_encryption_key_secret_key(worker_id)] = _secret_data_value(
+                credentials_encryption_key,
+            )
+        return secret_data
 
     def _deployment_manifest(
         self,
@@ -802,16 +834,9 @@ class KubernetesResourceManager:
             {"name": "HOME", "value": dedicated_root},
             self._worker_token_env(worker_id=worker_id),
         ]
-        credentials_encryption_key = self.config.extra_env.get(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
-        if credentials_encryption_key is None:
-            credentials_encryption_key = self.runtime_paths.env_value(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
-        if credentials_encryption_key and credentials_encryption_key.strip():
-            env.append(
-                {
-                    "name": constants.CREDENTIALS_ENCRYPTION_KEY_ENV,
-                    "value": credentials_encryption_key.strip(),
-                },
-            )
+        credentials_encryption_key_env = self._worker_credentials_encryption_key_env(worker_id=worker_id)
+        if credentials_encryption_key_env is not None:
+            env.append(credentials_encryption_key_env)
 
         for name, value in sorted(worker_extra_env(self.config.extra_env).items()):
             env.append({"name": name, "value": value})
@@ -831,6 +856,34 @@ class KubernetesResourceManager:
                 },
             },
         }
+
+    def _worker_credentials_encryption_key_env(self, *, worker_id: str) -> dict[str, object] | None:
+        if self._credentials_encryption_key() is None:
+            return None
+        return {
+            "name": constants.CREDENTIALS_ENCRYPTION_KEY_ENV,
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": self.config.auth_secret_name or worker_id,
+                    "key": (
+                        _worker_credentials_encryption_key_secret_key(worker_id)
+                        if self.config.auth_secret_name is not None
+                        else constants.CREDENTIALS_ENCRYPTION_KEY_ENV
+                    ),
+                },
+            },
+        }
+
+    def _credentials_encryption_key(self) -> str | None:
+        credentials_encryption_key = self.config.extra_env.get(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
+        if credentials_encryption_key is None:
+            credentials_encryption_key = self.runtime_paths.env_value(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
+        if credentials_encryption_key is None:
+            return None
+        normalized_key = credentials_encryption_key.strip()
+        if not normalized_key:
+            return None
+        return normalized_key
 
     def _worker_auth_token(self, worker_key: str) -> str:
         worker_token = worker_auth_token(self.auth_token, worker_key)
