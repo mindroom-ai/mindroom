@@ -297,7 +297,7 @@ def oauth_connect_url(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     *,
-    worker_target: ResolvedWorkerTarget | None,
+    worker_target: ResolvedWorkerTarget | None = None,
 ) -> str:
     """Return a browser-openable MindRoom OAuth link for one credential scope."""
     agent_name = worker_target.routing_agent_name if worker_target is not None else None
@@ -316,7 +316,7 @@ def build_oauth_connect_instruction(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     *,
-    worker_target: ResolvedWorkerTarget | None,
+    worker_target: ResolvedWorkerTarget | None = None,
 ) -> str:
     """Return a concise user-facing connection instruction for a tool result."""
     connect_url = oauth_connect_url(

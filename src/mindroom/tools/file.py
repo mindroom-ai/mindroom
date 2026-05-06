@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-from glob import has_magic
-from pathlib import Path
+from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
 from typing import Any, cast
 
 from agno.tools.file import FileTools as AgnoFileTools
@@ -18,52 +17,13 @@ from mindroom.tool_system.metadata import (
     ToolStatus,
     register_tool_with_metadata,
 )
-
-
-def _blocked_path_message(action: str, requested_path: str, base_dir: Path) -> str:
-    """Explain why a file-tool path was blocked."""
-    return (
-        f"Error {action}: path '{requested_path}' is outside base_dir '{base_dir}'. "
-        "Set restrict_to_base_dir=false to allow access outside base_dir."
-    )
-
-
-def _format_path_for_output(path: Path, base_dir: Path) -> str:
-    """Prefer base-dir-relative output, falling back to absolute paths outside the base dir."""
-    try:
-        return str(path.relative_to(base_dir))
-    except ValueError:
-        return str(path)
-
-
-def _is_within_base_dir(path: Path, base_dir: Path) -> bool:
-    """Check whether a resolved path stays within base_dir."""
-    try:
-        path.resolve().relative_to(base_dir.resolve())
-    except (OSError, ValueError):
-        return False
-    return True
-
-
-def _split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:
-    """Resolve the concrete search root ahead of the first glob component."""
-    pattern_path = Path(pattern)
-    if pattern_path.is_absolute():
-        search_root = Path(pattern_path.anchor)
-        parts = list(pattern_path.relative_to(search_root).parts)
-    else:
-        search_root = base_dir
-        parts = list(pattern_path.parts)
-
-    first_glob_index = next((index for index, part in enumerate(parts) if has_magic(part)), len(parts))
-    static_parts = parts[:first_glob_index]
-    glob_parts = parts[first_glob_index:]
-    if not glob_parts and static_parts:
-        glob_parts = [static_parts.pop()]
-
-    resolved_root = search_root.joinpath(*static_parts).resolve()
-    resolved_pattern = str(Path(*glob_parts)) if glob_parts else "."
-    return resolved_root, resolved_pattern
+from mindroom.tools.path_safety import (
+    blocked_file_action_message,
+    format_path_for_output,
+    is_within_base_dir,
+    resolve_base_dir_path,
+    split_search_pattern,
+)
 
 
 class _MindRoomFileTools(AgnoFileTools):
@@ -107,11 +67,11 @@ class _MindRoomFileTools(AgnoFileTools):
 
     def check_escape(self, relative_path: str) -> tuple[bool, Path]:
         """Check whether a path stays within base_dir when restriction is enabled."""
-        return self._check_path(
-            relative_path,
-            self.base_dir,
-            restrict_to_base_dir=self.restrict_to_base_dir,
-        )
+        try:
+            return True, resolve_base_dir_path(self.base_dir, relative_path, self.restrict_to_base_dir)
+        except ValueError:
+            log_error(f"Path escapes base directory: {relative_path}")
+            return False, self.base_dir
 
     def save_file(self, contents: str, file_name: str, overwrite: bool = True, encoding: str = "utf-8") -> str:
         """Save content to a file, with clear blocked-path errors."""
@@ -119,7 +79,7 @@ class _MindRoomFileTools(AgnoFileTools):
             safe, file_path = self.check_escape(file_name)
             if not safe:
                 log_error(f"Attempted to save file: {file_name}")
-                return _blocked_path_message("saving file", file_name, self.base_dir)
+                return blocked_file_action_message("saving file", file_name, self.base_dir)
             log_debug(f"Saving contents to {file_path}")
             if not file_path.parent.exists():
                 file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,7 +99,7 @@ class _MindRoomFileTools(AgnoFileTools):
             safe, file_path = self.check_escape(file_name)
             if not safe:
                 log_error(f"Attempted to read file: {file_name}")
-                return _blocked_path_message("reading file", file_name, self.base_dir)
+                return blocked_file_action_message("reading file", file_name, self.base_dir)
             contents = file_path.read_text(encoding=encoding)
             lines = contents.split(self.line_separator)
             return self.line_separator.join(lines[start_line : end_line + 1])
@@ -161,7 +121,7 @@ class _MindRoomFileTools(AgnoFileTools):
             safe, file_path = self.check_escape(file_name)
             if not safe:
                 log_error(f"Attempted to replace file chunk: {file_name}")
-                return _blocked_path_message("replacing file chunk", file_name, self.base_dir)
+                return blocked_file_action_message("replacing file chunk", file_name, self.base_dir)
             contents = file_path.read_text(encoding=encoding)
             lines = contents.split(self.line_separator)
             start = lines[0:start_line]
@@ -182,7 +142,7 @@ class _MindRoomFileTools(AgnoFileTools):
             safe, file_path = self.check_escape(file_name)
             if not safe:
                 log_error(f"Attempted to read file: {file_name}")
-                return _blocked_path_message("reading file", file_name, self.base_dir)
+                return blocked_file_action_message("reading file", file_name, self.base_dir)
             contents = file_path.read_text(encoding=encoding)
             if len(contents) > self.max_file_length:
                 return "Error reading file: file too long. Use read_file_chunk instead"
@@ -204,7 +164,7 @@ class _MindRoomFileTools(AgnoFileTools):
                 path.unlink()
                 return ""
             log_error(f"Attempt to delete file outside {self.base_dir}: {file_name}")
-            return _blocked_path_message("removing file", file_name, self.base_dir)
+            return blocked_file_action_message("removing file", file_name, self.base_dir)
         except Exception as e:
             log_error(f"Error removing {file_name}: {e}")
             return f"Error removing file: {e}"
@@ -216,9 +176,9 @@ class _MindRoomFileTools(AgnoFileTools):
             log_debug(f"Reading files in : {self.base_dir}/{directory}")
             safe, resolved_directory = self.check_escape(str(directory))
             if not safe:
-                return _blocked_path_message("listing files", str(directory), self.base_dir)
+                return blocked_file_action_message("listing files", str(directory), self.base_dir)
             return json.dumps(
-                [_format_path_for_output(file_path, self.base_dir) for file_path in resolved_directory.iterdir()],
+                [format_path_for_output(file_path, self.base_dir) for file_path in resolved_directory.iterdir()],
                 indent=4,
             )
         except Exception as e:
@@ -231,14 +191,14 @@ class _MindRoomFileTools(AgnoFileTools):
             if not pattern or not pattern.strip():
                 return "Error: Pattern cannot be empty"
 
-            search_root, glob_pattern = _split_search_pattern(self.base_dir, pattern)
-            if self.restrict_to_base_dir and not _is_within_base_dir(search_root, self.base_dir):
-                return _blocked_path_message("searching files", pattern, self.base_dir)
+            search_root, glob_pattern = split_search_pattern(self.base_dir, pattern)
+            if self.restrict_to_base_dir and not is_within_base_dir(search_root, self.base_dir):
+                return blocked_file_action_message("searching files", pattern, self.base_dir)
 
             log_debug(f"Searching files in {search_root} with pattern {glob_pattern}")
             matching_files = []
             for file_path in search_root.glob(glob_pattern):
-                if self.restrict_to_base_dir and not _is_within_base_dir(file_path, self.base_dir):
+                if self.restrict_to_base_dir and not is_within_base_dir(file_path, self.base_dir):
                     continue
                 matching_files.append(file_path)
             if self.expose_base_directory:
@@ -250,7 +210,7 @@ class _MindRoomFileTools(AgnoFileTools):
                     "files": file_paths,
                 }
             else:
-                file_paths = [_format_path_for_output(file_path, self.base_dir) for file_path in matching_files]
+                file_paths = [format_path_for_output(file_path, self.base_dir) for file_path in matching_files]
                 result = {
                     "pattern": pattern,
                     "matches_found": len(file_paths),

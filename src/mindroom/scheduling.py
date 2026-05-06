@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import humanize
 import nio
 from agno.agent import Agent
-from cron_descriptor import get_description
+from cron_descriptor import Options, get_description
 from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field
 
@@ -114,7 +114,8 @@ class CronSchedule(BaseModel):
         """Convert cron schedule to natural language description."""
         try:
             cron_str = self.to_cron_string()
-            return str(get_description(cron_str))
+            options = Options(use_24hour_time_format=True)
+            return str(get_description(cron_str, options))
         except Exception:
             return f"Cron: {self.to_cron_string()}"
 

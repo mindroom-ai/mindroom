@@ -15,6 +15,7 @@ from google.oauth2 import credentials as google_credentials
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider, oauth_connection_required_payload
 from mindroom.oauth.service import (
+    build_oauth_connect_instruction,
     oauth_connect_url,
     oauth_credentials_have_required_scopes,
     oauth_credentials_match_client_id,
@@ -145,9 +146,10 @@ class ScopedOAuthClientMixin:
             self._runtime_paths,
             worker_target=self._worker_target,
         )
-        message = (
-            f"{self._oauth_provider.display_name} is not connected for this agent. "
-            f"Open this MindRoom link to connect it, then retry the request: {connect_url}"
+        message = build_oauth_connect_instruction(
+            self._oauth_provider,
+            self._runtime_paths,
+            worker_target=self._worker_target,
         )
         return OAuthConnectionRequired(
             message,
