@@ -64,8 +64,30 @@ def build_terminal_stream_transport_outcome(
     )
 
 
+def build_placeholder_terminal_stream_transport_outcome(
+    event_id: str,
+    *,
+    terminal_status: TerminalFailureStatus,
+    failure_reason: str,
+    placeholder_body: str,
+) -> StreamTransportOutcome:
+    """Build the canonical stream outcome for a committed placeholder."""
+    return build_terminal_stream_transport_outcome(
+        PendingVisibleResponse(
+            tracked_event_id=None,
+            run_message_id=event_id,
+            existing_event_id=None,
+            existing_event_is_placeholder=False,
+        ),
+        terminal_status=terminal_status,
+        failure_reason=failure_reason,
+        placeholder_body=placeholder_body,
+    )
+
+
 __all__ = [
     "PendingVisibleResponse",
     "TerminalFailureStatus",
+    "build_placeholder_terminal_stream_transport_outcome",
     "build_terminal_stream_transport_outcome",
 ]

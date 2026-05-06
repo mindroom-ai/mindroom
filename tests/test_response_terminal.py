@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.response_terminal import PendingVisibleResponse, build_terminal_stream_transport_outcome
+from mindroom.response_terminal import (
+    PendingVisibleResponse,
+    TerminalFailureStatus,
+    build_placeholder_terminal_stream_transport_outcome,
+    build_terminal_stream_transport_outcome,
+)
 
 
 @pytest.mark.parametrize(
@@ -85,3 +90,22 @@ def test_terminal_stream_outcome_resolves_visible_placeholder_state(
     assert outcome.failure_reason == "delivery failed"
     assert outcome.rendered_body == ("Thinking..." if expected_placeholder_only else None)
     assert outcome.visible_body_state == ("placeholder_only" if expected_placeholder_only else "none")
+
+
+@pytest.mark.parametrize("terminal_status", ["cancelled", "error"])
+def test_placeholder_terminal_stream_outcome_matches_response_runner_cleanup_shape(
+    terminal_status: TerminalFailureStatus,
+) -> None:
+    """Pre-delivery response runner failures should preserve placeholder cleanup fields."""
+    outcome = build_placeholder_terminal_stream_transport_outcome(
+        "$thinking",
+        terminal_status=terminal_status,
+        failure_reason="delivery failed",
+        placeholder_body="Thinking...",
+    )
+
+    assert outcome.last_physical_stream_event_id == "$thinking"
+    assert outcome.terminal_status == terminal_status
+    assert outcome.failure_reason == "delivery failed"
+    assert outcome.rendered_body == "Thinking..."
+    assert outcome.visible_body_state == "placeholder_only"
