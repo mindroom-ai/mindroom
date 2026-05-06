@@ -7,6 +7,7 @@ from typing import Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
+from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import validate_service_name
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
@@ -190,13 +191,7 @@ def validate_unique_tool_entries(
     scope_name: str,
 ) -> list[ToolConfigEntry]:
     """Ensure each normalized tool name appears at most once within one scope."""
-    seen: set[str] = set()
-    duplicates: list[str] = []
-    for entry in tools:
-        if entry.name in seen and entry.name not in duplicates:
-            duplicates.append(entry.name)
-        seen.add(entry.name)
-
+    duplicates = duplicate_items([entry.name for entry in tools])
     if duplicates:
         msg = f"Duplicate {scope_name} tools are not allowed: {', '.join(duplicates)}"
         raise ValueError(msg)
@@ -423,9 +418,10 @@ class DefaultsConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
-        if self.num_history_runs is not None and self.num_history_messages is not None:
-            msg = "num_history_runs and num_history_messages are mutually exclusive"
-            raise ValueError(msg)
+        validate_history_limit_choice(
+            num_history_runs=self.num_history_runs,
+            num_history_messages=self.num_history_messages,
+        )
         return self
 
     @property

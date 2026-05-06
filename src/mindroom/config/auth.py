@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator
 
+from mindroom.config.validation import duplicate_items
+
 
 class AuthorizationConfig(BaseModel):
     """Authorization configuration with fine-grained permissions."""
@@ -46,14 +48,7 @@ class AuthorizationConfig(BaseModel):
     @classmethod
     def validate_unique_aliases(cls, aliases: dict[str, list[str]]) -> dict[str, list[str]]:
         """Ensure each alias is assigned to at most one canonical user."""
-        seen_aliases: set[str] = set()
-        duplicates: list[str] = []
-        for alias_list in aliases.values():
-            for alias in alias_list:
-                if alias in seen_aliases and alias not in duplicates:
-                    duplicates.append(alias)
-                seen_aliases.add(alias)
-
+        duplicates = duplicate_items([alias for alias_list in aliases.values() for alias in alias_list])
         if duplicates:
             msg = f"Duplicate bridge aliases are not allowed: {', '.join(duplicates)}"
             raise ValueError(msg)

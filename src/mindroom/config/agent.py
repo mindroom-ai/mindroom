@@ -15,6 +15,7 @@ from mindroom.config.models import (
     ToolConfigEntry,
     validate_unique_tool_entries,
 )
+from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 CultureMode = Literal["automatic", "agentic", "manual"]
@@ -303,9 +304,10 @@ class AgentConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
-        if self.num_history_runs is not None and self.num_history_messages is not None:
-            msg = "num_history_runs and num_history_messages are mutually exclusive"
-            raise ValueError(msg)
+        validate_history_limit_choice(
+            num_history_runs=self.num_history_runs,
+            num_history_messages=self.num_history_messages,
+        )
         if self.private is not None and self.worker_scope is not None:
             msg = "Private agents derive their execution scope from private.per; configure private or worker_scope, not both"
             raise ValueError(msg)
@@ -344,7 +346,7 @@ class AgentConfig(BaseModel):
     @classmethod
     def validate_unique_allowed_toolkits(cls, toolkits: list[str]) -> list[str]:
         """Ensure each allowed toolkit is listed at most once."""
-        duplicates = _duplicate_items(toolkits)
+        duplicates = duplicate_items(toolkits)
         if duplicates:
             msg = f"Duplicate allowed_toolkits are not allowed: {', '.join(duplicates)}"
             raise ValueError(msg)
@@ -354,7 +356,7 @@ class AgentConfig(BaseModel):
     @classmethod
     def validate_unique_initial_toolkits(cls, toolkits: list[str]) -> list[str]:
         """Ensure each initial toolkit is listed at most once."""
-        duplicates = _duplicate_items(toolkits)
+        duplicates = duplicate_items(toolkits)
         if duplicates:
             msg = f"Duplicate initial_toolkits are not allowed: {', '.join(duplicates)}"
             raise ValueError(msg)
@@ -364,7 +366,7 @@ class AgentConfig(BaseModel):
     @classmethod
     def validate_unique_knowledge_bases(cls, knowledge_bases: list[str]) -> list[str]:
         """Ensure each knowledge base assignment appears at most once per agent."""
-        duplicates = _duplicate_items(knowledge_bases)
+        duplicates = duplicate_items(knowledge_bases)
         if duplicates:
             msg = f"Duplicate knowledge bases are not allowed: {', '.join(duplicates)}"
             raise ValueError(msg)
@@ -375,17 +377,6 @@ class AgentConfig(BaseModel):
     def validate_context_files(cls, values: list[str]) -> list[str]:
         """Ensure configured context files stay inside the canonical workspace."""
         return [agent_workspace_relative_path(value).as_posix() for value in values]
-
-
-def _duplicate_items(values: list[str]) -> list[str]:
-    """Return duplicate items while preserving first duplicate order."""
-    seen: set[str] = set()
-    duplicates: list[str] = []
-    for value in values:
-        if value in seen and value not in duplicates:
-            duplicates.append(value)
-        seen.add(value)
-    return duplicates
 
 
 class TeamConfig(BaseModel):
@@ -428,7 +419,7 @@ class TeamConfig(BaseModel):
     @classmethod
     def validate_unique_agents(cls, agents: list[str]) -> list[str]:
         """Ensure each team member appears at most once."""
-        duplicates = _duplicate_items(agents)
+        duplicates = duplicate_items(agents)
         if duplicates:
             msg = f"Duplicate agents are not allowed in a team: {', '.join(duplicates)}"
             raise ValueError(msg)
@@ -437,9 +428,10 @@ class TeamConfig(BaseModel):
     @model_validator(mode="after")
     def validate_history_settings(self) -> Self:
         """Ensure team history replay knobs stay unambiguous."""
-        if self.num_history_runs is not None and self.num_history_messages is not None:
-            msg = "num_history_runs and num_history_messages are mutually exclusive"
-            raise ValueError(msg)
+        validate_history_limit_choice(
+            num_history_runs=self.num_history_runs,
+            num_history_messages=self.num_history_messages,
+        )
         return self
 
 
@@ -457,7 +449,7 @@ class CultureConfig(BaseModel):
     @classmethod
     def validate_unique_agents(cls, agents: list[str]) -> list[str]:
         """Ensure each agent is assigned at most once per culture."""
-        duplicates = _duplicate_items(agents)
+        duplicates = duplicate_items(agents)
         if duplicates:
             msg = f"Duplicate agents are not allowed in a culture: {', '.join(duplicates)}"
             raise ValueError(msg)
