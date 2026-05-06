@@ -27,10 +27,10 @@ from mindroom.history import (
     ResolvedReplayPlan,
     ScopeSessionContext,
     apply_replay_plan,
+    context_budget_after_reserve,
     estimate_preparation_static_tokens,
     estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
-    normalize_compaction_budget_tokens,
     prepare_bound_scope_history,
     prepare_scope_history,
     read_scope_seen_event_ids,
@@ -521,7 +521,7 @@ def _fallback_static_token_budget(*, context_window: int | None, reserve_tokens:
     """Return the total static-token budget available to Matrix-thread fallback prompts."""
     if context_window is None or context_window <= 0:
         return None
-    return max(0, context_window - normalize_compaction_budget_tokens(reserve_tokens, context_window))
+    return context_budget_after_reserve(context_window, reserve_tokens)
 
 
 def _thread_history_before_current_event(

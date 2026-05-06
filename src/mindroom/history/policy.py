@@ -207,6 +207,12 @@ def _resolve_summary_input_budget(
     return summary_input_budget_tokens, None
 
 
+def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int, spent_tokens: int = 0) -> int:
+    """Return the usable context budget after clamped reserve and known prompt cost."""
+    normalized_reserve_tokens = normalize_compaction_budget_tokens(reserve_tokens, context_window_tokens)
+    return max(0, context_window_tokens - normalized_reserve_tokens - spent_tokens)
+
+
 def _resolve_replay_threshold_tokens(
     *,
     compaction_config: CompactionConfig,
@@ -228,11 +234,10 @@ def _resolve_replay_budget_tokens(
 ) -> int:
     ceiling_tokens = threshold_tokens
     if has_authored_compaction_config:
-        normalized_reserve_tokens = normalize_compaction_budget_tokens(
-            compaction_config.reserve_tokens,
-            replay_window_tokens,
+        ceiling_tokens = min(
+            ceiling_tokens,
+            context_budget_after_reserve(replay_window_tokens, compaction_config.reserve_tokens),
         )
-        ceiling_tokens = min(ceiling_tokens, max(0, replay_window_tokens - normalized_reserve_tokens))
     return max(0, ceiling_tokens - static_prompt_tokens)
 
 
@@ -242,8 +247,4 @@ def _resolve_replay_budget_without_compaction(
     replay_window_tokens: int,
     static_prompt_tokens: int,
 ) -> int:
-    normalized_reserve_tokens = normalize_compaction_budget_tokens(
-        compaction_config.reserve_tokens,
-        replay_window_tokens,
-    )
-    return max(0, replay_window_tokens - normalized_reserve_tokens - static_prompt_tokens)
+    return context_budget_after_reserve(replay_window_tokens, compaction_config.reserve_tokens, static_prompt_tokens)

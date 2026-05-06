@@ -9,6 +9,7 @@ from mindroom.execution_preparation import (
     _build_matrix_prompt_with_thread_history,
     _build_unseen_context_messages,
     _collect_history_messages,
+    _fallback_static_token_budget,
 )
 from tests.conftest import make_visible_message
 
@@ -117,6 +118,14 @@ def test_build_matrix_prompt_with_thread_history_truncates_visible_body_to_max_l
     assert message.text.startswith("okok")
     assert message.text.endswith("…")
     assert len(message.text) <= 200
+
+
+def test_fallback_static_token_budget_preserves_context_window_bounds() -> None:
+    """Fallback static budgeting should keep missing and reserve-clamped bounds."""
+    assert _fallback_static_token_budget(context_window=None, reserve_tokens=100) is None
+    assert _fallback_static_token_budget(context_window=0, reserve_tokens=100) is None
+    assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=800) == 500
+    assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=100) == 900
 
 
 def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:

@@ -70,7 +70,11 @@ from mindroom.history.compaction import (
     estimate_prompt_visible_history_tokens,
     estimate_session_summary_tokens,
 )
-from mindroom.history.policy import classify_compaction_decision, resolve_history_execution_plan
+from mindroom.history.policy import (
+    classify_compaction_decision,
+    context_budget_after_reserve,
+    resolve_history_execution_plan,
+)
 from mindroom.history.runtime import (
     _plan_replay_that_fits,
     _prepare_history_for_run,
@@ -4535,6 +4539,25 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
     assert execution_plan.summary_input_budget_tokens == 0
     assert execution_plan.destructive_compaction_available is False
     assert execution_plan.unavailable_reason == "non_positive_summary_input_budget"
+
+
+@pytest.mark.parametrize(
+    ("context_window_tokens", "reserve_tokens", "spent_tokens", "expected"),
+    [
+        (1_000, 100, 25, 875),
+        (1_000, 800, 10, 490),
+        (1_000, 100, 2_000, 0),
+        (0, 100, 10, 0),
+        (-10, 5, 3, 0),
+    ],
+)
+def test_context_budget_after_reserve_preserves_replay_budget_bounds(
+    context_window_tokens: int,
+    reserve_tokens: int,
+    spent_tokens: int,
+    expected: int,
+) -> None:
+    assert context_budget_after_reserve(context_window_tokens, reserve_tokens, spent_tokens) == expected
 
 
 def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_disabled(

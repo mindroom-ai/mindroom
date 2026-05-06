@@ -2659,6 +2659,7 @@ expose = [
     "close_agent_runtime_state_dbs",
     "close_team_runtime_state_dbs",
     "compute_prompt_token_breakdown",
+    "context_budget_after_reserve",
     "create_scope_session_storage",
     "estimate_preparation_static_tokens",
     "estimate_preparation_static_tokens_for_team",
