@@ -2608,6 +2608,7 @@ expose = [
     "private_instance_scope_root_path",
     "parse_tool_execution_identity_payload",
     "require_worker_key_for_scope",
+    "requires_explicit_private_agent_visibility",
     "resolve_agent_owned_path",
     "resolve_agent_state_storage_path",
     "resolve_unscoped_worker_key",

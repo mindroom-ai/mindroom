@@ -45,6 +45,7 @@ from mindroom.tool_system.worker_routing import (
     agent_state_root_path,
     agent_workspace_root_path,
     private_instance_scope_root_path,
+    requires_explicit_private_agent_visibility,
     resolve_agent_owned_path,
     resolve_agent_state_storage_path,
     resolve_unscoped_worker_key,
@@ -1883,6 +1884,15 @@ def test_visible_state_roots_for_user_worker_include_private_instance_namespace(
         shared_storage_root(tmp_path) / "agents",
         private_instance_scope_root_path(tmp_path, worker_key),
     )
+
+
+def test_worker_visibility_policy_requires_explicit_private_names_only_for_user_agent_scope() -> None:
+    """Only user-agent scoped workers need caller-provided private-agent visibility."""
+    assert requires_explicit_private_agent_visibility("v1:tenant:user_agent:@alice:example.org:mind")
+    assert not requires_explicit_private_agent_visibility("v1:tenant:user:@alice:example.org")
+    assert not requires_explicit_private_agent_visibility("v1:tenant:shared:mind")
+    assert not requires_explicit_private_agent_visibility("v1:tenant:unscoped:mind")
+    assert not requires_explicit_private_agent_visibility("legacy-worker-key")
 
 
 def test_visible_state_roots_for_private_user_agent_workers_hide_shared_agent_root(

@@ -524,6 +524,11 @@ def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
     return cast("ResolvedWorkerKeyScope", scope)
 
 
+def requires_explicit_private_agent_visibility(worker_key: str) -> bool:
+    """Return whether visible private-agent names must be supplied for this worker."""
+    return resolved_worker_key_scope(worker_key) == "user_agent"
+
+
 def _worker_key_agent_name(worker_key: str) -> str | None:
     """Return the encoded agent name for one resolved worker key, when present."""
     scope = resolved_worker_key_scope(worker_key)

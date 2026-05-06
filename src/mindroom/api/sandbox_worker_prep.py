@@ -15,7 +15,7 @@ from mindroom.api import sandbox_exec
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
-    resolved_worker_key_scope,
+    requires_explicit_private_agent_visibility,
     visible_state_roots_for_worker_key,
     worker_dir_name,
 )
@@ -247,7 +247,7 @@ def _explicit_private_agent_names(
     private_agent_names: frozenset[str] | None,
 ) -> frozenset[str]:
     """Require explicit private-agent visibility for user-agent worker resolution."""
-    if resolved_worker_key_scope(worker_key) != "user_agent":
+    if not requires_explicit_private_agent_visibility(worker_key):
         return frozenset()
     if private_agent_names is None:
         msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"

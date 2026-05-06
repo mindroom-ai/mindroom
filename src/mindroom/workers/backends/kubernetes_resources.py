@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from mindroom import constants
 from mindroom.constants import RuntimePaths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
-from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
+from mindroom.tool_system import worker_routing
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -989,16 +989,16 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
     ) -> list[dict[str, object]]:
         mounted_storage_root = Path(self.config.storage_mount_path)
-        if resolved_worker_key_scope(worker_key) == "user_agent" and private_agent_names is None:
+        if worker_routing.requires_explicit_private_agent_visibility(worker_key) and private_agent_names is None:
             msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"
             raise WorkerBackendError(msg)
         effective_private_agent_names = private_agent_names or frozenset()
-        visible_state_roots = visible_state_roots_for_worker_key(
+        visible_state_roots = worker_routing.visible_state_roots_for_worker_key(
             mounted_storage_root,
             worker_key,
             private_agent_names=effective_private_agent_names,
         )
-        local_visible_state_roots = visible_state_roots_for_worker_key(
+        local_visible_state_roots = worker_routing.visible_state_roots_for_worker_key(
             self.storage_root,
             worker_key,
             private_agent_names=effective_private_agent_names,
