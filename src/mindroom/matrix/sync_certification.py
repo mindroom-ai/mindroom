@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from mindroom.matrix.sync_token_values import normalize_sync_token
+
 
 class SyncTrustState(Enum):
     """Runtime state for restored sync-token cache trust."""
@@ -60,18 +62,10 @@ class _SyncCertificationStart:
     legacy_token: bool = False
 
 
-def _non_empty_token(token: str | None) -> str | None:
-    """Return a normalized token when it can be persisted or restored."""
-    if not isinstance(token, str):
-        return None
-    normalized = token.strip()
-    return normalized or None
-
-
 def start_from_loaded_token(loaded: SyncCheckpoint | str | None) -> _SyncCertificationStart:
     """Build initial certifier state from a loaded token or checkpoint."""
     if isinstance(loaded, SyncCheckpoint):
-        token = _non_empty_token(loaded.token)
+        token = normalize_sync_token(loaded.token)
         if token is None:
             return _SyncCertificationStart(
                 state=SyncTrustState.COLD,
@@ -82,7 +76,7 @@ def start_from_loaded_token(loaded: SyncCheckpoint | str | None) -> _SyncCertifi
             sync_token=token,
         )
 
-    token = _non_empty_token(loaded) if isinstance(loaded, str) else None
+    token = normalize_sync_token(loaded)
     return _SyncCertificationStart(
         state=SyncTrustState.COLD,
         sync_token=token,
@@ -106,7 +100,7 @@ def _uncertain_decision(
 
 def _uncertain_reason(cache_result: SyncCacheWriteResult, *, next_batch: str | None) -> str | None:
     """Return why one sync response cannot certify a checkpoint."""
-    if _non_empty_token(next_batch) is None:
+    if normalize_sync_token(next_batch) is None:
         return "missing_next_batch"
     if cache_result.errors:
         return "cache_write_failed"
@@ -132,7 +126,7 @@ def certify_sync_response(
             reset_client_token=state is SyncTrustState.PENDING and first_sync,
         )
 
-    token = _non_empty_token(next_batch)
+    token = normalize_sync_token(next_batch)
     if token is None:
         return _uncertain_decision(reason="missing_next_batch")
 

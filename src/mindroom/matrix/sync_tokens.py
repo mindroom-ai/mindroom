@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.sync_certification import SyncCheckpoint
+from mindroom.matrix.sync_token_values import normalize_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -37,14 +38,6 @@ def _sync_token_certification_path(storage_path: Path, agent_name: str) -> Path:
     return storage_path / "sync_tokens" / f"{agent_name}.token.certified"
 
 
-def _normalized_token(value: object) -> str | None:
-    """Return a safe sync token string parsed from disk."""
-    if not isinstance(value, str):
-        return None
-    token = value.strip()
-    return token or None
-
-
 def _record_from_json(text: str) -> _SyncTokenRecord | None:
     """Return a token record from the JSON checkpoint format."""
     try:
@@ -53,7 +46,7 @@ def _record_from_json(text: str) -> _SyncTokenRecord | None:
         return None
     if not isinstance(payload, dict) or payload.get("version") != _SYNC_TOKEN_RECORD_VERSION:
         return None
-    token = _normalized_token(payload.get("token"))
+    token = normalize_sync_token(payload.get("token"))
     if token is None:
         return None
     checkpoint = SyncCheckpoint(token=token)
@@ -76,7 +69,7 @@ def save_sync_token(
 ) -> None:
     """Persist one cache-certified sync token checkpoint."""
     token_path = _sync_token_path(storage_path, agent_name)
-    token_value = _normalized_token(token)
+    token_value = normalize_sync_token(token)
     if token_value is None:
         msg = "Certified sync tokens require a non-empty token"
         raise ValueError(msg)
@@ -117,7 +110,7 @@ def load_sync_token_record(storage_path: Path, agent_name: str) -> _SyncTokenRec
     if token_text.lstrip().startswith("{"):
         return _record_from_json(token_text)
 
-    token = _normalized_token(token_text)
+    token = normalize_sync_token(token_text)
     if token is None:
         return None
     return _SyncTokenRecord(token=token)
