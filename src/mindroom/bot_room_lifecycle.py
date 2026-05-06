@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -57,6 +59,23 @@ class BotRoomLifecycle:
     def __init__(self, deps: BotRoomLifecycleDeps) -> None:
         self.deps = deps
         self.invited_rooms = self.load_invited_rooms()
+        self._invite_join_locks: dict[str, asyncio.Lock] = {}
+        self._welcome_locks: dict[str, asyncio.Lock] = {}
+        self._handled_invite_room_ids: set[str] = set()
+        self._welcomed_room_ids: set[str] = set()
+
+    def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
+        lock = locks.get(room_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[room_id] = lock
+        return lock
+
+    def _client_has_joined_room(self, room_id: str) -> bool:
+        rooms = self._client().rooms
+        if not isinstance(rooms, Mapping):
+            return False
+        return any(joined_room_id == room_id for joined_room_id in rooms)
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
@@ -152,39 +171,47 @@ class BotRoomLifecycle:
 
     async def send_welcome_message_if_empty(self, room_id: str) -> None:
         """Send the router welcome message only when the room has no other history."""
-        client = self._client()
-        response = await client.room_messages(
-            room_id,
-            limit=2,
-            message_filter={"types": ["m.room.message"]},
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            self._logger().error("Failed to check room messages", room_id=room_id, error=str(response))
-            return
+        async with self._lock_for_room(self._welcome_locks, room_id):
+            if room_id in self._welcomed_room_ids:
+                self._logger().debug("Welcome message already handled", room_id=room_id)
+                return
 
-        if not response.chunk:
-            self._logger().info("Room is empty, sending welcome message", room_id=room_id)
-            welcome_msg = generate_welcome_message(room_id, self._config(), self.deps.runtime_paths)
-            await self.deps.send_response(
-                room_id=room_id,
-                reply_to_event_id=None,
-                response_text=welcome_msg,
-                thread_id=None,
-                skip_mentions=True,
+            client = self._client()
+            response = await client.room_messages(
+                room_id,
+                limit=2,
+                message_filter={"types": ["m.room.message"]},
             )
-            self._logger().info("Welcome message sent", room_id=room_id)
-            return
+            if not isinstance(response, nio.RoomMessagesResponse):
+                self._logger().error("Failed to check room messages", room_id=room_id, error=str(response))
+                return
 
-        if len(response.chunk) != 1:
-            return
+            if not response.chunk:
+                self._logger().info("Room is empty, sending welcome message", room_id=room_id)
+                welcome_msg = generate_welcome_message(room_id, self._config(), self.deps.runtime_paths)
+                await self.deps.send_response(
+                    room_id=room_id,
+                    reply_to_event_id=None,
+                    response_text=welcome_msg,
+                    thread_id=None,
+                    skip_mentions=True,
+                )
+                self._welcomed_room_ids.add(room_id)
+                self._logger().info("Welcome message sent", room_id=room_id)
+                return
 
-        message = response.chunk[0]
-        if (
-            isinstance(message, nio.RoomMessageText)
-            and message.sender == self.deps.agent_user.user_id
-            and "Welcome to MindRoom" in message.body
-        ):
-            self._logger().debug("Welcome message already sent", room_id=room_id)
+            if len(response.chunk) != 1:
+                return
+
+            message = response.chunk[0]
+            if (
+                isinstance(message, nio.RoomMessageText)
+                and message.sender == self.deps.agent_user.user_id
+                and "Welcome to MindRoom" in message.body
+            ):
+                self._welcomed_room_ids.add(room_id)
+                self._logger().debug("Welcome message already sent", room_id=room_id)
+            return
 
     async def on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         """Handle one inbound invite using the configured room membership policy."""
@@ -210,14 +237,20 @@ class BotRoomLifecycle:
             )
             return
 
-        self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
-        if not await join_room(client, room.room_id):
-            self._logger().error("Failed to join room", room_id=room.room_id)
-            return
+        async with self._lock_for_room(self._invite_join_locks, room.room_id):
+            if room.room_id in self._handled_invite_room_ids or self._client_has_joined_room(room.room_id):
+                self._logger().debug("Invite already handled", room_id=room.room_id, sender=event.sender)
+                return
 
-        self._logger().info("Joined room", room_id=room.room_id)
-        if self.should_persist_invited_rooms() and room.room_id not in self.invited_rooms:
-            self.invited_rooms.add(room.room_id)
-            self.save_invited_rooms()
-        if self.deps.agent_name == ROUTER_AGENT_NAME:
-            await self.deps.on_router_invite_joined(room.room_id)
+            self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
+            if not await join_room(client, room.room_id):
+                self._logger().error("Failed to join room", room_id=room.room_id)
+                return
+
+            self._handled_invite_room_ids.add(room.room_id)
+            self._logger().info("Joined room", room_id=room.room_id)
+            if self.should_persist_invited_rooms() and room.room_id not in self.invited_rooms:
+                self.invited_rooms.add(room.room_id)
+                self.save_invited_rooms()
+            if self.deps.agent_name == ROUTER_AGENT_NAME:
+                await self.deps.on_router_invite_joined(room.room_id)
