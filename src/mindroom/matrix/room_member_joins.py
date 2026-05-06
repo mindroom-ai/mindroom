@@ -188,6 +188,35 @@ def room_member_joins_from_sync_state(
     return tuple(joins)
 
 
+def room_member_joins_from_sync_timeline(
+    response: nio.SyncResponse,
+    *,
+    rooms: Mapping[str, nio.MatrixRoom],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    storage_root: Path,
+) -> tuple[RoomMemberJoin, ...]:
+    """Return hook payloads for human joins delivered through sync timeline events."""
+    joins: list[RoomMemberJoin] = []
+    for room_id, join_info in response.rooms.join.items():
+        room = rooms.get(room_id)
+        if room is None:
+            continue
+        for event in join_info.timeline.events:
+            if not isinstance(event, nio.RoomMemberEvent):
+                continue
+            join = room_member_join_from_event(
+                room,
+                event,
+                config=config,
+                runtime_paths=runtime_paths,
+                storage_root=storage_root,
+            )
+            if join is not None:
+                joins.append(join)
+    return tuple(joins)
+
+
 def _optional_string(content: dict[str, object], key: str) -> str | None:
     value = content.get(key)
     return value if isinstance(value, str) else None

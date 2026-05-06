@@ -81,7 +81,12 @@ def _room_member_event(
     return event
 
 
-def _sync_response_with_state(room_id: str, events: list[object]) -> nio.SyncResponse:
+def _sync_response_with_state(
+    room_id: str,
+    events: list[object],
+    *,
+    timeline_events: list[object] | None = None,
+) -> nio.SyncResponse:
     response = MagicMock()
     response.__class__ = nio.SyncResponse
     response.next_batch = "s_next"
@@ -89,7 +94,7 @@ def _sync_response_with_state(room_id: str, events: list[object]) -> nio.SyncRes
         join={
             room_id: SimpleNamespace(
                 state=events,
-                timeline=SimpleNamespace(events=[], limited=False),
+                timeline=SimpleNamespace(events=timeline_events or [], limited=False),
             ),
         },
     )
@@ -230,6 +235,46 @@ async def test_router_emits_room_member_joined_from_sync_state_after_initial_syn
     await bot._on_sync_response(_sync_response_with_state(room.room_id, [_room_member_event(event_id="$state-join")]))
 
     assert seen == ["$state-join"]
+
+
+@pytest.mark.asyncio
+async def test_router_emits_room_member_joined_from_first_restored_token_sync_timeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first sync after a restored certified token should emit missed live joins."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot._first_sync_done = False
+    bot._room_member_join_hooks_armed = False
+    bot._sync_trust_state = SyncTrustState.PENDING
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_restored"
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._maybe_start_startup_thread_prewarm = MagicMock()
+    bot._maybe_start_deferred_overdue_task_drain = MagicMock()
+    monkeypatch.setattr(
+        bot,
+        "_sync_cache_result_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [],
+            timeline_events=[_room_member_event(event_id="$catchup-join")],
+        ),
+    )
+
+    assert seen == ["$catchup-join"]
 
 
 @pytest.mark.asyncio
