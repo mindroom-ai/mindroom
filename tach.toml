@@ -1688,7 +1688,17 @@ path = "mindroom.tool_system.runtime_context"
 depends_on = [
     "mindroom.hooks",
     "mindroom.scheduling",
+    "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.plugin_identity",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.tool_system.context_bound_streams"
+depends_on = []
+visibility = [
+    "mindroom.llm_request_logging",
+    "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -1748,6 +1758,7 @@ depends_on = ["mindroom.tool_system.plugin_imports"]
 path = "mindroom.tool_system.worker_routing"
 depends_on = [
     "mindroom.mcp.registry",
+    "mindroom.tool_system.context_bound_streams",
 ]
 
 [[modules]]

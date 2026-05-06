@@ -5,18 +5,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from collections.abc import AsyncGenerator as AsyncGeneratorABC
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, cast
 
 from agno.models.message import Message
 from pydantic import BaseModel
 
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
+from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine, Iterator, Sequence
@@ -27,14 +27,6 @@ if TYPE_CHECKING:
     from mindroom.config.models import DebugConfig
 
 _INSTALLED_ATTR = "_mindroom_llm_request_logging_installed"
-
-
-@runtime_checkable
-class _AsyncClosableIterator(Protocol):
-    """Minimal async-iterator surface that can be closed explicitly."""
-
-    async def aclose(self) -> None:
-        """Close the async iterator and release any underlying resources."""
 
 
 _SKIP_MODEL_PARAM_NAMES = {
@@ -253,27 +245,16 @@ def bind_llm_request_log_context(**context: object) -> Iterator[None]:
         _REQUEST_CONTEXT.reset(token)
 
 
-async def stream_with_llm_request_log_context[StreamEventT](
+def stream_with_llm_request_log_context[StreamEventT](
     stream_generator: AsyncIterator[StreamEventT],
     *,
     request_context: dict[str, object],
 ) -> AsyncIterator[StreamEventT]:
     """Advance one async stream with request-log context bound per item pull."""
-    stream: AsyncIterator[StreamEventT] | None = None
-    try:
-        with bind_llm_request_log_context(**request_context):
-            stream = stream_generator.__aiter__()
-        while True:
-            try:
-                with bind_llm_request_log_context(**request_context):
-                    event = await stream.__anext__()
-            except StopAsyncIteration:
-                return
-            yield event
-    finally:
-        if isinstance(stream, (AsyncGeneratorABC, _AsyncClosableIterator)):
-            with bind_llm_request_log_context(**request_context):
-                await stream.aclose()
+    return context_bound_async_stream(
+        context_factory=lambda: bind_llm_request_log_context(**request_context),
+        stream_factory=stream_generator.__aiter__,
+    )
 
 
 async def _write_llm_request_log(

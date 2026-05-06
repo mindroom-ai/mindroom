@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import AsyncGenerator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
 from mindroom.hooks import (
@@ -22,6 +21,7 @@ from mindroom.hooks import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
@@ -46,14 +46,6 @@ if TYPE_CHECKING:
 
 _ToolContextReturn = TypeVar("_ToolContextReturn")
 _StreamChunk = TypeVar("_StreamChunk")
-
-
-@runtime_checkable
-class _AsyncClosableIterator(Protocol):
-    """Minimal async-iterator surface that can be closed explicitly."""
-
-    async def aclose(self) -> None:
-        """Close the async iterator and release any underlying resources."""
 
 
 @contextmanager
@@ -361,25 +353,10 @@ class ToolRuntimeSupport:
         stream_factory: Callable[[], AsyncIterator[_StreamChunk]],
     ) -> AsyncIterator[_StreamChunk]:
         """Wrap one async iterator without spanning tool-runtime tokens across yields."""
-
-        async def wrapped_stream() -> AsyncIterator[_StreamChunk]:
-            stream: AsyncIterator[_StreamChunk] | None = None
-            try:
-                with _tool_runtime_context_scope(tool_context):
-                    stream = stream_factory()
-                while True:
-                    try:
-                        with _tool_runtime_context_scope(tool_context):
-                            chunk = await anext(stream)
-                    except StopAsyncIteration:
-                        return
-                    yield chunk
-            finally:
-                if isinstance(stream, (AsyncGenerator, _AsyncClosableIterator)):
-                    with _tool_runtime_context_scope(tool_context):
-                        await stream.aclose()
-
-        return wrapped_stream()
+        return context_bound_async_stream(
+            context_factory=lambda: _tool_runtime_context_scope(tool_context),
+            stream_factory=stream_factory,
+        )
 
 
 _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import AsyncGenerator as AsyncGeneratorABC
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Literal, cast
+
+from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
@@ -39,14 +40,6 @@ _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
         "homeassistant",
     },
 )
-
-
-@runtime_checkable
-class _AsyncClosableIterator(Protocol):
-    """Minimal async-iterator surface that can be closed explicitly."""
-
-    async def aclose(self) -> None:
-        """Close the async iterator and release any underlying resources."""
 
 
 @dataclass(frozen=True)
@@ -138,25 +131,10 @@ def stream_with_tool_execution_identity[ChunkT](
     stream_factory: Callable[[], AsyncIterator[ChunkT]],
 ) -> AsyncIterator[ChunkT]:
     """Wrap one async iterator without spanning execution-identity tokens across yields."""
-
-    async def wrapped_stream() -> AsyncIterator[ChunkT]:
-        stream: AsyncIterator[ChunkT] | None = None
-        try:
-            with tool_execution_identity(identity):
-                stream = stream_factory()
-            while True:
-                try:
-                    with tool_execution_identity(identity):
-                        chunk = await anext(stream)
-                except StopAsyncIteration:
-                    return
-                yield chunk
-        finally:
-            if isinstance(stream, (AsyncGeneratorABC, _AsyncClosableIterator)):
-                with tool_execution_identity(identity):
-                    await stream.aclose()
-
-    return wrapped_stream()
+    return context_bound_async_stream(
+        context_factory=lambda: tool_execution_identity(identity),
+        stream_factory=stream_factory,
+    )
 
 
 def _normalize_worker_key_part(value: str) -> str:
