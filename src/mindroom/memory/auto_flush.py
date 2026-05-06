@@ -8,7 +8,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from agno.agent import Agent
 
@@ -17,7 +17,12 @@ from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import (
+    SerializedToolExecutionIdentity,
+    ToolExecutionIdentity,
+    parse_tool_execution_identity_payload,
+    serialize_tool_execution_identity,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -41,7 +46,7 @@ class _FlushSessionEntry(TypedDict, total=False):
     agent_name: str
     session_id: str
     worker_key: str | None
-    execution_identity: _SerializedExecutionIdentity | None
+    execution_identity: SerializedToolExecutionIdentity | None
     dirty: bool
     in_flight: bool
     first_dirty_at: int
@@ -61,20 +66,6 @@ class _FlushState(TypedDict):
 
     version: int
     sessions: dict[str, _FlushSessionEntry]
-
-
-class _SerializedExecutionIdentity(TypedDict):
-    """JSON-safe execution identity for persisted flush entries."""
-
-    channel: str
-    agent_name: str
-    requester_id: str | None
-    room_id: str | None
-    thread_id: str | None
-    resolved_thread_id: str | None
-    session_id: str | None
-    tenant_id: str | None
-    account_id: str | None
 
 
 def _state_path(storage_path: Path) -> Path:
@@ -97,61 +88,11 @@ def _session_key(agent_name: str, session_id: str, worker_key: str | None = None
     return f"{agent_name}:{worker_key}:{session_id}"
 
 
-def _serialize_execution_identity(identity: ToolExecutionIdentity) -> _SerializedExecutionIdentity:
-    return {
-        "channel": identity.channel,
-        "agent_name": identity.agent_name,
-        "requester_id": identity.requester_id,
-        "room_id": identity.room_id,
-        "thread_id": identity.thread_id,
-        "resolved_thread_id": identity.resolved_thread_id,
-        "session_id": identity.session_id,
-        "tenant_id": identity.tenant_id,
-        "account_id": identity.account_id,
-    }
-
-
-def _deserialize_execution_identity(raw_identity: object) -> ToolExecutionIdentity | None:
-    if not isinstance(raw_identity, dict):
-        return None
-    payload = cast("dict[str, object]", raw_identity)
-    channel = payload.get("channel")
-    agent_name = payload.get("agent_name")
-    if not isinstance(channel, str) or not isinstance(agent_name, str):
-        return None
-    optional_keys = (
-        "requester_id",
-        "room_id",
-        "thread_id",
-        "resolved_thread_id",
-        "session_id",
-        "tenant_id",
-        "account_id",
-    )
-    optional_values: dict[str, str | None] = {}
-    for key in optional_keys:
-        value = payload.get(key)
-        if value is not None and not isinstance(value, str):
-            return None
-        optional_values[key] = value
-    return ToolExecutionIdentity(
-        channel=cast("Any", channel),
-        agent_name=agent_name,
-        requester_id=optional_values["requester_id"],
-        room_id=optional_values["room_id"],
-        thread_id=optional_values["thread_id"],
-        resolved_thread_id=optional_values["resolved_thread_id"],
-        session_id=optional_values["session_id"],
-        tenant_id=optional_values["tenant_id"],
-        account_id=optional_values["account_id"],
-    )
-
-
 def _resolve_flush_scope(
     config: Config,
     agent_name: str,
     execution_identity: ToolExecutionIdentity | None,
-) -> tuple[str | None, _SerializedExecutionIdentity | None]:
+) -> tuple[str | None, SerializedToolExecutionIdentity | None]:
     resolved_execution = resolve_agent_execution(
         agent_name,
         config,
@@ -163,7 +104,10 @@ def _resolve_flush_scope(
     if resolved_identity is None:
         msg = f"Private agent '{agent_name}' requires an execution identity for memory auto-flush"
         raise ValueError(msg)
-    return resolved_execution.worker_key, _serialize_execution_identity(resolved_identity)
+    return resolved_execution.worker_key, serialize_tool_execution_identity(
+        resolved_identity,
+        include_transport_agent_name=False,
+    )
 
 
 def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
@@ -176,7 +120,10 @@ def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
     if worker_key is not None and not isinstance(worker_key, str):
         entry.pop("worker_key", None)
     execution_identity = entry.get("execution_identity")
-    if execution_identity is not None and _deserialize_execution_identity(execution_identity) is None:
+    if (
+        execution_identity is not None
+        and parse_tool_execution_identity_payload(execution_identity, strict=False) is None
+    ):
         entry.pop("execution_identity", None)
     return cast("_FlushSessionEntry", entry)
 
@@ -188,7 +135,7 @@ def _stale_private_session_entry(
 ) -> bool:
     agent_config = config.agents.get(agent_name)
     worker_key = entry.get("worker_key")
-    execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
+    execution_identity = parse_tool_execution_identity_payload(entry.get("execution_identity"), strict=False)
     if agent_config is None or agent_config.private is None:
         return worker_key is not None or execution_identity is not None
     if not isinstance(worker_key, str) or execution_identity is None:
@@ -635,7 +582,10 @@ class MemoryAutoFlushWorker:
             batch_key = _flush_batch_key(config, agent_name, entry)
             if per_agent_count.get(batch_key, 0) >= max_per_agent:
                 continue
-            entry_execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
+            entry_execution_identity = parse_tool_execution_identity_payload(
+                entry.get("execution_identity"),
+                strict=False,
+            )
 
             session = _load_agent_session(
                 config,
@@ -697,7 +647,7 @@ class MemoryAutoFlushWorker:
         session_updated_at = entry.get("last_session_updated_at")
         if not isinstance(agent_name, str) or not isinstance(session_id, str):
             return
-        entry_execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
+        entry_execution_identity = parse_tool_execution_identity_payload(entry.get("execution_identity"), strict=False)
 
         wrote_memory = False
         try:

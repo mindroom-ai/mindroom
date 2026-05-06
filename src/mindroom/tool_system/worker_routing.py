@@ -7,7 +7,7 @@ import re
 from collections.abc import AsyncGenerator as AsyncGeneratorABC
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
 
@@ -63,6 +63,87 @@ class ToolExecutionIdentity:
     tenant_id: str | None = None
     account_id: str | None = None
     transport_agent_name: str | None = None
+
+
+type SerializedToolExecutionIdentity = dict[str, object]
+
+
+_TOOL_EXECUTION_IDENTITY_OPTIONAL_PAYLOAD_FIELDS = (
+    "requester_id",
+    "room_id",
+    "thread_id",
+    "resolved_thread_id",
+    "session_id",
+    "tenant_id",
+    "account_id",
+    "transport_agent_name",
+)
+
+
+def serialize_tool_execution_identity(
+    identity: ToolExecutionIdentity,
+    *,
+    include_transport_agent_name: bool = True,
+) -> SerializedToolExecutionIdentity:
+    """Return a JSON-safe payload for one execution identity."""
+    payload = cast("SerializedToolExecutionIdentity", asdict(identity))
+    if not include_transport_agent_name:
+        payload.pop("transport_agent_name", None)
+    return payload
+
+
+def parse_tool_execution_identity_payload(
+    payload: object,
+    *,
+    strict: bool = True,
+    error_prefix: str = "Tool execution_identity",
+) -> ToolExecutionIdentity | None:
+    """Parse one JSON execution-identity payload with strict or lenient error handling."""
+    if not isinstance(payload, dict):
+        return _invalid_tool_execution_identity_payload(strict, f"{error_prefix} must be an object")
+
+    raw_payload = cast("dict[str, object]", payload)
+    channel = raw_payload.get("channel")
+    if channel not in ("matrix", "openai_compat"):
+        return _invalid_tool_execution_identity_payload(
+            strict,
+            f"{error_prefix}.channel must be matrix or openai_compat",
+        )
+
+    agent_name = raw_payload.get("agent_name")
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        return _invalid_tool_execution_identity_payload(
+            strict,
+            f"{error_prefix}.agent_name must be a non-empty string",
+        )
+
+    optional_values: dict[str, str | None] = {}
+    for field_name in _TOOL_EXECUTION_IDENTITY_OPTIONAL_PAYLOAD_FIELDS:
+        value = raw_payload.get(field_name)
+        if value is not None and not isinstance(value, str):
+            return _invalid_tool_execution_identity_payload(
+                strict,
+                f"{error_prefix}.{field_name} must be a string when present",
+            )
+        optional_values[field_name] = value
+
+    return ToolExecutionIdentity(
+        channel=cast("_ExecutionChannel", channel),
+        agent_name=agent_name,
+        requester_id=optional_values["requester_id"],
+        room_id=optional_values["room_id"],
+        thread_id=optional_values["thread_id"],
+        resolved_thread_id=optional_values["resolved_thread_id"],
+        session_id=optional_values["session_id"],
+        tenant_id=optional_values["tenant_id"],
+        account_id=optional_values["account_id"],
+        transport_agent_name=optional_values["transport_agent_name"],
+    )
+
+
+def _invalid_tool_execution_identity_payload(strict: bool, message: str) -> None:
+    if strict:
+        raise TypeError(message)
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict
 
 if os.name != "nt":
     import fcntl
@@ -54,7 +54,12 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import (
+    SerializedToolExecutionIdentity,
+    ToolExecutionIdentity,
+    parse_tool_execution_identity_payload,
+    serialize_tool_execution_identity,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -80,7 +85,7 @@ class _SubprocessRefreshRequest:
     config_data: dict[str, object]
     config_path: str
     storage_root: str
-    execution_identity: dict[str, object] | None = None
+    execution_identity: SerializedToolExecutionIdentity | None = None
     force_reindex: bool = False
 
 
@@ -275,7 +280,9 @@ def _serialize_subprocess_refresh_request(
         config_data=config.authored_model_dump(),
         config_path=str(runtime_paths.config_path),
         storage_root=str(runtime_paths.storage_root),
-        execution_identity=None if execution_identity is None else asdict(execution_identity),
+        execution_identity=None
+        if execution_identity is None
+        else serialize_tool_execution_identity(execution_identity),
         force_reindex=force_reindex,
     )
     return json.dumps(asdict(payload), sort_keys=True).encode()
@@ -871,40 +878,6 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     )
 
 
-def _optional_str_payload_field(payload: dict[str, object], field_name: str) -> str | None:
-    value = payload.get(field_name)
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        msg = f"Knowledge refresh execution_identity.{field_name} must be a string when present"
-        raise TypeError(msg)
-    return value
-
-
-def _execution_identity_from_payload(payload: dict[str, object] | None) -> ToolExecutionIdentity | None:
-    if payload is None:
-        return None
-    channel = payload.get("channel")
-    if channel not in ("matrix", "openai_compat"):
-        msg = "Knowledge refresh execution_identity.channel must be matrix or openai_compat"
-        raise TypeError(msg)
-    agent_name = payload.get("agent_name")
-    if not isinstance(agent_name, str) or not agent_name.strip():
-        msg = "Knowledge refresh execution_identity.agent_name must be a non-empty string"
-        raise TypeError(msg)
-    return ToolExecutionIdentity(
-        channel=cast("Literal['matrix', 'openai_compat']", channel),
-        agent_name=agent_name,
-        requester_id=_optional_str_payload_field(payload, "requester_id"),
-        room_id=_optional_str_payload_field(payload, "room_id"),
-        thread_id=_optional_str_payload_field(payload, "thread_id"),
-        resolved_thread_id=_optional_str_payload_field(payload, "resolved_thread_id"),
-        session_id=_optional_str_payload_field(payload, "session_id"),
-        tenant_id=_optional_str_payload_field(payload, "tenant_id"),
-        account_id=_optional_str_payload_field(payload, "account_id"),
-    )
-
-
 async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshResult:
     request = _load_subprocess_refresh_request(payload)
     runtime_paths = resolve_runtime_paths(
@@ -913,7 +886,14 @@ async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshRes
         process_env=dict(os.environ),
     )
     config = Config.validate_with_runtime(request.config_data, runtime_paths, tolerate_plugin_load_errors=True)
-    execution_identity = _execution_identity_from_payload(request.execution_identity)
+    execution_identity = (
+        None
+        if request.execution_identity is None
+        else parse_tool_execution_identity_payload(
+            request.execution_identity,
+            error_prefix="Knowledge refresh execution_identity",
+        )
+    )
     return await refresh_knowledge_binding(
         request.base_id,
         config=config,

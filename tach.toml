@@ -2577,6 +2577,7 @@ from = ["mindroom.tool_system.plugin_identity"]
 expose = [
     "ResolvedWorkerTarget",
     "ResolvedWorkerKeyScope",
+    "SerializedToolExecutionIdentity",
     "ToolExecutionIdentity",
     "WorkerScope",
     "active_tool_execution_identity",
@@ -2587,6 +2588,7 @@ expose = [
     "build_worker_target_from_runtime_env",
     "get_tool_execution_identity",
     "private_instance_scope_root_path",
+    "parse_tool_execution_identity_payload",
     "require_worker_key_for_scope",
     "resolve_agent_owned_path",
     "resolve_agent_state_storage_path",
@@ -2597,6 +2599,7 @@ expose = [
     "resolved_worker_key_scope",
     "run_with_tool_execution_identity",
     "shared_storage_root",
+    "serialize_tool_execution_identity",
     "stream_with_tool_execution_identity",
     "supports_tool_name_for_worker_scope",
     "tool_stays_local",
