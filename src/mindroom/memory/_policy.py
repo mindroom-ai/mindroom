@@ -9,6 +9,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from ._shared import FileMemoryResolution
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -150,6 +151,24 @@ def storage_paths_for_scope_user_id(
         return [_effective_storage_path_for_agent(agent_name, config, runtime_paths, execution_identity)]
     msg = f"Unsupported memory scope user_id: {scope_user_id}"
     raise ValueError(msg)
+
+
+def allowed_scope_storage_paths(
+    caller_context: str | list[str],
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> Iterator[tuple[str, Path]]:
+    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+        for target_storage_path in storage_paths_for_scope_user_id(
+            scope_user_id,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        ):
+            yield scope_user_id, target_storage_path
 
 
 def get_allowed_memory_user_ids(caller_context: str | list[str], config: Config) -> set[str]:
