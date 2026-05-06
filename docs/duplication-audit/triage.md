@@ -18,11 +18,11 @@ Avoid broad base classes or universal helpers unless two or more narrow extracti
 | --- | --- | --- | --- | --- | --- |
 | CFG-001 / rank 6: CLI `.env` mutation helpers | In progress with Confucius the 5th (`019dfb3e-9720-7963-95ba-e0926cc6e049`) | Pending | `refactor/cli-env-file-helpers` | Pending | Pending |
 | CFG-003 / rank 7: Config validation helpers | In progress with Rawls the 5th (`019dfb3e-979d-7072-845f-cad086c7add1`) | Pending | `refactor/config-validation-helpers` | Pending | Pending |
-| CRED-001 / rank 8: Google service-account fallback | In progress with Bohr the 5th (`019dfb3e-983c-72a3-bd79-a725e5fbc363`) | Pending | `refactor/google-service-account-fallback` | Pending | Pending |
+| CRED-001 / rank 8: Google service-account fallback | Draft PR opened; accepted as roughly flat with duplicated predicate removed | [#898](https://github.com/mindroom-ai/mindroom/pull/898) | `refactor/google-service-account-fallback` | Production net `+4` lines | `uv run pytest tests/test_google_tool_wrappers.py tests/test_google_calendar_oauth_tool.py tests/test_google_drive_oauth_tool.py tests/test_google_sheets_oauth_tool.py tests/test_gmail_tools.py -n 0 --no-cov -q`; `uv run pre-commit run --files ...` |
 | STORE-003 / rank 9: Agent session coercion cleanup | In progress with Goodall the 5th (`019dfb3e-989d-7b01-876c-5203a0c8329d`) | Pending | `refactor/agent-session-coercion` | Pending | Pending |
 | API-001 / rank 10: API snapshot publishing | In progress with Nietzsche the 5th (`019dfb3e-98f3-7cc1-a760-8b9e89b961e3`) | Pending | `refactor/api-snapshot-publishing` | Pending | Pending |
 | STORE-001 / rank 11: Knowledge index metadata codec | In progress with Cicero the 5th (`019dfb3e-994d-7db3-acb6-54f6f1841569`) | Pending | `refactor/knowledge-index-metadata` | Pending | Pending |
-| FLOW-001 / rank 12: Scheduled task restore parsing | Queued; waiting for local subagent slot | Pending | `refactor/scheduled-task-restore-parsing` | Pending | Pending |
+| FLOW-001 / rank 12: Scheduled task restore parsing | In progress with Maxwell the 5th (`019dfb42-ebb1-75a2-a07c-8937a2317d43`) | Pending | `refactor/scheduled-task-restore-parsing` | Pending | Pending |
 | API-003 / rank 13: Credentials worker-target resolver | Queued; waiting for local subagent slot | Pending | `refactor/credentials-worker-target` | Pending | Pending |
 | CRED-002 / rank 14: Google OAuth provider factory skeleton | Queued; waiting for local subagent slot | Pending | `refactor/google-oauth-provider-factory` | Pending | Pending |
 | MAT-003 / rank 15: Matrix thread and visible-event helpers | Queued; waiting for local subagent slot | Pending | `refactor/matrix-thread-visible-helpers` | Pending | Pending |
