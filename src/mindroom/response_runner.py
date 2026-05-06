@@ -17,11 +17,7 @@ from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.background_tasks import create_background_task
-from mindroom.constants import (
-    ATTACHMENT_IDS_KEY,
-    ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
-)
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history import HistoryScope, strip_transient_enrichment_from_session
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
@@ -45,11 +41,7 @@ from mindroom.orchestration.runtime import (
     log_cancelled_response_source,
 )
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
-from mindroom.response_attempt import (
-    ResponseAttemptDeps,
-    ResponseAttemptRequest,
-    ResponseAttemptRunner,
-)
+from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_terminal import (
     PendingVisibleResponse,
     build_placeholder_terminal_stream_transport_outcome,

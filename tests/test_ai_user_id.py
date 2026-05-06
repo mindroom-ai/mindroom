@@ -86,10 +86,7 @@ from mindroom.hooks import (
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.utils import (
-    KnowledgeAvailabilityDetail,
-    _KnowledgeResolution,
-)
+from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_fallback import append_inline_media_fallback_prompt
@@ -6249,9 +6246,7 @@ class TestUserIdPassthrough:
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=2000)},
         )
 
-        with (
-            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-        ):
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent, estimated_context_tokens=1500)
             run_metadata: dict[str, object] = {}
             await ai_response(
@@ -7175,9 +7170,7 @@ class TestUserIdPassthrough:
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
         )
 
-        with (
-            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-        ):
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent, estimated_context_tokens=900)
             run_metadata: dict[str, object] = {}
             async for _chunk in stream_agent_response(
@@ -7310,9 +7303,7 @@ class TestUserIdPassthrough:
             models={"default": ModelConfig(provider="openai", id="test-model", context_window=1000)},
         )
 
-        with (
-            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-        ):
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = _prepared_prompt_result(mock_agent, estimated_context_tokens=900)
             run_metadata: dict[str, object] = {}
             async for _chunk in stream_agent_response(

@@ -1,10 +1,6 @@
 """Tests for comprehensive event relation analysis."""
 
-from mindroom.matrix.event_info import (
-    EventInfo,
-    origin_server_ts_from_event_source,
-    reply_to_event_id_from_content,
-)
+from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source, reply_to_event_id_from_content
 
 
 class TestEventRelations:

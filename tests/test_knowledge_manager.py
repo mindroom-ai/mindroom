@@ -30,10 +30,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateK
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.knowledge import (
-    KnowledgeRefreshScheduler,
-    resolve_agent_knowledge_access,
-)
+from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import (
     KnowledgeManager,

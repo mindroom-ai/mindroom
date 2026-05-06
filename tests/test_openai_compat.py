@@ -50,11 +50,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
-from mindroom.history.types import (
-    CompactionDecision,
-    HistoryScope,
-    ResolvedReplayPlan,
-)
+from mindroom.history.types import CompactionDecision, HistoryScope, ResolvedReplayPlan
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import current_llm_request_log_context
