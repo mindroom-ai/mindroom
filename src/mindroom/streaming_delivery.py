@@ -251,13 +251,13 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 continue
 
             tool_index = len(streaming.tool_trace) + 1
-            started = tool_tracker.start(chunk.tool, tool_index=tool_index)
-            if started.trace_entry is not None:
-                streaming.tool_trace.append(started.trace_entry)
+            text_chunk, trace_entry = tool_tracker.start(chunk.tool, tool_index=tool_index)
+            if trace_entry is not None:
+                streaming.tool_trace.append(trace_entry)
             await _apply_visible_text_chunk(
                 streaming,
                 delivery_queue,
-                started.visible_text,
+                text_chunk,
                 apply_chunk=streaming._append_incremental_text,
                 boundary_refresh=True,
                 wait_for_capture=(
@@ -268,12 +268,12 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
         elif isinstance(chunk, ToolCallCompletedEvent):
             completion = tool_tracker.complete(chunk.tool)
             if completion is not None:
+                tool_name, result, pending_tool, completed_trace = completion
                 if streaming.show_tool_calls:
-                    pending_tool = completion.pending_tool
                     if pending_tool is None or pending_tool.visible_tool_index is None:
                         logger.warning(
                             "Missing pending tool start in streaming response; skipping completion marker",
-                            tool_name=completion.tool_name,
+                            tool_name=tool_name,
                         )
                         _queue_delivery_request(delivery_queue, progress_hint=True)
                         continue
@@ -282,17 +282,17 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                     previous_text = streaming.accumulated_text
                     streaming.accumulated_text, _ = complete_pending_tool_block(
                         streaming.accumulated_text,
-                        completion.tool_name,
-                        completion.result,
+                        tool_name,
+                        result,
                         tool_index=tool_index,
                     )
                     text_changed = streaming.accumulated_text != previous_text
                     if text_changed:
                         streaming._mark_nonadditive_text_mutation()
-                    if not tool_tracker.update_visible_trace_entry(streaming.tool_trace, completion):
+                    if not tool_tracker.update_visible_trace_entry(streaming.tool_trace, pending_tool, completed_trace):
                         logger.warning(
                             "Missing tool trace slot in streaming response for completion",
-                            tool_name=completion.tool_name,
+                            tool_name=tool_name,
                             tool_index=tool_index,
                             trace_len=len(streaming.tool_trace),
                         )

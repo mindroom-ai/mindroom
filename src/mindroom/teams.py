@@ -2105,13 +2105,13 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             ) -> None:
                 nonlocal next_tool_index
                 tool_index = next_tool_index if show_tool_calls else None
-                started = tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
+                tool_msg, trace_entry = tool_tracker.start(tool, scope_key=scope_key, tool_index=tool_index)
                 if not show_tool_calls or tool_index is None:
                     return
-                if started.visible_text:
-                    apply_visible_text(started.visible_text)
-                if started.trace_entry is not None:
-                    tool_trace.append(started.trace_entry)
+                if tool_msg:
+                    apply_visible_text(tool_msg)
+                if trace_entry is not None:
+                    tool_trace.append(trace_entry)
                 next_tool_index += 1
 
             def _complete_tool(
@@ -2124,31 +2124,31 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 completion = tool_tracker.complete(tool, scope_key=scope_key)
                 if completion is None:
                     return
+                tool_name, result, pending_tool, completed_trace = completion
 
                 if not show_tool_calls:
                     return
 
-                pending_tool = completion.pending_tool
                 if pending_tool is None or pending_tool.visible_tool_index is None:
                     logger.warning(
                         "Missing pending tool start in team stream; skipping completion marker",
-                        tool_name=completion.tool_name,
+                        tool_name=tool_name,
                         scope=scope_key,
                     )
                     return
 
                 updated_text, _ = complete_pending_tool_block(
                     get_visible_text(),
-                    completion.tool_name,
-                    completion.result,
+                    tool_name,
+                    result,
                     tool_index=pending_tool.visible_tool_index,
                 )
                 set_visible_text(updated_text)
 
-                if not tool_tracker.update_visible_trace_entry(tool_trace, completion):
+                if not tool_tracker.update_visible_trace_entry(tool_trace, pending_tool, completed_trace):
                     logger.warning(
                         "Missing tool trace slot in team stream for completion",
-                        tool_name=completion.tool_name,
+                        tool_name=tool_name,
                         tool_index=pending_tool.visible_tool_index,
                         trace_len=len(tool_trace),
                     )
