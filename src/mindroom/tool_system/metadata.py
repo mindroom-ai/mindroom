@@ -9,7 +9,6 @@ import os
 import sys
 from dataclasses import asdict, dataclass
 from enum import Enum
-from importlib import util as importlib_util
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -868,29 +867,34 @@ def _execute_validation_plugin_module(
     """Execute one plugin module into a temporary validation import context."""
     runtime_module_name = plugin_module._module_name(plugin_name, plugin_root, module_path)
     validation_module_name = f"{runtime_module_name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{id(registrations_by_module)}"
-    previous_packages = plugin_module._snapshot_plugin_package_chain(plugin_name, plugin_root, module_path)
-    plugin_module._install_plugin_package_chain(plugin_name, plugin_root, module_path)
-    spec = importlib_util.spec_from_file_location(validation_module_name, module_path)
-    if spec is None or spec.loader is None:
-        plugin_module._restore_plugin_package_chain(previous_packages)
-        msg = f"Failed to load plugin validation module: {module_path}"
-        raise ToolMetadataValidationError(msg)
-
     previous_module = sys.modules.get(validation_module_name)
+    try:
+        module, loader, previous_packages = plugin_module._prepare_plugin_module_execution(
+            plugin_name,
+            plugin_root,
+            module_path,
+            validation_module_name,
+        )
+    except plugin_module._PluginModuleSpecError:
+        msg = f"Failed to load plugin validation module: {module_path}"
+        raise ToolMetadataValidationError(msg) from None
+
     loaded_modules = sys.modules.copy()
+    if previous_module is None:
+        loaded_modules.pop(validation_module_name, None)
+    else:
+        loaded_modules[validation_module_name] = previous_module
     previous_modules_within_root = {
         module_name: loaded_module
         for module_name, loaded_module in loaded_modules.items()
         if _module_origin_within_root(loaded_module, plugin_root)
     }
-    module = importlib_util.module_from_spec(spec)
-    sys.modules[validation_module_name] = module
     try:
         with (
             scoped_plugin_registration_store(registrations_by_module),
             scoped_plugin_registration_owner(validation_module_name),
         ):
-            spec.loader.exec_module(module)
+            loader.exec_module(module)
     except Exception as exc:
         msg = f"Plugin validation module execution failed for {module_path}: {exc}"
         raise ToolMetadataValidationError(msg) from exc

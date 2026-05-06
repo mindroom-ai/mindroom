@@ -9,11 +9,15 @@ from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
 from types import ModuleType
+from typing import TYPE_CHECKING
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.plugin_identity import validate_plugin_name
+
+if TYPE_CHECKING:
+    from importlib.abc import Loader
 
 logger = get_logger(__name__)
 
@@ -61,6 +65,10 @@ class _ModuleCacheEntry:
     mtime: float
     module_name: str
     module: ModuleType
+
+
+class _PluginModuleSpecError(RuntimeError):
+    """Raised when importlib cannot build a plugin module spec."""
 
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
@@ -404,3 +412,21 @@ def _restore_plugin_package_chain(previous_packages: dict[str, ModuleType | None
             sys.modules.pop(package_name, None)
         else:
             sys.modules[package_name] = previous_module
+
+
+def _prepare_plugin_module_execution(
+    plugin_name: str,
+    plugin_root: Path,
+    module_path: Path,
+    module_name: str,
+) -> tuple[ModuleType, Loader, dict[str, ModuleType | None]]:
+    previous_packages = _snapshot_plugin_package_chain(plugin_name, plugin_root, module_path)
+    _install_plugin_package_chain(plugin_name, plugin_root, module_path)
+    spec = util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        _restore_plugin_package_chain(previous_packages)
+        raise _PluginModuleSpecError(str(module_path))
+
+    module = util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    return module, spec.loader, previous_packages

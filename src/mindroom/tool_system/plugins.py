@@ -6,7 +6,6 @@ import asyncio
 import sys
 import tokenize
 from dataclasses import dataclass
-from importlib import util
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
@@ -427,17 +426,18 @@ def load_plugin_module(
     if cached is not None and cached.module_name != module_name:
         sys.modules.pop(cached.module_name, None)
 
-    previous_packages = plugin_imports._snapshot_plugin_package_chain(plugin_name, plugin_root, module_path)
-    plugin_imports._install_plugin_package_chain(plugin_name, plugin_root, module_path)
-    spec = util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        plugin_imports._restore_plugin_package_chain(previous_packages)
+    try:
+        module, _, previous_packages = plugin_imports._prepare_plugin_module_execution(
+            plugin_name,
+            plugin_root,
+            module_path,
+            module_name,
+        )
+    except plugin_imports._PluginModuleSpecError:
         msg = f"Failed to load plugin {kind} module: {module_path}"
-        logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
-        raise _PluginValidationError(msg)
+        logger.error("Failed to load plugin module", path=str(module_path), kind=kind)  # noqa: TRY400
+        raise _PluginValidationError(msg) from None
 
-    module = util.module_from_spec(spec)
-    sys.modules[module_name] = module
     try:
         if kind == "tools":
             with scoped_plugin_registration_owner(module_name):
