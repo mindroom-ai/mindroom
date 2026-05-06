@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.lifecycle import WorkerLockRegistry, effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.manager import WorkerManager
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
@@ -23,8 +24,7 @@ _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_WORKER_API_ROOT = "/api/sandbox-runner"
 _WORKER_ENDPOINT_ENV = "MINDROOM_SANDBOX_WORKER_ENDPOINT"
 _WORKER_IDLE_TIMEOUT_ENV = "MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS"
-_SHARED_INITIALIZATION_LOCK = threading.Lock()
-_SHARED_INITIALIZATION_LOCKS: dict[str, threading.Lock] = {}
+_SHARED_INITIALIZATION_LOCKS = WorkerLockRegistry()
 
 
 @dataclass(frozen=True)
@@ -138,12 +138,7 @@ def ensure_local_worker_state_locked(worker_key: str, paths: LocalWorkerStatePat
 
 
 def _shared_worker_initialization_lock(worker_key: str) -> threading.Lock:
-    with _SHARED_INITIALIZATION_LOCK:
-        worker_lock = _SHARED_INITIALIZATION_LOCKS.get(worker_key)
-        if worker_lock is None:
-            worker_lock = threading.Lock()
-            _SHARED_INITIALIZATION_LOCKS[worker_key] = worker_lock
-    return worker_lock
+    return _SHARED_INITIALIZATION_LOCKS.lock_for(worker_key)
 
 
 class _LocalWorkerBackend:
@@ -163,7 +158,7 @@ class _LocalWorkerBackend:
         self.idle_timeout_seconds = max(1.0, idle_timeout_seconds)
         self.worker_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._initialization_locks: dict[str, threading.Lock] = {}
+        self._initialization_locks = WorkerLockRegistry()
 
     def ensure_worker(
         self,
@@ -236,9 +231,7 @@ class _LocalWorkerBackend:
                 if (metadata := self._load_metadata(paths)) is not None
             ]
 
-        if not include_idle:
-            handles = [handle for handle in handles if handle.status != "idle"]
-        return sorted(handles, key=lambda handle: handle.last_used_at, reverse=True)
+        return filter_and_sort_worker_handles(handles, include_idle=include_idle)
 
     def evict_worker(
         self,
@@ -282,7 +275,7 @@ class _LocalWorkerBackend:
                     self._save_metadata(paths, metadata)
                     cleaned_workers.append(self._to_handle(metadata, paths, now=timestamp))
 
-        return sorted(cleaned_workers, key=lambda handle: handle.last_used_at, reverse=True)
+        return filter_and_sort_worker_handles(cleaned_workers, include_idle=True)
 
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         """Persist one local worker failure."""
@@ -294,12 +287,7 @@ class _LocalWorkerBackend:
             return self._record_failure_locked(paths, worker_key, failure_reason, now=timestamp)
 
     def _worker_lock(self, worker_key: str) -> threading.Lock:
-        with self._lock:
-            worker_lock = self._initialization_locks.get(worker_key)
-            if worker_lock is None:
-                worker_lock = threading.Lock()
-                self._initialization_locks[worker_key] = worker_lock
-            return worker_lock
+        return self._initialization_locks.lock_for(worker_key)
 
     def _default_metadata(self, worker_key: str, now: float) -> _LocalWorkerMetadata:
         return _LocalWorkerMetadata(
@@ -344,9 +332,12 @@ class _LocalWorkerBackend:
             json.dump(asdict(metadata), f, sort_keys=True)
 
     def _effective_status(self, metadata: _LocalWorkerMetadata, now: float) -> WorkerStatus:
-        if metadata.status == "ready" and now - metadata.last_used_at >= self.idle_timeout_seconds:
-            return "idle"
-        return metadata.status
+        return effective_idle_status(
+            metadata.status,
+            last_used_at=metadata.last_used_at,
+            idle_timeout_seconds=self.idle_timeout_seconds,
+            now=now,
+        )
 
     def _record_failure_locked(
         self,
