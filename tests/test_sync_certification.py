@@ -15,6 +15,22 @@ from mindroom.matrix.sync_certification import (
     start_from_loaded_token,
     sync_cache_write_diagnostics,
 )
+from mindroom.matrix.sync_token_values import normalize_sync_token
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("s_token", "s_token"),
+        ("  s_token\n", "s_token"),
+        (" \t\n", None),
+        (None, None),
+        (123, None),
+    ],
+)
+def test_normalize_sync_token_accepts_only_non_empty_strings(value: object, expected: str | None) -> None:
+    """Sync-token normalization should have one Matrix-local source of truth."""
+    assert normalize_sync_token(value) == expected
 
 
 def test_start_without_token_is_cold() -> None:
