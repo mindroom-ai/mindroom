@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from .attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from .constants import ORIGINAL_SENDER_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
@@ -13,6 +13,7 @@ from .dispatch_handoff import (
     MediaDispatchEvent,
     PendingDispatchMetadata,
     dispatch_prompt_for_event,
+    event_content_dict,
     is_media_dispatch_event,
 )
 
@@ -59,15 +60,6 @@ class CoalescedBatch:
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
 
-def _event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
-    if not isinstance(event.source, dict):
-        return None
-    content = event.source.get("content")
-    if not isinstance(content, dict):
-        return None
-    return cast("dict[str, object]", content)
-
-
 def _pending_event_trusts_internal_payload(pending_event: PendingEvent) -> bool:
     return pending_event.trust_internal_payload_metadata
 
@@ -90,7 +82,7 @@ def _batch_metadata(pending_events: list[PendingEvent]) -> tuple[str | None, boo
     for pending_event in pending_events:
         if not _pending_event_trusts_internal_payload(pending_event):
             continue
-        content = _event_content_dict(pending_event.event)
+        content = event_content_dict(pending_event.event)
         if content is None:
             continue
         if original_sender is None:

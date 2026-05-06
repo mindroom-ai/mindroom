@@ -105,7 +105,8 @@ class DispatchHandoff:
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
 
-def _event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
+def event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
+    """Return Matrix content from a dispatch event when it has mapping content."""
     if not isinstance(event.source, dict):
         return None
     content = event.source.get("content")
@@ -142,7 +143,7 @@ def _collect_batch_mentions_and_formatted_bodies(
     skip_mentions = False
     inspected_content = False
     for pending_event in pending_events:
-        content = _event_content_dict(pending_event.event)
+        content = event_content_dict(pending_event.event)
         if content is None:
             continue
         inspected_content = True
