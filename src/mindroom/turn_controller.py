@@ -1314,7 +1314,6 @@ class TurnController:
                         prepared_payload = type(prepared_payload)(
                             payload=prepared_payload.payload,
                             envelope=prepared_payload.envelope,
-                            strip_transient_enrichment_after_run=prepared_payload.strip_transient_enrichment_after_run,
                             system_enrichment_items=tuple(system_enrichment_items),
                         )
                     payload_ready_monotonic = time.monotonic()

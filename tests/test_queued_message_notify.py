@@ -433,34 +433,6 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
 
 
 @pytest.mark.asyncio
-async def test_post_response_effects_strips_transient_enrichment_when_flagged() -> None:
-    """Transient model/system enrichment cleanup should run after delivery effects."""
-    cleanup = MagicMock()
-    outcome = ResponseOutcome(
-        strip_transient_enrichment_after_run=True,
-        session_id="session-1",
-        session_type=SessionType.AGENT,
-    )
-
-    await apply_post_response_effects(
-        FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$response",
-            is_visible_response=True,
-            final_visible_body="response",
-            delivery_kind="sent",
-        ),
-        outcome,
-        PostResponseEffectsDeps(
-            logger=MagicMock(),
-            strip_transient_enrichment=cleanup,
-        ),
-    )
-
-    cleanup.assert_called_once_with(outcome)
-
-
-@pytest.mark.asyncio
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(tmp_path: Path) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
     config = _config(tmp_path)
