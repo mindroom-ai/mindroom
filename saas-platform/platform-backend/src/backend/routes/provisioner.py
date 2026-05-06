@@ -19,7 +19,13 @@ from backend.config import (
     INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER,
+    INSTANCE_TRUSTED_UPSTREAM_JWKS_URL,
+    INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE,
+    INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM,
+    INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER,
+    INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER,
     INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER,
+    INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT,
     INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER,
     OPENAI_API_KEY,
     OPENROUTER_API_KEY,
@@ -242,6 +248,18 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                     f"{INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE}"
                 ),
             ]
+        if INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT:
+            helm_args += ["--set", f"trustedUpstreamAuth.requireJwt={INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT}"]
+        if INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER:
+            helm_args += ["--set", f"trustedUpstreamAuth.jwtHeader={INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER}"]
+        if INSTANCE_TRUSTED_UPSTREAM_JWKS_URL:
+            helm_args += ["--set", f"trustedUpstreamAuth.jwksUrl={INSTANCE_TRUSTED_UPSTREAM_JWKS_URL}"]
+        if INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE:
+            helm_args += ["--set", f"trustedUpstreamAuth.jwtAudience={INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE}"]
+        if INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER:
+            helm_args += ["--set", f"trustedUpstreamAuth.jwtIssuer={INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER}"]
+        if INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM:
+            helm_args += ["--set", f"trustedUpstreamAuth.jwtEmailClaim={INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM}"]
 
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:

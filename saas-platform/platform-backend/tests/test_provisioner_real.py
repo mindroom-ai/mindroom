@@ -147,6 +147,12 @@ class TestProvisionerCommandValidation:
                 "backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
                 "@{localpart}:example.org",
             ),
+            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT", "true"),
+            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER", "X-Trusted-Jwt"),
+            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_JWKS_URL", "https://issuer.example/jwks"),
+            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE", "mindroom-dashboard"),
+            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER", "https://issuer.example"),
+            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM", "email"),
             patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
             patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
         ):
@@ -177,6 +183,12 @@ class TestProvisionerCommandValidation:
         assert set_args["trustedUpstreamAuth.emailHeader"] == "X-MindRoom-User-Email"
         assert set_args["trustedUpstreamAuth.matrixUserIdHeader"] == "X-MindRoom-Matrix-User-Id"
         assert set_args["trustedUpstreamAuth.emailToMatrixUserIdTemplate"] == "@{localpart}:example.org"
+        assert set_args["trustedUpstreamAuth.requireJwt"] == "true"
+        assert set_args["trustedUpstreamAuth.jwtHeader"] == "X-Trusted-Jwt"
+        assert set_args["trustedUpstreamAuth.jwksUrl"] == "https://issuer.example/jwks"
+        assert set_args["trustedUpstreamAuth.jwtAudience"] == "mindroom-dashboard"
+        assert set_args["trustedUpstreamAuth.jwtIssuer"] == "https://issuer.example"
+        assert set_args["trustedUpstreamAuth.jwtEmailClaim"] == "email"
 
     @pytest.mark.asyncio
     async def test_kubectl_scale_command_uses_correct_syntax(self):
