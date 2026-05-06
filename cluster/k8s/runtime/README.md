@@ -141,6 +141,8 @@ workers:
   In the release namespace, the chart stores derived worker tokens as keys in one chart-created worker-auth Secret and grants only `get` and `patch` on that Secret.
   When `workers.kubernetes.namespace` points at a separate worker namespace, the chart uses per-worker auth Secrets and grants Secret CRUD only in that namespace.
   The chart can create the worker-manager RBAC and a worker NetworkPolicy.
+  The worker NetworkPolicy leaves static external egress empty by default, apart from DNS.
+  Add deployment-specific dynamic grants for exact external hostnames when workers need outbound network access.
 - If workers run in a different namespace, provide storage, service accounts, and network policy behavior that are valid for that namespace.
   Kubernetes owner references are only set by default for same-namespace workers.
   The sandbox proxy token secret is only needed by the primary runtime; dedicated worker pods receive per-worker derived runner tokens.
