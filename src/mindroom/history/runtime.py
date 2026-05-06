@@ -41,6 +41,7 @@ from mindroom.history.storage import (
     clear_force_compaction_state,
     consume_pending_force_compaction_scope,
     read_scope_state,
+    set_force_compaction_state,
     write_scope_state,
 )
 from mindroom.history.types import (
@@ -1409,8 +1410,7 @@ def _prepare_scope_state_for_run(
 ) -> HistoryScopeState:
     state = read_scope_state(session, scope)
     if consume_pending_force_compaction_scope(session, scope):
-        state = replace(state, force_compact_before_next_run=True)
-        write_scope_state(session, scope, state)
+        state = set_force_compaction_state(session, scope, state, force=True)
         storage.upsert_session(session)
     if state.force_compact_before_next_run and not execution_plan.destructive_compaction_available:
         state = clear_force_compaction_state(session, scope, state)
