@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import cast
 
 __all__ = [
+    "CREDENTIALS_ENCRYPTION_KEY_ENV",
     "CREDENTIAL_SEEDS_FILE_ENV",
     "CREDENTIAL_SEEDS_JSON_ENV",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
@@ -28,6 +29,7 @@ __all__ = [
     "is_worker_extra_env_name",
     "isolated_worker_runtime_env",
     "public_worker_startup_env",
+    "sandbox_execution_runtime_env",
     "sandbox_runner_runtime_state_env",
     "sandbox_runner_startup_process_env",
     "sandbox_shell_system_env",
@@ -39,6 +41,7 @@ __all__ = [
 SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
 CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
 CREDENTIAL_SEEDS_FILE_ENV = "MINDROOM_CREDENTIAL_SEEDS_FILE"
+CREDENTIALS_ENCRYPTION_KEY_ENV = "MINDROOM_CREDENTIALS_ENCRYPTION_KEY"
 SHARED_CREDENTIALS_PATH_ENV = "MINDROOM_SHARED_CREDENTIALS_PATH"
 VERTEXAI_CLAUDE_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
@@ -200,6 +203,7 @@ _WORKER_EXTRA_ENV_GENERATED_NAMES = frozenset(
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
     {
         *_CREDENTIAL_SEED_DECLARATION_ENV_NAMES,
+        CREDENTIALS_ENCRYPTION_KEY_ENV,
         "MINDROOM_EVENT_CACHE_DATABASE_URL",
         "MINDROOM_LOCAL_CLIENT_ID",
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
@@ -224,6 +228,7 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
 )
 _NON_SANDBOX_RUNTIME_CONTROL_ENV_NAMES = frozenset(
     {
+        CREDENTIALS_ENCRYPTION_KEY_ENV,
         "MINDROOM_API_KEY",
         "MINDROOM_LOCAL_CLIENT_SECRET",
     },
@@ -308,7 +313,7 @@ def is_public_worker_startup_env_name(name: str) -> bool:
 
 def is_isolated_worker_runtime_env_name(name: str) -> bool:
     """Return whether inherited env may remain visible inside isolated workers."""
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES and name != CREDENTIALS_ENCRYPTION_KEY_ENV:
         return False
     if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
@@ -359,6 +364,15 @@ def public_worker_startup_env(env: Mapping[str, str]) -> dict[str, str]:
 def isolated_worker_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return inherited env safe for isolated worker RuntimePaths."""
     return {key: value for key, value in env.items() if is_isolated_worker_runtime_env_name(key)}
+
+
+def sandbox_execution_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return env safe for sandboxed tool execution snapshots."""
+    return {
+        key: value
+        for key, value in env.items()
+        if is_isolated_worker_runtime_env_name(key) and key != CREDENTIALS_ENCRYPTION_KEY_ENV
+    }
 
 
 def sandbox_runner_startup_process_env(env: Mapping[str, str]) -> dict[str, str]:

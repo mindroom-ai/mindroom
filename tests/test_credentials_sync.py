@@ -16,7 +16,7 @@ from mindroom.credentials_sync import (
     get_secret_from_env,
     sync_env_to_credentials,
 )
-from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV, SHARED_CREDENTIALS_PATH_ENV
 
 
 def _runtime_paths(
@@ -457,6 +457,7 @@ class TestCredentialsSync:
             config_path=config_path,
             storage_path=tmp_path,
             process_env={
+                CREDENTIALS_ENCRYPTION_KEY_ENV: "encryption-key-material",
                 "MINDROOM_CREDENTIAL_SEEDS_JSON": seed_json,
                 "MINDROOM_CREDENTIAL_SEEDS_FILE": str(seed_file),
             },
@@ -464,18 +465,22 @@ class TestCredentialsSync:
 
         public_runtime = constants_mod._serialize_public_runtime_paths(runtime_paths)
         isolated_runtime = constants_mod.isolated_runtime_paths(runtime_paths)
-        runtime_envs = [
+        public_and_execution_envs = [
             public_runtime["process_env"],
             public_runtime["env_file_values"],
-            isolated_runtime.process_env,
-            isolated_runtime.env_file_values,
             constants_mod.execution_runtime_env_values(runtime_paths),
             constants_mod.sandbox_execution_runtime_env_values(runtime_paths),
         ]
 
-        for runtime_env in runtime_envs:
+        for runtime_env in public_and_execution_envs:
+            assert CREDENTIALS_ENCRYPTION_KEY_ENV not in runtime_env
             assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in runtime_env
             assert "MINDROOM_CREDENTIAL_SEEDS_FILE" not in runtime_env
+        assert isolated_runtime.process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] == "encryption-key-material"
+        assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in isolated_runtime.process_env
+        assert "MINDROOM_CREDENTIAL_SEEDS_FILE" not in isolated_runtime.process_env
+        assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in isolated_runtime.env_file_values
+        assert "MINDROOM_CREDENTIAL_SEEDS_FILE" not in isolated_runtime.env_file_values
 
     def test_declared_credential_seed_logs_file_source(
         self,
