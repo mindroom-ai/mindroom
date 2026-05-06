@@ -21,7 +21,7 @@ from mindroom.thread_summary import (
     update_last_summary_count,
 )
 from mindroom.thread_tags import ThreadTagsError, normalize_tag_name, set_thread_tag
-from mindroom.thread_utils import create_session_id
+from mindroom.thread_utils import create_session_id, parse_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -208,11 +208,7 @@ def _bounded_offset(offset: int | None) -> int:
 
 
 def _session_key_to_room_thread(session_key: str) -> tuple[str, str | None]:
-    marker = ":$"
-    if marker in session_key:
-        room_id, thread_suffix = session_key.rsplit(marker, 1)
-        return room_id, f"${thread_suffix}"
-    return session_key, None
+    return parse_session_id(session_key)
 
 
 def _agent_thread_mode(context: ToolRuntimeContext, agent_name: str, room_id: str | None = None) -> str:

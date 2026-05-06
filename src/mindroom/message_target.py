@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindroom.thread_utils import create_session_id
+
 if TYPE_CHECKING:
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -30,10 +32,7 @@ class MessageTarget:
         """Return the canonical room/thread log fields for this target."""
         return {"room_id": self.room_id, "thread_id": self.resolved_thread_id}
 
-    @staticmethod
-    def _build_session_id(room_id: str, resolved_thread_id: str | None) -> str:
-        """Build the canonical persisted session ID for one target."""
-        return room_id if resolved_thread_id is None else f"{room_id}:{resolved_thread_id}"
+    _build_session_id = staticmethod(create_session_id)
 
     @classmethod
     def for_scheduled_task(

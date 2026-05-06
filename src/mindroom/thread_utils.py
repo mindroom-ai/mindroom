@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, cast
 from mindroom import authorization
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID, extract_agent_name
-from mindroom.matrix.rooms import resolve_room_aliases
 from mindroom.matrix.visible_body import visible_content_from_content
 
 if TYPE_CHECKING:
@@ -76,6 +75,12 @@ def create_session_id(room_id: str, thread_id: str | None) -> str:
     """Create a session ID with thread awareness."""
     # Thread sessions include thread ID
     return f"{room_id}:{thread_id}" if thread_id else room_id
+
+
+def parse_session_id(session_id: str) -> tuple[str, str | None]:
+    """Parse the canonical persisted room/thread session ID."""
+    room_id, marker, thread_suffix = session_id.rpartition(":$")
+    return (room_id, f"${thread_suffix}") if marker else (session_id, None)
 
 
 def get_agents_in_thread(
@@ -208,6 +213,7 @@ def get_configured_agents_for_room(
     """
     configured_agents: list[MatrixID] = []
     config_ids = config.get_ids(runtime_paths)
+    from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
 
     # Check which agents should be in this room
     for agent_name, agent_config in config.agents.items():

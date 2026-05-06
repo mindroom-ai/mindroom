@@ -29,7 +29,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import StreamingResponse, send_streaming_response
-from mindroom.thread_utils import create_session_id
+from mindroom.thread_utils import create_session_id, parse_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 if TYPE_CHECKING:
@@ -518,6 +518,23 @@ class TestCreateSessionIdWithNoneThread:
         session_id = create_session_id("!room:localhost", "$thread123")
         assert session_id == "!room:localhost:$thread123"
 
+    def test_room_level_session_round_trip_keeps_room_id_with_colons(self) -> None:
+        """Room-level session parsing should preserve room ids containing colons."""
+        room_id = "!room:with:colons:localhost"
+        session_id = create_session_id(room_id, None)
+
+        assert session_id == room_id
+        assert parse_session_id(session_id) == (room_id, None)
+
+    def test_thread_level_session_round_trip_keeps_event_id_with_dollars(self) -> None:
+        """Thread-level session parsing should preserve Matrix event ids containing dollars."""
+        room_id = "!room:with:colons:localhost"
+        thread_id = "$thread$with$dollars:localhost"
+        session_id = create_session_id(room_id, thread_id)
+
+        assert session_id == f"{room_id}:{thread_id}"
+        assert parse_session_id(session_id) == (room_id, thread_id)
+
     def test_message_target_room_mode_reuses_room_level_session_format(self) -> None:
         """Room-mode MessageTarget sessions should match create_session_id(None)."""
         target = MessageTarget.resolve(
@@ -529,6 +546,20 @@ class TestCreateSessionIdWithNoneThread:
         assert target.source_thread_id is None
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
+
+    def test_message_target_thread_session_round_trips_through_canonical_parser(self) -> None:
+        """Thread-mode MessageTarget sessions should use the canonical persisted format."""
+        room_id = "!room:with:colons:localhost"
+        thread_id = "$thread$with$dollars:localhost"
+
+        target = MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id="$event456",
+        )
+
+        assert target.session_id == create_session_id(room_id, thread_id)
+        assert parse_session_id(target.session_id) == (room_id, thread_id)
 
     def test_message_target_plain_reply_keeps_room_level_session(self) -> None:
         """Plain reply targets should not derive thread or session identity."""

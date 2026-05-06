@@ -16,7 +16,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, resolve_runtime_paths
 from mindroom.custom_tools import subagents as subagents_module
 from mindroom.custom_tools.subagents import SubAgentsTools
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
-from mindroom.thread_utils import create_session_id
+from mindroom.thread_utils import create_session_id, parse_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import delivered_matrix_side_effect, make_event_cache_mock
@@ -767,6 +767,24 @@ def test_load_registry_returns_existing_dict_without_migration(tmp_path: Path) -
 
     registry = subagents_module._load_registry(ctx)
     assert registry == old_data
+
+
+def test_subagent_session_key_reverse_parse_matches_canonical_parser() -> None:
+    """Subagent registry session keys should reverse-parse through the canonical parser."""
+    room_id = "!room:with:colons:localhost"
+    thread_id = "$thread$with$dollars:localhost"
+    session_key = create_session_id(room_id, thread_id)
+
+    assert parse_session_id(session_key) == (room_id, thread_id)
+    assert subagents_module._session_key_to_room_thread(session_key) == (room_id, thread_id)
+
+
+def test_subagent_session_key_reverse_parse_keeps_room_level_keys() -> None:
+    """Subagent registry room-level session keys should not invent a thread id."""
+    room_id = "!room:with:colons:localhost"
+
+    assert parse_session_id(room_id) == (room_id, None)
+    assert subagents_module._session_key_to_room_thread(room_id) == (room_id, None)
 
 
 def test_resolve_by_label_require_thread_skips_entries_without_thread_id(tmp_path: Path) -> None:
