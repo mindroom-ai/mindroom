@@ -12,7 +12,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_h
 from mindroom.logging_config import get_logger
 from mindroom.matrix import provisioning
 from mindroom.matrix.client_session import login, matrix_client, matrix_startup_error, restore_login
-from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
 
@@ -24,13 +24,8 @@ _INVALID_REGISTRATION_TOKEN_MESSAGE = (
 )
 
 
-def _account_key_for_agent(agent_name: str) -> str:
-    """Build the Matrix state account key for an agent-like entity."""
-    return f"agent_{agent_name}"
-
-
 INTERNAL_USER_AGENT_NAME = "user"
-INTERNAL_USER_ACCOUNT_KEY = _account_key_for_agent(INTERNAL_USER_AGENT_NAME)
+INTERNAL_USER_ACCOUNT_KEY = managed_account_key(INTERNAL_USER_AGENT_NAME)
 
 
 def _extract_domain_from_user_id(user_id: str) -> str:
@@ -72,7 +67,7 @@ def _get_agent_credentials(
 
     """
     state = matrix_state_for_runtime(runtime_paths)
-    agent_key = _account_key_for_agent(agent_name)
+    agent_key = managed_account_key(agent_name)
     account = state.get_account(agent_key)
     if account:
         return {
@@ -105,7 +100,7 @@ def _save_agent_credentials(
 
     """
     state = MatrixState.load(runtime_paths=runtime_paths)
-    agent_key = _account_key_for_agent(agent_name)
+    agent_key = managed_account_key(agent_name)
     server_name = extract_server_name_from_homeserver(
         runtime_matrix_homeserver(runtime_paths),
         runtime_paths=runtime_paths,
