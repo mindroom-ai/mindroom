@@ -10,7 +10,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from mindroom.logging_config import get_logger
@@ -128,6 +128,25 @@ def issue_opaque_oauth_state(
     return token
 
 
+def _validated_oauth_state_data(record: object, *, kind: str, now: float) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        msg = "OAuth state is invalid or expired"
+        raise OAuthProviderError(msg)
+    state_record = cast("dict[str, Any]", record)
+    if state_record.get("kind") != kind:
+        msg = "OAuth state does not match this integration"
+        raise OAuthProviderError(msg)
+    expires_at = state_record.get("exp")
+    if not isinstance(expires_at, int | float) or expires_at <= now:
+        msg = "OAuth state is invalid or expired"
+        raise OAuthProviderError(msg)
+    data = state_record.get("data")
+    if not isinstance(data, dict):
+        msg = "OAuth state is invalid or expired"
+        raise OAuthProviderError(msg)
+    return data
+
+
 def read_opaque_oauth_state(
     runtime_paths: RuntimePaths,
     *,
@@ -139,25 +158,7 @@ def read_opaque_oauth_state(
     with _locked_state_store(runtime_paths, now=now, save_on_exit=False) as states:
         record = states.get(token)
 
-    if not isinstance(record, dict):
-        msg = "OAuth state is invalid or expired"
-        raise OAuthProviderError(msg)
-    if record.get("kind") != kind:
-        msg = "OAuth state does not match this integration"
-        raise OAuthProviderError(msg)
-    expires_at = record.get("exp")
-    if not isinstance(expires_at, int | float):
-        msg = "OAuth state is invalid or expired"
-        raise OAuthProviderError(msg)
-    if expires_at <= now:
-        msg = "OAuth state is invalid or expired"
-        raise OAuthProviderError(msg)
-
-    data = record.get("data")
-    if not isinstance(data, dict):
-        msg = "OAuth state is invalid or expired"
-        raise OAuthProviderError(msg)
-    return data
+    return _validated_oauth_state_data(record, kind=kind, now=now)
 
 
 def consume_opaque_oauth_state(
@@ -170,18 +171,4 @@ def consume_opaque_oauth_state(
     now = time.time()
     with _locked_state_store(runtime_paths, now=now) as states:
         record = states.pop(token, None)
-    if not isinstance(record, dict):
-        msg = "OAuth state is invalid or expired"
-        raise OAuthProviderError(msg)
-    if record.get("kind") != kind:
-        msg = "OAuth state does not match this integration"
-        raise OAuthProviderError(msg)
-    expires_at = record.get("exp")
-    if not isinstance(expires_at, int | float) or expires_at <= now:
-        msg = "OAuth state is invalid or expired"
-        raise OAuthProviderError(msg)
-    data = record.get("data")
-    if not isinstance(data, dict):
-        msg = "OAuth state is invalid or expired"
-        raise OAuthProviderError(msg)
-    return data
+    return _validated_oauth_state_data(record, kind=kind, now=now)

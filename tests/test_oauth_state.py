@@ -8,13 +8,17 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
 
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.oauth.providers import OAuthProviderError
-from mindroom.oauth.state import issue_opaque_oauth_state, read_opaque_oauth_state
+from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _state_file(storage_root: Path) -> Path:
@@ -96,6 +100,45 @@ def test_read_opaque_oauth_state_does_not_write_to_disk(tmp_path: Path) -> None:
         assert read_opaque_oauth_state(runtime_paths, kind="test_state", token=token) == {"value": "stored"}
 
     mock_save.assert_not_called()
+
+
+def test_consume_opaque_oauth_state_removes_token_before_kind_validation(tmp_path: Path) -> None:
+    runtime_paths = resolve_primary_runtime_paths(storage_path=tmp_path / "storage", process_env={})
+    token = issue_opaque_oauth_state(
+        runtime_paths,
+        kind="other_state",
+        ttl_seconds=60,
+        data={"value": "stored"},
+    )
+
+    with pytest.raises(OAuthProviderError, match="OAuth state does not match this integration"):
+        consume_opaque_oauth_state(runtime_paths, kind="test_state", token=token)
+
+    with pytest.raises(OAuthProviderError, match="OAuth state is invalid or expired"):
+        read_opaque_oauth_state(runtime_paths, kind="other_state", token=token)
+
+
+@pytest.mark.parametrize(
+    "accessor",
+    [read_opaque_oauth_state, consume_opaque_oauth_state],
+)
+def test_opaque_oauth_state_rejects_non_mapping_data(
+    tmp_path: Path,
+    accessor: Callable[..., dict[str, Any]],
+) -> None:
+    runtime_paths = resolve_primary_runtime_paths(storage_path=tmp_path / "storage", process_env={})
+    token = issue_opaque_oauth_state(
+        runtime_paths,
+        kind="test_state",
+        ttl_seconds=60,
+        data={"value": "stored"},
+    )
+    stored = json.loads(_state_file(runtime_paths.storage_root).read_text(encoding="utf-8"))
+    stored["states"][token]["data"] = "invalid"
+    _state_file(runtime_paths.storage_root).write_text(json.dumps(stored), encoding="utf-8")
+
+    with pytest.raises(OAuthProviderError, match="OAuth state is invalid or expired"):
+        accessor(runtime_paths, kind="test_state", token=token)
 
 
 def test_corrupt_state_file_renamed_to_corrupt_suffix(tmp_path: Path) -> None:
