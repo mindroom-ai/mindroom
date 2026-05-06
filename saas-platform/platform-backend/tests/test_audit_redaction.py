@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
+import pytest
+from backend.middleware import audit_logging
+from backend.middleware.audit_logging import AuditLoggingMiddleware
 from backend.utils.audit import REDACTED, redact_audit_details
 
 
@@ -72,10 +77,40 @@ def test_redact_audit_details_redacts_oauth_url_and_query_values() -> None:
         "callback_url": "https://example.test/cb?code=code-secret&state=state-secret&keep=1",
         "signed_url": "https://user:pass-secret@example.test/file?signature=sig-secret&name=file",
         "query_params": {"code": "code-secret", "state": "state-secret", "keep": "1"},
+        "query_string": "code=code-secret&state=state-secret&keep=1",
     }
 
     assert redact_audit_details(details) == {
         "callback_url": f"https://example.test/cb?code={REDACTED}&state={REDACTED}&keep=1",
         "signed_url": f"https://user:***@example.test/file?signature={REDACTED}&name=file",
         "query_params": {"code": REDACTED, "state": REDACTED, "keep": "1"},
+        "query_string": f"code={REDACTED}&state={REDACTED}&keep=1",
     }
+
+
+@pytest.mark.asyncio
+async def test_audit_log_persists_non_object_json_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Array or scalar JSON bodies should keep audit rows instead of failing insertion."""
+    table = Mock()
+    table.insert.return_value.execute.return_value = Mock()
+    supabase = Mock()
+    supabase.table.return_value = table
+    monkeypatch.setattr(audit_logging, "supabase", supabase)
+    middleware = AuditLoggingMiddleware(app=Mock())
+
+    await middleware._create_audit_log(
+        account_id="account-1",
+        action="create",
+        resource_type="account",
+        resource_id=None,
+        details=["Authorization: Bearer auth-secret"],
+        ip_address="127.0.0.1",
+        user_email="user@example.test",
+        path="/api/accounts",
+        status_code=200,
+    )
+
+    inserted = table.insert.call_args.args[0]
+    assert inserted["details"]["body"] == [f"Authorization: Bearer {REDACTED}"]
+    assert inserted["details"]["path"] == "/api/accounts"
+    assert inserted["details"]["status_code"] == 200

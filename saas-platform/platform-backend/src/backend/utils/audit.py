@@ -180,6 +180,20 @@ def _redact_url(value: str) -> str:
     return urlunparse(parsed._replace(netloc=netloc, query=urlencode(query_items, doseq=True, safe="*")))
 
 
+def _redact_query_fragment(value: str) -> str:
+    query_items: list[tuple[str, str]] = []
+    changed = False
+    for key, item in parse_qsl(value, keep_blank_values=True):
+        if _is_redacted_query_key(key):
+            query_items.append((key, REDACTED))
+            changed = True
+        else:
+            query_items.append((key, item))
+    if not changed:
+        return redact_audit_text(value)
+    return urlencode(query_items, doseq=True, safe="*")
+
+
 def redact_audit_text(value: str) -> str:
     """Redact credential-bearing values from free-form audit text."""
     redacted = _URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), value)
@@ -200,6 +214,8 @@ def _redact_audit_details(value: Any, parent_key: str | None) -> Any:  # noqa: A
     if isinstance(value, list):
         return [_redact_audit_details(item, parent_key=parent_key) for item in value]
     if isinstance(value, str):
+        if _is_query_container(parent_key):
+            return _redact_query_fragment(value)
         return redact_audit_text(value)
     return value
 

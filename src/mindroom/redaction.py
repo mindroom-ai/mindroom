@@ -201,6 +201,20 @@ def _redact_url(value: str) -> str:
     return urlunparse(parsed._replace(netloc=netloc, query=query))
 
 
+def _redact_query_fragment(value: str, *, max_length: int | None) -> str:
+    query_items: list[tuple[str, str]] = []
+    changed = False
+    for key, item in parse_qsl(value, keep_blank_values=True):
+        if _is_redacted_query_key(key):
+            query_items.append((key, REDACTED))
+            changed = True
+        else:
+            query_items.append((key, item))
+    if not changed:
+        return redact_sensitive_text(value, max_length=max_length)
+    return _truncate_text(urlencode(query_items, doseq=True, safe="*"), max_length)
+
+
 def _truncate_text(value: str, max_length: int | None) -> str:
     if max_length is None or len(value) <= max_length:
         return value
@@ -317,7 +331,10 @@ def redact_sensitive_data(
     elif isinstance(value, Path):
         redacted = str(value)
     elif isinstance(value, str):
-        redacted = redact_sensitive_text(value, max_length=max_string_length)
+        if _is_query_container(_parent_key):
+            redacted = _redact_query_fragment(value, max_length=max_string_length)
+        else:
+            redacted = redact_sensitive_text(value, max_length=max_string_length)
     elif isinstance(value, float):
         redacted = value if math.isfinite(value) else None
     elif value is None or isinstance(value, bool | int):

@@ -55,6 +55,23 @@ def test_redact_sensitive_data_redacts_oauth_callback_query_values_in_urls() -> 
     }
 
 
+def test_redact_sensitive_data_redacts_bare_query_fragments_under_query_keys() -> None:
+    """Raw callback query strings should be redacted when logged as structured fields."""
+    redacted = redact_sensitive_data(
+        {
+            "query_string": "code=code-secret&state=state-secret&keep=1",
+            "callback_query": "x_goog_signature=sig-secret&name=file",
+            "nested": {"query_params": "access_token=access-secret&keep=1"},
+        },
+    )
+
+    assert redacted == {
+        "query_string": f"code={REDACTED}&state={REDACTED}&keep=1",
+        "callback_query": f"x_goog_signature={REDACTED}&name=file",
+        "nested": {"query_params": f"access_token={REDACTED}&keep=1"},
+    }
+
+
 def test_redact_sensitive_data_redacts_secret_assignments_inside_embedded_text_values() -> None:
     """Non-secret wrapper fields should not hide secret-looking text inside their values."""
     redacted = redact_sensitive_data(

@@ -156,7 +156,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
         action: str,
         resource_type: str,
         resource_id: str | None,
-        details: dict[str, Any],
+        details: Any,  # noqa: ANN401
         ip_address: str | None,
         user_email: str | None = None,
         path: str | None = None,
@@ -167,6 +167,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
             if not supabase:
                 return
 
+            normalized_details = details if isinstance(details, dict) else {"body": details}
             log_entry = {
                 "account_id": account_id,
                 "action": action,
@@ -174,7 +175,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                 "resource_id": resource_id,
                 "details": redact_audit_details(
                     {
-                        **details,
+                        **normalized_details,
                         "path": path,
                         "status_code": status_code,
                         "user_email": user_email,
