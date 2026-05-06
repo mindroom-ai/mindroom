@@ -547,6 +547,17 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
     tmp_path: Path,
 ) -> None:
     """Dedicated workers may read the encryption key from process env without exposing it to tools."""
+    wiped_entries: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_process_environment_entry",
+        lambda name: (123, 45) if name == constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV else None,
+    )
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_wipe_process_environment_entry",
+        lambda address, size: wiped_entries.append((address, size)),
+    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -578,6 +589,8 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
     )
 
     assert startup_runtime.env_value(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV not in os.environ
+    assert wiped_entries == [(123, 45)]
     assert constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
     assert constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV not in constants_module.shell_extra_env_values(
         extra_env_passthrough="MINDROOM_*",
@@ -585,6 +598,48 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
     )
     assert not constants_module.is_workspace_env_overlay_name_allowed(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV)
     assert subprocess_runtime.env_value(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+
+
+def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_environ(tmp_path: Path) -> None:
+    """Linux exposes the original startup env through /proc, so wipe the credential key entry too."""
+    if not Path("/proc/self/environ").exists():
+        pytest.skip("/proc/self/environ is not available on this platform")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    storage_path = tmp_path / "storage"
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_path,
+        process_env={"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-1"},
+    )
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    env = os.environ.copy()
+    env[constants_module.SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(manifest_path)
+    env[constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV] = encryption_key
+    script = (
+        "import os\n"
+        "from mindroom import constants\n"
+        "from mindroom.api import sandbox_runner as m\n"
+        "runtime_paths = m._startup_runtime_paths_from_env()\n"
+        "raw_environ = open('/proc/self/environ', 'rb').read()\n"
+        f"print(runtime_paths.env_value({constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV!r}))\n"
+        f"print({constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV!r} in os.environ)\n"
+        "print(b'MINDROOM_CREDENTIALS_ENCRYPTION_KEY=' in raw_environ)\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.stdout.splitlines() == [encryption_key, "False", "False"]
 
 
 @pytest.mark.asyncio

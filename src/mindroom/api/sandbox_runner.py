@@ -106,8 +106,8 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
         _startup_manifest_from_env(),
     )
     if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
-        credentials_encryption_key = os.environ.get(constants.CREDENTIALS_ENCRYPTION_KEY_ENV, "").strip()
-        if not credentials_encryption_key:
+        credentials_encryption_key = _startup_secret_from_env(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
+        if credentials_encryption_key is None:
             return startup_runtime_paths
         process_env = dict(startup_runtime_paths.process_env)
         process_env[constants.CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
@@ -140,14 +140,19 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
 
 def startup_runner_token_from_env() -> str | None:
     """Read and remove the runner auth token from process env after startup."""
-    if SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"] not in os.environ:
+    return _startup_secret_from_env(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"])
+
+
+def _startup_secret_from_env(name: str) -> str | None:
+    """Read and remove one startup secret from process env."""
+    if name not in os.environ:
         return None
-    raw_token = os.environ.get(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"], "")
-    raw_process_entry = _process_environment_entry(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"])
+    raw_secret = os.environ.get(name, "")
+    raw_process_entry = _process_environment_entry(name)
     if raw_process_entry is not None:
         _wipe_process_environment_entry(*raw_process_entry)
-    os.environ.pop(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"], None)
-    return raw_token.strip() or None
+    os.environ.pop(name, None)
+    return raw_secret.strip() or None
 
 
 def _process_environment_entry(name: str) -> tuple[int, int] | None:
