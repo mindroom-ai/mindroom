@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from threading import Lock
@@ -14,6 +13,7 @@ from agno.tools import Toolkit
 
 from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
+from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpactState,
@@ -518,34 +518,18 @@ class MatrixApiTools(Toolkit):
         *,
         action: str,
     ) -> str | None:
-        weight = cls._WRITE_ACTION_WEIGHTS[action]
-        key = (context.agent_name, context.requester_id, room_id)
-        now = time.monotonic()
-        cutoff = now - cls._RATE_LIMIT_WINDOW_SECONDS
-
-        with cls._rate_limit_lock:
-            history = cls._recent_write_units[key]
-            while history and history[0] < cutoff:
-                history.popleft()
-            if len(history) + weight > cls._RATE_LIMIT_MAX_UNITS:
-                return (
-                    "Rate limit exceeded for matrix_api writes "
-                    f"({cls._RATE_LIMIT_MAX_UNITS} units per {int(cls._RATE_LIMIT_WINDOW_SECONDS)}s)."
-                )
-            history.extend(now for _ in range(weight))
-
-            stale_keys: list[tuple[str, str, str]] = []
-            for other_key, other_history in cls._recent_write_units.items():
-                if other_key == key:
-                    continue
-                while other_history and other_history[0] < cutoff:
-                    other_history.popleft()
-                if not other_history:
-                    stale_keys.append(other_key)
-            for stale_key in stale_keys:
-                del cls._recent_write_units[stale_key]
-
-        return None
+        return check_rate_limit(
+            lock=cls._rate_limit_lock,
+            recent_actions=cls._recent_write_units,
+            window_seconds=cls._RATE_LIMIT_WINDOW_SECONDS,
+            max_actions=cls._RATE_LIMIT_MAX_UNITS,
+            tool_name="matrix_api",
+            context=context,
+            room_id=room_id,
+            weight=cls._WRITE_ACTION_WEIGHTS[action],
+            limit_label="matrix_api writes",
+            limit_budget_label="units",
+        )
 
     @classmethod
     def _audit_write(

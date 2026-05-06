@@ -22,6 +22,8 @@ def check_rate_limit(
     context: ToolRuntimeContext,
     room_id: str,
     weight: int = 1,
+    limit_label: str | None = None,
+    limit_budget_label: str | None = None,
 ) -> str | None:
     """Enforce a per-(agent, requester, room) sliding-window rate limit.
 
@@ -37,7 +39,11 @@ def check_rate_limit(
         while history and history[0] < cutoff:
             history.popleft()
         if len(history) + action_weight > max_actions:
-            return f"Rate limit exceeded for {tool_name} actions ({max_actions} per {int(window_seconds)}s)."
+            subject = limit_label or f"{tool_name} actions"
+            budget = f"{max_actions} per {int(window_seconds)}s"
+            if limit_budget_label is not None:
+                budget = f"{max_actions} {limit_budget_label} per {int(window_seconds)}s"
+            return f"Rate limit exceeded for {subject} ({budget})."
         history.extend(now for _ in range(action_weight))
 
         stale_keys: list[tuple[str, str, str]] = []

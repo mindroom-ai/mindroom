@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import tempfile
+from collections import defaultdict, deque
 from pathlib import Path
+from threading import Lock
 from unittest.mock import AsyncMock, Mock, patch
 
 import nio
@@ -14,6 +16,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchResponse
+from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -1745,9 +1748,31 @@ async def test_matrix_api_rate_limit_uses_weighted_budget() -> None:
 
     assert [payload["status"] for payload in (first, second, third, fourth)] == ["ok", "ok", "ok", "ok"]
     assert fifth["status"] == "error"
-    assert "Rate limit exceeded" in fifth["message"]
+    assert fifth["message"] == "Rate limit exceeded for matrix_api writes (8 units per 60s)."
     assert ctx.client.room_put_state.await_count == 4
     ctx.client.room_send.assert_not_awaited()
+
+
+def test_matrix_rate_limit_helper_preserves_matrix_api_budget_message() -> None:
+    """The shared helper should keep matrix_api's user-facing units wording."""
+    ctx = _make_context()
+    recent_actions: dict[tuple[str, str, str], deque[float]] = defaultdict(deque)
+
+    error = check_rate_limit(
+        lock=Lock(),
+        recent_actions=recent_actions,
+        window_seconds=60.0,
+        max_actions=2,
+        tool_name="matrix_api",
+        context=ctx,
+        room_id=ctx.room_id,
+        weight=3,
+        limit_label="matrix_api writes",
+        limit_budget_label="units",
+    )
+
+    assert error == "Rate limit exceeded for matrix_api writes (2 units per 60s)."
+    assert list(recent_actions[(ctx.agent_name, ctx.requester_id, ctx.room_id)]) == []
 
 
 @pytest.mark.asyncio
