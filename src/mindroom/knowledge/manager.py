@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import json
 import os
 import subprocess
 import time
@@ -36,6 +35,13 @@ from mindroom.embeddings import (
     effective_knowledge_embedder_signature,
 )
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
+from mindroom.knowledge.index_metadata import (
+    IndexMetadataFields,
+    build_index_metadata_payload,
+    load_index_metadata_payload,
+    parse_index_metadata_fields,
+    write_index_metadata_payload,
+)
 from mindroom.knowledge.redaction import (
     credential_free_url_identity,
     embedded_http_userinfo,
@@ -342,20 +348,6 @@ def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
         "Supported providers: openai, ollama, sentence_transformers"
     )
     raise ValueError(msg)
-
-
-def _coerce_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value) if value.is_integer() else None
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped and stripped.lstrip("-").isdigit():
-            return int(stripped)
-    return None
 
 
 def _credential_free_repo_url(repo_url: str) -> str:
@@ -890,49 +882,24 @@ class KnowledgeManager:
             return True
 
     def _load_persisted_index_state(self) -> _PersistedIndexState | None:
-        if not self._indexing_settings_path.exists():
+        payload = load_index_metadata_payload(self._indexing_settings_path)
+        if payload is None:
             return None
-        try:
-            payload = json.loads(self._indexing_settings_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-
-        if not isinstance(payload, dict):
-            return None
-        raw_settings = payload.get("settings")
-        raw_status = payload.get("status")
-        raw_collection = payload.get("collection")
-        raw_indexed_count = payload.get("indexed_count")
-        indexed_count = _coerce_int(raw_indexed_count)
-        raw_source_signature = payload.get("source_signature")
-        if (
-            not isinstance(raw_settings, list)
-            or not all(isinstance(item, str) for item in raw_settings)
-            or raw_status not in _INDEXING_STATUSES
-            or not isinstance(raw_collection, str)
-            or not raw_collection
-            or indexed_count is None
-            or indexed_count < 0
-            or not isinstance(raw_source_signature, str)
-            or not raw_source_signature
-        ):
-            return None
-        raw_last_published_at = payload.get("last_published_at")
-        last_published_at = (
-            raw_last_published_at if isinstance(raw_last_published_at, str) and raw_last_published_at else None
+        fields = parse_index_metadata_fields(
+            payload,
+            allowed_statuses=_INDEXING_STATUSES,
+            require_complete_fields_for_all_statuses=True,
         )
-        raw_published_revision = payload.get("published_revision")
-        published_revision = (
-            raw_published_revision if isinstance(raw_published_revision, str) and raw_published_revision else None
-        )
+        if fields is None:
+            return None
         return _PersistedIndexState(
-            tuple(raw_settings),
-            cast('Literal["resetting", "indexing", "complete"]', raw_status),
-            collection=raw_collection,
-            last_published_at=last_published_at,
-            published_revision=published_revision,
-            indexed_count=indexed_count,
-            source_signature=raw_source_signature,
+            fields.settings,
+            cast('Literal["resetting", "indexing", "complete"]', fields.status),
+            collection=fields.collection,
+            last_published_at=fields.last_published_at,
+            published_revision=fields.published_revision,
+            indexed_count=fields.indexed_count,
+            source_signature=fields.source_signature,
         )
 
     def _save_persisted_index_state(
@@ -946,30 +913,18 @@ class KnowledgeManager:
         indexed_count: int | None = None,
         source_signature: str | None = None,
     ) -> None:
-        persisted_settings = settings or self._indexing_settings
-        payload: dict[str, object] = {
-            "settings": list(persisted_settings),
-            "status": status,
-        }
-        if collection is not None:
-            payload["collection"] = collection
-        if last_published_at is not None:
-            payload["last_published_at"] = last_published_at
-        if published_revision is not None:
-            payload["published_revision"] = published_revision
-        if indexed_count is not None:
-            payload["indexed_count"] = indexed_count
-        if source_signature is not None:
-            payload["source_signature"] = source_signature
-        tmp_path = self._indexing_settings_path.with_name(
-            f".{self._indexing_settings_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp",
+        payload = build_index_metadata_payload(
+            IndexMetadataFields(
+                settings=settings or self._indexing_settings,
+                status=status,
+                collection=collection,
+                last_published_at=last_published_at,
+                published_revision=published_revision,
+                indexed_count=indexed_count,
+                source_signature=source_signature,
+            ),
         )
-        try:
-            tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-            tmp_path.replace(self._indexing_settings_path)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        write_index_metadata_payload(self._indexing_settings_path, payload)
 
     def _load_git_lfs_hydrated_head(self) -> str | None:
         try:

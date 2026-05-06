@@ -1942,9 +1942,18 @@ path = "mindroom.knowledge.chunking"
 depends_on = []
 
 [[modules]]
+path = "mindroom.knowledge.index_metadata"
+depends_on = []
+visibility = [
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.registry",
+]
+
+[[modules]]
 path = "mindroom.knowledge.registry"
 depends_on = [
     "mindroom.knowledge.availability",
+    "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.manager",
     "mindroom.runtime_resolution",
 ]
@@ -1954,6 +1963,7 @@ path = "mindroom.knowledge.manager"
 depends_on = [
     "mindroom.constants",
     "mindroom.knowledge.chunking",
+    "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.redaction",
 ]
 

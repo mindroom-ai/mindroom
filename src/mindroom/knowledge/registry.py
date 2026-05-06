@@ -8,9 +8,6 @@ importing this module directly.
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +15,14 @@ from typing import TYPE_CHECKING, Literal, ParamSpec, Protocol, TypeVar, cast
 
 import mindroom.knowledge.manager as manager_module
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.index_metadata import (
+    IndexMetadataFields,
+    build_index_metadata_payload,
+    load_index_metadata_payload,
+    optional_metadata_str,
+    parse_index_metadata_fields,
+    write_index_metadata_payload,
+)
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
 
@@ -117,6 +122,7 @@ class _PublishedIndexVectorDb(Protocol):
 _published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
 _PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
 _MAX_PRIVATE_PUBLISHED_INDEXES = 128
+_PUBLISHED_INDEX_STATUSES = {"resetting", "indexing", "complete", "failed"}
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -249,105 +255,58 @@ def published_index_metadata_path(key: PublishedIndexKey) -> Path:
     return _published_index_storage_path(key) / "indexing_settings.json"
 
 
-def _coerce_nonnegative_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int) and value >= 0:
-        return value
-    if isinstance(value, float) and value.is_integer() and value >= 0:
-        return int(value)
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
-    return None
-
-
-def _coerce_status(value: object) -> Literal["resetting", "indexing", "complete", "failed"] | None:
-    if value in {"resetting", "indexing", "complete", "failed"}:
-        return cast('Literal["resetting", "indexing", "complete", "failed"]', value)
-    return None
-
-
 def _coerce_refresh_job(value: object) -> Literal["idle", "pending", "running", "failed"]:
     if value in {"idle", "pending", "running", "failed"}:
         return cast('Literal["idle", "pending", "running", "failed"]', value)
     return "idle"
 
 
-def _optional_str(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
 def load_published_index_state(metadata_path: Path) -> PublishedIndexState | None:
     """Load published index metadata."""
-    if not metadata_path.exists():
+    payload = load_index_metadata_payload(metadata_path)
+    if payload is None:
         return None
-    try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-
-    raw_settings = payload.get("settings")
-    status = _coerce_status(payload.get("status"))
-    if not isinstance(raw_settings, list) or not all(isinstance(item, str) for item in raw_settings) or status is None:
-        return None
-
-    collection = _optional_str(payload.get("collection"))
-    indexed_count = _coerce_nonnegative_int(payload.get("indexed_count"))
-    source_signature = _optional_str(payload.get("source_signature"))
-    if status == "complete" and (collection is None or indexed_count is None or source_signature is None):
+    fields = parse_index_metadata_fields(payload, allowed_statuses=_PUBLISHED_INDEX_STATUSES)
+    if fields is None:
         return None
 
     return PublishedIndexState(
-        settings=tuple(raw_settings),
-        status=status,
-        collection=collection,
-        last_published_at=_optional_str(payload.get("last_published_at")),
-        published_revision=_optional_str(payload.get("published_revision")),
-        indexed_count=indexed_count,
-        source_signature=source_signature,
+        settings=fields.settings,
+        status=cast('Literal["resetting", "indexing", "complete", "failed"]', fields.status),
+        collection=fields.collection,
+        last_published_at=fields.last_published_at,
+        published_revision=fields.published_revision,
+        indexed_count=fields.indexed_count,
+        source_signature=fields.source_signature,
         refresh_job=_coerce_refresh_job(payload.get("refresh_job")),
-        reason=_optional_str(payload.get("reason")),
-        last_error=_optional_str(payload.get("last_error")),
-        updated_at=_optional_str(payload.get("updated_at")),
-        last_refresh_at=_optional_str(payload.get("last_refresh_at")),
+        reason=optional_metadata_str(payload.get("reason")),
+        last_error=optional_metadata_str(payload.get("last_error")),
+        updated_at=optional_metadata_str(payload.get("updated_at")),
+        last_refresh_at=optional_metadata_str(payload.get("last_refresh_at")),
     )
 
 
 def save_published_index_state(metadata_path: Path, state: PublishedIndexState) -> None:
     """Atomically persist published index metadata."""
-    payload: dict[str, object] = {
-        "settings": list(state.settings),
-        "status": state.status,
-        "refresh_job": state.refresh_job,
-    }
-    payload.update(
-        {
-            key: value
-            for key, value in (
-                ("collection", state.collection),
-                ("last_published_at", state.last_published_at),
-                ("published_revision", state.published_revision),
-                ("indexed_count", state.indexed_count),
-                ("source_signature", state.source_signature),
-                ("reason", state.reason),
-                ("last_error", state.last_error),
-                ("updated_at", state.updated_at),
-                ("last_refresh_at", state.last_refresh_at),
-            )
-            if value is not None
+    payload = build_index_metadata_payload(
+        IndexMetadataFields(
+            settings=state.settings,
+            status=state.status,
+            collection=state.collection,
+            last_published_at=state.last_published_at,
+            published_revision=state.published_revision,
+            indexed_count=state.indexed_count,
+            source_signature=state.source_signature,
+        ),
+        extra_fields={
+            "refresh_job": state.refresh_job,
+            "reason": state.reason,
+            "last_error": state.last_error,
+            "updated_at": state.updated_at,
+            "last_refresh_at": state.last_refresh_at,
         },
     )
-
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        tmp_path.replace(metadata_path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    write_index_metadata_payload(metadata_path, payload)
 
 
 def published_index_refresh_state(
