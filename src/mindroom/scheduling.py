@@ -16,7 +16,7 @@ import humanize
 import nio
 from agno.agent import Agent
 from cron_descriptor import get_description
-from croniter import croniter
+from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field
 
 from mindroom import model_loading
@@ -55,7 +55,7 @@ _SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 _MESSAGE_PREVIEW_LENGTH = 50
 
 # Shared validation message for edit attempts that change task type.
-SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
+_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
 
 # How often running tasks should re-check persisted Matrix state for edits/cancellations.
 _TASK_STATE_POLL_INTERVAL_SECONDS = 30
@@ -153,6 +153,26 @@ class ScheduledTaskRecord:
 
 
 @dataclass(frozen=True)
+class ScheduledTaskReadModel:
+    """Display-neutral scheduled task fields derived from persisted state."""
+
+    task_id: str
+    room_id: str
+    status: str
+    schedule_type: Literal["once", "cron"]
+    execute_at: datetime | None
+    next_run_at: datetime | None
+    cron_expression: str | None
+    cron_description: str | None
+    description: str
+    message: str
+    thread_id: str | None
+    new_thread: bool
+    created_by: str | None
+    created_at: datetime | None
+
+
+@dataclass(frozen=True)
 class SchedulingRuntime:
     """Live scheduling collaborators required to create or edit running tasks."""
 
@@ -183,6 +203,111 @@ def _parse_datetime(value: object) -> datetime | None:
         return datetime.fromisoformat(normalized)
     except ValueError:
         return None
+
+
+def _raise_schedule_edit_error(message: str) -> typing.NoReturn:
+    raise ValueError(message)
+
+
+def build_scheduled_task_read_model(
+    task: ScheduledTaskRecord,
+    current_time: datetime | None = None,
+) -> ScheduledTaskReadModel:
+    """Build API/chat-neutral display fields for a scheduled task."""
+    workflow = task.workflow
+    cron_expression = workflow.cron_schedule.to_cron_string() if workflow.cron_schedule else None
+    cron_description = workflow.cron_schedule.to_natural_language() if workflow.cron_schedule else None
+    next_run_at = workflow.execute_at if workflow.schedule_type == "once" else None
+    if workflow.schedule_type == "cron" and cron_expression:
+        try:
+            next_run_at = croniter(cron_expression, current_time or datetime.now(UTC)).get_next(datetime)
+        except CroniterError:
+            next_run_at = None
+
+    return ScheduledTaskReadModel(
+        task_id=task.task_id,
+        room_id=task.room_id,
+        status=task.status,
+        schedule_type=workflow.schedule_type,
+        execute_at=workflow.execute_at,
+        next_run_at=next_run_at,
+        cron_expression=cron_expression,
+        cron_description=cron_description,
+        description=workflow.description,
+        message=workflow.message,
+        thread_id=workflow.thread_id,
+        new_thread=workflow.new_thread,
+        created_by=workflow.created_by,
+        created_at=task.created_at,
+    )
+
+
+def scheduled_task_read_sort_key(task: ScheduledTaskReadModel) -> tuple[int, datetime]:
+    """Sort pending tasks first, then by next execution time."""
+    status_rank = 0 if task.status == "pending" else 1
+    scheduled_time = task.next_run_at or datetime.max.replace(tzinfo=UTC)
+    return (status_rank, scheduled_time)
+
+
+def build_edited_scheduled_workflow(  # noqa: C901
+    existing_workflow: ScheduledWorkflow,
+    room_id: str,
+    *,
+    message: str | None = None,
+    description: str | None = None,
+    schedule_type: Literal["once", "cron"] | None = None,
+    execute_at: datetime | None = None,
+    cron_expression: str | None = None,
+) -> ScheduledWorkflow:
+    """Build a validated patch-style workflow edit while preserving immutable metadata."""
+    if schedule_type and schedule_type != existing_workflow.schedule_type:
+        _raise_schedule_edit_error(_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
+
+    schedule_type = existing_workflow.schedule_type
+    if schedule_type == "once":
+        if cron_expression is not None:
+            _raise_schedule_edit_error("cron_expression is only valid for cron schedules")
+        execute_at = execute_at or existing_workflow.execute_at
+        if execute_at is None:
+            _raise_schedule_edit_error("execute_at is required for one-time schedules")
+        cron_schedule = None
+    else:
+        if execute_at is not None:
+            _raise_schedule_edit_error("execute_at is only valid for one-time schedules")
+        cron_schedule = existing_workflow.cron_schedule
+        if cron_expression is not None:
+            raw_expression = cron_expression.strip()
+            fields = raw_expression.split()
+            if len(fields) != 5:
+                _raise_schedule_edit_error(
+                    "Invalid cron expression: Cron expression must have exactly 5 fields: minute hour day month weekday",
+                )
+            try:
+                croniter(raw_expression, datetime.now(UTC))
+            except (ValueError, CroniterError) as e:
+                _raise_schedule_edit_error(f"Invalid cron expression: {e!s}")
+            minute, hour, day, month, weekday = fields
+            cron_schedule = CronSchedule(minute=minute, hour=hour, day=day, month=month, weekday=weekday)
+        if cron_schedule is None:
+            _raise_schedule_edit_error("cron_expression is required for cron schedules")
+        execute_at = None
+
+    message_value = (message if message is not None else existing_workflow.message).strip()
+    if not message_value:
+        _raise_schedule_edit_error("message cannot be empty")
+    description_value = (description if description is not None else existing_workflow.description).strip()
+
+    return ScheduledWorkflow(
+        schedule_type=schedule_type,
+        execute_at=execute_at,
+        cron_schedule=cron_schedule,
+        message=message_value,
+        description=description_value or message_value,
+        created_by=existing_workflow.created_by,
+        thread_id=existing_workflow.thread_id,
+        room_id=room_id,
+        new_thread=existing_workflow.new_thread,
+    )
 
 
 def _parse_scheduled_task_record(
@@ -615,7 +740,7 @@ async def save_edited_scheduled_task(
         raise ValueError(msg)
 
     if workflow.schedule_type != existing_task.workflow.schedule_type:
-        raise ValueError(SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
+        raise ValueError(_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
 
     await _persist_scheduled_task_state(
         client=client,

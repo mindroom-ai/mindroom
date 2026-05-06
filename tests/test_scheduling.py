@@ -23,6 +23,8 @@ from mindroom.scheduling import (
     SchedulingRuntime,
     _run_cron_task,
     _run_once_task,
+    build_edited_scheduled_workflow,
+    build_scheduled_task_read_model,
     cancel_all_scheduled_tasks,
     clear_deferred_overdue_tasks,
     drain_deferred_overdue_tasks,
@@ -32,6 +34,7 @@ from mindroom.scheduling import (
     restore_scheduled_tasks,
     save_edited_scheduled_task,
     schedule_task,
+    scheduled_task_read_sort_key,
 )
 from tests.conftest import bind_runtime_paths, make_event_cache_mock
 
@@ -91,6 +94,115 @@ def _record(
         created_at=datetime.now(UTC),
         workflow=workflow,
     )
+
+
+def test_scheduled_task_read_model_derives_display_fields_and_sort_order() -> None:
+    """Schedule read models should preserve API-visible derived fields."""
+    current_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    once_record = _record(
+        "once123",
+        ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=datetime(2026, 1, 2, 9, 30, tzinfo=UTC),
+            message="one-time message",
+            description="One-time task",
+            new_thread=True,
+        ),
+        status="cancelled",
+    )
+    cron_record = _record(
+        "cron123",
+        ScheduledWorkflow(
+            schedule_type="cron",
+            cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+            message="cron message",
+            description="Cron task",
+            created_by="@user:server",
+            thread_id="$thread1",
+        ),
+    )
+
+    once_model = build_scheduled_task_read_model(once_record, current_time=current_time)
+    cron_model = build_scheduled_task_read_model(cron_record, current_time=current_time)
+
+    assert once_model.task_id == "once123"
+    assert once_model.status == "cancelled"
+    assert once_model.next_run_at == datetime(2026, 1, 2, 9, 30, tzinfo=UTC)
+    assert once_model.cron_expression is None
+    assert once_model.new_thread is True
+    assert cron_model.cron_expression == "0 9 * * *"
+    assert cron_model.cron_description == "At 09:00"
+    assert cron_model.next_run_at == datetime(2026, 1, 2, 9, 0, tzinfo=UTC)
+    assert cron_model.created_by == "@user:server"
+    assert cron_model.thread_id == "$thread1"
+    assert sorted([once_model, cron_model], key=scheduled_task_read_sort_key) == [cron_model, once_model]
+
+
+def test_build_edited_scheduled_workflow_preserves_metadata_and_strips_text() -> None:
+    """Patch-style edits should preserve ownership/thread metadata while normalizing text."""
+    existing = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="original message",
+        description="Original description",
+        created_by="@user:server",
+        thread_id="$thread1",
+        room_id="!old:server",
+        new_thread=True,
+    )
+
+    updated = build_edited_scheduled_workflow(
+        existing,
+        room_id="!new:server",
+        schedule_type="cron",
+        cron_expression="30 8 * * 1-5",
+        message="  updated message  ",
+        description="   ",
+    )
+
+    assert updated == ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="30", hour="8", day="*", month="*", weekday="1-5"),
+        execute_at=None,
+        message="updated message",
+        description="updated message",
+        created_by="@user:server",
+        thread_id="$thread1",
+        room_id="!new:server",
+        new_thread=True,
+    )
+
+
+def test_build_edited_scheduled_workflow_rejects_invalid_field_combinations() -> None:
+    """Patch-style edits should keep existing API validation messages."""
+    existing_once = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 1, 2, 9, 30, tzinfo=UTC),
+        message="original message",
+        description="Original description",
+    )
+    existing_cron = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="original message",
+        description="Original description",
+    )
+
+    with pytest.raises(ValueError, match="Changing schedule_type is not supported"):
+        build_edited_scheduled_workflow(existing_once, room_id="!room:server", schedule_type="cron")
+
+    with pytest.raises(ValueError, match="cron_expression is only valid for cron schedules"):
+        build_edited_scheduled_workflow(existing_once, room_id="!room:server", cron_expression="0 9 * * *")
+
+    with pytest.raises(ValueError, match="execute_at is only valid for one-time schedules"):
+        build_edited_scheduled_workflow(
+            existing_cron,
+            room_id="!room:server",
+            execute_at=datetime(2026, 1, 3, 9, 30, tzinfo=UTC),
+        )
+
+    with pytest.raises(ValueError, match="message cannot be empty"):
+        build_edited_scheduled_workflow(existing_once, room_id="!room:server", message="   ")
 
 
 @pytest.fixture(autouse=True)
