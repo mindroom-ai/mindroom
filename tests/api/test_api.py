@@ -4020,6 +4020,19 @@ def test_trusted_upstream_strict_jwt_accepts_valid_token(
     }
 
 
+def test_trusted_upstream_strict_jwt_accepts_non_ascii_identity() -> None:
+    """Strict trusted upstream auth should handle non-ASCII identifier values."""
+    user_id, email = auth._verified_trusted_upstream_identity(
+        auth._TrustedUpstreamAuthSettings(email_header="X-Trusted-Email"),
+        "üser_123",
+        "álîçé@example.com",
+        auth._TrustedUpstreamJwtIdentity(email="álîçé@example.com", user_id="üser_123"),
+    )
+
+    assert user_id == "üser_123"
+    assert email == "álîçé@example.com"
+
+
 def test_trusted_upstream_strict_jwt_accepts_email_claim_as_user_id_without_user_id_claim(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
