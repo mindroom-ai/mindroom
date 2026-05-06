@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 import mindroom.constants as constants_module
 from mindroom.agents import ensure_default_agent_workspaces
+from mindroom.cli import config as config_cli
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
 from mindroom.cli.main import _load_active_config_or_exit, app
 from mindroom.config.main import Config
@@ -682,6 +683,22 @@ class TestConfigInit:
         content = target.read_text()
         assert "provider: openrouter" in content
         assert "anthropic/claude-sonnet-4.6" in content
+
+    def test_provider_env_template_uses_canonical_provider_env_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Provider .env templates should derive required keys from the canonical provider mapping."""
+        monkeypatch.setattr(
+            config_cli,
+            "env_key_for_provider",
+            lambda provider: "OPENAI_API_KEY" if provider == "openrouter" else None,
+        )
+
+        env_content = config_cli._provider_env_template("openrouter")
+
+        assert "\nOPENAI_API_KEY=your-openai-key-here" in f"\n{env_content}"
+        assert "\n# OPENROUTER_API_KEY=your-openrouter-key-here" in f"\n{env_content}"
 
     def test_init_codex_preset_uses_codex_models(self, tmp_path: Path) -> None:
         """Config init --provider codex uses Codex subscription defaults."""

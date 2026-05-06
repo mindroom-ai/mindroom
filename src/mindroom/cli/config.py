@@ -75,13 +75,6 @@ _DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
     "vertexai_claude": ("vertexai_claude", "claude-sonnet-4-6"),
 }
 
-_REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
-    "anthropic": ("ANTHROPIC_API_KEY",),
-    "codex": (),
-    "openai": ("OPENAI_API_KEY",),
-    "openrouter": ("OPENROUTER_API_KEY",),
-    "vertexai_claude": (),
-}
 _PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
     ("MATRIX_HOMESERVER", "https://mindroom.chat"),
     ("MATRIX_SERVER_NAME", "mindroom.chat"),
@@ -1014,7 +1007,7 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:
         # or set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
         """).rstrip()
 
-    required_env_keys = set(_REQUIRED_ENV_KEYS[provider_preset])
+    required_env_key = env_key_for_provider(provider_preset)
     key_placeholders = {
         "ANTHROPIC_API_KEY": "your-anthropic-key-here",
         "OPENAI_API_KEY": "your-openai-key-here",
@@ -1022,6 +1015,6 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:
     }
     provider_lines: list[str] = ["# AI provider API keys (set the uncommented keys for this preset)"]
     for env_key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
-        prefix = "" if env_key in required_env_keys else "# "
+        prefix = "" if env_key == required_env_key else "# "
         provider_lines.append(f"{prefix}{env_key}={key_placeholders[env_key]}")
     return "\n".join(provider_lines)
