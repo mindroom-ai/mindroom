@@ -36,6 +36,7 @@ from mindroom.matrix.client_visible_messages import (
     trusted_visible_sender_ids,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -339,17 +340,10 @@ class MatrixMessageOperations:
             return self._result("error", action="react", message="target event_id is required.")
 
         reaction = message.strip() if message and message.strip() else "👍"
-        content = {
-            "m.relates_to": {
-                "rel_type": "m.annotation",
-                "event_id": target,
-                "key": reaction,
-            },
-        }
         response = await context.client.room_send(
             room_id=room_id,
             message_type="m.reaction",
-            content=content,
+            content=build_reaction_content(target, reaction),
             ignore_unverified_devices=ignore_unverified_devices_for_config(context.config),
         )
         if isinstance(response, nio.RoomSendResponse):

@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 import yaml
 
@@ -21,6 +22,7 @@ from mindroom.commands.config_commands import (
     apply_config_change,
     handle_config_command,
 )
+from mindroom.commands.config_confirmation import add_confirmation_reactions
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
@@ -34,6 +36,34 @@ from tests.conftest import make_event_cache_mock
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
     return resolve_runtime_paths(config_path=config_path)
+
+
+@pytest.mark.asyncio
+async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations() -> None:
+    """Config confirmation should add canonical Matrix annotation reactions."""
+    client = AsyncMock()
+    response = MagicMock(spec=nio.RoomSendResponse)
+    client.room_send.return_value = response
+    config = SimpleNamespace(matrix_delivery=SimpleNamespace(ignore_unverified_devices=False))
+
+    await add_confirmation_reactions(client, "!room:example.org", "$preview", config=config)
+
+    assert [call.kwargs["content"] for call in client.room_send.await_args_list] == [
+        {
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": "$preview",
+                "key": "✅",
+            },
+        },
+        {
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": "$preview",
+                "key": "❌",
+            },
+        },
+    ]
 
 
 class TestCommandParser:

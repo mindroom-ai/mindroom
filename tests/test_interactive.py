@@ -305,6 +305,22 @@ Based on your choice, I'll proceed accordingly."""
 
         # Should have added reactions
         assert mock_client.room_send.call_count == 2
+        assert [call.kwargs["content"] for call in mock_client.room_send.await_args_list] == [
+            {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": event_id,
+                    "key": "🚀",
+                },
+            },
+            {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": event_id,
+                    "key": "🔍",
+                },
+            },
+        ]
 
     @pytest.mark.asyncio
     async def test_handle_interactive_response_invalid_json(self, mock_client: AsyncMock) -> None:  # noqa: ARG002

@@ -13,6 +13,7 @@ from agno.run.cancel import acancel_run
 from mindroom.cancellation import USER_STOP_CANCEL_MSG, request_task_cancel
 from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.logging_config import get_logger
+from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -367,16 +368,11 @@ class StopManager:
             **self._log_target(tracked.target),
         )
         try:
+            reaction_content = build_reaction_content(message_id, "🛑")
             response = await client.room_send(
                 room_id=tracked.target.room_id,
                 message_type="m.reaction",
-                content={
-                    "m.relates_to": {
-                        "rel_type": "m.annotation",
-                        "event_id": message_id,
-                        "key": "🛑",
-                    },
-                },
+                content=reaction_content,
                 ignore_unverified_devices=ignore_unverified_devices_for_config(config),
             )
             if isinstance(response, nio.RoomSendResponse):
@@ -396,13 +392,7 @@ class StopManager:
                             "room_id": tracked.target.room_id,
                             "event_id": event_id,
                             "sender": client.user_id if isinstance(client.user_id, str) else None,
-                            "content": {
-                                "m.relates_to": {
-                                    "rel_type": "m.annotation",
-                                    "event_id": message_id,
-                                    "key": "🛑",
-                                },
-                            },
+                            "content": reaction_content,
                         },
                     )
                 return event_id
