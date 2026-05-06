@@ -5,10 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
@@ -24,6 +23,7 @@ from mindroom.matrix.client_delivery import send_file_message
 from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
     ensure_output_path_schema_optional,
+    saved_tool_output_receipt,
     validate_output_path,
     validate_output_path_syntax,
     write_bytes_to_output_path,
@@ -511,7 +511,7 @@ class AttachmentTools(Toolkit):
             return validate_output_path(local_policy, output_path)
         return "mindroom_output_path requires an agent workspace in this runtime path."
 
-    async def _save_attachment_to_output_path(  # noqa: C901, PLR0911, PLR0912
+    async def _save_attachment_to_output_path(  # noqa: C901, PLR0911
         self,
         context: ToolRuntimeContext,
         *,
@@ -588,13 +588,12 @@ class AttachmentTools(Toolkit):
                 "ok",
                 attachment_id=requested_attachment_id,
                 attachment=attachment_payload,
-                mindroom_tool_output={
-                    "status": "saved_to_file",
-                    "path": worker_receipt.worker_path,
-                    "bytes": worker_receipt.size_bytes,
-                    "format": "binary",
-                    "sha256": worker_receipt.sha256,
-                },
+                mindroom_tool_output=saved_tool_output_receipt(
+                    path=worker_receipt.worker_path,
+                    byte_count=worker_receipt.size_bytes,
+                    output_format="binary",
+                    sha256=worker_receipt.sha256,
+                ),
             )
 
         if local_policy is None:
@@ -607,24 +606,9 @@ class AttachmentTools(Toolkit):
         if isinstance(write_result, str):
             return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=write_result)
 
-        output_receipt = write_result.receipt["mindroom_tool_output"]
-        if not isinstance(output_receipt, Mapping):
-            return _attachment_tool_payload(
-                "error",
-                attachment_id=requested_attachment_id,
-                message="Failed to build attachment save receipt.",
-            )
-        output_receipt_map = cast("Mapping[str, object]", output_receipt)
-        receipt_path = output_receipt_map.get("path")
-        if not isinstance(receipt_path, str):
-            return _attachment_tool_payload(
-                "error",
-                attachment_id=requested_attachment_id,
-                message="Failed to build attachment save receipt.",
-            )
         attachment_payload.update(
             {
-                "save_path": receipt_path,
+                "save_path": output_path,
                 "size_bytes": write_result.byte_count,
                 "sha256": sha256,
             },
@@ -633,10 +617,13 @@ class AttachmentTools(Toolkit):
             "ok",
             attachment_id=requested_attachment_id,
             attachment=attachment_payload,
-            mindroom_tool_output={
-                **output_receipt,
-                "sha256": sha256,
-            },
+            mindroom_tool_output=saved_tool_output_receipt(
+                path=output_path,
+                byte_count=write_result.byte_count,
+                output_format="binary",
+                overwritten=write_result.overwritten,
+                sha256=sha256,
+            ),
         )
 
     async def register_attachment(self, file_path: str) -> str:

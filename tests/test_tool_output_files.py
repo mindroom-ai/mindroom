@@ -31,6 +31,7 @@ from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
     _wrap_function_for_output_files,
     ensure_output_path_schema_optional,
+    saved_tool_output_receipt,
     wrap_toolkit_for_output_files,
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
@@ -105,6 +106,26 @@ def test_ensure_output_path_schema_optional_preserves_custom_schema_shape() -> N
         "description": "Context attachment.",
     }
     _assert_output_path_schema_is_optional(function)
+
+
+def test_saved_tool_output_receipt_keeps_canonical_key_order() -> None:
+    receipt = saved_tool_output_receipt(
+        path="notes/result.txt",
+        byte_count=5,
+        output_format="binary",
+        overwritten=False,
+        sha256="abc123",
+    )
+
+    assert list(receipt) == ["status", "path", "bytes", "format", "overwritten", "sha256"]
+    assert receipt == {
+        "status": "saved_to_file",
+        "path": "notes/result.txt",
+        "bytes": 5,
+        "format": "binary",
+        "overwritten": False,
+        "sha256": "abc123",
+    }
 
 
 def _plugin(*callbacks: object) -> object:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import stat
 import time
@@ -210,6 +211,14 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_writes_prima
     assert payload["mindroom_tool_output"]["status"] == "saved_to_file"
     assert payload["mindroom_tool_output"]["path"] == "inputs/sample.txt"
     assert payload["mindroom_tool_output"]["format"] == "binary"
+    assert payload["mindroom_tool_output"] == {
+        "status": "saved_to_file",
+        "path": "inputs/sample.txt",
+        "bytes": 5,
+        "format": "binary",
+        "overwritten": False,
+        "sha256": hashlib.sha256(b"hello").hexdigest(),
+    }
 
 
 @pytest.mark.asyncio
@@ -388,7 +397,13 @@ async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_w
 
     assert payload["status"] == "ok"
     assert payload["attachment"]["save_path"] == "inputs/sample.txt"
-    assert payload["mindroom_tool_output"]["path"] == "inputs/sample.txt"
+    assert payload["mindroom_tool_output"] == {
+        "status": "saved_to_file",
+        "path": "inputs/sample.txt",
+        "bytes": 5,
+        "format": "binary",
+        "sha256": "sha256",
+    }
     assert not any(workspace.rglob("*"))
     mocked_save.assert_called_once()
     assert mocked_save.call_args.kwargs["worker_tools_override"] == worker_tools_override

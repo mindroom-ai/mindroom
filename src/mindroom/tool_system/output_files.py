@@ -113,14 +113,35 @@ def _success_receipt(
     overwritten: bool,
 ) -> dict[str, object]:
     return {
-        "mindroom_tool_output": {
-            "status": "saved_to_file",
-            "path": path,
-            "bytes": byte_count,
-            "format": output_format,
-            "overwritten": overwritten,
-        },
+        "mindroom_tool_output": saved_tool_output_receipt(
+            path=path,
+            byte_count=byte_count,
+            output_format=output_format,
+            overwritten=overwritten,
+        ),
     }
+
+
+def saved_tool_output_receipt(
+    *,
+    path: str,
+    byte_count: int,
+    output_format: Literal["text", "json", "binary"],
+    overwritten: bool | None = None,
+    sha256: str | None = None,
+) -> dict[str, object]:
+    """Return the canonical inner ``mindroom_tool_output`` saved-file receipt."""
+    receipt: dict[str, object] = {
+        "status": "saved_to_file",
+        "path": path,
+        "bytes": byte_count,
+        "format": output_format,
+    }
+    if overwritten is not None:
+        receipt["overwritten"] = overwritten
+    if sha256 is not None:
+        receipt["sha256"] = sha256
+    return receipt
 
 
 def _error_receipt(error: str) -> dict[str, object]:
