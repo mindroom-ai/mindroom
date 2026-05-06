@@ -56,6 +56,7 @@ data:
   INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE: {{ $trustedUpstreamAuth.jwtAudience | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER: {{ $trustedUpstreamAuth.jwtIssuer | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM: {{ $trustedUpstreamAuth.jwtEmailClaim | default "email" | quote }}
+  INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM: {{ $trustedUpstreamAuth.jwtUserIdClaim | default "" | quote }}
   DO_NOT_TRACK: "1"
   NEXT_TELEMETRY_DISABLED: "1"
   TURBO_TELEMETRY_DISABLED: "1"

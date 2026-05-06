@@ -168,6 +168,10 @@ spec:
           value: {{ $trustedUpstreamAuth.jwtIssuer | quote }}
         - name: MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM
           value: {{ $trustedUpstreamAuth.jwtEmailClaim | default "email" | quote }}
+        {{- if $trustedUpstreamAuth.jwtUserIdClaim }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM
+          value: {{ $trustedUpstreamAuth.jwtUserIdClaim | quote }}
+        {{- end }}
         {{- end }}
         {{- end }}
         - name: MINDROOM_PLATFORM_LOGIN_URL

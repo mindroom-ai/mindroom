@@ -56,15 +56,18 @@ MINDROOM_TRUSTED_UPSTREAM_JWKS_URL=https://gateway.example.com/.well-known/jwks.
 MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE=mindroom-dashboard
 MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER=https://gateway.example.com
 MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM=email
+MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM=sub
 ```
 
 `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT` is disabled by default to preserve existing header-only deployments.
 When it is set to true, `MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER`, `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL`, `MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE`, and `MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER` are required.
 `MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM` defaults to `email`.
+Set `MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM` when the trusted user ID header contains a stable ID that is distinct from the email address.
 MindRoom caches the JWKS response briefly and refreshes it automatically so key rotation can take effect without fetching keys on every request.
 If the JWT is missing, expired, signed by an unknown key, issued by the wrong issuer, meant for the wrong audience, missing the configured email claim, or inconsistent with the configured trusted email header, MindRoom returns `401`.
-The trusted user ID header must match the verified JWT claim.
-When a trusted email header is configured, that email value must also match the verified JWT claim.
+When `MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM` is set, the trusted user ID header must match that verified JWT claim.
+When `MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM` is not set, the trusted user ID header must match the verified email claim because no separate signed user ID is available.
+When a trusted email header is configured, that email value must match `MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM`.
 
 ## Instance Chart
 
@@ -83,6 +86,7 @@ trustedUpstreamAuth:
   jwtAudience: mindroom-dashboard
   jwtIssuer: https://gateway.example.com
   jwtEmailClaim: email
+  jwtUserIdClaim: sub
 ```
 
 The chart renders these values as the `MINDROOM_TRUSTED_UPSTREAM_*` runtime environment variables.
@@ -105,6 +109,7 @@ provisioner:
     jwtAudience: mindroom-dashboard
     jwtIssuer: https://gateway.example.com
     jwtEmailClaim: email
+    jwtUserIdClaim: sub
 ```
 
 The platform chart renders these as `INSTANCE_TRUSTED_UPSTREAM_*` variables on the provisioner deployment.

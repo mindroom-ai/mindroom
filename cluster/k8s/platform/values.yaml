@@ -45,6 +45,7 @@ provisioner:
     jwtAudience: ""
     jwtIssuer: ""
     jwtEmailClaim: "email"
+    jwtUserIdClaim: ""
 
 # Optional AI API keys
 apiKeys:

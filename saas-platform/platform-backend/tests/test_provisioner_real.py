@@ -129,30 +129,28 @@ class TestProvisionerCommandValidation:
             return (0, "Success", "")
 
         with (
-            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
-            patch("backend.routes.provisioner.INSTANCE_BASE_DOMAIN", "local"),
-            patch("backend.routes.provisioner.INSTANCE_STORAGE_CLASS_NAME", "standard"),
-            patch("backend.routes.provisioner.INSTANCE_MINDROOM_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest"),
-            patch("backend.routes.provisioner.INSTANCE_MINDROOM_IMAGE_PULL_POLICY", "IfNotPresent"),
-            patch("backend.routes.provisioner.INSTANCE_SYNAPSE_IMAGE", "matrixdotorg/synapse:latest"),
-            patch("backend.routes.provisioner.INSTANCE_SYNAPSE_IMAGE_PULL_POLICY", "IfNotPresent"),
-            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED", "true"),
-            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER", "X-MindRoom-User-Id"),
-            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER", "X-MindRoom-User-Email"),
-            patch(
-                "backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER",
-                "X-MindRoom-Matrix-User-Id",
+            patch.multiple(
+                "backend.routes.provisioner",
+                PROVISIONER_API_KEY="test-key",
+                INSTANCE_BASE_DOMAIN="local",
+                INSTANCE_STORAGE_CLASS_NAME="standard",
+                INSTANCE_MINDROOM_IMAGE="ghcr.io/mindroom-ai/mindroom:latest",
+                INSTANCE_MINDROOM_IMAGE_PULL_POLICY="IfNotPresent",
+                INSTANCE_SYNAPSE_IMAGE="matrixdotorg/synapse:latest",
+                INSTANCE_SYNAPSE_IMAGE_PULL_POLICY="IfNotPresent",
+                INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
+                INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER="X-MindRoom-User-Id",
+                INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER="X-MindRoom-User-Email",
+                INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER="X-MindRoom-Matrix-User-Id",
+                INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE="@{localpart}:example.org",
+                INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT="true",
+                INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER="X-Trusted-Jwt",
+                INSTANCE_TRUSTED_UPSTREAM_JWKS_URL="https://issuer.example/jwks",
+                INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE="mindroom-dashboard",
+                INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER="https://issuer.example",
+                INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM="email",
+                INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM="sub",
             ),
-            patch(
-                "backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
-                "@{localpart}:example.org",
-            ),
-            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT", "true"),
-            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER", "X-Trusted-Jwt"),
-            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_JWKS_URL", "https://issuer.example/jwks"),
-            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE", "mindroom-dashboard"),
-            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER", "https://issuer.example"),
-            patch("backend.routes.provisioner.INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM", "email"),
             patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
             patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
         ):
@@ -189,6 +187,7 @@ class TestProvisionerCommandValidation:
         assert set_args["trustedUpstreamAuth.jwtAudience"] == "mindroom-dashboard"
         assert set_args["trustedUpstreamAuth.jwtIssuer"] == "https://issuer.example"
         assert set_args["trustedUpstreamAuth.jwtEmailClaim"] == "email"
+        assert set_args["trustedUpstreamAuth.jwtUserIdClaim"] == "sub"
 
     @pytest.mark.asyncio
     async def test_kubectl_scale_command_uses_correct_syntax(self):
