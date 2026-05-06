@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
-import hashlib
 import inspect
 import io
 import json
@@ -57,7 +55,7 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     write_bytes_to_output_path,
 )
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, to_json_compatible
+from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -1316,22 +1314,6 @@ def _save_attachment_output_path(payload: SandboxRunnerSaveAttachmentRequest) ->
     return payload.mindroom_output_path if payload.mindroom_output_path is not None else payload.save_to_disk
 
 
-def _decode_attachment_save_bytes(payload: SandboxRunnerSaveAttachmentRequest) -> bytes | str:
-    """Decode and integrity-check one save-attachment payload."""
-    if payload.size_bytes is not None and (type(payload.size_bytes) is not int or payload.size_bytes < 0):
-        return "Attachment size_bytes must be a non-negative integer."
-    try:
-        payload_bytes = base64.b64decode(payload.bytes_b64.encode("ascii"), validate=True)
-    except (UnicodeEncodeError, binascii.Error):
-        return "Attachment bytes are not valid base64."
-    if payload.size_bytes is not None and len(payload_bytes) != payload.size_bytes:
-        return "Attachment byte length does not match the request receipt."
-    actual_sha256 = hashlib.sha256(payload_bytes).hexdigest()
-    if not secrets.compare_digest(actual_sha256, payload.sha256):
-        return "Attachment SHA256 does not match the request payload."
-    return payload_bytes
-
-
 @router.post("/save-attachment", response_model=SandboxRunnerSaveAttachmentResponse)
 async def save_attachment_to_worker(  # noqa: C901, PLR0911
     request: Request,
@@ -1361,7 +1343,11 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     if raw_path_error is not None:
         return SandboxRunnerSaveAttachmentResponse(ok=False, error=raw_path_error, failure_kind="tool")
 
-    decoded_bytes = _decode_attachment_save_bytes(payload)
+    decoded_bytes = decode_attachment_save_bytes(
+        bytes_b64=payload.bytes_b64,
+        sha256=payload.sha256,
+        size_bytes=payload.size_bytes,
+    )
     if isinstance(decoded_bytes, str):
         return SandboxRunnerSaveAttachmentResponse(ok=False, error=decoded_bytes, failure_kind="tool")
 
