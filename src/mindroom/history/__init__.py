@@ -9,6 +9,7 @@ from mindroom.history.compaction import (
 from mindroom.history.manual import (
     request_compaction_before_next_reply,
 )
+from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     ScopeSessionContext,
@@ -64,6 +65,7 @@ __all__ = [
     "close_agent_runtime_state_dbs",
     "close_team_runtime_state_dbs",
     "compute_prompt_token_breakdown",
+    "context_budget_after_reserve",
     "create_scope_session_storage",
     "estimate_preparation_static_tokens",
     "estimate_preparation_static_tokens_for_team",
