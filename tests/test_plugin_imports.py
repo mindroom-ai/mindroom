@@ -6,15 +6,15 @@ import sys
 from types import ModuleType
 from typing import TYPE_CHECKING
 
-import pytest
-
 from mindroom.tool_system import plugin_imports
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
 
-def test_prepare_plugin_module_execution_installs_package_chain(tmp_path: Path) -> None:
+
+def test_prepare_module_installs_package_chain(tmp_path: Path) -> None:
     """Prepared plugin module execution should install packages and expose the module."""
     plugin_root = tmp_path / "plugins" / "demo"
     package_dir = plugin_root / "nested"
@@ -28,7 +28,7 @@ def test_prepare_plugin_module_execution_installs_package_chain(tmp_path: Path) 
     ]
 
     try:
-        module, loader, _ = plugin_imports._prepare_plugin_module_execution(
+        module, loader, _ = plugin_imports._prepare_module(
             "demo",
             plugin_root,
             module_path,
@@ -46,7 +46,7 @@ def test_prepare_plugin_module_execution_installs_package_chain(tmp_path: Path) 
             sys.modules.pop(package_name, None)
 
 
-def test_prepare_plugin_module_execution_restores_package_chain_on_spec_failure(
+def test_prepare_module_restores_package_chain_on_spec_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -65,14 +65,14 @@ def test_prepare_plugin_module_execution_restores_package_chain_on_spec_failure(
     monkeypatch.setattr(plugin_imports.util, "spec_from_file_location", lambda *_args, **_kwargs: None)
 
     try:
-        with pytest.raises(plugin_imports._PluginModuleSpecError):
-            plugin_imports._prepare_plugin_module_execution(
-                "demo",
-                plugin_root,
-                module_path,
-                plugin_imports._module_name("demo", plugin_root, module_path),
-            )
+        module_execution = plugin_imports._prepare_module(
+            "demo",
+            plugin_root,
+            module_path,
+            plugin_imports._module_name("demo", plugin_root, module_path),
+        )
 
+        assert module_execution is None
         assert sys.modules[package_names[0]] is existing_package
         for package_name in package_names[1:]:
             assert package_name not in sys.modules

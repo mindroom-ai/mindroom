@@ -426,17 +426,12 @@ def load_plugin_module(
     if cached is not None and cached.module_name != module_name:
         sys.modules.pop(cached.module_name, None)
 
-    try:
-        module, _, previous_packages = plugin_imports._prepare_plugin_module_execution(
-            plugin_name,
-            plugin_root,
-            module_path,
-            module_name,
-        )
-    except plugin_imports._PluginModuleSpecError:
+    prepared_module = plugin_imports._prepare_module(plugin_name, plugin_root, module_path, module_name)
+    if prepared_module is None:
         msg = f"Failed to load plugin {kind} module: {module_path}"
-        logger.error("Failed to load plugin module", path=str(module_path), kind=kind)  # noqa: TRY400
-        raise _PluginValidationError(msg) from None
+        logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
+        raise _PluginValidationError(msg)
+    module, _, previous_packages = prepared_module
 
     try:
         if kind == "tools":
