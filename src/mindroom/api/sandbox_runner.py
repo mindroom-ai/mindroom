@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
 import ctypes
-import hashlib
 import inspect
 import io
 import json
