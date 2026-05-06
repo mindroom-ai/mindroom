@@ -42,6 +42,7 @@ from mindroom.tool_approval import (
     is_process_approval_card,
     request_tool_approval_for_call,
     resolve_tool_approval_approver,
+    tool_requires_approval_for_openai_compat,
 )
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -2319,6 +2320,110 @@ async def test_evaluate_tool_approval_rule_action_requires_approval(tmp_path: Pa
 
     assert requires_approval is True
     assert timeout_seconds > 0
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_rule_matching_uses_first_matching_action_for_both_callers(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            tool_approval={
+                "default": "auto_approve",
+                "rules": [
+                    {"match": "read_*", "action": "auto_approve", "timeout_days": 2},
+                    {"match": "read_file", "action": "require_approval", "timeout_days": 9},
+                ],
+            },
+        ),
+        runtime_paths,
+    )
+
+    requires_approval, timeout_seconds = await evaluate_tool_approval(
+        config,
+        runtime_paths,
+        "read_file",
+        {"path": "notes.txt"},
+        "code",
+    )
+
+    assert requires_approval is False
+    assert timeout_seconds == 2 * 24 * 60 * 60
+    assert tool_requires_approval_for_openai_compat(config, "read_file") is False
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_script_rule_listing_requires_approval_but_evaluation_runs_script(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    script_path = tmp_path / "approval.py"
+    script_path.write_text(
+        "def check(tool_name, arguments, agent_name):\n    return arguments['requires_approval']\n",
+        encoding="utf-8",
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            tool_approval={
+                "default": "auto_approve",
+                "timeout_days": 4,
+                "rules": [{"match": "write_*", "script": str(script_path), "timeout_days": 1}],
+            },
+        ),
+        runtime_paths,
+    )
+
+    requires_approval, timeout_seconds = await evaluate_tool_approval(
+        config,
+        runtime_paths,
+        "write_file",
+        {"requires_approval": False},
+        "code",
+    )
+
+    assert requires_approval is False
+    assert timeout_seconds == 24 * 60 * 60
+    assert tool_requires_approval_for_openai_compat(config, "write_file") is True
+
+
+@pytest.mark.parametrize(
+    ("default", "expected"),
+    [
+        ("auto_approve", False),
+        ("require_approval", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_tool_approval_rule_matching_falls_back_to_default_for_both_callers(
+    tmp_path: Path,
+    default: str,
+    expected: bool,
+) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            tool_approval={
+                "default": default,
+                "rules": [{"match": "write_*", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+
+    requires_approval, timeout_seconds = await evaluate_tool_approval(
+        config,
+        runtime_paths,
+        "read_file",
+        {"path": "notes.txt"},
+        "code",
+    )
+
+    assert requires_approval is expected
+    assert timeout_seconds == 7 * 24 * 60 * 60
+    assert tool_requires_approval_for_openai_compat(config, "read_file") is expected
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
+    from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
     from mindroom.matrix.cache.event_cache import ConversationEventCache
 
@@ -161,22 +162,22 @@ def _clear_script_cache() -> None:
         _SCRIPT_CACHE.clear()
 
 
+def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
+    return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
+
+
 def tool_requires_approval_for_openai_compat(
     config: Config,
     tool_name: str,
 ) -> bool:
     """Return whether one `/v1` tool must be hidden because approval may be required."""
     approval_config = config.tool_approval
-    require_approval = approval_config.default == "require_approval"
-
-    for rule in approval_config.rules:
-        if not fnmatchcase(tool_name, rule.match):
-            continue
-        if rule.action is not None:
-            return rule.action == "require_approval"
-        return True
-
-    return require_approval
+    rule = _matching_tool_approval_rule(config, tool_name)
+    if rule is None:
+        return approval_config.default == "require_approval"
+    if rule.action is not None:
+        return rule.action == "require_approval"
+    return True
 
 
 def resolve_tool_approval_approver(
@@ -208,31 +209,29 @@ async def evaluate_tool_approval(
     require_approval = approval_config.default == "require_approval"
     timeout_seconds = approval_config.timeout_days * 24 * 60 * 60
 
-    for rule in approval_config.rules:
-        if not fnmatchcase(tool_name, rule.match):
-            continue
-        if rule.timeout_days is not None:
-            timeout_seconds = rule.timeout_days * 24 * 60 * 60
-        if rule.action is not None:
-            return rule.action == "require_approval", timeout_seconds
+    rule = _matching_tool_approval_rule(config, tool_name)
+    if rule is None:
+        return require_approval, timeout_seconds
+    if rule.timeout_days is not None:
+        timeout_seconds = rule.timeout_days * 24 * 60 * 60
+    if rule.action is not None:
+        return rule.action == "require_approval", timeout_seconds
 
-        assert rule.script is not None
-        module, resolved_path = _load_script_module(rule.script, runtime_paths)
-        check = _check_callable_from_module(module, resolved_path)
-        try:
-            result = check(tool_name, arguments, agent_name)
-            if inspect.isawaitable(result):
-                result = await result
-        except Exception as exc:
-            logger.warning("Approval script raised", script_path=str(resolved_path), exc_info=True)
-            msg = f"Approval script '{resolved_path}' failed with {type(exc).__name__}"
-            raise ToolApprovalScriptError(msg) from exc
-        if not isinstance(result, bool):
-            msg = f"Approval script '{resolved_path}' returned a non-bool result."
-            raise ToolApprovalScriptError(msg)
-        return result, timeout_seconds
-
-    return require_approval, timeout_seconds
+    assert rule.script is not None
+    module, resolved_path = _load_script_module(rule.script, runtime_paths)
+    check = _check_callable_from_module(module, resolved_path)
+    try:
+        result = check(tool_name, arguments, agent_name)
+        if inspect.isawaitable(result):
+            result = await result
+    except Exception as exc:
+        logger.warning("Approval script raised", script_path=str(resolved_path), exc_info=True)
+        msg = f"Approval script '{resolved_path}' failed with {type(exc).__name__}"
+        raise ToolApprovalScriptError(msg) from exc
+    if not isinstance(result, bool):
+        msg = f"Approval script '{resolved_path}' returned a non-bool result."
+        raise ToolApprovalScriptError(msg)
+    return result, timeout_seconds
 
 
 async def request_tool_approval_for_call(call: ToolApprovalCall) -> ApprovalDecision | None:
