@@ -25,16 +25,10 @@ from pathlib import Path
 from agno.tools import Toolkit
 
 from mindroom.tools.path_safety import (
-    format_path_for_output as _relativize_path,
-)
-from mindroom.tools.path_safety import (
+    format_path_for_output,
     is_within_base_dir,
-)
-from mindroom.tools.path_safety import (
-    resolve_base_dir_path as _resolve_path,
-)
-from mindroom.tools.path_safety import (
-    split_search_pattern as _normalize_search_root,
+    resolve_base_dir_path,
+    split_search_pattern,
 )
 
 _MAX_LINES = 2000
@@ -517,7 +511,7 @@ def _find_files_in(
 def _resolve_and_read(base_dir: Path, path: str, restrict_to_base_dir: bool = True) -> tuple[Path, str] | str:
     """Resolve path and read file content. Returns (resolved, content) or error string."""
     try:
-        resolved = _resolve_path(base_dir, path, restrict_to_base_dir)
+        resolved = resolve_base_dir_path(base_dir, path, restrict_to_base_dir)
     except ValueError as e:
         return f"Error: {e}"
 
@@ -630,7 +624,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            resolved = _resolve_path(self.base_dir, path, self.restrict_to_base_dir)
+            resolved = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir)
         except ValueError as e:
             return f"Error: {e}"
 
@@ -673,12 +667,14 @@ class CodingTools(Toolkit):
 
         """
         try:
-            search_path = _resolve_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
+            search_path = (
+                resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
+            )
         except ValueError as e:
             return f"Error: {e}"
         effective_glob = glob
         if not self.restrict_to_base_dir and glob is not None:
-            normalized_path, normalized_glob = _normalize_search_root(search_path, glob)
+            normalized_path, normalized_glob = split_search_pattern(search_path, glob)
             if normalized_path.exists():
                 search_path = normalized_path
                 effective_glob = normalized_glob
@@ -732,12 +728,14 @@ class CodingTools(Toolkit):
 
         """
         try:
-            search_path = _resolve_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
+            search_path = (
+                resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
+            )
         except ValueError as e:
             return f"Error: {e}"
         search_pattern = pattern
         if not self.restrict_to_base_dir:
-            normalized_path, normalized_pattern = _normalize_search_root(search_path, pattern)
+            normalized_path, normalized_pattern = split_search_pattern(search_path, pattern)
             if normalized_path.exists():
                 search_path = normalized_path
                 search_pattern = normalized_pattern
@@ -768,7 +766,7 @@ class CodingTools(Toolkit):
 
         """
         try:
-            target = _resolve_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
+            target = resolve_base_dir_path(self.base_dir, path, self.restrict_to_base_dir) if path else self.base_dir
         except ValueError as e:
             return f"Error: {e}"
 
@@ -872,7 +870,7 @@ def _run_ripgrep(
 def _format_rg_line(event: _RgEvent, base_dir: Path) -> str:
     """Format a ripgrep event as one output line."""
     marker = ":" if event.event_type == "match" else "-"
-    rel_path = _relativize_path(event.path_text, base_dir)
+    rel_path = format_path_for_output(event.path_text, base_dir)
     return f"{rel_path}{marker}{event.line_number}{marker}{_truncate_line(event.line_text.rstrip())}"
 
 
