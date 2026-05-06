@@ -20,7 +20,11 @@ from mindroom.credentials import (
     save_scoped_credentials,
     sync_shared_credentials_to_worker,
 )
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    SHARED_CREDENTIALS_PATH_ENV,
+)
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 
 
@@ -210,6 +214,37 @@ class TestCredentialsManager:
         creds_path.write_bytes(b"MINDROOM-CREDENTIALS-V1\nnot-valid-ciphertext")
 
         assert manager.load_credentials("oauth_service") is None
+
+    def test_isolated_worker_runtime_loads_encrypted_shared_credentials(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Isolated workers should keep the encryption key in RuntimePaths for credential reads."""
+        encryption_key = _test_encryption_key()
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
+        worker_manager = manager.for_worker("worker-a")
+        worker_manager.shared_manager().save_credentials("openai", {"api_key": "shared-key", "_source": "env"})
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=worker_manager.storage_root,
+            process_env={
+                CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key,
+                SHARED_CREDENTIALS_PATH_ENV: str(worker_manager.shared_base_path),
+            },
+        )
+
+        isolated_runtime_paths = constants_mod.isolated_runtime_paths(runtime_paths)
+
+        loaded_credentials = (
+            get_runtime_credentials_manager(isolated_runtime_paths)
+            .shared_manager()
+            .load_credentials(
+                "openai",
+            )
+        )
+        assert loaded_credentials == {"api_key": "shared-key", "_source": "env"}
 
     def test_load_nonexistent_credentials(self, credentials_manager: CredentialsManager) -> None:
         """Test loading credentials that don't exist."""

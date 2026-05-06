@@ -438,11 +438,11 @@ class TestCredentialsSync:
             "_source": "env",
         }
 
-    def test_declared_credential_seed_env_names_stay_out_of_runtime_env_views(
+    def test_internal_credential_env_names_stay_out_of_public_and_execution_env_views(
         self,
         tmp_path: Path,
     ) -> None:
-        """Credential seed declaration env vars must not leak to worker/runtime views."""
+        """Internal credential env vars must not leak to public manifests or tool execution envs."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
         seed_file = tmp_path / "credential-seeds.json"
@@ -470,8 +470,11 @@ class TestCredentialsSync:
             public_runtime["env_file_values"],
             constants_mod.execution_runtime_env_values(runtime_paths),
             constants_mod.sandbox_execution_runtime_env_values(runtime_paths),
+            constants_mod.execution_runtime_env_values(isolated_runtime),
+            constants_mod.sandbox_execution_runtime_env_values(isolated_runtime),
         ]
 
+        assert isolated_runtime.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV) == "encryption-key-material"
         for runtime_env in public_and_execution_envs:
             assert CREDENTIALS_ENCRYPTION_KEY_ENV not in runtime_env
             assert "MINDROOM_CREDENTIAL_SEEDS_JSON" not in runtime_env
