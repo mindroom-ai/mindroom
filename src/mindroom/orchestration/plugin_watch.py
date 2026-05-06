@@ -111,15 +111,20 @@ def _collect_plugin_root_changes(
     return changed_paths
 
 
+def _drop_unconfigured_plugin_root_snapshots(
+    configured_roots: tuple[Path, ...],
+    last_snapshot_by_root: dict[Path, dict[Path, int]],
+) -> None:
+    for root in set(last_snapshot_by_root) - set(configured_roots):
+        last_snapshot_by_root.pop(root, None)
+
+
 def sync_plugin_root_snapshots(
     configured_roots: tuple[Path, ...],
     last_snapshot_by_root: dict[Path, dict[Path, int]],
 ) -> None:
     """Drop removed roots and seed baselines for newly configured ones."""
-    configured_root_set = set(configured_roots)
-    for root in tuple(last_snapshot_by_root):
-        if root not in configured_root_set:
-            last_snapshot_by_root.pop(root, None)
+    _drop_unconfigured_plugin_root_snapshots(configured_roots, last_snapshot_by_root)
     for root in configured_roots:
         if root in last_snapshot_by_root:
             continue
@@ -137,10 +142,7 @@ def replace_plugin_root_snapshots(
     last_snapshot_by_root: dict[Path, dict[Path, int]],
 ) -> None:
     """Replace watcher baselines with the snapshots that match the applied plugin runtime."""
-    configured_root_set = set(configured_roots)
-    for root in tuple(last_snapshot_by_root):
-        if root not in configured_root_set:
-            last_snapshot_by_root.pop(root, None)
+    _drop_unconfigured_plugin_root_snapshots(configured_roots, last_snapshot_by_root)
     for root in configured_roots:
         last_snapshot_by_root[root] = root_snapshots.get(root, {}).copy()
 

@@ -24,7 +24,10 @@ from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents
-from mindroom.orchestration.plugin_watch import watch_plugins_task
+from mindroom.orchestration.plugin_watch import (
+    _drop_unconfigured_plugin_root_snapshots,
+    watch_plugins_task,
+)
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.orchestrator import _ConfigReloadDrainState, _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.tool_system.plugins import PluginReloadResult
@@ -355,6 +358,20 @@ async def test_plugin_watcher_debounces_changes_and_ignores_unconfigured_roots(
     assert (plugin_root / "hooks.py") in changed_paths
     assert (plugin_root / "helper.py") in changed_paths
     assert all(path.is_relative_to(plugin_root) for path in changed_paths)
+
+
+def test_plugin_watcher_drops_unconfigured_root_snapshots(tmp_path: Path) -> None:
+    """Plugin watcher snapshot pruning should remove only unconfigured roots."""
+    configured_root = tmp_path / "plugins" / "configured"
+    removed_root = tmp_path / "plugins" / "removed"
+    snapshots = {
+        configured_root: {configured_root / "hooks.py": 1},
+        removed_root: {removed_root / "hooks.py": 1},
+    }
+
+    _drop_unconfigured_plugin_root_snapshots((configured_root,), snapshots)
+
+    assert snapshots == {configured_root: {configured_root / "hooks.py": 1}}
 
 
 @pytest.mark.asyncio
