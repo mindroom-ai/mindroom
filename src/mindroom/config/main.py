@@ -7,7 +7,6 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
-from urllib.parse import urlparse, urlunparse
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
@@ -53,6 +52,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
     safe_replace,
 )
+from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
@@ -286,44 +286,12 @@ class _KnowledgeBaseSourceSemantics:
     git_lfs: bool
 
 
-def _credential_free_repo_url_for_config_validation(repo_url: str) -> str:
-    """Return a comparable Git URL identity without credential-bearing URL fields."""
-    parsed = urlparse(repo_url)
-    if not parsed.scheme or not parsed.netloc:
-        return repo_url
-    path = parsed.path.split(";", 1)[0]
-    if parsed.scheme == "ssh" and "@" in parsed.netloc and parsed.password is None:
-        userinfo, host = parsed.netloc.rsplit("@", 1)
-        if userinfo and ":" not in userinfo:
-            return urlunparse(
-                parsed._replace(
-                    netloc=f"{userinfo}@{host}",
-                    path=path,
-                    params="",
-                    query="",
-                    fragment="",
-                ),
-            )
-    netloc = parsed.netloc.rsplit("@", 1)[-1]
-    return urlunparse(
-        parsed._replace(
-            netloc=netloc,
-            path=path,
-            params="",
-            query="",
-            fragment="",
-        ),
-    )
-
-
 def _knowledge_base_source_semantics(base_config: KnowledgeBaseConfig) -> _KnowledgeBaseSourceSemantics:
     """Return the source semantics for duplicate-path compatibility checks."""
     git_config = base_config.git
     return _KnowledgeBaseSourceSemantics(
         git_enabled=git_config is not None,
-        git_repo_identity=_credential_free_repo_url_for_config_validation(git_config.repo_url)
-        if git_config is not None
-        else "",
+        git_repo_identity=credential_free_repo_url(git_config.repo_url) if git_config is not None else "",
         git_branch=git_config.branch if git_config is not None else "",
         git_credentials_service=git_config.credentials_service if git_config is not None else None,
         git_lfs=git_config.lfs if git_config is not None else False,

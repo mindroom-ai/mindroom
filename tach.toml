@@ -952,6 +952,7 @@ depends_on = [
     "mindroom.config.voice",
     "mindroom.constants",
     "mindroom.entity_resolution",
+    "mindroom.git_urls",
     "mindroom.history.types",
     "mindroom.logging_config",
     "mindroom.matrix_identifiers",
@@ -1978,6 +1979,10 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.knowledge.redaction"
+depends_on = ["mindroom.git_urls"]
+
+[[modules]]
+path = "mindroom.git_urls"
 depends_on = []
 
 [[modules]]

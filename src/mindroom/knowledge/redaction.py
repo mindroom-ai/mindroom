@@ -8,11 +8,20 @@ from base64 import b64decode
 from binascii import Error as BinasciiError
 from urllib.parse import unquote, urlparse, urlunparse
 
+from mindroom.git_urls import credential_free_repo_url
+
 _URL_PATTERN: re.Pattern[str] = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
 _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
     r"\bAuthorization:\s*(Basic|Bearer)\s+([^\s'\"<>]+)",
     re.IGNORECASE,
 )
+__all__ = [
+    "credential_free_repo_url",
+    "credential_free_url_identity",
+    "embedded_http_userinfo",
+    "redact_credentials_in_text",
+    "redact_url_credentials",
+]
 
 
 def _strip_path_params(path: str) -> str:
