@@ -154,6 +154,19 @@ def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> N
     assert agent_prompts._OPENAI_COMPAT_HISTORY_GUIDANCE in openai_compat_agent.role
 
 
+def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
+    """Agents should understand when the dispatcher requires explicit Matrix mentions."""
+    config = _test_config()
+
+    agent = _create_agent_for_test("general", config)
+
+    assert "## Matrix Reply Targeting" in agent.role
+    assert "explicit Matrix mention" in agent.role
+    assert "multi-agent or multi-human" in agent.role
+    assert "not dispatched" in agent.role
+    assert "natural-language addressing" in agent.role
+
+
 def test_config_round_trips_structured_agent_tool_entries() -> None:
     """Structured tool entries should stay authored while runtime access stays name-based."""
     runtime_paths = _runtime_paths(Path(tempfile.mkdtemp()))
