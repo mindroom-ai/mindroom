@@ -47,6 +47,25 @@ def test_redact_audit_details_redacts_free_form_secret_strings() -> None:
     }
 
 
+def test_redact_audit_details_redacts_bare_provider_token_formats() -> None:
+    """Common provider token shapes should be masked even under ordinary keys."""
+    details = {
+        "openai": "sk_live_secret",
+        "github": "ghp_secret",
+        "github_pat": "github_pat_secret",
+        "google": "AIzaSySecret",
+        "slack": "xoxb-secret",
+    }
+
+    assert redact_audit_details(details) == {
+        "openai": REDACTED,
+        "github": REDACTED,
+        "github_pat": REDACTED,
+        "google": REDACTED,
+        "slack": REDACTED,
+    }
+
+
 def test_redact_audit_details_redacts_oauth_url_and_query_values() -> None:
     """OAuth callback codes and states should be masked in URLs and query containers."""
     details = {

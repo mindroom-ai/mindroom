@@ -31,6 +31,16 @@ _SECRET_ASSIGNMENT_PATTERN = re.compile(
     rf"(?=(?:{_NEXT_ASSIGNMENT_PATTERN})|[\r\n,&)\]}}]|$)",
     re.IGNORECASE,
 )
+_TOKEN_LIKE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?P<token>("
+    r"(?:sk|pk)-[A-Za-z0-9._-]+"
+    r"|(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9._-]+"
+    r"|xox[baprs]-[A-Za-z0-9-]+"
+    r"|gh(?:p|o|u|s|r)_[A-Za-z0-9_]+"
+    r"|github_pat_[A-Za-z0-9_]+"
+    r"|AIza[0-9A-Za-z_-]+"
+    r"))(?![A-Za-z0-9])",
+)
 _SECRET_KEYS = frozenset(
     {
         "access_token",
@@ -175,6 +185,7 @@ def redact_audit_text(value: str) -> str:
     redacted = _URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), value)
     redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _API_KEY_MESSAGE_PATTERN.sub(_redact_matched_token, redacted)
+    redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, redacted)
     return _SECRET_ASSIGNMENT_PATTERN.sub(_redact_secret_assignment, redacted)
 
 
