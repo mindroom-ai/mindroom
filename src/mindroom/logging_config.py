@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from mindroom.redaction import redact_log_event
+
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
@@ -131,7 +133,9 @@ def setup_logging(
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
+        structlog.stdlib.ExtraAdder(),
         timestamper,
+        redact_log_event,
     ]
     log_format = os.getenv("MINDROOM_LOG_FORMAT", "text").strip().lower()
     renderer_name = "json" if log_format == "json" else "text"
@@ -142,10 +146,14 @@ def setup_logging(
 
     text_processors = [
         structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+        structlog.processors.ExceptionRenderer(),
+        redact_log_event,
         structlog.dev.ConsoleRenderer(colors=False),
     ]
     colored_processors = [
         structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+        structlog.processors.ExceptionRenderer(),
+        redact_log_event,
         structlog.dev.ConsoleRenderer(
             colors=True,
             exception_formatter=structlog.dev.RichTracebackFormatter(
@@ -157,6 +165,7 @@ def setup_logging(
     json_processors = [
         structlog.stdlib.ProcessorFormatter.remove_processors_meta,
         structlog.processors.ExceptionRenderer(),
+        redact_log_event,
         structlog.processors.JSONRenderer(),
     ]
 

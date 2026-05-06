@@ -62,6 +62,71 @@ def test_setup_logging_json_mode_emits_expected_fields(
     assert "timestamp" in payload
 
 
+def test_setup_logging_json_mode_redacts_sensitive_structured_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Structured log output should retain audit fields while redacting bearer material."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    get_logger("tests.logging").info(
+        "request_audit",
+        headers={
+            "Authorization": "Bearer auth-secret",
+            "set-cookie": "session=secret",
+        },
+        payload={
+            "nested": [
+                {"access_token": "access-secret"},
+                {"clientSecret": "client-secret"},
+            ],
+        },
+        callback_url="https://example.test/oauth/callback?code=code-secret&state=state-secret&keep=1",
+    )
+
+    payload = _last_stderr_payload(capsys)
+
+    assert payload["event"] == "request_audit"
+    assert payload["headers"] == {
+        "Authorization": "***redacted***",
+        "set-cookie": "***redacted***",
+    }
+    assert payload["payload"] == {
+        "nested": [
+            {"access_token": "***redacted***"},
+            {"clientSecret": "***redacted***"},
+        ],
+    }
+    assert payload["callback_url"] == (
+        "https://example.test/oauth/callback?code=***redacted***&state=***redacted***&keep=1"
+    )
+
+
+def test_setup_logging_json_mode_redacts_foreign_logger_extra_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Foreign stdlib log records should pass through the same redaction processor."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    logging.getLogger("test.foreign").info(
+        "foreign audit",
+        extra={"headers": {"authorization": "Bearer auth-secret"}, "api_key": "api-secret"},
+    )
+
+    payload = _last_stderr_payload(capsys)
+
+    assert payload["event"] == "foreign audit"
+    assert payload["headers"] == {"authorization": "***redacted***"}
+    assert payload["api_key"] == "***redacted***"
+
+
 def test_bound_log_context_from_message_target_binds_and_restores_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

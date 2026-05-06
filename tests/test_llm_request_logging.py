@@ -182,6 +182,64 @@ async def test_llm_request_logging_writes_jsonl(tmp_path: Path) -> None:  # noqa
 
 
 @pytest.mark.asyncio
+async def test_llm_request_logging_redacts_sensitive_values_before_jsonl_write(tmp_path: Path) -> None:
+    """Durable request logs should preserve structure while masking credentials."""
+    model = _FakeModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+
+    with bind_llm_request_log_context(
+        agent_id="assistant",
+        session_id="session-123",
+        correlation_id="corr-1",
+        callback_url="https://example.test/oauth/callback?code=code-secret&state=state-secret&keep=1",
+    ):
+        await model.ainvoke(
+            messages=[
+                Message(
+                    role="user",
+                    content="call failed with Authorization: Bearer auth-secret and api_key=api-secret",
+                ),
+            ],
+            assistant_message=Message(role="assistant"),
+            tools=[
+                {
+                    "name": "custom_api",
+                    "headers": {
+                        "Authorization": "Bearer auth-secret",
+                        "set-cookie": "session=secret",
+                    },
+                    "nested": [{"refresh_token": "refresh-secret"}],
+                },
+            ],
+        )
+
+    entry = _read_log_entries(tmp_path)[0]
+    serialized = json.dumps(entry)
+
+    assert "auth-secret" not in serialized
+    assert "api-secret" not in serialized
+    assert "refresh-secret" not in serialized
+    assert "code-secret" not in serialized
+    assert "state-secret" not in serialized
+    assert entry["messages"][0]["content"] == (
+        "call failed with Authorization: Bearer ***redacted*** and api_key=***redacted***"
+    )
+    assert entry["tools"][0]["headers"] == {
+        "Authorization": "***redacted***",
+        "set-cookie": "***redacted***",
+    }
+    assert entry["tools"][0]["nested"] == [{"refresh_token": "***redacted***"}]
+    assert entry["callback_url"] == (
+        "https://example.test/oauth/callback?code=***redacted***&state=***redacted***&keep=1"
+    )
+
+
+@pytest.mark.asyncio
 async def test_stream_with_llm_request_log_context_accepts_plain_async_iterator() -> None:
     """Request-log stream binding should not require an aclose method."""
     source = _PlainAsyncIterator(["one", "two"])
