@@ -323,13 +323,10 @@ def map_backed_thread_membership_access(
 
     async def prove_thread_root(_room_id: str, thread_root_id: str) -> ThreadRootProof:
         has_children = any(
-            event_id != thread_root_id
-            and any(
-                candidate_thread_id == thread_root_id
-                for candidate_thread_id in (
-                    event_info.thread_id,
-                    event_info.thread_id_from_edit,
-                )
+            page_event_info_counts_as_thread_child_proof(
+                thread_root_id,
+                event_id=event_id,
+                event_info=event_info,
             )
             for event_id, event_info in event_infos.items()
         )
@@ -339,6 +336,24 @@ def map_backed_thread_membership_access(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=fetch_event_info,
         prove_thread_root=prove_thread_root,
+    )
+
+
+def page_event_info_counts_as_thread_child_proof(
+    thread_root_id: str,
+    *,
+    event_id: str,
+    event_info: EventInfo,
+) -> bool:
+    """Return whether one page-local event proves a root has thread children."""
+    if event_id == thread_root_id:
+        return False
+    return any(
+        candidate_thread_id == thread_root_id
+        for candidate_thread_id in (
+            event_info.thread_id,
+            event_info.thread_id_from_edit,
+        )
     )
 
 

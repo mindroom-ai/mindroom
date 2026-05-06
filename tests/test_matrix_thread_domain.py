@@ -23,6 +23,7 @@ from mindroom.matrix.thread_bookkeeping import (
 from mindroom.matrix.thread_membership import (
     ThreadResolution,
     map_backed_thread_membership_access,
+    page_event_info_counts_as_thread_child_proof,
     resolve_event_thread_membership,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -35,6 +36,80 @@ def _message_event_info(content: dict[str, object]) -> EventInfo:
             "type": "m.room.message",
             "content": content,
         },
+    )
+
+
+def test_page_event_info_counts_as_thread_child_proof_preserves_thread_semantics() -> None:
+    """Page-local root proof should count only non-root children of the candidate thread."""
+    thread_root_id = "$thread-root:localhost"
+    explicit_child = _message_event_info(
+        {
+            "body": "thread reply",
+            "msgtype": "m.text",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": thread_root_id,
+            },
+        },
+    )
+    edit_child = _message_event_info(
+        {
+            "body": "* edited reply",
+            "msgtype": "m.text",
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": "$reply:localhost",
+            },
+            "m.new_content": {
+                "body": "edited reply",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": thread_root_id,
+                },
+            },
+        },
+    )
+    root_info = _message_event_info(
+        {
+            "body": "root",
+            "msgtype": "m.text",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": thread_root_id,
+            },
+        },
+    )
+    unrelated = _message_event_info(
+        {
+            "body": "other thread",
+            "msgtype": "m.text",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$other-root:localhost",
+            },
+        },
+    )
+
+    assert page_event_info_counts_as_thread_child_proof(
+        thread_root_id,
+        event_id="$reply:localhost",
+        event_info=explicit_child,
+    )
+    assert page_event_info_counts_as_thread_child_proof(
+        thread_root_id,
+        event_id="$reply-edit:localhost",
+        event_info=edit_child,
+    )
+    assert not page_event_info_counts_as_thread_child_proof(
+        thread_root_id,
+        event_id=thread_root_id,
+        event_info=root_info,
+    )
+    assert not page_event_info_counts_as_thread_child_proof(
+        thread_root_id,
+        event_id="$other-reply:localhost",
+        event_info=unrelated,
     )
 
 

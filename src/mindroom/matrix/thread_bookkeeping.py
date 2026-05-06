@@ -20,6 +20,7 @@ from mindroom.matrix.thread_membership import (
     ThreadResolutionState,
     ThreadRootProof,
     fetch_event_info_for_client,
+    page_event_info_counts_as_thread_child_proof,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
 )
@@ -337,7 +338,7 @@ class ThreadMutationResolver:
             if cached_proof is not None:
                 return cached_proof
             if any(
-                _page_event_info_counts_as_thread_child_proof(
+                page_event_info_counts_as_thread_child_proof(
                     thread_root_id,
                     event_id=event_id,
                     event_info=event_info,
@@ -417,21 +418,3 @@ def _event_source_counts_as_thread_child_proof(
     if event_info.is_edit and event_info.original_event_id == thread_root_id:
         return False
     return isinstance(event_info.thread_id, str) and event_info.thread_id == thread_root_id
-
-
-def _page_event_info_counts_as_thread_child_proof(
-    thread_root_id: str,
-    *,
-    event_id: str,
-    event_info: EventInfo,
-) -> bool:
-    """Return whether one page-local event proves a root has thread children."""
-    if event_id == thread_root_id:
-        return False
-    return any(
-        candidate_thread_id == thread_root_id
-        for candidate_thread_id in (
-            event_info.thread_id,
-            event_info.thread_id_from_edit,
-        )
-    )

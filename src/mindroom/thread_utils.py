@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 from mindroom import authorization
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.rooms import resolve_room_aliases
+from mindroom.matrix.visible_body import visible_content_from_content
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 _MATRIX_PILL_RE = re.compile(r"""href=["']https://matrix\.to/#/(@[^"':]+:[^"']+)["']""")
 
 
-def _extract_mentioned_user_ids(content: dict[str, Any]) -> list[str]:
+def _extract_mentioned_user_ids(content: dict[str, object]) -> list[str]:
     """Extract mentioned user IDs from message content.
 
     Checks ``m.mentions.user_ids`` first.  When that field is absent or empty
@@ -32,24 +33,15 @@ def _extract_mentioned_user_ids(content: dict[str, Any]) -> list[str]:
     HTML pills (``<a href="https://matrix.to/#/@user:domain">``) from
     ``formatted_body``.
     """
-    mentions = content.get("m.mentions", {})
-    user_ids: list[str] = mentions.get("user_ids", [])
-    if user_ids:
-        return user_ids
+    mentions = content.get("m.mentions")
+    user_ids = cast("dict[str, object]", mentions).get("user_ids") if isinstance(mentions, dict) else None
+    if isinstance(user_ids, list) and user_ids:
+        return [user_id for user_id in user_ids if isinstance(user_id, str)]
 
-    # Fallback: parse formatted_body for HTML pills
-    formatted_body = content.get("formatted_body", "")
-    if formatted_body:
+    formatted_body = content.get("formatted_body")
+    if isinstance(formatted_body, str):
         return _MATRIX_PILL_RE.findall(formatted_body)
     return []
-
-
-def _visible_message_content(content: dict[str, Any]) -> dict[str, Any]:
-    """Return the visible message content layer for mention detection."""
-    new_content = content.get("m.new_content")
-    if isinstance(new_content, dict):
-        return new_content
-    return content
 
 
 def _is_bot_or_agent(sender: str, config: Config, runtime_paths: RuntimePaths) -> bool:
@@ -71,7 +63,7 @@ def check_agent_mentioned(
     (i.e. a real human user).
     """
     raw_content = event_source.get("content", {})
-    content = _visible_message_content(raw_content) if isinstance(raw_content, dict) else {}
+    content = visible_content_from_content(raw_content) if isinstance(raw_content, dict) else {}
     all_mentioned_ids = _extract_mentioned_user_ids(content)
     mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config, runtime_paths)
     am_i_mentioned = agent_id in mentioned_agents
