@@ -73,6 +73,15 @@ class _TrustedUpstreamJwtSettings:
     audience: str | None = None
     issuer: str | None = None
     email_claim: str = "email"
+    user_id_claim: str | None = None
+
+
+@dataclass(frozen=True)
+class _TrustedUpstreamJwtIdentity:
+    """Identity claims verified from the upstream JWT."""
+
+    email: str
+    user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +156,7 @@ def _build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> _Trust
             audience=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE"),
             issuer=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER"),
             email_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM") or "email",
+            user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"),
         ),
     )
 
@@ -322,12 +332,12 @@ def _trusted_upstream_required_jwt_setting(value: str | None, env_name: str) -> 
     return value
 
 
-async def _verified_trusted_upstream_jwt_claim(
+async def _verified_trusted_upstream_jwt_identity(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
     jwt_client: PyJWKClient | None,
-) -> str | None:
-    """Return the verified upstream identity claim when strict mode is enabled."""
+) -> _TrustedUpstreamJwtIdentity | None:
+    """Return verified upstream identity claims when strict mode is enabled."""
     jwt_settings = settings.jwt
     if not jwt_settings.require_jwt:
         return None
@@ -363,40 +373,54 @@ async def _verified_trusted_upstream_jwt_claim(
         algorithm = signing_key.algorithm_name
         if algorithm is None:
             raise jwt.InvalidTokenError
+        required_claims = ["exp", "iss", "aud", jwt_settings.email_claim]
+        if jwt_settings.user_id_claim is not None:
+            required_claims.append(jwt_settings.user_id_claim)
         claims = jwt.decode(
             token,
             signing_key.key,
             algorithms=[algorithm],
             audience=audience,
             issuer=issuer,
-            options={"require": ["exp", "iss", "aud", jwt_settings.email_claim]},
+            options={"require": required_claims},
         )
     except PyJWTError as exc:
         raise HTTPException(status_code=401, detail="Invalid trusted upstream JWT") from exc
 
-    claim = claims.get(jwt_settings.email_claim)
+    email = _trusted_upstream_jwt_string_claim(claims, jwt_settings.email_claim)
+    user_id = (
+        _trusted_upstream_jwt_string_claim(claims, jwt_settings.user_id_claim)
+        if jwt_settings.user_id_claim is not None
+        else None
+    )
+    return _TrustedUpstreamJwtIdentity(email=email, user_id=user_id)
+
+
+def _trusted_upstream_jwt_string_claim(claims: dict[str, Any], claim_name: str) -> str:
+    claim = claims.get(claim_name)
     if not isinstance(claim, str) or not claim.strip():
         raise HTTPException(status_code=401, detail="Invalid trusted upstream JWT")
     return claim.strip()
 
 
-def _verified_trusted_upstream_email(
+def _verified_trusted_upstream_identity(
     settings: _TrustedUpstreamAuthSettings,
     user_id: str,
     email: str | None,
-    jwt_claim: str | None,
-) -> str | None:
-    """Return the trusted email after checking strict JWT identity consistency."""
-    if jwt_claim is None:
-        return email
+    jwt_identity: _TrustedUpstreamJwtIdentity | None,
+) -> tuple[str, str | None]:
+    """Return trusted identity headers after checking strict JWT consistency."""
+    if jwt_identity is None:
+        return user_id, email
 
-    if not secrets.compare_digest(user_id, jwt_claim):
+    verified_user_id = jwt_identity.user_id or jwt_identity.email
+    if not secrets.compare_digest(user_id, verified_user_id):
         raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
-    if email is not None and not secrets.compare_digest(email, jwt_claim):
+    if email is not None and not secrets.compare_digest(email, jwt_identity.email):
         raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
     if settings.email_header is None and email is None:
-        return jwt_claim
-    return email
+        email = jwt_identity.email
+    return user_id, email
 
 
 async def _trusted_upstream_auth_user(
@@ -420,10 +444,10 @@ async def _trusted_upstream_auth_user(
             detail=f"Missing trusted upstream identity header: {settings.user_id_header}",
         )
 
-    jwt_claim = await _verified_trusted_upstream_jwt_claim(request, settings, jwt_client)
+    jwt_identity = await _verified_trusted_upstream_jwt_identity(request, settings, jwt_client)
     email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(settings)
     email = _get_configured_header(request, settings.email_header)
-    email = _verified_trusted_upstream_email(settings, user_id, email, jwt_claim)
+    user_id, email = _verified_trusted_upstream_identity(settings, user_id, email, jwt_identity)
     matrix_user_id = _get_configured_header(request, settings.matrix_user_id_header)
     parsed_matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id)
     if matrix_user_id is not None and parsed_matrix_user_id is None:

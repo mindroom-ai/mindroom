@@ -24,6 +24,7 @@ from backend.config import (
     INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM,
     INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER,
     INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER,
+    INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM,
     INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER,
     INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT,
     INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER,
@@ -260,6 +261,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             helm_args += ["--set", f"trustedUpstreamAuth.jwtIssuer={INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER}"]
         if INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM:
             helm_args += ["--set", f"trustedUpstreamAuth.jwtEmailClaim={INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM}"]
+        if INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM:
+            helm_args += ["--set", f"trustedUpstreamAuth.jwtUserIdClaim={INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM}"]
 
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:

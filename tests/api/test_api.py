@@ -3929,8 +3929,8 @@ def test_trusted_upstream_headers_populate_auth_user_when_enabled(tmp_path: Path
     }
 
 
-def _trusted_upstream_strict_jwt_env(tmp_path: Path) -> dict[str, str]:
-    return {
+def _trusted_upstream_strict_jwt_env(tmp_path: Path, *, user_id_claim: str | None = "sub") -> dict[str, str]:
+    env = {
         "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
         "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
         "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
@@ -3941,6 +3941,9 @@ def _trusted_upstream_strict_jwt_env(tmp_path: Path) -> dict[str, str]:
         "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER": "https://issuer.example",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM": "email",
     }
+    if user_id_claim is not None:
+        env["MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"] = user_id_claim
+    return env
 
 
 def _trusted_upstream_jwt_key() -> rsa.RSAPrivateKey:
@@ -3963,6 +3966,7 @@ def _trusted_upstream_jwt(
     expires_at: datetime | None = None,
     issuer: str = "https://issuer.example",
     kid: str = "test-key",
+    user_id: str = "user_123",
 ) -> str:
     now = datetime.now(UTC)
     return jwt.encode(
@@ -3972,6 +3976,7 @@ def _trusted_upstream_jwt(
             "exp": expires_at or now + timedelta(minutes=5),
             "iat": now,
             "email": email,
+            "sub": user_id,
         },
         private_key,
         algorithm="RS256",
@@ -3979,9 +3984,14 @@ def _trusted_upstream_jwt(
     )
 
 
-def _trusted_upstream_strict_headers(token: str | None = None, *, email: str = "alice@example.com") -> dict[str, str]:
+def _trusted_upstream_strict_headers(
+    token: str | None = None,
+    *,
+    email: str = "alice@example.com",
+    user_id: str = "user_123",
+) -> dict[str, str]:
     headers = {
-        "X-Trusted-User": email,
+        "X-Trusted-User": user_id,
         "X-Trusted-Email": email,
     }
     if token is not None:
@@ -4001,6 +4011,32 @@ def test_trusted_upstream_strict_jwt_accepts_valid_token(
 
     with TestClient(api_app) as client:
         response = client.get("/whoami", headers=_trusted_upstream_strict_headers(token))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_id": "user_123",
+        "email": "alice@example.com",
+        "auth_source": "trusted_upstream",
+    }
+
+
+def test_trusted_upstream_strict_jwt_accepts_email_claim_as_user_id_without_user_id_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Strict auth can use the email claim as the signed user identity when no user ID claim is configured."""
+    private_key = _trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    token = _trusted_upstream_jwt(private_key)
+    api_app = _trusted_auth_test_app(
+        _runtime_paths(tmp_path, process_env=_trusted_upstream_strict_jwt_env(tmp_path, user_id_claim=None)),
+    )
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers=_trusted_upstream_strict_headers(token, user_id="alice@example.com"),
+        )
 
     assert response.status_code == 200
     assert response.json() == {
@@ -4080,7 +4116,7 @@ def test_trusted_upstream_strict_jwt_rejects_identity_mismatch(
     """Strict trusted upstream auth should reject headers that conflict with the verified claim."""
     private_key = _trusted_upstream_jwt_key()
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
-    token = _trusted_upstream_jwt(private_key, email="alice@example.com")
+    token = _trusted_upstream_jwt(private_key, email="alice@example.com", user_id="user_123")
     api_app = _trusted_auth_test_app(_runtime_paths(tmp_path, process_env=_trusted_upstream_strict_jwt_env(tmp_path)))
 
     with TestClient(api_app) as client:
@@ -4093,21 +4129,21 @@ def test_trusted_upstream_strict_jwt_rejects_identity_mismatch(
     assert response.json()["detail"] == "Trusted upstream identity does not match JWT claim"
 
 
-def test_trusted_upstream_strict_jwt_rejects_unsigned_user_id_mismatch(
+def test_trusted_upstream_strict_jwt_rejects_user_id_claim_mismatch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Strict trusted upstream auth should not accept a user ID that is not bound to the JWT."""
+    """Strict trusted upstream auth should reject a user ID that conflicts with the signed user claim."""
     private_key = _trusted_upstream_jwt_key()
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
-    token = _trusted_upstream_jwt(private_key, email="alice@example.com")
+    token = _trusted_upstream_jwt(private_key, email="alice@example.com", user_id="user_123")
     api_app = _trusted_auth_test_app(_runtime_paths(tmp_path, process_env=_trusted_upstream_strict_jwt_env(tmp_path)))
 
     with TestClient(api_app) as client:
         response = client.get(
             "/whoami",
             headers={
-                "X-Trusted-User": "bob@example.com",
+                "X-Trusted-User": "other-user",
                 "X-Trusted-Email": "alice@example.com",
                 "X-Trusted-Jwt": token,
             },
