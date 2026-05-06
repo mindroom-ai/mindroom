@@ -170,15 +170,12 @@ class TurnStore:
         """
         metadata = self._build_run_metadata_for_handled_turn(handled_turn) or {}
         if additional_source_event_ids:
-            source_event_ids = [
-                event_id
-                for event_id in metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, [])
-                if isinstance(event_id, str) and event_id
-            ]
-            for event_id in additional_source_event_ids:
-                if not event_id or event_id in source_event_ids:
-                    continue
-                source_event_ids.append(event_id)
+            source_event_ids = list(
+                _normalized_matrix_source_event_ids(metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)),
+            )
+            for event_id in _normalized_matrix_source_event_ids(list(additional_source_event_ids)):
+                if event_id not in source_event_ids:
+                    source_event_ids.append(event_id)
             if source_event_ids:
                 metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = source_event_ids
         return metadata or None
@@ -292,16 +289,10 @@ class TurnStore:
         raw_response_event_id = metadata.get(constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
         response_event_id = raw_response_event_id if isinstance(raw_response_event_id, str) else None
         handled_turn = HandledTurnState.create(
-            raw_source_event_ids if isinstance(raw_source_event_ids, list) else [anchor_event_id],
+            _normalized_matrix_source_event_ids(raw_source_event_ids, fallback_event_id=anchor_event_id),
             response_event_id=response_event_id,
             source_event_prompts=raw_prompt_map if isinstance(raw_prompt_map, dict) else None,
         )
-        if not handled_turn.source_event_ids:
-            handled_turn = HandledTurnState.from_source_event_id(
-                anchor_event_id,
-                response_event_id=response_event_id,
-                source_event_prompts=raw_prompt_map if isinstance(raw_prompt_map, dict) else None,
-            )
         return _PersistedTurnMetadata(
             anchor_event_id=anchor_event_id,
             source_event_ids=handled_turn.source_event_ids,
@@ -475,3 +466,19 @@ class TurnStore:
                 history_scope=turn_record.history_scope.key,
             )
         return removed_any
+
+
+def _normalized_matrix_source_event_ids(
+    raw_source_event_ids: object,
+    *,
+    fallback_event_id: str | None = None,
+) -> tuple[str, ...]:
+    """Return normalized Matrix source-event IDs with optional anchor fallback."""
+    if isinstance(raw_source_event_ids, list):
+        raw_string_event_ids = [event_id for event_id in raw_source_event_ids if isinstance(event_id, str)]
+        source_event_ids = HandledTurnState.create(raw_string_event_ids).source_event_ids
+        if source_event_ids:
+            return source_event_ids
+    if fallback_event_id is None:
+        return ()
+    return HandledTurnState.from_source_event_id(fallback_event_id).source_event_ids

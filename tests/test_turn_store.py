@@ -6,11 +6,12 @@ import ast
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.handled_turns import HandledTurnState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.turn_store import TurnStore, TurnStoreDeps
+from mindroom.turn_store import TurnStore, TurnStoreDeps, _normalized_matrix_source_event_ids
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
@@ -43,6 +44,70 @@ def test_turn_store_constructs_private_ledger_from_tracking_base_path(tmp_path: 
     turn_record = reloaded_store.get_turn_record("$event")
     assert turn_record is not None
     assert turn_record.response_event_id == "$response"
+
+
+def test_normalized_matrix_source_event_ids_deduplicates_and_falls_back_to_anchor() -> None:
+    """Run metadata source IDs should use handled-turn normalization with anchor fallback."""
+    assert _normalized_matrix_source_event_ids(["$first", "", "$first", "$anchor"]) == ("$first", "$anchor")
+    assert _normalized_matrix_source_event_ids([None, "$first", 2, "$first"]) == ("$first",)
+    assert _normalized_matrix_source_event_ids([], fallback_event_id="$anchor") == ("$anchor",)
+    assert _normalized_matrix_source_event_ids("not-a-list", fallback_event_id="$anchor") == ("$anchor",)
+    assert _normalized_matrix_source_event_ids([""], fallback_event_id="") == ()
+
+
+def test_build_run_metadata_uses_shared_source_event_id_normalization(tmp_path: Path) -> None:
+    """Additional run metadata source IDs should normalize the same way as persisted parsing."""
+    store = TurnStore(
+        TurnStoreDeps(
+            agent_name="agent",
+            tracking_base_path=tmp_path,
+            state_writer=MagicMock(),
+            resolver=MagicMock(),
+            tool_runtime=MagicMock(),
+        ),
+    )
+    handled_turn = HandledTurnState.create(["$first", "$anchor"])
+
+    metadata = store.build_run_metadata(
+        handled_turn,
+        additional_source_event_ids=("", "$first", "$selection", "$selection"),
+    )
+
+    assert metadata == {
+        constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$anchor", "$selection"],
+    }
+
+
+def test_persisted_turn_metadata_uses_shared_source_event_id_normalization(tmp_path: Path) -> None:
+    """Persisted run metadata parsing should normalize IDs and filter prompt entries."""
+    store = TurnStore(
+        TurnStoreDeps(
+            agent_name="agent",
+            tracking_base_path=tmp_path,
+            state_writer=MagicMock(),
+            resolver=MagicMock(),
+            tool_runtime=MagicMock(),
+        ),
+    )
+
+    metadata = store._persisted_turn_metadata_for_run(
+        {
+            constants.MATRIX_EVENT_ID_METADATA_KEY: "$anchor",
+            constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "", "$first", "$anchor"],
+            constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {
+                "$first": "first",
+                "$anchor": "anchor",
+                "$extra": "ignored",
+            },
+            constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$response",
+        },
+    )
+
+    assert metadata is not None
+    assert metadata.anchor_event_id == "$anchor"
+    assert metadata.source_event_ids == ("$first", "$anchor")
+    assert metadata.source_event_prompts == {"$first": "first", "$anchor": "anchor"}
+    assert metadata.response_event_id == "$response"
 
 
 def test_only_turn_store_imports_handled_turn_ledger_in_production() -> None:
