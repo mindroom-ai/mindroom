@@ -15,7 +15,7 @@ from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthProvider
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 
 
 def _config_with_worker_scope(
@@ -247,6 +247,57 @@ class TestCredentialsAPI:
 
         assert response.status_code == 200
         mock_credentials_manager.for_worker.assert_called_once_with(expected_worker_key)
+
+    def test_credentials_target_worker_resolver_matches_worker_routing(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Credentials and OAuth paths should share one target-to-worker conversion."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        )
+        target = credentials_api.RequestCredentialsTarget(
+            runtime_paths=runtime_paths,
+            base_manager=manager,
+            target_manager=manager,
+            worker_scope="user_agent",
+            agent_name="general",
+            execution_identity=identity,
+        )
+
+        worker_target = credentials_api.worker_target_for_credentials_target(target)
+
+        assert worker_target == resolve_worker_target(
+            "user_agent",
+            "general",
+            execution_identity=identity,
+        )
+
+    def test_credentials_target_worker_resolver_returns_none_for_unscoped_target(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Unscoped credential operations must keep using the primary credentials store."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        target = credentials_api.RequestCredentialsTarget(
+            runtime_paths=runtime_paths,
+            base_manager=manager,
+            target_manager=manager,
+            worker_scope=None,
+            agent_name="general",
+            execution_identity=None,
+        )
+
+        assert credentials_api.worker_target_for_credentials_target(target) is None
 
     def test_rejects_shared_only_integration_services_for_isolating_scope(
         self,

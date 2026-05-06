@@ -18,6 +18,7 @@ from mindroom.api.credentials import (
     consume_pending_oauth_request,
     issue_pending_oauth_state,
     resolve_request_credentials_target,
+    worker_target_for_credentials_target,
 )
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 from mindroom.logging_config import get_logger
@@ -36,7 +37,6 @@ from mindroom.oauth.service import (
     oauth_success_redirect_url,
     sanitized_oauth_token_result,
 )
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 
 if TYPE_CHECKING:
     from mindroom.api.credentials import RequestCredentialsTarget
@@ -177,28 +177,15 @@ def _issue_authorization_url(
 
 
 def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsTarget) -> dict[str, str]:
-    worker_target = resolve_worker_target(
-        target.worker_scope,
-        target.agent_name,
-        execution_identity=target.execution_identity,
-    )
+    worker_target = worker_target_for_credentials_target(target)
+    worker_key = worker_target.worker_key if worker_target is not None else None
     return {
         "provider": provider.id,
         "credential_service": provider.credential_service,
         "agent_name": target.agent_name or "",
         "worker_scope": target.worker_scope or "unscoped",
-        "worker_key": worker_target.worker_key or "",
+        "worker_key": worker_key or "",
     }
-
-
-def _resolved_worker_target_for_credentials(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:
-    if target.worker_scope is None:
-        return None
-    return resolve_worker_target(
-        target.worker_scope,
-        target.agent_name,
-        execution_identity=target.execution_identity,
-    )
 
 
 def _verify_connect_target_authorized(
@@ -383,7 +370,6 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
     await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
     pending = consume_pending_oauth_request(request, provider.id, state)
-    worker_target: ResolvedWorkerTarget | None = None
     target = resolve_request_credentials_target(
         request,
         agent_name=pending.agent_name,
@@ -402,7 +388,7 @@ async def callback(provider_id: str, request: Request) -> RedirectResponse:
         )
         provider.validate_claims(token_result, runtime_paths)
         safe_result = sanitized_oauth_token_result(provider, token_result)
-        worker_target = _resolved_worker_target_for_credentials(target)
+        worker_target = worker_target_for_credentials_target(target)
         credentials_manager = target.base_manager
         existing_credentials = load_scoped_credentials(
             provider.credential_service,
@@ -443,7 +429,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         service_names=(provider.credential_service,),
         allow_private_scopes=True,
     )
-    worker_target = _resolved_worker_target_for_credentials(target)
+    worker_target = worker_target_for_credentials_target(target)
     credentials = (
         load_scoped_credentials(
             provider.credential_service,
@@ -493,7 +479,7 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
         service_names=(provider.credential_service,),
         allow_private_scopes=True,
     )
-    worker_target = _resolved_worker_target_for_credentials(target)
+    worker_target = worker_target_for_credentials_target(target)
     delete_scoped_credentials(
         provider.credential_service,
         credentials_manager=target.base_manager,
