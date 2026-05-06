@@ -5,7 +5,7 @@ import asyncio
 import threading
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,9 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom import constants
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import ApiAuthState, verify_user
+from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
-from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult
+from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
@@ -53,7 +53,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
 logger = get_logger(__name__)
-_UNSET = object()
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
 
 
@@ -207,36 +206,6 @@ def _api_runtime_paths(request: Request) -> constants.RuntimePaths:
     return config_lifecycle.api_runtime_paths(request)
 
 
-def _published_snapshot(
-    snapshot: ApiSnapshot,
-    *,
-    increment_generation: bool = True,
-    runtime_paths: constants.RuntimePaths | None = None,
-    config_data: dict[str, Any] | None = None,
-    runtime_config: Config | None | object = _UNSET,
-    config_load_result: ConfigLoadResult | None | object = _UNSET,
-    auth_state: ApiAuthState | None | object = _UNSET,
-) -> ApiSnapshot:
-    """Return one new published snapshot with an incremented generation."""
-    updated_runtime_paths = snapshot.runtime_paths if runtime_paths is None else runtime_paths
-    updated_config_data = snapshot.config_data if config_data is None else config_data
-    updated_runtime_config = snapshot.runtime_config if runtime_config is _UNSET else runtime_config
-    updated_config_load_result = (
-        snapshot.config_load_result
-        if config_load_result is _UNSET
-        else cast("ConfigLoadResult | None", config_load_result)
-    )
-    updated_auth_state = snapshot.auth_state if auth_state is _UNSET else auth_state
-    return ApiSnapshot(
-        generation=snapshot.generation + 1 if increment_generation else snapshot.generation,
-        runtime_paths=updated_runtime_paths,
-        config_data=updated_config_data,
-        runtime_config=cast("Config | None", updated_runtime_config),
-        config_load_result=updated_config_load_result,
-        auth_state=updated_auth_state,
-    )
-
-
 def _app_context(api_app: FastAPI) -> ApiSnapshot:
     """Return the committed API snapshot for one app instance."""
     return config_lifecycle.require_api_state(api_app).snapshot
@@ -275,7 +244,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         config_load_result = (
             current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
         )
-        previous_state.snapshot = _published_snapshot(
+        previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
             config_data=config_data,

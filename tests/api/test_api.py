@@ -136,7 +136,7 @@ def _publish_committed_runtime_config(
     runtime_config = Config.validate_with_runtime(authored_payload, runtime_paths)
     context.config_data = runtime_config.authored_model_dump()
     context.runtime_config = runtime_config
-    context.config_load_result = main.ConfigLoadResult(success=True)
+    context.config_load_result = config_lifecycle.ConfigLoadResult(success=True)
     context.auth_state = None
 
 
@@ -152,6 +152,54 @@ def test_api_main_does_not_reexport_config_lifecycle_pass_through_helpers() -> N
         "_load_config_from_file",
     ):
         assert not hasattr(main, helper_name)
+
+
+def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_path: Path) -> None:
+    """Snapshot publication should preserve, replace, and clear every committed field centrally."""
+    first_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "first.yaml",
+        process_env={},
+    )
+    second_runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "second.yaml",
+        process_env={},
+    )
+    runtime_config = Config.validate_with_runtime(_authored_config_payload("old"), first_runtime)
+    load_result = config_lifecycle.ConfigLoadResult(success=True)
+    auth_state = cast("auth.ApiAuthState", object())
+    snapshot = main.ApiSnapshot(
+        generation=7,
+        runtime_paths=first_runtime,
+        config_data={"agents": {"old": {"display_name": "Old"}}},
+        runtime_config=runtime_config,
+        config_load_result=load_result,
+        auth_state=auth_state,
+    )
+
+    preserved = config_lifecycle._published_snapshot(snapshot, increment_generation=False)
+
+    assert preserved.generation == 7
+    assert preserved.runtime_paths == first_runtime
+    assert preserved.config_data is snapshot.config_data
+    assert preserved.runtime_config is runtime_config
+    assert preserved.config_load_result is load_result
+    assert preserved.auth_state is auth_state
+
+    cleared = config_lifecycle._published_snapshot(
+        snapshot,
+        runtime_paths=second_runtime,
+        config_data={},
+        runtime_config=None,
+        config_load_result=None,
+        auth_state=None,
+    )
+
+    assert cleared.generation == 8
+    assert cleared.runtime_paths == second_runtime
+    assert cleared.config_data == {}
+    assert cleared.runtime_config is None
+    assert cleared.config_load_result is None
+    assert cleared.auth_state is None
 
 
 class _ContextSwapLock:
@@ -571,7 +619,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
 
     context = main._app_context(fresh_app)
     assert context.runtime_paths == second_runtime
-    assert context.config_load_result == main.ConfigLoadResult(success=True)
+    assert context.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
     assert set(context.config_data["agents"]) == {"second"}
 
 
@@ -617,7 +665,7 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
 
     assert config_lifecycle.load_config_into_app(first_runtime, fresh_app) is False
     assert set(main._app_context(fresh_app).config_data["agents"]) == {"second"}
-    assert main._app_context(fresh_app).config_load_result == main.ConfigLoadResult(success=True)
+    assert main._app_context(fresh_app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
 
 
 def test_reload_api_runtime_config_does_not_clear_worker_snapshot_on_failed_load(tmp_path: Path) -> None:
@@ -625,7 +673,7 @@ def test_reload_api_runtime_config_does_not_clear_worker_snapshot_on_failed_load
     fresh_app = FastAPI()
     runtime_paths = _runtime_paths(tmp_path)
     main.initialize_api_app(fresh_app, runtime_paths)
-    failure = main.ConfigLoadResult(success=False, error_status_code=422, error_detail="bad config")
+    failure = config_lifecycle.ConfigLoadResult(success=False, error_status_code=422, error_detail="bad config")
 
     with (
         patch.object(config_lifecycle, "_load_config_result", return_value=(failure, None, None)),
@@ -654,13 +702,13 @@ def test_read_app_committed_config_uses_current_context_after_runtime_swap(tmp_p
         generation=0,
         runtime_paths=first_runtime,
         config_data=_validated_authored_payload(first_runtime, "old"),
-        config_load_result=main.ConfigLoadResult(success=True),
+        config_load_result=config_lifecycle.ConfigLoadResult(success=True),
     )
     second_snapshot = main.ApiSnapshot(
         generation=1,
         runtime_paths=second_runtime,
         config_data=_validated_authored_payload(second_runtime, "new"),
-        config_load_result=main.ConfigLoadResult(success=True),
+        config_load_result=config_lifecycle.ConfigLoadResult(success=True),
     )
     fresh_app_state = config_lifecycle.ensure_app_state(fresh_app)
     fresh_app_state.api_state = main.ApiState(
@@ -708,13 +756,13 @@ def test_write_app_committed_config_uses_current_context_after_runtime_swap(tmp_
         generation=0,
         runtime_paths=first_runtime,
         config_data=_validated_authored_payload(first_runtime, "old"),
-        config_load_result=main.ConfigLoadResult(success=True),
+        config_load_result=config_lifecycle.ConfigLoadResult(success=True),
     )
     second_snapshot = main.ApiSnapshot(
         generation=1,
         runtime_paths=second_runtime,
         config_data=_validated_authored_payload(second_runtime, "new"),
-        config_load_result=main.ConfigLoadResult(success=True),
+        config_load_result=config_lifecycle.ConfigLoadResult(success=True),
     )
     fresh_app_state = config_lifecycle.ensure_app_state(fresh_app)
     fresh_app_state.api_state = main.ApiState(
@@ -2461,7 +2509,7 @@ def test_save_config_can_recover_from_invalid_reload(
     saved_config = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
     assert saved_config["agents"]["recovered_agent"]["display_name"] == "Recovered Agent"
     assert "plugins" not in saved_config
-    assert main._app_context(main.app).config_load_result == main.ConfigLoadResult(success=True)
+    assert main._app_context(main.app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
 
 
 def test_get_raw_config_source_returns_current_invalid_file(
@@ -2528,7 +2576,7 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
 
     assert response.status_code == 200
     assert temp_config_file.read_text(encoding="utf-8") == valid_source
-    assert main._app_context(main.app).config_load_result == main.ConfigLoadResult(success=True)
+    assert main._app_context(main.app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
 
     load_response = test_client.post("/api/config/load")
     assert load_response.status_code == 200
@@ -2772,7 +2820,7 @@ def test_write_app_committed_config_checks_current_config_load_result_after_acqu
         "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
     }
     context.config_data = yaml.safe_load(yaml.safe_dump(original_config))
-    context.config_load_result = main.ConfigLoadResult(success=True)
+    context.config_load_result = config_lifecycle.ConfigLoadResult(success=True)
 
     class _SignalingLock:
         def __init__(self) -> None:
@@ -2822,7 +2870,7 @@ def test_write_app_committed_config_checks_current_config_load_result_after_acqu
             writer_thread = threading.Thread(target=_run_write)
             writer_thread.start()
             assert signaling_lock.blocked.wait(timeout=1)
-            context.config_load_result = main.ConfigLoadResult(
+            context.config_load_result = config_lifecycle.ConfigLoadResult(
                 success=False,
                 error_status_code=422,
                 error_detail=error_detail,
