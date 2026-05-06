@@ -35,6 +35,8 @@ from mindroom.tool_system.metadata import (
     serialize_tool_validation_snapshot,
 )
 from mindroom.tool_system.registry_state import (
+    BUILTIN_TOOL_METADATA,
+    BUILTIN_TOOL_REGISTRY,
     PLUGIN_MODULE_PREFIX,
     TOOL_METADATA,
     TOOL_REGISTRY,
@@ -274,6 +276,23 @@ def test_tool_metadata_consistency() -> None:
         assert metadata.category, f"Tool {tool_name} missing category"
         assert metadata.status, f"Tool {tool_name} missing status"
         assert metadata.setup_type, f"Tool {tool_name} missing setup_type"
+
+
+def test_dynamic_tools_is_durable_metadata_only_builtin(tmp_path: Path) -> None:
+    """Dynamic tools metadata should survive runtime registry rebuilding without a factory."""
+    metadata = TOOL_METADATA["dynamic_tools"]
+
+    assert BUILTIN_TOOL_METADATA["dynamic_tools"] == metadata
+    assert "dynamic_tools" not in BUILTIN_TOOL_REGISTRY
+    assert "dynamic_tools" not in TOOL_REGISTRY
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+
+    assert metadata_module.resolved_tool_metadata_for_runtime(runtime_paths, Config())["dynamic_tools"] == metadata
 
 
 def test_tool_metadata_does_not_advertise_env_var_fallbacks() -> None:
