@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 from uuid import uuid4
 
+from mindroom.attachments import unique_attachment_ids
 from mindroom.hooks import (
     CustomEventContext,
     HookContextSupport,
@@ -507,11 +508,7 @@ def attachment_id_available_in_tool_runtime_context(
 
 def list_tool_runtime_attachment_ids(context: ToolRuntimeContext) -> list[str]:
     """Return all attachment IDs currently available in runtime context order."""
-    attachment_ids: list[str] = []
-    for attachment_id in (*context.attachment_ids, *context.runtime_attachment_ids):
-        if attachment_id and attachment_id not in attachment_ids:
-            attachment_ids.append(attachment_id)
-    return attachment_ids
+    return unique_attachment_ids((*context.attachment_ids, *context.runtime_attachment_ids))
 
 
 def append_tool_runtime_attachment_id(attachment_id: str) -> ToolRuntimeContext | None:

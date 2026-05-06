@@ -16,6 +16,7 @@ from mindroom.attachments import (
     _attachment_id_for_event,
     _register_image_attachment,
     filter_attachments_for_context,
+    format_attachment_ids_prompt,
     load_attachment,
     merge_attachment_ids,
     parse_attachment_ids_from_event_source,
@@ -23,6 +24,7 @@ from mindroom.attachments import (
     register_local_attachment,
     resolve_attachments,
     resolve_thread_attachment_ids,
+    unique_attachment_ids,
 )
 from tests.conftest import make_visible_message
 
@@ -266,6 +268,19 @@ def test_merge_attachment_ids_preserves_order() -> None:
     """Merge should preserve first-seen ordering across sources."""
     merged = merge_attachment_ids(["att_1", "att_2"], ["att_2", "att_3"], ["att_1"])
     assert merged == ["att_1", "att_2", "att_3"]
+
+
+def test_unique_attachment_ids_preserves_first_seen_order() -> None:
+    """Attachment ID ordering should keep first occurrence and skip blanks."""
+    attachment_ids = unique_attachment_ids(["att_1", "att_2", "att_1", "", "att_3", "att_2"])
+    assert attachment_ids == ["att_1", "att_2", "att_3"]
+
+
+def test_format_attachment_ids_prompt_preserves_user_facing_text() -> None:
+    """Attachment prompt wording is shared and remains exact."""
+    prompt = format_attachment_ids_prompt(["att_1", "att_2"])
+    assert prompt == "Available attachment IDs: att_1, att_2. Use tool calls to inspect or process them."
+    assert format_attachment_ids_prompt([]) is None
 
 
 def test_filter_attachments_for_context_enforces_room_and_thread(tmp_path: Path) -> None:

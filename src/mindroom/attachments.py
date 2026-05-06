@@ -36,7 +36,7 @@ from .matrix.media import (
 from .timing import emit_elapsed_timing
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from .matrix.client import ResolvedVisibleMessage
 
@@ -131,25 +131,29 @@ def _thread_history_message_in_scope(message: ResolvedVisibleMessage, thread_id:
     return thread_id in (message.thread_id, message.event_id)
 
 
+def unique_attachment_ids(attachment_ids: Iterable[str]) -> list[str]:
+    """Return unique non-empty attachment IDs preserving first-seen order."""
+    unique_ids: list[str] = []
+    seen_attachment_ids: set[str] = set()
+    for attachment_id in attachment_ids:
+        if attachment_id and attachment_id not in seen_attachment_ids:
+            seen_attachment_ids.add(attachment_id)
+            unique_ids.append(attachment_id)
+    return unique_ids
+
+
 def merge_attachment_ids(*attachment_id_lists: list[str]) -> list[str]:
     """Merge attachment IDs preserving first-seen order."""
-    merged: list[str] = []
-    seen_attachment_ids: set[str] = set()
-    for attachment_ids in attachment_id_lists:
-        for attachment_id in attachment_ids:
-            if attachment_id and attachment_id not in seen_attachment_ids:
-                seen_attachment_ids.add(attachment_id)
-                merged.append(attachment_id)
-    return merged
-
-
-def _append_attachment_ids_prompt(prompt: str, attachment_ids: list[str]) -> str:
-    """Append attachment guidance to a prompt when attachment IDs are available."""
-    if not attachment_ids:
-        return prompt
-    return (
-        f"{prompt}\n\nAvailable attachment IDs: {', '.join(attachment_ids)}. Use tool calls to inspect or process them."
+    return unique_attachment_ids(
+        attachment_id for attachment_ids in attachment_id_lists for attachment_id in attachment_ids
     )
+
+
+def format_attachment_ids_prompt(attachment_ids: list[str]) -> str | None:
+    """Return attachment guidance prompt text when attachment IDs are available."""
+    if not attachment_ids:
+        return None
+    return f"Available attachment IDs: {', '.join(attachment_ids)}. Use tool calls to inspect or process them."
 
 
 def _attachments_dir(storage_path: Path) -> Path:
