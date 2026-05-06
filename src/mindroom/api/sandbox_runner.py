@@ -28,13 +28,9 @@ from pydantic import BaseModel, Field, ValidationError
 from mindroom import constants
 from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
 from mindroom.api.worker_responses import (
-    WorkerCleanupResponse as SandboxWorkerCleanupResponse,
-)
-from mindroom.api.worker_responses import (
-    WorkerListResponse as SandboxWorkerListResponse,
-)
-from mindroom.api.worker_responses import (
-    serialize_worker_response as _serialize_worker,
+    SandboxWorkerCleanupResponse,
+    SandboxWorkerListResponse,
+    serialize_sandbox_worker_response,
 )
 from mindroom.attachments import _normalize_attachment_id
 from mindroom.config.main import Config, _normalized_config_data, load_config
@@ -1252,7 +1248,7 @@ async def list_workers(request: Request, include_idle: bool = True) -> SandboxWo
     """List known workers and their current lifecycle status."""
     runtime_paths = _sandbox_runner_runtime_paths(request)
     workers = [
-        _serialize_worker(worker)
+        serialize_sandbox_worker_response(worker)
         for worker in get_local_worker_manager(runtime_paths).list_workers(include_idle=include_idle)
     ]
     return SandboxWorkerListResponse(workers=workers)
@@ -1263,7 +1259,7 @@ async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse
     """Mark idle workers inactive while retaining their persisted state."""
     runtime_paths = _sandbox_runner_runtime_paths(request)
     worker_manager = get_local_worker_manager(runtime_paths)
-    cleaned_workers = [_serialize_worker(worker) for worker in worker_manager.cleanup_idle_workers()]
+    cleaned_workers = [serialize_sandbox_worker_response(worker) for worker in worker_manager.cleanup_idle_workers()]
     return SandboxWorkerCleanupResponse(
         idle_timeout_seconds=worker_manager.idle_timeout_seconds,
         cleaned_workers=cleaned_workers,

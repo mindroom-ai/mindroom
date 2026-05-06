@@ -36,11 +36,11 @@ TEST_WORKER_AUTH = "token"
 
 def test_worker_api_modules_share_response_dtos_and_serializer() -> None:
     """Primary and sandbox worker APIs should share the worker response contract."""
-    assert workers_api.WorkerListResponse is sandbox_runner_api.SandboxWorkerListResponse
-    assert workers_api.WorkerCleanupResponse is sandbox_runner_api.SandboxWorkerCleanupResponse
-    assert workers_api._serialize_worker is sandbox_runner_api._serialize_worker
+    assert workers_api.SandboxWorkerListResponse is sandbox_runner_api.SandboxWorkerListResponse
+    assert workers_api.SandboxWorkerCleanupResponse is sandbox_runner_api.SandboxWorkerCleanupResponse
+    assert workers_api.serialize_sandbox_worker_response is sandbox_runner_api.serialize_sandbox_worker_response
 
-    serialized_worker = workers_api._serialize_worker(
+    serialized_worker = workers_api.serialize_sandbox_worker_response(
         WorkerHandle(
             worker_id="worker-1",
             worker_key="worker-key",

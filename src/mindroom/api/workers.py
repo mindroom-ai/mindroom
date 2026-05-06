@@ -8,12 +8,10 @@ from fastapi import APIRouter, HTTPException, Request
 
 from mindroom.api import config_lifecycle
 from mindroom.api.worker_responses import (
-    WorkerCleanupResponse,
-    WorkerListResponse,
-    WorkerResponse,
-)
-from mindroom.api.worker_responses import (
-    serialize_worker_response as _serialize_worker,
+    SandboxWorkerCleanupResponse,
+    SandboxWorkerListResponse,
+    SandboxWorkerResponse,
+    serialize_sandbox_worker_response,
 )
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import (
@@ -28,9 +26,9 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "WorkerCleanupResponse",
-    "WorkerListResponse",
-    "WorkerResponse",
+    "SandboxWorkerCleanupResponse",
+    "SandboxWorkerListResponse",
+    "SandboxWorkerResponse",
     "cleanup_idle_workers",
     "list_workers",
     "router",
@@ -64,20 +62,22 @@ def _worker_manager(request: Request) -> WorkerManager:
     )
 
 
-@router.get("", response_model=WorkerListResponse)
-async def list_workers(request: Request, include_idle: bool = True) -> WorkerListResponse:
+@router.get("", response_model=SandboxWorkerListResponse)
+async def list_workers(request: Request, include_idle: bool = True) -> SandboxWorkerListResponse:
     """List known workers from the configured primary-runtime backend."""
     worker_manager = _worker_manager(request)
-    workers = [_serialize_worker(worker) for worker in worker_manager.list_workers(include_idle=include_idle)]
-    return WorkerListResponse(workers=workers)
+    workers = [
+        serialize_sandbox_worker_response(worker) for worker in worker_manager.list_workers(include_idle=include_idle)
+    ]
+    return SandboxWorkerListResponse(workers=workers)
 
 
-@router.post("/cleanup", response_model=WorkerCleanupResponse)
-async def cleanup_idle_workers(request: Request) -> WorkerCleanupResponse:
+@router.post("/cleanup", response_model=SandboxWorkerCleanupResponse)
+async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse:
     """Run one idle-worker cleanup pass on the configured backend."""
     worker_manager = _worker_manager(request)
-    cleaned_workers = [_serialize_worker(worker) for worker in worker_manager.cleanup_idle_workers()]
-    return WorkerCleanupResponse(
+    cleaned_workers = [serialize_sandbox_worker_response(worker) for worker in worker_manager.cleanup_idle_workers()]
+    return SandboxWorkerCleanupResponse(
         idle_timeout_seconds=worker_manager.idle_timeout_seconds,
         cleaned_workers=cleaned_workers,
     )

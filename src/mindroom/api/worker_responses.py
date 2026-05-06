@@ -11,14 +11,14 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "WorkerCleanupResponse",
-    "WorkerListResponse",
-    "WorkerResponse",
-    "serialize_worker_response",
+    "SandboxWorkerCleanupResponse",
+    "SandboxWorkerListResponse",
+    "SandboxWorkerResponse",
+    "serialize_sandbox_worker_response",
 ]
 
 
-class WorkerResponse(BaseModel):
+class SandboxWorkerResponse(BaseModel):
     """Serialized worker metadata for API responses."""
 
     worker_id: str
@@ -36,22 +36,22 @@ class WorkerResponse(BaseModel):
     debug_metadata: dict[str, str] = Field(default_factory=dict)
 
 
-class WorkerListResponse(BaseModel):
+class SandboxWorkerListResponse(BaseModel):
     """List of known workers."""
 
-    workers: list[WorkerResponse]
+    workers: list[SandboxWorkerResponse]
 
 
-class WorkerCleanupResponse(BaseModel):
+class SandboxWorkerCleanupResponse(BaseModel):
     """Result of one cleanup pass."""
 
     idle_timeout_seconds: float
-    cleaned_workers: list[WorkerResponse]
+    cleaned_workers: list[SandboxWorkerResponse]
 
 
-def serialize_worker_response(worker: WorkerHandle) -> WorkerResponse:
+def serialize_sandbox_worker_response(worker: WorkerHandle) -> SandboxWorkerResponse:
     """Serialize a WorkerHandle without exposing its auth token."""
-    return WorkerResponse(
+    return SandboxWorkerResponse(
         worker_id=worker.worker_id,
         worker_key=worker.worker_key,
         endpoint=worker.endpoint,
