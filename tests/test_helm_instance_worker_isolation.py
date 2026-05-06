@@ -11,8 +11,18 @@ import pytest
 import yaml
 
 
-def _render_chart(chart_dir: Path, *set_args: str, release_name: str = "mindroom-demo") -> list[dict[str, Any]]:
-    completed = _run_helm_template(chart_dir, *set_args, release_name=release_name)
+def _render_chart(
+    chart_dir: Path,
+    *set_args: str,
+    release_name: str = "mindroom-demo",
+    set_string_args: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    completed = _run_helm_template(
+        chart_dir,
+        *set_args,
+        release_name=release_name,
+        set_string_args=set_string_args,
+    )
     completed.check_returncode()
     return [doc for doc in yaml.safe_load_all(completed.stdout) if isinstance(doc, dict)]
 
@@ -158,6 +168,32 @@ def test_instance_chart_rejects_email_template_without_email_header() -> None:
         "trustedUpstreamAuth.emailHeader is required when trustedUpstreamAuth.emailToMatrixUserIdTemplate is set"
         in completed.stderr
     )
+
+
+def test_instance_chart_renders_strict_trusted_upstream_jwt_env() -> None:
+    """Strict trusted upstream settings should render to MindRoom runtime env vars."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "trustedUpstreamAuth.enabled=true",
+        "trustedUpstreamAuth.userIdHeader=X-Trusted-User",
+        "trustedUpstreamAuth.emailHeader=X-Trusted-Email",
+        "trustedUpstreamAuth.requireJwt=true",
+        "trustedUpstreamAuth.jwtHeader=X-Trusted-Jwt",
+        "trustedUpstreamAuth.jwtAudience=mindroom-dashboard",
+        "trustedUpstreamAuth.jwtIssuer=https://issuer.example",
+        "trustedUpstreamAuth.jwtEmailClaim=email",
+        set_string_args=("trustedUpstreamAuth.jwksUrl=https://issuer.example/jwks",),
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-demo")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+
+    assert env_values["MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT"] == "true"
+    assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER"] == "X-Trusted-Jwt"
+    assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWKS_URL"] == "https://issuer.example/jwks"
+    assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE"] == "mindroom-dashboard"
+    assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER"] == "https://issuer.example"
+    assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM"] == "email"
 
 
 def test_platform_chart_rejects_email_template_without_email_header() -> None:

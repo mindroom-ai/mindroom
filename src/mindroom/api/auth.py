@@ -9,8 +9,10 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.parse import quote, urlencode
 
+import jwt
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
+from jwt import PyJWKClient, PyJWTError
 from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle
@@ -27,6 +29,8 @@ router = APIRouter(tags=["auth"])
 
 _PLATFORM_AUTH_COOKIE_NAME = "mindroom_jwt"
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
+_TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
+_TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
         "/api/homeassistant/callback",
@@ -59,6 +63,18 @@ class _SupabaseClientProtocol(Protocol):
 
 
 @dataclass(frozen=True)
+class _TrustedUpstreamJwtSettings:
+    """Signed assertion settings for trusted-upstream auth."""
+
+    require_jwt: bool = False
+    header: str | None = None
+    jwks_url: str | None = None
+    audience: str | None = None
+    issuer: str | None = None
+    email_claim: str = "email"
+
+
+@dataclass(frozen=True)
 class _TrustedUpstreamAuthSettings:
     """Trusted reverse-proxy/browser identity settings for hosted deployments."""
 
@@ -67,6 +83,7 @@ class _TrustedUpstreamAuthSettings:
     email_header: str | None = None
     matrix_user_id_header: str | None = None
     email_to_matrix_user_id_template: str | None = None
+    jwt: _TrustedUpstreamJwtSettings = field(default_factory=_TrustedUpstreamJwtSettings)
 
 
 @dataclass(frozen=True)
@@ -88,6 +105,7 @@ class ApiAuthState:
     runtime_paths: RuntimePaths
     settings: _ApiAuthSettings
     supabase_auth: _SupabaseClientProtocol | None
+    trusted_upstream_jwt_client: PyJWKClient | None = None
 
 
 def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> _ApiAuthSettings:
@@ -121,6 +139,28 @@ def _build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> _Trust
             runtime_paths,
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
         ),
+        jwt=_TrustedUpstreamJwtSettings(
+            require_jwt=runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT"),
+            header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER"),
+            jwks_url=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL"),
+            audience=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE"),
+            issuer=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER"),
+            email_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM") or "email",
+        ),
+    )
+
+
+def _build_trusted_upstream_jwt_client(settings: _TrustedUpstreamAuthSettings) -> PyJWKClient | None:
+    """Return a short-lived JWKS cache for strict trusted-upstream auth."""
+    jwt_settings = settings.jwt
+    if not settings.enabled or not jwt_settings.require_jwt or jwt_settings.jwks_url is None:
+        return None
+    return PyJWKClient(
+        jwt_settings.jwks_url,
+        cache_keys=False,
+        cache_jwk_set=True,
+        lifespan=_TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS,
+        timeout=_TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS,
     )
 
 
@@ -142,6 +182,7 @@ def _app_auth_state(api_app: FastAPI) -> ApiAuthState:
                 settings.supabase_url,
                 settings.supabase_anon_key,
             ),
+            trusted_upstream_jwt_client=_build_trusted_upstream_jwt_client(settings.trusted_upstream),
         )
         api_state.snapshot = replace(snapshot, auth_state=state)
         return state
@@ -271,9 +312,95 @@ def _derive_trusted_upstream_matrix_user_id(
     return parsed_matrix_user_id
 
 
+def _trusted_upstream_required_jwt_setting(value: str | None, env_name: str) -> str:
+    if value is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Trusted upstream strict JWT auth is enabled but {env_name} is not set",
+        )
+    return value
+
+
+def _verified_trusted_upstream_jwt_claim(
+    request: Request,
+    settings: _TrustedUpstreamAuthSettings,
+    jwt_client: PyJWKClient | None,
+) -> str | None:
+    """Return the verified upstream identity claim when strict mode is enabled."""
+    jwt_settings = settings.jwt
+    if not jwt_settings.require_jwt:
+        return None
+
+    header = _trusted_upstream_required_jwt_setting(
+        jwt_settings.header,
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER",
+    )
+    audience = _trusted_upstream_required_jwt_setting(
+        jwt_settings.audience,
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE",
+    )
+    issuer = _trusted_upstream_required_jwt_setting(
+        jwt_settings.issuer,
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER",
+    )
+    _trusted_upstream_required_jwt_setting(
+        jwt_settings.jwks_url,
+        "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL",
+    )
+    if jwt_client is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Trusted upstream strict JWT auth is enabled but JWKS validation is not configured",
+        )
+
+    token = _get_configured_header(request, header)
+    if token is None:
+        raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
+
+    try:
+        signing_key = jwt_client.get_signing_key_from_jwt(token)
+        algorithm = signing_key.algorithm_name
+        if algorithm is None:
+            raise jwt.InvalidTokenError
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=[algorithm],
+            audience=audience,
+            issuer=issuer,
+            options={"require": ["exp", "iss", "aud", jwt_settings.email_claim]},
+        )
+    except PyJWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid trusted upstream JWT") from exc
+
+    claim = claims.get(jwt_settings.email_claim)
+    if not isinstance(claim, str) or not claim.strip():
+        raise HTTPException(status_code=401, detail="Invalid trusted upstream JWT")
+    return claim.strip()
+
+
+def _verified_trusted_upstream_email(
+    settings: _TrustedUpstreamAuthSettings,
+    user_id: str,
+    email: str | None,
+    jwt_claim: str | None,
+) -> str | None:
+    """Return the trusted email after checking strict JWT identity consistency."""
+    if jwt_claim is None:
+        return email
+
+    identity_value = email or user_id
+    if not secrets.compare_digest(identity_value, jwt_claim):
+        raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
+    if settings.email_header is None and email is None:
+        return jwt_claim
+    return email
+
+
 def _trusted_upstream_auth_user(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
+    jwt_client: PyJWKClient | None = None,
 ) -> dict[str, Any] | None:
     """Return the trusted-upstream auth user for this request when configured."""
     if not settings.enabled:
@@ -291,8 +418,10 @@ def _trusted_upstream_auth_user(
             detail=f"Missing trusted upstream identity header: {settings.user_id_header}",
         )
 
+    jwt_claim = _verified_trusted_upstream_jwt_claim(request, settings, jwt_client)
     email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(settings)
     email = _get_configured_header(request, settings.email_header)
+    email = _verified_trusted_upstream_email(settings, user_id, email, jwt_claim)
     matrix_user_id = _get_configured_header(request, settings.matrix_user_id_header)
     parsed_matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id)
     if matrix_user_id is not None and parsed_matrix_user_id is None:
@@ -357,6 +486,7 @@ def _bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
                     settings.supabase_url,
                     settings.supabase_anon_key,
                 ),
+                trusted_upstream_jwt_client=_build_trusted_upstream_jwt_client(settings.trusted_upstream),
             )
             current = replace(current, auth_state=auth_state)
             api_state.snapshot = current
@@ -380,7 +510,11 @@ def request_has_frontend_access(request: Request) -> bool:
     auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
     try:
-        trusted_auth_user = _trusted_upstream_auth_user(request, auth_state.settings.trusted_upstream)
+        trusted_auth_user = _trusted_upstream_auth_user(
+            request,
+            auth_state.settings.trusted_upstream,
+            auth_state.trusted_upstream_jwt_client,
+        )
     except HTTPException as exc:
         if exc.status_code >= 500:
             raise
@@ -558,7 +692,11 @@ async def verify_user(
     snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
     mindroom_api_key = auth_state.settings.mindroom_api_key
-    trusted_auth_user = _trusted_upstream_auth_user(request, auth_state.settings.trusted_upstream)
+    trusted_auth_user = _trusted_upstream_auth_user(
+        request,
+        auth_state.settings.trusted_upstream,
+        auth_state.trusted_upstream_jwt_client,
+    )
     if trusted_auth_user is not None:
         request.scope["auth_user"] = trusted_auth_user
         return trusted_auth_user
