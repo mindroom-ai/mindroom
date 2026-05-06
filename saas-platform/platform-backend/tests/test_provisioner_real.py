@@ -150,6 +150,7 @@ class TestProvisionerCommandValidation:
                 INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER="https://issuer.example",
                 INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM="email",
                 INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM="sub",
+                INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM="matrix_user_id",
             ),
             patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
             patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
@@ -188,6 +189,7 @@ class TestProvisionerCommandValidation:
         assert set_args["trustedUpstreamAuth.jwtIssuer"] == "https://issuer.example"
         assert set_args["trustedUpstreamAuth.jwtEmailClaim"] == "email"
         assert set_args["trustedUpstreamAuth.jwtUserIdClaim"] == "sub"
+        assert set_args["trustedUpstreamAuth.jwtMatrixUserIdClaim"] == "matrix_user_id"
 
     @pytest.mark.asyncio
     async def test_kubectl_scale_command_uses_correct_syntax(self):

@@ -183,6 +183,7 @@ def test_instance_chart_renders_strict_trusted_upstream_jwt_env() -> None:
         "trustedUpstreamAuth.jwtIssuer=https://issuer.example",
         "trustedUpstreamAuth.jwtEmailClaim=email",
         "trustedUpstreamAuth.jwtUserIdClaim=sub",
+        "trustedUpstreamAuth.jwtMatrixUserIdClaim=matrix_user_id",
         set_string_args=("trustedUpstreamAuth.jwksUrl=https://issuer.example/jwks",),
     )
     deployment = _resource(docs, "Deployment", "mindroom-demo")
@@ -196,6 +197,7 @@ def test_instance_chart_renders_strict_trusted_upstream_jwt_env() -> None:
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER"] == "https://issuer.example"
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM"] == "email"
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"] == "sub"
+    assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"] == "matrix_user_id"
 
 
 def test_platform_chart_rejects_email_template_without_email_header() -> None:

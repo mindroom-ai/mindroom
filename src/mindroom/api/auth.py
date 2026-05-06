@@ -74,6 +74,7 @@ class _TrustedUpstreamJwtSettings:
     issuer: str | None = None
     email_claim: str = "email"
     user_id_claim: str | None = None
+    matrix_user_id_claim: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ class _TrustedUpstreamJwtIdentity:
 
     email: str
     user_id: str | None = None
+    matrix_user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +159,7 @@ def _build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> _Trust
             issuer=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER"),
             email_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM") or "email",
             user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"),
+            matrix_user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"),
         ),
     )
 
@@ -376,6 +379,8 @@ async def _verified_trusted_upstream_jwt_identity(
         required_claims = ["exp", "iss", "aud", jwt_settings.email_claim]
         if jwt_settings.user_id_claim is not None:
             required_claims.append(jwt_settings.user_id_claim)
+        if jwt_settings.matrix_user_id_claim is not None:
+            required_claims.append(jwt_settings.matrix_user_id_claim)
         claims = jwt.decode(
             token,
             signing_key.key,
@@ -393,7 +398,12 @@ async def _verified_trusted_upstream_jwt_identity(
         if jwt_settings.user_id_claim is not None
         else None
     )
-    return _TrustedUpstreamJwtIdentity(email=email, user_id=user_id)
+    matrix_user_id = (
+        _trusted_upstream_jwt_string_claim(claims, jwt_settings.matrix_user_id_claim)
+        if jwt_settings.matrix_user_id_claim is not None
+        else None
+    )
+    return _TrustedUpstreamJwtIdentity(email=email, user_id=user_id, matrix_user_id=matrix_user_id)
 
 
 def _trusted_upstream_jwt_string_claim(claims: dict[str, Any], claim_name: str) -> str:
@@ -404,7 +414,6 @@ def _trusted_upstream_jwt_string_claim(claims: dict[str, Any], claim_name: str) 
 
 
 def _verified_trusted_upstream_identity(
-    settings: _TrustedUpstreamAuthSettings,
     user_id: str,
     email: str | None,
     jwt_identity: _TrustedUpstreamJwtIdentity | None,
@@ -418,9 +427,51 @@ def _verified_trusted_upstream_identity(
         raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
     if email is not None and email != jwt_identity.email:
         raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
-    if settings.email_header is None and email is None:
+    if email is None:
         email = jwt_identity.email
     return user_id, email
+
+
+def _verified_trusted_upstream_matrix_user_id(
+    settings: _TrustedUpstreamAuthSettings,
+    matrix_user_id: str | None,
+    email: str | None,
+    email_to_matrix_template: str | None,
+    jwt_identity: _TrustedUpstreamJwtIdentity | None,
+) -> str | None:
+    """Return a Matrix identity only when it is trusted for the active auth mode."""
+    parsed_matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id)
+    if matrix_user_id is not None and parsed_matrix_user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
+
+    if jwt_identity is None:
+        if parsed_matrix_user_id is not None:
+            return parsed_matrix_user_id
+        return _derive_trusted_upstream_matrix_user_id(settings, email, email_to_matrix_template)
+
+    if jwt_identity.matrix_user_id is not None:
+        verified_matrix_user_id = try_parse_historical_matrix_user_id(jwt_identity.matrix_user_id)
+        if verified_matrix_user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
+        if parsed_matrix_user_id is not None and parsed_matrix_user_id != verified_matrix_user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Trusted upstream Matrix identity does not match JWT claim",
+            )
+        return verified_matrix_user_id
+
+    derived_matrix_user_id = _derive_trusted_upstream_matrix_user_id(settings, email, email_to_matrix_template)
+    if derived_matrix_user_id is not None:
+        if parsed_matrix_user_id is not None and parsed_matrix_user_id != derived_matrix_user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Trusted upstream Matrix identity does not match verified email",
+            )
+        return derived_matrix_user_id
+
+    if parsed_matrix_user_id is not None:
+        raise HTTPException(status_code=401, detail="Trusted upstream Matrix identity is not signed")
+    return None
 
 
 async def _trusted_upstream_auth_user(
@@ -447,13 +498,15 @@ async def _trusted_upstream_auth_user(
     jwt_identity = await _verified_trusted_upstream_jwt_identity(request, settings, jwt_client)
     email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(settings)
     email = _get_configured_header(request, settings.email_header)
-    user_id, email = _verified_trusted_upstream_identity(settings, user_id, email, jwt_identity)
+    user_id, email = _verified_trusted_upstream_identity(user_id, email, jwt_identity)
     matrix_user_id = _get_configured_header(request, settings.matrix_user_id_header)
-    parsed_matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id)
-    if matrix_user_id is not None and parsed_matrix_user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
-    if parsed_matrix_user_id is None:
-        parsed_matrix_user_id = _derive_trusted_upstream_matrix_user_id(settings, email, email_to_matrix_template)
+    parsed_matrix_user_id = _verified_trusted_upstream_matrix_user_id(
+        settings,
+        matrix_user_id,
+        email,
+        email_to_matrix_template,
+        jwt_identity,
+    )
 
     auth_user = {
         "user_id": user_id,

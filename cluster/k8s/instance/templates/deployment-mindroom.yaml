@@ -172,6 +172,10 @@ spec:
         - name: MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM
           value: {{ $trustedUpstreamAuth.jwtUserIdClaim | quote }}
         {{- end }}
+        {{- if $trustedUpstreamAuth.jwtMatrixUserIdClaim }}
+        - name: MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM
+          value: {{ $trustedUpstreamAuth.jwtMatrixUserIdClaim | quote }}
+        {{- end }}
         {{- end }}
         {{- end }}
         - name: MINDROOM_PLATFORM_LOGIN_URL

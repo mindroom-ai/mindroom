@@ -4090,7 +4090,12 @@ def test_trusted_upstream_headers_populate_auth_user_when_enabled(tmp_path: Path
     }
 
 
-def _trusted_upstream_strict_jwt_env(tmp_path: Path, *, user_id_claim: str | None = "sub") -> dict[str, str]:
+def _trusted_upstream_strict_jwt_env(
+    tmp_path: Path,
+    *,
+    user_id_claim: str | None = "sub",
+    matrix_user_id_claim: str | None = None,
+) -> dict[str, str]:
     env = {
         "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
         "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
@@ -4104,6 +4109,8 @@ def _trusted_upstream_strict_jwt_env(tmp_path: Path, *, user_id_claim: str | Non
     }
     if user_id_claim is not None:
         env["MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"] = user_id_claim
+    if matrix_user_id_claim is not None:
+        env["MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"] = matrix_user_id_claim
     return env
 
 
@@ -4127,18 +4134,22 @@ def _trusted_upstream_jwt(
     expires_at: datetime | None = None,
     issuer: str = "https://issuer.example",
     kid: str = "test-key",
+    matrix_user_id: str | None = None,
     user_id: str = "user_123",
 ) -> str:
     now = datetime.now(UTC)
+    claims = {
+        "iss": issuer,
+        "aud": audience,
+        "exp": expires_at or now + timedelta(minutes=5),
+        "iat": now,
+        "email": email,
+        "sub": user_id,
+    }
+    if matrix_user_id is not None:
+        claims["matrix_user_id"] = matrix_user_id
     return jwt.encode(
-        {
-            "iss": issuer,
-            "aud": audience,
-            "exp": expires_at or now + timedelta(minutes=5),
-            "iat": now,
-            "email": email,
-            "sub": user_id,
-        },
+        claims,
         private_key,
         algorithm="RS256",
         headers={"kid": kid},
@@ -4184,7 +4195,6 @@ def test_trusted_upstream_strict_jwt_accepts_valid_token(
 def test_trusted_upstream_strict_jwt_accepts_non_ascii_identity() -> None:
     """Strict trusted upstream auth should handle non-ASCII identifier values."""
     user_id, email = auth._verified_trusted_upstream_identity(
-        auth._TrustedUpstreamAuthSettings(email_header="X-Trusted-Email"),
         "üser_123",
         "álîçé@example.com",
         auth._TrustedUpstreamJwtIdentity(email="álîçé@example.com", user_id="üser_123"),
@@ -4218,6 +4228,113 @@ def test_trusted_upstream_strict_jwt_accepts_email_claim_as_user_id_without_user
         "email": "alice@example.com",
         "auth_source": "trusted_upstream",
     }
+
+
+def test_trusted_upstream_strict_jwt_uses_verified_email_when_email_header_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Strict auth should use the signed email when the optional email header is absent."""
+    private_key = _trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    token = _trusted_upstream_jwt(private_key, email="alice@example.com", user_id="user_123")
+    api_app = _trusted_auth_test_app(_runtime_paths(tmp_path, process_env=_trusted_upstream_strict_jwt_env(tmp_path)))
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                "X-Trusted-User": "user_123",
+                "X-Trusted-Jwt": token,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_id": "user_123",
+        "email": "alice@example.com",
+        "auth_source": "trusted_upstream",
+    }
+
+
+def test_trusted_upstream_strict_jwt_rejects_unsigned_matrix_header(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Strict auth should not accept Matrix identity from an unsigned header."""
+    private_key = _trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    token = _trusted_upstream_jwt(private_key)
+    env = _trusted_upstream_strict_jwt_env(tmp_path)
+    env["MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"] = "X-Trusted-Matrix-User"
+    api_app = _trusted_auth_test_app(_runtime_paths(tmp_path, process_env=env))
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                **_trusted_upstream_strict_headers(token),
+                "X-Trusted-Matrix-User": "@bob:example.org",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Trusted upstream Matrix identity is not signed"
+
+
+def test_trusted_upstream_strict_jwt_accepts_signed_matrix_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Strict auth should accept Matrix identity when it matches a verified JWT claim."""
+    private_key = _trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    token = _trusted_upstream_jwt(private_key, matrix_user_id="@alice:example.org")
+    env = _trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id")
+    env["MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"] = "X-Trusted-Matrix-User"
+    api_app = _trusted_auth_test_app(_runtime_paths(tmp_path, process_env=env))
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                **_trusted_upstream_strict_headers(token),
+                "X-Trusted-Matrix-User": "@alice:example.org",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user_id": "user_123",
+        "email": "alice@example.com",
+        "auth_source": "trusted_upstream",
+        "matrix_user_id": "@alice:example.org",
+    }
+
+
+def test_trusted_upstream_strict_jwt_rejects_matrix_claim_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Strict auth should reject Matrix headers that conflict with the verified JWT claim."""
+    private_key = _trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    token = _trusted_upstream_jwt(private_key, matrix_user_id="@alice:example.org")
+    env = _trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id")
+    env["MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"] = "X-Trusted-Matrix-User"
+    api_app = _trusted_auth_test_app(_runtime_paths(tmp_path, process_env=env))
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                **_trusted_upstream_strict_headers(token),
+                "X-Trusted-Matrix-User": "@bob:example.org",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Trusted upstream Matrix identity does not match JWT claim"
 
 
 def test_trusted_upstream_strict_jwt_rejects_missing_token(tmp_path: Path) -> None:
