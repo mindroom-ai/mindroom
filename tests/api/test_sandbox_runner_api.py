@@ -16,11 +16,13 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_protocol as sandbox_protocol_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
+import mindroom.api.sandbox_runner_app as sandbox_runner_app_module
 import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
 import mindroom.credentials as credentials_module
@@ -370,6 +372,55 @@ def test_startup_runner_token_is_removed_from_proc_environ() -> None:
     )
 
     assert result.stdout.splitlines() == ["from-subprocess", "False"]
+
+
+def test_lifespan_scrubs_runner_token_before_loading_plugins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Plugin startup code should not observe the runner auth token in os.environ."""
+    plugin_root = tmp_path / "plugins" / "env-reader"
+    plugin_root.mkdir(parents=True)
+    capture_path = tmp_path / "plugin-captured-token.txt"
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "env_reader", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        f"Path({str(capture_path)!r}).write_text("
+        "os.environ.get('MINDROOM_SANDBOX_PROXY_TOKEN', ''), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents: {}\n"
+        "router:\n"
+        "  model: default\n"
+        "plugins:\n"
+        "  - ./plugins/env-reader\n",
+        encoding="utf-8",
+    )
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_NAMESPACE": "alpha1234"},
+    )
+    manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
+    _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "runner-secret")
+
+    app = FastAPI(lifespan=sandbox_runner_app_module._lifespan)
+    with TestClient(app):
+        pass
+
+    assert capture_path.read_text(encoding="utf-8") == ""
+    assert sandbox_runner_module.app_runner_token(app) == "runner-secret"
 
 
 def test_lifespan_reuses_initialized_runner_context_without_reloading_disk_config(tmp_path: Path) -> None:

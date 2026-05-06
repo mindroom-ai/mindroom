@@ -21,8 +21,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         runtime_paths = app_runtime_paths(app)
     except TypeError:
-        runtime_paths, config = load_config_from_startup_runtime()
         runner_token = startup_runner_token_from_env()
+        runtime_paths, config = load_config_from_startup_runtime()
     else:
         config = app_runtime_config(app)
         runner_token = app_runner_token(app)
