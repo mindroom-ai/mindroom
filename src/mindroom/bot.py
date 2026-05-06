@@ -1058,6 +1058,7 @@ class AgentBot:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
         room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
+        room_member_join_hooks_should_arm = True
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
 
@@ -1082,10 +1083,11 @@ class AgentBot:
                 first_sync_response=first_sync_response,
             )
             self._apply_sync_certification_decision(decision, cache_result=cache_result)
-            if not first_sync_response and room_member_join_hooks_were_armed:
+            room_member_join_hooks_should_arm = not decision.reset_client_token
+            if not first_sync_response and room_member_join_hooks_were_armed and not decision.reset_client_token:
                 await self._emit_room_member_joined_sync_state_hooks(_response)
         self._first_sync_done = True
-        self._room_member_join_hooks_armed = True
+        self._room_member_join_hooks_armed = room_member_join_hooks_should_arm
 
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()

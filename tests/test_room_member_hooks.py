@@ -17,7 +17,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from mindroom.matrix import room_member_joins
-from mindroom.matrix.sync_certification import SyncCacheWriteResult
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, test_runtime_paths
 
@@ -289,6 +289,55 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     sync_error.status_code = "M_UNKNOWN_POS"
 
     await bot._on_sync_error(sync_error)
+    await bot._on_room_member(room, _room_member_event(event_id="$timeline-snapshot"))
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [_room_member_event(event_id="$state-snapshot")],
+        ),
+    )
+
+    assert seen == []
+
+    await bot._on_room_member(room, _room_member_event(event_id="$live", user_id="@bob:localhost"))
+
+    assert seen == ["$live"]
+
+
+@pytest.mark.asyncio
+async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tokenless resync after first-sync uncertainty should not onboard existing members."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot._first_sync_done = False
+    bot._room_member_join_hooks_armed = False
+    bot._sync_trust_state = SyncTrustState.PENDING
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_restored"
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot,
+        "_sync_cache_result_for_certification",
+        AsyncMock(
+            side_effect=[
+                SyncCacheWriteResult(complete=False),
+                SyncCacheWriteResult(complete=True),
+            ],
+        ),
+    )
+
+    await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
+    assert bot.client.next_batch is None
+
     await bot._on_room_member(room, _room_member_event(event_id="$timeline-snapshot"))
     await bot._on_sync_response(
         _sync_response_with_state(
