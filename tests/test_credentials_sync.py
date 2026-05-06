@@ -652,6 +652,64 @@ class TestCredentialsSync:
             "_source": "env",
         }
 
+    def test_github_private_sync_uses_env_owned_service_policy(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub sync should reuse the generic env-owned credential save policy."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp-test-token")
+        runtime_paths = _runtime_paths(
+            temp_credentials_dir.parent,
+            shared_credentials_dir=temp_credentials_dir,
+        )
+        calls: list[dict[str, object]] = []
+
+        def fake_sync_service_credentials(**kwargs: object) -> bool:
+            calls.append(kwargs)
+            return True
+
+        monkeypatch.setattr(credentials_sync_mod, "_sync_service_credentials", fake_sync_service_credentials)
+
+        assert credentials_sync_mod._sync_github_private_credentials(runtime_paths=runtime_paths)
+        assert calls == [
+            {
+                "service": "github_private",
+                "credentials": {
+                    "username": "x-access-token",
+                    "token": "ghp-test-token",
+                },
+                "runtime_paths": runtime_paths,
+                "env_var": "GITHUB_TOKEN",
+            },
+        ]
+
+    def test_sync_env_updates_env_sourced_github_private_credentials(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Env-sourced github_private credentials should follow GITHUB_TOKEN changes."""
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        cm.save_credentials(
+            "github_private",
+            {"username": "x-access-token", "token": "old-token", "_source": "env"},
+        )
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp-new-token")
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        assert cm.load_credentials("github_private") == {
+            "username": "x-access-token",
+            "token": "ghp-new-token",
+            "_source": "env",
+        }
+
     def test_sync_env_does_not_overwrite_ui_github_private_credentials(
         self,
         temp_credentials_dir: Path,
@@ -677,6 +735,50 @@ class TestCredentialsSync:
         assert github_private is not None
         assert github_private["token"] == ui_value
         assert github_private["_source"] == "ui"
+
+    def test_sync_env_does_not_overwrite_legacy_github_private_credentials(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Legacy github_private credentials without _source should not be overwritten."""
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        cm.save_credentials(
+            "github_private",
+            {"username": "my-user", "token": "legacy-token"},
+        )
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp-env-token")
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        assert cm.load_credentials("github_private") == {
+            "username": "my-user",
+            "token": "legacy-token",
+        }
+
+    def test_sync_env_skips_github_private_when_github_token_missing(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Missing GITHUB_TOKEN should not create github_private credentials."""
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN_FILE", raising=False)
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        cm = CredentialsManager(base_path=temp_credentials_dir)
+        assert cm.load_credentials("github_private") is None
 
     def test_get_api_key_for_provider(self, credentials_manager: CredentialsManager) -> None:
         """Test getting API key for different providers."""

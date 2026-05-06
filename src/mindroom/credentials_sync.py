@@ -68,28 +68,15 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
         logger.debug("No value found for GITHUB_TOKEN or GITHUB_TOKEN_FILE")
         return False
 
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    existing = creds_manager.load_credentials("github_private")
-    if existing is not None:
-        source = existing.get("_source")
-        if source != "env":
-            # UI-set or legacy (no _source) — don't overwrite
-            logger.debug("Credentials for github_private not env-sourced, skipping env sync")
-            return False
-
-    creds_manager.save_credentials(
-        "github_private",
-        {
+    return _sync_service_credentials(
+        service="github_private",
+        credentials={
             "username": "x-access-token",
             "token": github_token,
-            "_source": "env",
         },
+        runtime_paths=runtime_paths,
+        env_var="GITHUB_TOKEN",
     )
-    if existing is None:
-        logger.info("Seeded github_private credentials from GITHUB_TOKEN")
-    else:
-        logger.info("Updated github_private credentials from GITHUB_TOKEN")
-    return True
 
 
 def _sync_service_credentials(
