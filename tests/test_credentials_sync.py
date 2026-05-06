@@ -1,5 +1,6 @@
 """Tests for syncing shared provider/bootstrap credentials from runtime env."""
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -557,6 +558,28 @@ class TestCredentialsSync:
         )
 
         assert cm.get_api_key("openai") == "ui-set-key"
+
+    def test_sync_env_does_not_overwrite_unreadable_existing_credentials(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted-mode sync should fail closed when an existing credential file cannot be loaded."""
+        encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+        plaintext_credentials = {"api_key": "ui-set-key", "_source": "ui"}
+        openai_path = temp_credentials_dir / "openai_credentials.json"
+        openai_path.write_text(json.dumps(plaintext_credentials), encoding="utf-8")
+        monkeypatch.setenv(CREDENTIALS_ENCRYPTION_KEY_ENV, encryption_key)
+        monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+
+        sync_env_to_credentials(
+            runtime_paths=_runtime_paths(
+                temp_credentials_dir.parent,
+                shared_credentials_dir=temp_credentials_dir,
+            ),
+        )
+
+        assert json.loads(openai_path.read_text(encoding="utf-8")) == plaintext_credentials
 
     def test_get_secret_from_env_resolves_relative_file_paths_from_config_dir(self, tmp_path: Path) -> None:
         """Relative *_FILE secret paths in the runtime `.env` should anchor to the config directory."""
