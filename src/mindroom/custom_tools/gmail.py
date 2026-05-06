@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.gmail import GmailTools as AgnoGmailTools
 
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
@@ -64,5 +64,4 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
         self._wrap_oauth_function_entrypoints()
 
     def _should_fallback_to_original_auth(self) -> bool:
-        """Prefer the upstream auth path when a service account is configured."""
-        return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
+        return google_service_account_configured(self.service_account_path, self._runtime_paths)

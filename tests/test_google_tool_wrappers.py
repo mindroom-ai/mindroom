@@ -15,7 +15,7 @@ from mindroom.custom_tools import google_service
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -141,6 +141,25 @@ def test_google_service_state_first_access_is_thread_safe(monkeypatch: pytest.Mo
         results = list(executor.map(lambda _: set_and_read_thread_service(), range(2)))
 
     assert results == [True, True]
+
+
+def test_google_service_account_configured_checks_instance_and_runtime_values(
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Service-account fallback should honor explicit and runtime configuration."""
+    service_account_path = tmp_path / "service-account.json"
+    runtime_paths_with_env = replace(
+        runtime_paths,
+        process_env={
+            **runtime_paths.process_env,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": str(service_account_path),
+        },
+    )
+
+    assert google_service_account_configured(str(service_account_path), runtime_paths) is True
+    assert google_service_account_configured(None, runtime_paths_with_env) is True
+    assert google_service_account_configured(None, runtime_paths) is False
 
 
 @pytest.mark.parametrize(

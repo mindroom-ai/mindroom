@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 
 class _GoogleServiceThreadState(threading.local):
     def __init__(self) -> None:
         self.service: Any | None = None
+
+
+def google_service_account_configured(service_account_path: str | None, runtime_paths: RuntimePaths) -> bool:
+    """Return whether Google upstream service-account auth is configured."""
+    return bool(service_account_path or runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
 
 
 class ThreadLocalGoogleServiceMixin:
