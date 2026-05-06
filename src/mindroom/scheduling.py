@@ -31,9 +31,9 @@ from mindroom.hooks import (
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
+    send_and_track_message,
 )
 from mindroom.logging_config import bound_log_context, get_logger
-from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.matrix.message_builder import build_message_content
@@ -931,13 +931,7 @@ async def _notify_scheduled_workflow_failure(
         conversation_cache,
     )
     try:
-        delivered = await send_message_result(client, workflow.room_id, error_content, config=config)
-        if delivered is not None:
-            conversation_cache.notify_outbound_message(
-                workflow.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
+        await send_and_track_message(client, workflow.room_id, error_content, config, conversation_cache)
     except Exception:
         logger.exception("Failed to send scheduled workflow failure message")
 
@@ -1005,14 +999,9 @@ async def _execute_scheduled_workflow(
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
             content["com.mindroom.source_kind"] = "scheduled"
-            delivered = await send_message_result(client, workflow.room_id, content, config=config)
+            delivered = await send_and_track_message(client, workflow.room_id, content, config, conversation_cache)
             if delivered is None:
                 _raise_scheduled_workflow_send_error()
-            conversation_cache.notify_outbound_message(
-                workflow.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
             logger.info(
                 "Executed scheduled workflow",
                 description=workflow.description,
@@ -1146,13 +1135,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     error_message,
                     conversation_cache,
                 )
-                delivered = await send_message_result(client, workflow.room_id, error_content, config=config)
-                if delivered is not None:
-                    conversation_cache.notify_outbound_message(
-                        workflow.room_id,
-                        delivered.event_id,
-                        delivered.content_sent,
-                    )
+                await send_and_track_message(client, workflow.room_id, error_content, config, conversation_cache)
     finally:
         _cleanup_task_if_current(task_id, running_tasks)
 
@@ -1259,13 +1242,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     error_message,
                     conversation_cache,
                 )
-                delivered = await send_message_result(client, workflow.room_id, error_content, config=config)
-                if delivered is not None:
-                    conversation_cache.notify_outbound_message(
-                        workflow.room_id,
-                        delivered.event_id,
-                        delivered.content_sent,
-                    )
+                await send_and_track_message(client, workflow.room_id, error_content, config, conversation_cache)
             if latest_pending_task is not None:
                 try:
                     await _save_one_time_task_status(

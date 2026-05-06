@@ -2747,6 +2747,7 @@ expose = [
     "iter_module_hooks",
     "render_enrichment_block",
     "render_system_enrichment_block",
+    "send_and_track_message",
     "send_hook_message",
     "should_handle_interactive_text_response",
     "validate_event_name",
