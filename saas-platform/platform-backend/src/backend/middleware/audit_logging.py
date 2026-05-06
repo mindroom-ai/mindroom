@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 from backend.config import logger, supabase
 from backend.tasks.usage_metrics import update_realtime_metrics
+from backend.utils.audit import redact_audit_details
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 
@@ -87,14 +88,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                     except json.JSONDecodeError:
                         details = {"body": "non-json"}
                     else:
-                        # Remove sensitive fields
-                        sensitive_fields = {"password", "api_key", "secret", "token", "credit_card"}
-                        details = {
-                            k: v
-                            for k, v in data.items()
-                            if k.lower() not in sensitive_fields
-                            and not any(sensitive in k.lower() for sensitive in sensitive_fields)
-                        }
+                        details = redact_audit_details(data)
             except Exception as e:
                 logger.warning(f"Failed to parse request body for audit: {e}")
 
@@ -178,7 +172,14 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                 "action": action,
                 "resource_type": resource_type,
                 "resource_id": resource_id,
-                "details": {**details, "path": path, "status_code": status_code, "user_email": user_email},
+                "details": redact_audit_details(
+                    {
+                        **details,
+                        "path": path,
+                        "status_code": status_code,
+                        "user_email": user_email,
+                    },
+                ),
                 "ip_address": ip_address,
                 "created_at": datetime.now(UTC).isoformat(),
             }

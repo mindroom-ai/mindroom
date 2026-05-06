@@ -489,7 +489,8 @@ When enabled, MindRoom writes JSONL request records under `debug.llm_request_log
 Those records include prompts, messages, tool schemas, model parameters, correlation IDs, requester metadata, and source Matrix event metadata.
 The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs.
 Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
-These artifacts can contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
+Audit logging remains enabled, and credential-bearing fields such as tokens, cookies, passwords, API keys, and authorization headers are redacted before log records are emitted.
+These artifacts can still contain sensitive non-credential prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
 
 ## Managed Avatars
 

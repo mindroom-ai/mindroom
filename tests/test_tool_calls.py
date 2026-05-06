@@ -253,6 +253,8 @@ def test_sanitize_failure_text_redacts_camel_case_secret_assignments() -> None:
         "authorization_header",
         "refreshTokenValue",
         "myCustomSecret",
+        "id_token",
+        "Set-Cookie",
     ],
 )
 def test_sanitize_failure_redacts_secret_key_suffix_variants(secret_key: str) -> None:
