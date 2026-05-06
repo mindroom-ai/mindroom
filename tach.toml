@@ -459,6 +459,10 @@ depends_on = [
 path = "mindroom.api.sandbox_protocol"
 depends_on = []
 
+[[modules]]
+path = "mindroom.api.worker_responses"
+depends_on = []
+
 # NOTE (arch-b-7): sandbox modules currently depend on the concrete
 # workers.backends.local backend. Honest definition-site encoding for
 # now; ARCH-B-9 will lift the shared sandbox-relevant types into a
@@ -469,6 +473,7 @@ depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_protocol",
     "mindroom.api.sandbox_worker_prep",
+    "mindroom.api.worker_responses",
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.credentials",
@@ -521,6 +526,7 @@ depends_on = [
 path = "mindroom.api.workers"
 depends_on = [
     "mindroom.api.config_lifecycle",
+    "mindroom.api.worker_responses",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.workers.runtime",
 ]

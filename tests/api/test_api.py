@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
 from mindroom.api import auth, config_lifecycle, frontend, main, runtime_reload
+from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
@@ -31,6 +32,38 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from mindroom.workers.models import WorkerHandle
 
 TEST_WORKER_AUTH = "token"
+
+
+def test_worker_api_modules_share_response_dtos_and_serializer() -> None:
+    """Primary and sandbox worker APIs should share the worker response contract."""
+    assert workers_api.WorkerListResponse is sandbox_runner_api.SandboxWorkerListResponse
+    assert workers_api.WorkerCleanupResponse is sandbox_runner_api.SandboxWorkerCleanupResponse
+    assert workers_api._serialize_worker is sandbox_runner_api._serialize_worker
+
+    serialized_worker = workers_api._serialize_worker(
+        WorkerHandle(
+            worker_id="worker-1",
+            worker_key="worker-key",
+            endpoint="http://worker/api/sandbox-runner/execute",
+            auth_token=TEST_WORKER_AUTH,
+            status="failed",
+            backend_name="kubernetes",
+            last_used_at=12.0,
+            created_at=1.0,
+            last_started_at=2.0,
+            expires_at=30.0,
+            startup_count=3,
+            failure_count=2,
+            failure_reason="startup failed",
+            debug_metadata={"namespace": "mindroom-instances"},
+        ),
+    ).model_dump()
+
+    assert "auth_token" not in serialized_worker
+    assert serialized_worker["failure_reason"] == "startup failed"
+    assert serialized_worker["debug_metadata"] == {"namespace": "mindroom-instances"}
+    assert serialized_worker["last_started_at"] == 2.0
+    assert serialized_worker["expires_at"] == 30.0
 
 
 def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None) -> constants.RuntimePaths:
