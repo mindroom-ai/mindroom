@@ -97,8 +97,16 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_knowledge_descriptions"
-depends_on = []
+depends_on = ["mindroom.knowledge_source_descriptions"]
 visibility = ["mindroom.agents"]
+
+[[modules]]
+path = "mindroom.knowledge_source_descriptions"
+depends_on = []
+visibility = [
+    "mindroom.agent_knowledge_descriptions",
+    "mindroom.knowledge.utils",
+]
 
 [[modules]]
 path = "mindroom.agent_storage"
@@ -2046,6 +2054,7 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",
+    "mindroom.knowledge_source_descriptions",
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
 ]

@@ -7,6 +7,7 @@ import re
 import stat
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
@@ -42,6 +43,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.knowledge import resolve_agent_knowledge_access
+from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
@@ -142,6 +145,45 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
         execution_identity=execution_identity,
         **kwargs,
     )
+
+
+class _TestVectorDb:
+    def exists(self) -> bool:
+        return True
+
+    def create(self) -> None:
+        return
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        filters: dict[str, object] | list[object] | None = None,
+    ) -> list[object]:
+        _ = (query, limit, filters)
+        return []
+
+
+def _queryable_knowledge_handle() -> Knowledge:
+    return Knowledge(vector_db=_TestVectorDb())
+
+
+def _patch_published_knowledge(
+    monkeypatch: pytest.MonkeyPatch,
+    knowledge_by_base: dict[str, Knowledge],
+) -> None:
+    def _get_published_index(base_id: str, **_kwargs: object) -> object:
+        return SimpleNamespace(
+            key=SimpleNamespace(base_id=base_id),
+            index=SimpleNamespace(
+                knowledge=knowledge_by_base[base_id],
+                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
+            ),
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)
 
 
 def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> None:
@@ -2812,7 +2854,10 @@ def test_knowledge_base_config_preserves_description() -> None:
     assert config.knowledge_bases["research"].description == ("Research plans, experiment notes, and decision records.")
 
 
-def test_agent_knowledge_search_tool_description_lists_configured_sources(tmp_path: Path) -> None:
+def test_agent_knowledge_search_tool_description_lists_configured_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The model-facing knowledge search tool should explain what each source contains."""
     config = _test_config()
     config.agents["general"].knowledge_bases = ["engineering", "product"]
@@ -2826,15 +2871,18 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(tmp_pa
             path="./knowledge_docs/product",
         ),
     }
-    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
-
-    knowledge = Knowledge(
-        name="general_multi_knowledge",
-        description=(
-            "engineering: Architecture docs, ADRs, deployment runbooks, and coding conventions.\n"
-            "product: Product requirements, feature specs, roadmap notes, and user-facing behavior decisions."
-        ),
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(config, runtime_paths)
+    _patch_published_knowledge(
+        monkeypatch,
+        {
+            "engineering": _queryable_knowledge_handle(),
+            "product": _queryable_knowledge_handle(),
+        },
     )
+
+    knowledge = resolve_agent_knowledge_access("general", config, runtime_paths).knowledge
+    assert knowledge is not None
     agent = _create_agent_for_test("general", config, knowledge=knowledge)
     run_output = RunOutput(
         run_id="run-knowledge-description",
@@ -2867,6 +2915,65 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(tmp_pa
         "- product: Product requirements, feature specs, roadmap notes, and user-facing behavior decisions."
         in description
     )
+
+
+def test_agent_knowledge_search_tool_description_preserves_colon_space_source_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid knowledge base ID containing ': ' should render as the same source ID."""
+    base_id = "foo: bar"
+    config = _test_config()
+    config.agents["general"].knowledge_bases = [base_id, "product"]
+    config.knowledge_bases = {
+        base_id: KnowledgeBaseConfig(
+            description="Special source with punctuation in its ID.",
+            path="./knowledge_docs/special",
+        ),
+        "product": KnowledgeBaseConfig(
+            description="Product requirements and feature specs.",
+            path="./knowledge_docs/product",
+        ),
+    }
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(config, runtime_paths)
+    _patch_published_knowledge(
+        monkeypatch,
+        {
+            base_id: _queryable_knowledge_handle(),
+            "product": _queryable_knowledge_handle(),
+        },
+    )
+
+    knowledge = resolve_agent_knowledge_access("general", config, runtime_paths).knowledge
+    assert knowledge is not None
+    agent = _create_agent_for_test("general", config, knowledge=knowledge)
+    run_output = RunOutput(
+        run_id="run-knowledge-description-colon",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-knowledge-description-colon",
+        input="hello",
+        content="ok",
+    )
+    run_context = RunContext(run_id="run-knowledge-description-colon", session_id="session-knowledge-description-colon")
+    session = AgentSession(
+        session_id="session-knowledge-description-colon",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    search_tools = [
+        tool
+        for tool in agent.get_tools(run_output, run_context, session)
+        if isinstance(tool, Function) and tool.name == "search_knowledge_base"
+    ]
+
+    assert len(search_tools) == 1
+    description = search_tools[0].description
+    assert description is not None
+    assert "- foo: bar: Special source with punctuation in its ID." in description
 
 
 def test_agent_knowledge_search_tool_description_excludes_unavailable_sources(tmp_path: Path) -> None:
@@ -2951,14 +3058,13 @@ def test_agent_accepts_custom_knowledge_protocol_without_source_metadata(tmp_pat
     assert agent.knowledge is not None
 
 
-def test_config_rejects_knowledge_base_ids_with_source_metadata_separator() -> None:
-    """Knowledge base IDs must not collide with the source-description transport."""
-    base_id = "foo: bar"
+@pytest.mark.parametrize("base_id", ["foo\nbar", "foo\rbar"])
+def test_config_rejects_knowledge_base_ids_with_line_breaks(base_id: str) -> None:
+    """Knowledge base IDs must not inject extra model-facing source-list lines."""
     with pytest.raises(
         ValidationError,
         match=re.escape(
-            "knowledge_bases keys must not contain the reserved source description separator ': '; "
-            f"invalid keys: {base_id}",
+            f"knowledge_bases keys must not contain line breaks; invalid keys: {base_id}",
         ),
     ):
         Config(

@@ -53,7 +53,7 @@ Chat uses the last successfully published index and continues without blocking w
 When a watched file changes, MindRoom marks the published index stale, refreshes in the background, and atomically publishes the replacement when it succeeds.
 When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation.
 Knowledge base IDs are the keys under `knowledge_bases`.
-Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, names containing `/` or `\`, or names containing the reserved source-description separator, a colon followed by a space.
+Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, names containing `/` or `\`, or names containing line breaks.
 
 ## Configuration
 

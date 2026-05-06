@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from agno.agent import Agent
 from agno.tools.function import Function
+
+from mindroom.knowledge_source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
 
 if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
@@ -15,47 +16,19 @@ if TYPE_CHECKING:
     from agno.session import AgentSession
 
 _KNOWLEDGE_SEARCH_TOOL_NAME = "search_knowledge_base"
-_SOURCE_DESCRIPTION_SEPARATOR = ": "
-
-
-@dataclass(frozen=True)
-class KnowledgeSourceDescription:
-    """Agent-visible description of one configured knowledge source."""
-
-    base_id: str
-    description: str
 
 
 def _normalize_description(value: str) -> str:
     return " ".join(value.split())
 
 
-def _source_description_from_line(line: str) -> KnowledgeSourceDescription | None:
-    base_id, separator, description = line.partition(_SOURCE_DESCRIPTION_SEPARATOR)
-    if not separator:
-        return None
-    normalized_base_id = base_id.strip()
-    if not normalized_base_id:
-        return None
-    return KnowledgeSourceDescription(
-        base_id=normalized_base_id,
-        description=_normalize_description(description),
-    )
-
-
 def knowledge_source_descriptions(knowledge: Knowledge) -> tuple[KnowledgeSourceDescription, ...]:
     """Return the resolved queryable knowledge sources one agent can search."""
+    if isinstance(knowledge, KnowledgeWithSourceDescriptions):
+        return knowledge.source_descriptions
+
     if knowledge.name is None:
         return ()
-
-    if knowledge.description is not None and "\n" in knowledge.description:
-        sources = [
-            source
-            for line in knowledge.description.splitlines()
-            if (source := _source_description_from_line(line.strip())) is not None
-        ]
-        if sources:
-            return tuple(sources)
 
     return (
         KnowledgeSourceDescription(

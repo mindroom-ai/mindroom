@@ -647,15 +647,12 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_knowledge_base_ids_do_not_use_source_separator(self) -> Config:
-        """Reject knowledge base IDs that collide with source-description metadata."""
-        invalid_ids = sorted(base_id for base_id in self.knowledge_bases if ": " in base_id)
+    def validate_knowledge_base_ids_do_not_use_line_breaks(self) -> Config:
+        """Reject knowledge base IDs that would create multi-line source-list labels."""
+        invalid_ids = sorted(base_id for base_id in self.knowledge_bases if "\n" in base_id or "\r" in base_id)
         if invalid_ids:
             formatted = ", ".join(invalid_ids)
-            msg = (
-                "knowledge_bases keys must not contain the reserved source description separator ': '; "
-                f"invalid keys: {formatted}"
-            )
+            msg = f"knowledge_bases keys must not contain line breaks; invalid keys: {formatted}"
             raise ValueError(msg)
         return self
 

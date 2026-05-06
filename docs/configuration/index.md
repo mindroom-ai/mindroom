@@ -375,7 +375,7 @@ memory:
 # MindRoom auto-installs that optional extra on first use.
 
 # Knowledge base configuration (optional)
-# Keys must be non-empty single path components, so do not use "", ., .., /, \, or the reserved colon-space separator in a knowledge base ID.
+# Keys must be non-empty single path components, so do not use "", ., .., /, \, or line breaks in a knowledge base ID.
 knowledge_bases:
   docs:
     description: Product documentation, support notes, and operating procedures
