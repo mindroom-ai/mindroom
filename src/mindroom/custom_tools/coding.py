@@ -20,10 +20,22 @@ import shutil
 import subprocess
 import unicodedata
 from dataclasses import dataclass
-from glob import has_magic
 from pathlib import Path
 
 from agno.tools import Toolkit
+
+from mindroom.tools.path_safety import (
+    format_path_for_output as _relativize_path,
+)
+from mindroom.tools.path_safety import (
+    is_within_base_dir,
+)
+from mindroom.tools.path_safety import (
+    resolve_base_dir_path as _resolve_path,
+)
+from mindroom.tools.path_safety import (
+    split_search_pattern as _normalize_search_root,
+)
 
 _MAX_LINES = 2000
 _MAX_BYTES = 50 * 1024  # 50KB
@@ -339,32 +351,6 @@ def _make_diff(
     return "\n".join(diff_lines)
 
 
-def _outside_base_dir_message(path: str, resolved: Path, base_dir: Path) -> str:
-    """Explain why a path was blocked by the base-dir restriction."""
-    return (
-        f"Path '{path}' resolves to '{resolved}', which is outside base_dir '{base_dir}'. "
-        "Set restrict_to_base_dir=false to allow access outside base_dir."
-    )
-
-
-def _resolve_path(base_dir: Path, path: str, restrict_to_base_dir: bool = True) -> Path:
-    """Resolve a path relative to base_dir, optionally preventing traversal."""
-    p = Path(path)
-    if not p.is_absolute():
-        p = base_dir / p
-    resolved = p.resolve()
-    if not restrict_to_base_dir:
-        return resolved
-
-    base_resolved = base_dir.resolve()
-    try:
-        resolved.relative_to(base_resolved)
-    except ValueError:
-        msg = _outside_base_dir_message(path, resolved, base_resolved)
-        raise ValueError(msg) from None
-    return resolved
-
-
 def _is_git_repo(base_dir: Path) -> bool:
     """Check whether base_dir is inside a git working tree."""
     current = base_dir.resolve()
@@ -544,20 +530,6 @@ def _resolve_and_read(base_dir: Path, path: str, restrict_to_base_dir: bool = Tr
         return resolved, resolved.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         return f"Error reading file: {e}"
-
-
-def _normalize_search_root(search_path: Path, pattern: str) -> tuple[Path, str]:
-    """Resolve parent-traversal prefixes out of a glob pattern."""
-    parts = list(Path(pattern).parts)
-    first_glob_index = next((index for index, part in enumerate(parts) if has_magic(part)), len(parts))
-    static_parts = parts[:first_glob_index]
-    glob_parts = parts[first_glob_index:]
-    if not glob_parts and static_parts:
-        glob_parts = [static_parts.pop()]
-
-    normalized_root = search_path.joinpath(*static_parts).resolve()
-    normalized_pattern = str(Path(*glob_parts)) if glob_parts else "."
-    return normalized_root, normalized_pattern
 
 
 class CodingTools(Toolkit):
@@ -897,14 +869,6 @@ def _run_ripgrep(
     return _format_rg_output(result.stdout, limit, context, base_dir)
 
 
-def _relativize_path(path_text: str, base_dir: Path) -> str:
-    """Make an absolute path relative to base_dir for consistent output."""
-    try:
-        return str(Path(path_text).relative_to(base_dir))
-    except ValueError:
-        return path_text
-
-
 def _format_rg_line(event: _RgEvent, base_dir: Path) -> str:
     """Format a ripgrep event as one output line."""
     marker = ":" if event.event_type == "match" else "-"
@@ -1054,21 +1018,14 @@ def _filter_hidden_and_ignored(files: list[Path], search_path: Path) -> list[Pat
     search_root = search_path.resolve()
     visible: list[Path] = []
     for filepath in files:
-        try:
-            resolved = filepath.resolve()
-        except OSError:
-            continue
-        try:
-            resolved.relative_to(search_root)
-        except ValueError:
-            # Ignore files reached through symlinks that escape the search root.
+        if not is_within_base_dir(filepath, search_root):
             continue
         if not filepath.is_file():
             continue
         try:
             rel = filepath.relative_to(search_path)
         except ValueError:
-            rel = resolved
+            rel = filepath.resolve()
         if any(part.startswith(".") for part in rel.parts):
             continue
         visible.append(filepath)

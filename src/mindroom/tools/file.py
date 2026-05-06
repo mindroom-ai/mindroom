@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-from glob import has_magic
-from pathlib import Path
+from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
 from typing import Any, cast
 
 from agno.tools.file import FileTools as AgnoFileTools
@@ -18,52 +17,21 @@ from mindroom.tool_system.metadata import (
     ToolStatus,
     register_tool_with_metadata,
 )
-
-
-def _blocked_path_message(action: str, requested_path: str, base_dir: Path) -> str:
-    """Explain why a file-tool path was blocked."""
-    return (
-        f"Error {action}: path '{requested_path}' is outside base_dir '{base_dir}'. "
-        "Set restrict_to_base_dir=false to allow access outside base_dir."
-    )
-
-
-def _format_path_for_output(path: Path, base_dir: Path) -> str:
-    """Prefer base-dir-relative output, falling back to absolute paths outside the base dir."""
-    try:
-        return str(path.relative_to(base_dir))
-    except ValueError:
-        return str(path)
-
-
-def _is_within_base_dir(path: Path, base_dir: Path) -> bool:
-    """Check whether a resolved path stays within base_dir."""
-    try:
-        path.resolve().relative_to(base_dir.resolve())
-    except (OSError, ValueError):
-        return False
-    return True
-
-
-def _split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:
-    """Resolve the concrete search root ahead of the first glob component."""
-    pattern_path = Path(pattern)
-    if pattern_path.is_absolute():
-        search_root = Path(pattern_path.anchor)
-        parts = list(pattern_path.relative_to(search_root).parts)
-    else:
-        search_root = base_dir
-        parts = list(pattern_path.parts)
-
-    first_glob_index = next((index for index, part in enumerate(parts) if has_magic(part)), len(parts))
-    static_parts = parts[:first_glob_index]
-    glob_parts = parts[first_glob_index:]
-    if not glob_parts and static_parts:
-        glob_parts = [static_parts.pop()]
-
-    resolved_root = search_root.joinpath(*static_parts).resolve()
-    resolved_pattern = str(Path(*glob_parts)) if glob_parts else "."
-    return resolved_root, resolved_pattern
+from mindroom.tools.path_safety import (
+    blocked_file_action_message as _blocked_path_message,
+)
+from mindroom.tools.path_safety import (
+    format_path_for_output as _format_path_for_output,
+)
+from mindroom.tools.path_safety import (
+    is_within_base_dir as _is_within_base_dir,
+)
+from mindroom.tools.path_safety import (
+    resolve_base_dir_path,
+)
+from mindroom.tools.path_safety import (
+    split_search_pattern as _split_search_pattern,
+)
 
 
 class _MindRoomFileTools(AgnoFileTools):
@@ -107,11 +75,11 @@ class _MindRoomFileTools(AgnoFileTools):
 
     def check_escape(self, relative_path: str) -> tuple[bool, Path]:
         """Check whether a path stays within base_dir when restriction is enabled."""
-        return self._check_path(
-            relative_path,
-            self.base_dir,
-            restrict_to_base_dir=self.restrict_to_base_dir,
-        )
+        try:
+            return True, resolve_base_dir_path(self.base_dir, relative_path, self.restrict_to_base_dir)
+        except ValueError:
+            log_error(f"Path escapes base directory: {relative_path}")
+            return False, self.base_dir
 
     def save_file(self, contents: str, file_name: str, overwrite: bool = True, encoding: str = "utf-8") -> str:
         """Save content to a file, with clear blocked-path errors."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,12 @@ from mindroom.custom_tools.coding import (
     _truncate_line,
 )
 from mindroom.tools.file import file_tools
+from mindroom.tools.path_safety import (
+    _blocked_base_dir_message,
+    format_path_for_output,
+    resolve_base_dir_path,
+    split_search_pattern,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1024,6 +1031,52 @@ class TestPathTraversal:
         """Tilde paths are not expanded and treated as literal relative paths."""
         result = tools.read_file("~/../../etc/passwd")
         assert "Error" in result
+
+
+class TestPathSafetyHelpers:
+    """Characterization tests for shared file/coding path helpers."""
+
+    def test_resolve_base_dir_path_preserves_coding_blocked_message(self, tmp_path: Path) -> None:
+        """Blocked path resolution should keep the coding-tool error text."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        outside_file = outside_dir / "secret.txt"
+        outside_file.write_text("secret\n")
+
+        expected = _blocked_base_dir_message(str(outside_file), outside_file, base_dir)
+        with pytest.raises(ValueError, match=re.escape(expected)) as exc_info:
+            resolve_base_dir_path(base_dir, str(outside_file))
+
+        assert str(exc_info.value) == expected
+
+    def test_format_path_for_output_prefers_base_relative_paths(self, tmp_path: Path) -> None:
+        """Output formatting should use relative paths only inside base_dir."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_file = base_dir / "src" / "app.py"
+        outside_file = outside_dir / "secret.txt"
+        base_file.parent.mkdir(parents=True)
+        outside_dir.mkdir()
+
+        assert format_path_for_output(base_file, base_dir) == "src/app.py"
+        assert format_path_for_output(outside_file, base_dir) == str(outside_file)
+
+    def test_split_search_pattern_preserves_absolute_and_parent_traversal_patterns(self, tmp_path: Path) -> None:
+        """Glob-root splitting should preserve existing absolute and ../ behavior."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+
+        absolute_root, absolute_pattern = split_search_pattern(base_dir, str(outside_dir / "*.txt"))
+        parent_root, parent_pattern = split_search_pattern(base_dir, "../outside/*.txt")
+
+        assert absolute_root == outside_dir.resolve()
+        assert absolute_pattern == "*.txt"
+        assert parent_root == outside_dir.resolve()
+        assert parent_pattern == "*.txt"
 
 
 class TestRestrictToBaseDir:
