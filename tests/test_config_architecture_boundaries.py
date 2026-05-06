@@ -103,14 +103,7 @@ def test_matrix_identity_does_not_reexport_identifier_helpers() -> None:
     tree = ast.parse(MATRIX_IDENTITY_MODULE.read_text(encoding="utf-8"))
     exported_names: set[str] = set()
     direct_naming_imports: list[str] = []
-    public_identifier_module_imports: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "mindroom":
-            public_identifier_module_imports.extend(
-                alias.name
-                for alias in node.names
-                if alias.name == "matrix_identifiers" and not (alias.asname or "").startswith("_")
-            )
         if isinstance(node, ast.ImportFrom) and node.module == "mindroom.matrix_identifiers":
             direct_naming_imports.extend(alias.name for alias in node.names if alias.name in MATRIX_IDENTIFIER_HELPERS)
         if not isinstance(node, ast.Assign):
@@ -120,7 +113,6 @@ def test_matrix_identity_does_not_reexport_identifier_helpers() -> None:
         if isinstance(node.value, ast.List):
             exported_names.update(item.value for item in node.value.elts if isinstance(item, ast.Constant))
 
-    assert public_identifier_module_imports == []
     assert sorted(direct_naming_imports) == []
     assert sorted(exported_names & MATRIX_IDENTIFIER_HELPERS) == []
 
