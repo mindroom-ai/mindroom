@@ -41,6 +41,7 @@ from mindroom.matrix.thread_projection import (
     sort_thread_messages_root_first,
 )
 from mindroom.matrix.visible_body import visible_body_from_event_source
+from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
@@ -328,7 +329,7 @@ async def _resolve_thread_history_from_event_sources_timed(
         input_order_by_event_id=input_order_by_event_id,
         related_event_id_by_event_id=related_event_id_by_event_id,
     )
-    return messages, round((time.perf_counter() - sidecar_hydration_started) * 1000, 1)
+    return messages, elapsed_ms_since(sidecar_hydration_started, clock=time.perf_counter)
 
 
 async def _load_stale_cached_thread_history(
@@ -387,8 +388,8 @@ async def _load_stale_cached_thread_history(
         error=str(fetch_error),
     )
     diagnostics: dict[str, str | int | float | bool] = {
-        "cache_read_ms": round((time.perf_counter() - cache_read_started) * 1000, 1),
-        "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
+        "cache_read_ms": elapsed_ms_since(cache_read_started, clock=time.perf_counter),
+        "resolution_ms": elapsed_ms_since(resolution_started, clock=time.perf_counter),
         "sidecar_hydration_ms": sidecar_hydration_ms,
         THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
         THREAD_HISTORY_ERROR_DIAGNOSTIC: str(fetch_error),
@@ -447,7 +448,7 @@ def _cache_reject_diagnostics(
         return diagnostics
     if cache_state.validated_at is not None:
         diagnostics["cache_validated_at"] = cache_state.validated_at
-        diagnostics["cache_age_ms"] = round((time.time() - cache_state.validated_at) * 1000, 1)
+        diagnostics["cache_age_ms"] = elapsed_ms_since(cache_state.validated_at, clock=time.time)
     if cache_state.invalidated_at is not None:
         diagnostics["cache_invalidated_at"] = cache_state.invalidated_at
     if cache_state.invalidation_reason is not None:
@@ -523,8 +524,8 @@ async def _load_cached_thread_history_if_usable(
         resolved_history,
         is_full_history=hydrate_sidecars,
         diagnostics={
-            "cache_read_ms": round((time.perf_counter() - cache_read_started) * 1000, 1),
-            "resolution_ms": round((time.perf_counter() - resolution_started) * 1000, 1),
+            "cache_read_ms": elapsed_ms_since(cache_read_started, clock=time.perf_counter),
+            "resolution_ms": elapsed_ms_since(resolution_started, clock=time.perf_counter),
             "sidecar_hydration_ms": sidecar_hydration_ms,
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
         },
@@ -1007,10 +1008,10 @@ async def _fetch_thread_history_via_room_messages_with_events(
     return _ThreadHistoryFetchResult(
         history=history,
         event_sources=scan_result.event_sources,
-        fetch_ms=round((time.perf_counter() - fetch_started) * 1000, 1),
+        fetch_ms=elapsed_ms_since(fetch_started, clock=time.perf_counter),
         room_scan_pages=scan_result.page_count,
         scanned_event_count=scan_result.scanned_event_count,
-        resolution_ms=round((time.perf_counter() - resolution_started) * 1000, 1),
+        resolution_ms=elapsed_ms_since(resolution_started, clock=time.perf_counter),
         sidecar_hydration_ms=sidecar_hydration_ms,
     )
 

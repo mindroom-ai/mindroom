@@ -5,16 +5,26 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
 
 import mindroom.timing as timing_module
-from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timing_enabled, timing_scope
+from mindroom.timing import (
+    DispatchPipelineTiming,
+    elapsed_ms_between,
+    emit_timing_event,
+    milliseconds,
+    timed,
+    timing_enabled,
+    timing_scope,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -261,7 +271,26 @@ def test_timing_enabled_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_elapsed_ms_between_rounds_to_one_decimal_place() -> None:
     """Elapsed-millisecond conversion should use the shared one-decimal policy."""
-    assert timing_module._elapsed_ms_between(1.0, 1.23456) == 234.6
+    assert elapsed_ms_between(1.0, 1.23456) == 234.6
+    assert elapsed_ms_between(1.0, 1.23456, ndigits=2) == 234.56
+    assert milliseconds(0.123456, ndigits=2) == 123.46
+
+
+def test_elapsed_millisecond_rounding_policy_is_shared() -> None:
+    """Production code should not duplicate the elapsed-millisecond rounding policy."""
+    source_root = Path(__file__).parents[1] / "src" / "mindroom"
+    direct_rounding_patterns = (
+        re.compile(r"round\(\s*\([^)]* - [^)]*\)\s*\* 1000,\s*\d+\s*\)", re.DOTALL),
+        re.compile(r"round\(\s*[^,)]+ \* 1000,\s*\d+\s*\)"),
+    )
+
+    offenders = [
+        path.relative_to(source_root).as_posix()
+        for path in source_root.rglob("*.py")
+        if path.name != "timing.py" and any(pattern.search(path.read_text()) for pattern in direct_rounding_patterns)
+    ]
+
+    assert offenders == []
 
 
 def test_timed_routes_elapsed_logging_through_shared_helper(monkeypatch: pytest.MonkeyPatch) -> None:

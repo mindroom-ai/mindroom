@@ -87,6 +87,7 @@ from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
     create_dispatch_pipeline_timing,
+    elapsed_ms_between,
     emit_elapsed_timing,
     event_timing_scope,
     get_dispatch_pipeline_timing,
@@ -1234,9 +1235,9 @@ class TurnController:
         latency_event_data: dict[str, str | float | int | bool] = {
             "event_id": event_id,
             "action_kind": action_kind,
-            "context_hydration_ms": round((context_ready_monotonic - dispatch_started_at) * 1000, 1),
-            "payload_hydration_ms": round((payload_ready_monotonic - context_ready_monotonic) * 1000, 1),
-            "startup_total_ms": round((payload_ready_monotonic - dispatch_started_at) * 1000, 1),
+            "context_hydration_ms": elapsed_ms_between(dispatch_started_at, context_ready_monotonic),
+            "payload_hydration_ms": elapsed_ms_between(context_ready_monotonic, payload_ready_monotonic),
+            "startup_total_ms": elapsed_ms_between(dispatch_started_at, payload_ready_monotonic),
         }
         if isinstance(thread_history, ThreadHistoryResult):
             latency_event_data.update(thread_history.diagnostics)

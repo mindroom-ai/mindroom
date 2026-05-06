@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import aiosqlite
 
 from mindroom.logging_config import get_logger
+from mindroom.timing import milliseconds
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .event_batching import group_lookup_events_by_room
@@ -344,7 +345,7 @@ class _SqliteEventCacheRuntime:
                     "Waited for SqliteEventCache room lock",
                     room_id=room_id,
                     operation=operation,
-                    wait_time_ms=round(wait_time * 1000, 2),
+                    wait_time_ms=milliseconds(wait_time, ndigits=2),
                 )
             yield
         finally:

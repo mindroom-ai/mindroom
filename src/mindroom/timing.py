@@ -37,8 +37,24 @@ def timing_enabled() -> bool:
     return _is_enabled()
 
 
-def _elapsed_ms_between(start: float, end: float) -> float:
-    return round((end - start) * 1000, 1)
+def milliseconds(seconds: float, *, ndigits: int = 1) -> float:
+    """Return seconds converted to milliseconds using the shared rounding policy."""
+    return round(seconds * 1000, ndigits)
+
+
+def elapsed_ms_between(start: float, end: float, *, ndigits: int = 1) -> float:
+    """Return elapsed milliseconds rounded to the shared precision policy."""
+    return milliseconds(end - start, ndigits=ndigits)
+
+
+def elapsed_ms_since(
+    start: float,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    ndigits: int = 1,
+) -> float:
+    """Return elapsed milliseconds from ``start`` using the shared rounding policy."""
+    return elapsed_ms_between(start, clock(), ndigits=ndigits)
 
 
 type _TimingMetadataValue = str | int | float | bool
@@ -114,7 +130,7 @@ class DispatchPipelineTiming:
         end = self.marks.get(end_label)
         if start is None or end is None:
             return None
-        return _elapsed_ms_between(start, end)
+        return elapsed_ms_between(start, end)
 
     def emit_summary(self, logger: BoundLogger, *, outcome: str) -> None:
         """Log one structured end-to-end timing summary."""
@@ -199,7 +215,7 @@ def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
     emit_timing_event(
         "timing_elapsed",
         label=label,
-        duration_ms=_elapsed_ms_between(start, time.monotonic()),
+        duration_ms=elapsed_ms_since(start),
         **event_data,
     )
 

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.logging_config import bound_log_context
-from mindroom.timing import emit_timing_event, timing_enabled
+from mindroom.timing import elapsed_ms_between, elapsed_ms_since, emit_timing_event, timing_enabled
 
 if TYPE_CHECKING:
     import structlog
@@ -110,7 +110,7 @@ class EventCacheWriteCoordinator:
             "Event cache idle wait timing",
             barrier_kind="room",
             room_id=room_id,
-            wait_ms=round((time.perf_counter() - wait_started) * 1000, 1),
+            wait_ms=elapsed_ms_since(wait_started, clock=time.perf_counter),
             wait_iterations=wait_iterations,
             pending_task_count=pending_task_count,
         )
@@ -464,13 +464,13 @@ class EventCacheWriteCoordinator:
                     raise
                 finally:
                     finished = time.perf_counter()
-                    total_ms = round((finished - queued_at) * 1000, 1)
+                    total_ms = elapsed_ms_between(queued_at, finished)
                     if update_started is None:
                         predecessor_wait_ms = total_ms
                         update_run_ms = 0.0
                     else:
-                        predecessor_wait_ms = round((update_started - queued_at) * 1000, 1)
-                        update_run_ms = round((finished - update_started) * 1000, 1)
+                        predecessor_wait_ms = elapsed_ms_between(queued_at, update_started)
+                        update_run_ms = elapsed_ms_between(update_started, finished)
                     coalescing_context: dict[str, object] = {}
                     if update_state.coalesced_update_count:
                         coalescing_context = {
