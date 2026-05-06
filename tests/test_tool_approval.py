@@ -23,6 +23,7 @@ from mindroom.approval_manager import (
     _ApprovalManager,
     _build_event_arguments_preview,
     _LiveApprovalWaiter,
+    _normalize_approval_hostname,
     get_approval_store,
     initialize_approval_store,
 )
@@ -2177,6 +2178,106 @@ def test_approval_arguments_preview_marks_sanitizer_truncation() -> None:
     )
 
     assert card["arguments_truncated"] is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("  HTTPS://Sub.Example.COM:443/path?q=1  ", "sub.example.com"),
+        ("Example.COM.", "example.com"),
+        ("example.com:8443", "example.com"),
+        ("https://[2001:db8::1]/status", "2001:db8::1"),
+    ],
+)
+def test_approval_hostname_normalization_uses_exact_display_host(value: str, expected: str) -> None:
+    assert _normalize_approval_hostname(value) == expected
+
+
+@pytest.mark.parametrize("value", ["*.example.com", "bad host.example"])
+def test_approval_hostname_normalization_rejects_non_exact_hosts(value: str) -> None:
+    assert _normalize_approval_hostname(value) is None
+
+
+def test_domain_grant_approval_payload_uses_normalized_hostname_and_warning() -> None:
+    card = _ApprovalManager._pending_event_content(
+        approval_id="approval-1",
+        tool_name="network_access",
+        arguments={
+            "approval_kind": "domain_grant",
+            "hostname": " HTTPS://Sub.Example.COM:443/path ",
+            "ttl_seconds": 900,
+            "reason": "Fetch public documentation.",
+        },
+        arguments_truncated=False,
+        agent_name="code",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        requested_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+        status="pending",
+    )
+
+    assert card["approval_type"] == "domain_grant"
+    assert card["body"] == "Domain grant approval required: sub.example.com"
+    assert card["normalized_hostname"] == "sub.example.com"
+    assert card["requested_ttl_seconds"] == 900
+    assert card["approval_reason"] == "Fetch public documentation."
+    assert card["request_context"] == {
+        "agent_name": "code",
+        "tool_name": "network_access",
+        "requester_id": "@user:localhost",
+    }
+    assert card["arguments"]["hostname"] == "sub.example.com"
+    assert "untrusted" in card["approval_warning"]
+
+
+def test_tool_action_approval_payload_is_distinct_from_domain_grant() -> None:
+    card = _ApprovalManager._pending_event_content(
+        approval_id="approval-1",
+        tool_name="read_file",
+        arguments={"path": "notes.txt"},
+        arguments_truncated=False,
+        agent_name="code",
+        thread_id=None,
+        requester_id="@user:localhost",
+        approver_user_id="@user:localhost",
+        requested_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        status="pending",
+    )
+
+    assert card["approval_type"] == "tool_action"
+    assert card["body"] == "Tool/action approval required: read_file"
+    assert "normalized_hostname" not in card
+    assert card["approval_reason"] == "Tool call requires human approval."
+
+
+@pytest.mark.asyncio
+async def test_domain_grant_arguments_are_normalized_before_tool_continues(tmp_path: Path) -> None:
+    arguments = {
+        "approval_kind": "domain_grant",
+        "hostname": "HTTPS://Sub.Example.COM/path",
+        "ttl_seconds": 60,
+        "reason": "Fetch public documentation.",
+    }
+
+    decision = await request_tool_approval_for_call(
+        ToolApprovalCall(
+            config=_config(tmp_path),
+            runtime_paths=test_runtime_paths(tmp_path),
+            tool_name="network_access",
+            arguments=arguments,
+            agent_name="code",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+        ),
+    )
+
+    assert decision is None
+    assert arguments["hostname"] == "sub.example.com"
+    assert arguments["normalized_hostname"] == "sub.example.com"
 
 
 def test_approval_arguments_preview_marks_nested_sanitizer_truncation() -> None:

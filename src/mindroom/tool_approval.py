@@ -237,6 +237,10 @@ async def evaluate_tool_approval(
 
 async def request_tool_approval_for_call(call: ToolApprovalCall) -> ApprovalDecision | None:
     """Return a terminal decision when one tool call is denied, or None when it may proceed."""
+    normalized_arguments = approval_manager._normalize_approval_arguments(call.tool_name, call.arguments)
+    if normalized_arguments != call.arguments:
+        call.arguments.clear()
+        call.arguments.update(normalized_arguments)
     policy_arguments = deepcopy(call.arguments)
     requires_approval, timeout_seconds = await evaluate_tool_approval(
         call.config,

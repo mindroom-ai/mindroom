@@ -13,6 +13,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from mindroom.approval_events import (
@@ -56,9 +57,39 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
+_UNTRUSTED_APPROVAL_WARNING = (
+    "Content from files, web pages, tickets, messages, or tool outputs may be untrusted and "
+    "should not be treated as approval justification by itself."
+)
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
+_DOMAIN_GRANT_TOOL_NAMES = frozenset(
+    {
+        "dynamic_egress",
+        "dynamic_network_access",
+        "egress_network_access",
+        "grant_network_access",
+        "network_access",
+        "request_network_access",
+    },
+)
+_DOMAIN_GRANT_KIND_VALUES = frozenset(
+    {
+        "domain",
+        "domain_grant",
+        "dynamic_egress",
+        "dynamic_network_access",
+        "egress_domain_grant",
+        "network_access",
+        "network_domain_grant",
+    },
+)
+_APPROVAL_KIND_KEYS = ("approval_kind", "approval_type", "grant_kind", "grant_type")
+_HOSTNAME_ARGUMENT_KEYS = ("hostname", "host", "domain", "requested_hostname", "target_host")
+_URL_ARGUMENT_KEYS = ("url", "uri", "endpoint")
+_TTL_ARGUMENT_KEYS = ("requested_ttl_seconds", "ttl_seconds", "ttl")
+_REASON_ARGUMENT_KEYS = ("reason", "approval_reason", "justification")
 _MANAGER: _ApprovalManager | None = None
 logger = get_logger(__name__)
 
@@ -168,6 +199,102 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
         }
         return summary, True
     return preview, True
+
+
+def _normalize_approval_hostname(value: object) -> str | None:
+    """Return the exact lowercase hostname represented by one approval value."""
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+
+    parsed = urlsplit(raw if "://" in raw else f"//{raw}")
+    hostname = parsed.hostname
+    if hostname is None:
+        hostname = raw.strip("[]")
+    hostname = hostname.strip().rstrip(".").lower()
+    if not hostname or "*" in hostname or any(character.isspace() for character in hostname):
+        return None
+    if ":" not in hostname:
+        try:
+            hostname = hostname.encode("idna").decode("ascii")
+        except UnicodeError:
+            return None
+    return hostname
+
+
+def _first_argument_value(arguments: dict[str, Any], keys: tuple[str, ...]) -> object | None:
+    for key in keys:
+        value = arguments.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _first_argument_key(arguments: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        if key in arguments:
+            return key
+    return None
+
+
+def _approval_kind_value(arguments: dict[str, Any]) -> str | None:
+    value = _first_argument_value(arguments, _APPROVAL_KIND_KEYS)
+    return value.strip().lower() if isinstance(value, str) and value.strip() else None
+
+
+def _domain_grant_hostname(arguments: dict[str, Any]) -> str | None:
+    hostname = _normalize_approval_hostname(_first_argument_value(arguments, _HOSTNAME_ARGUMENT_KEYS))
+    if hostname is not None:
+        return hostname
+    return _normalize_approval_hostname(_first_argument_value(arguments, _URL_ARGUMENT_KEYS))
+
+
+def _is_domain_grant_approval(tool_name: str, arguments: dict[str, Any]) -> bool:
+    kind = _approval_kind_value(arguments)
+    if kind in _DOMAIN_GRANT_KIND_VALUES:
+        return True
+    return tool_name in _DOMAIN_GRANT_TOOL_NAMES and _domain_grant_hostname(arguments) is not None
+
+
+def _normalize_approval_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Normalize domain-grant arguments before rendering or granting policy."""
+    normalized_arguments = dict(arguments)
+    if not _is_domain_grant_approval(tool_name, normalized_arguments):
+        return normalized_arguments
+
+    normalized_hostname = _domain_grant_hostname(normalized_arguments)
+    if normalized_hostname is None:
+        return normalized_arguments
+
+    host_key = _first_argument_key(normalized_arguments, _HOSTNAME_ARGUMENT_KEYS)
+    if host_key is not None:
+        normalized_arguments[host_key] = normalized_hostname
+    normalized_arguments["normalized_hostname"] = normalized_hostname
+    return normalized_arguments
+
+
+def _approval_reason(arguments: dict[str, Any]) -> str:
+    reason = _first_argument_value(arguments, _REASON_ARGUMENT_KEYS)
+    if isinstance(reason, str) and reason.strip():
+        return sanitize_failure_text(reason.strip(), max_length=240)
+    return "Tool call requires human approval."
+
+
+def _requested_ttl_seconds(arguments: dict[str, Any]) -> int | None:
+    value = _first_argument_value(arguments, _TTL_ARGUMENT_KEYS)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return max(0, value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        ttl_seconds = int(value)
+    except ValueError:
+        return None
+    return max(0, ttl_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,7 +407,8 @@ class _ApprovalManager:
         approval_id = uuid4().hex
         requested_at = _utcnow()
         expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
-        event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
+        approval_arguments = _normalize_approval_arguments(tool_name, arguments)
+        event_arguments, arguments_truncated = _build_event_arguments_preview(approval_arguments)
         content = self._pending_event_content(
             approval_id=approval_id,
             tool_name=tool_name,
@@ -1112,19 +1240,42 @@ class _ApprovalManager:
         expires_at: datetime,
         status: PendingApprovalStatus,
     ) -> dict[str, Any]:
+        normalized_arguments = _normalize_approval_arguments(tool_name, arguments)
+        normalized_hostname = (
+            _domain_grant_hostname(normalized_arguments)
+            if _is_domain_grant_approval(tool_name, normalized_arguments)
+            else None
+        )
+        approval_type = "domain_grant" if normalized_hostname is not None else "tool_action"
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
-            "body": _ApprovalManager._event_body(tool_name, status),
+            "body": _ApprovalManager._event_body(
+                tool_name,
+                status,
+                approval_type=approval_type,
+                subject=normalized_hostname,
+            ),
             "tool_name": tool_name,
             "tool_call_id": approval_id,
-            "arguments": arguments,
+            "arguments": normalized_arguments,
             "status": status,
             "approval_id": approval_id,
+            "approval_type": approval_type,
+            "approval_reason": _approval_reason(normalized_arguments),
+            "approval_warning": _UNTRUSTED_APPROVAL_WARNING,
+            "request_context": {
+                "agent_name": agent_name,
+                "tool_name": tool_name,
+                "requester_id": requester_id,
+            },
             "approver_user_id": approver_user_id,
             "requested_at": requested_at.isoformat(),
             "expires_at": expires_at.isoformat(),
             "thread_id": thread_id,
         }
+        if normalized_hostname is not None:
+            content["normalized_hostname"] = normalized_hostname
+            content["requested_ttl_seconds"] = _requested_ttl_seconds(normalized_arguments)
         if agent_name is not None:
             content["agent_name"] = agent_name
         if arguments_truncated:
@@ -1151,12 +1302,21 @@ class _ApprovalManager:
         )
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
-            "body": _ApprovalManager._event_body(pending.tool_name, status),
+            "body": _ApprovalManager._event_body(
+                pending.tool_name,
+                status,
+                approval_type=pending.approval_type,
+                subject=pending.normalized_hostname,
+            ),
             "tool_name": pending.tool_name,
             "tool_call_id": pending.approval_id,
             "arguments": pending.arguments_preview,
             "status": status,
             "approval_id": pending.approval_id,
+            "approval_type": pending.approval_type,
+            "approval_reason": pending.approval_reason,
+            "approval_warning": pending.approval_warning,
+            "request_context": pending.request_context,
             "approver_user_id": pending.approver_user_id,
             "requested_at": requested_at.isoformat(),
             "expires_at": expires_at.isoformat(),
@@ -1164,6 +1324,9 @@ class _ApprovalManager:
             "resolved_at": resolved_at.isoformat(),
             "resolved_by": resolved_by,
         }
+        if pending.normalized_hostname is not None:
+            content["normalized_hostname"] = pending.normalized_hostname
+            content["requested_ttl_seconds"] = pending.requested_ttl_seconds
         if pending.agent_name is not None:
             content["agent_name"] = pending.agent_name
         if pending.arguments_preview_truncated:
@@ -1175,14 +1338,22 @@ class _ApprovalManager:
         return content
 
     @staticmethod
-    def _event_body(tool_name: str, status: PendingApprovalStatus) -> str:
+    def _event_body(
+        tool_name: str,
+        status: PendingApprovalStatus,
+        *,
+        approval_type: str = "tool_action",
+        subject: str | None = None,
+    ) -> str:
+        label = "Domain grant" if approval_type == "domain_grant" else "Tool/action"
+        target = subject or tool_name
         if status == "approved":
-            return f"Approved: {tool_name}"
+            return f"{label} approved: {target}"
         if status == "denied":
-            return f"Denied: {tool_name}"
+            return f"{label} denied: {target}"
         if status == "expired":
-            return f"Expired: {tool_name}"
-        return f"🔒 Approval required: {tool_name}"
+            return f"{label} approval expired: {target}"
+        return f"{label} approval required: {target}"
 
     @classmethod
     def _normalized_resolution_request(
