@@ -49,14 +49,28 @@ _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
 
 __all__ = [
+    "STARTUP_RETRY_INITIAL_DELAY_SECONDS",
+    "STARTUP_RETRY_MAX_DELAY_SECONDS",
     "SYNC_RESTART_CANCEL_MSG",
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
+    "EntityStartResults",
     "cancel_failure_reason",
+    "cancel_logged_task",
+    "cancel_sync_task",
+    "cancel_task",
     "classify_cancel_source",
+    "create_logged_task",
+    "create_temp_user",
+    "is_permanent_startup_error",
     "is_sync_restart_cancel",
     "matrix_sync_startup_timeout_seconds",
     "request_task_cancel",
+    "retry_delay_seconds",
+    "run_with_retry",
+    "stop_entities",
+    "sync_forever_with_restart",
+    "wait_for_matrix_homeserver",
 ]
 
 
