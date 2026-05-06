@@ -16,8 +16,6 @@ from typing import TYPE_CHECKING, Literal, ParamSpec, Protocol, TypeVar, cast
 import mindroom.knowledge.manager as manager_module
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import (
-    IndexMetadataFields,
-    build_index_metadata_payload,
     load_index_metadata_payload,
     optional_metadata_str,
     parse_index_metadata_fields,
@@ -269,15 +267,24 @@ def load_published_index_state(metadata_path: Path) -> PublishedIndexState | Non
     fields = parse_index_metadata_fields(payload, allowed_statuses=_PUBLISHED_INDEX_STATUSES)
     if fields is None:
         return None
+    (
+        settings,
+        status,
+        collection,
+        last_published_at,
+        published_revision,
+        indexed_count,
+        source_signature,
+    ) = fields
 
     return PublishedIndexState(
-        settings=fields.settings,
-        status=cast('Literal["resetting", "indexing", "complete", "failed"]', fields.status),
-        collection=fields.collection,
-        last_published_at=fields.last_published_at,
-        published_revision=fields.published_revision,
-        indexed_count=fields.indexed_count,
-        source_signature=fields.source_signature,
+        settings=settings,
+        status=cast('Literal["resetting", "indexing", "complete", "failed"]', status),
+        collection=collection,
+        last_published_at=last_published_at,
+        published_revision=published_revision,
+        indexed_count=indexed_count,
+        source_signature=source_signature,
         refresh_job=_coerce_refresh_job(payload.get("refresh_job")),
         reason=optional_metadata_str(payload.get("reason")),
         last_error=optional_metadata_str(payload.get("last_error")),
@@ -288,25 +295,21 @@ def load_published_index_state(metadata_path: Path) -> PublishedIndexState | Non
 
 def save_published_index_state(metadata_path: Path, state: PublishedIndexState) -> None:
     """Atomically persist published index metadata."""
-    payload = build_index_metadata_payload(
-        IndexMetadataFields(
-            settings=state.settings,
-            status=state.status,
-            collection=state.collection,
-            last_published_at=state.last_published_at,
-            published_revision=state.published_revision,
-            indexed_count=state.indexed_count,
-            source_signature=state.source_signature,
-        ),
-        extra_fields={
-            "refresh_job": state.refresh_job,
-            "reason": state.reason,
-            "last_error": state.last_error,
-            "updated_at": state.updated_at,
-            "last_refresh_at": state.last_refresh_at,
-        },
+    write_index_metadata_payload(
+        metadata_path,
+        settings=state.settings,
+        status=state.status,
+        collection=state.collection,
+        last_published_at=state.last_published_at,
+        published_revision=state.published_revision,
+        indexed_count=state.indexed_count,
+        source_signature=state.source_signature,
+        refresh_job=state.refresh_job,
+        reason=state.reason,
+        last_error=state.last_error,
+        updated_at=state.updated_at,
+        last_refresh_at=state.last_refresh_at,
     )
-    write_index_metadata_payload(metadata_path, payload)
 
 
 def published_index_refresh_state(

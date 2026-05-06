@@ -36,8 +36,6 @@ from mindroom.embeddings import (
 )
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.index_metadata import (
-    IndexMetadataFields,
-    build_index_metadata_payload,
     load_index_metadata_payload,
     parse_index_metadata_fields,
     write_index_metadata_payload,
@@ -892,14 +890,23 @@ class KnowledgeManager:
         )
         if fields is None:
             return None
+        (
+            settings,
+            status,
+            collection,
+            last_published_at,
+            published_revision,
+            indexed_count,
+            source_signature,
+        ) = fields
         return _PersistedIndexState(
-            fields.settings,
-            cast('Literal["resetting", "indexing", "complete"]', fields.status),
-            collection=fields.collection,
-            last_published_at=fields.last_published_at,
-            published_revision=fields.published_revision,
-            indexed_count=fields.indexed_count,
-            source_signature=fields.source_signature,
+            settings,
+            cast('Literal["resetting", "indexing", "complete"]', status),
+            collection=collection,
+            last_published_at=last_published_at,
+            published_revision=published_revision,
+            indexed_count=indexed_count,
+            source_signature=source_signature,
         )
 
     def _save_persisted_index_state(
@@ -913,18 +920,16 @@ class KnowledgeManager:
         indexed_count: int | None = None,
         source_signature: str | None = None,
     ) -> None:
-        payload = build_index_metadata_payload(
-            IndexMetadataFields(
-                settings=settings or self._indexing_settings,
-                status=status,
-                collection=collection,
-                last_published_at=last_published_at,
-                published_revision=published_revision,
-                indexed_count=indexed_count,
-                source_signature=source_signature,
-            ),
+        write_index_metadata_payload(
+            self._indexing_settings_path,
+            settings=settings or self._indexing_settings,
+            status=status,
+            collection=collection,
+            last_published_at=last_published_at,
+            published_revision=published_revision,
+            indexed_count=indexed_count,
+            source_signature=source_signature,
         )
-        write_index_metadata_payload(self._indexing_settings_path, payload)
 
     def _load_git_lfs_hydrated_head(self) -> str | None:
         try:

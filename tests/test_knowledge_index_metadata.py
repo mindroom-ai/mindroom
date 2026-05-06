@@ -8,8 +8,6 @@ from pathlib import Path
 import pytest
 
 from mindroom.knowledge.index_metadata import (
-    IndexMetadataFields,
-    build_index_metadata_payload,
     load_index_metadata_payload,
     parse_index_metadata_fields,
     write_index_metadata_payload,
@@ -47,27 +45,27 @@ def test_index_metadata_fields_support_registry_and_manager_strictness(tmp_path:
         require_complete_fields_for_all_statuses=False,
     )
 
-    assert fields == IndexMetadataFields(settings=("base", "storage"), status="indexing")
+    assert fields == (("base", "storage"), "indexing", None, None, None, None, None)
 
 
-def test_build_index_metadata_payload_preserves_field_names_and_omits_none_values() -> None:
+def test_write_index_metadata_payload_preserves_field_names_and_omits_none_values(tmp_path: Path) -> None:
     """Payload building preserves on-disk field names and omits absent optional fields."""
-    payload = build_index_metadata_payload(
-        IndexMetadataFields(
-            settings=("base", "storage"),
-            status="complete",
-            collection="published_collection",
-            last_published_at="2026-01-02T03:04:05+00:00",
-            indexed_count=7,
-            source_signature="source-signature",
-        ),
-        extra_fields={
-            "refresh_job": "idle",
-            "reason": None,
-            "last_refresh_at": "2026-01-02T03:05:06+00:00",
-        },
+    metadata_path = tmp_path / "indexing_settings.json"
+
+    write_index_metadata_payload(
+        metadata_path,
+        settings=("base", "storage"),
+        status="complete",
+        collection="published_collection",
+        last_published_at="2026-01-02T03:04:05+00:00",
+        indexed_count=7,
+        source_signature="source-signature",
+        refresh_job="idle",
+        reason=None,
+        last_refresh_at="2026-01-02T03:05:06+00:00",
     )
 
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert payload == {
         "settings": ["base", "storage"],
         "status": "complete",
@@ -101,7 +99,8 @@ def test_write_index_metadata_payload_uses_unique_temp_and_cleans_failed_replace
     with pytest.raises(OSError, match="replace failed"):
         write_index_metadata_payload(
             metadata_path,
-            {"settings": ["base"], "status": "complete"},
+            settings=("base",),
+            status="complete",
         )
 
     assert attempted_temp_paths
