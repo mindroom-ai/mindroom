@@ -4,7 +4,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mindroom.commands.parsing import _COMMAND_DOCS, CommandType, command_parser, get_command_help
+from mindroom.commands.handler import generate_welcome_message
+from mindroom.commands.parsing import (
+    _COMMAND_DOCS,
+    CommandType,
+    command_parser,
+    get_command_help,
+    get_compact_command_entries,
+)
+from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths
+
+WELCOME_QUICK_COMMAND_LINES = [
+    "\u2022 `!hi` - Show this welcome message again",
+    "\u2022 `!schedule <time> <message>` - Schedule tasks and reminders",
+    "\u2022 `!help [topic]` - Get detailed help",
+]
+
+
+def _test_runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "mindroom_data",
+    )
 
 
 def test_help_command() -> None:
@@ -263,6 +287,29 @@ def test_get_command_help() -> None:
     skill_help = get_command_help("skill")
     assert "Available Commands" in skill_help
     assert "!skill" not in skill_help
+
+
+def test_compact_command_entries_characterize_welcome_subset() -> None:
+    """Compact command docs preserve the existing welcome quick-command wording."""
+    assert (
+        get_compact_command_entries(
+            (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP),
+            format_code=True,
+        )
+        == WELCOME_QUICK_COMMAND_LINES
+    )
+
+
+def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None:
+    """The welcome quick commands should match the parser-owned compact docs."""
+    welcome_message = generate_welcome_message(
+        "!room:localhost",
+        Config(),
+        _test_runtime_paths(tmp_path),
+    )
+
+    quick_command_block = "\u26a1 **Quick commands:**\n" + "\n".join(WELCOME_QUICK_COMMAND_LINES)
+    assert quick_command_block in welcome_message
 
 
 def test_docs_index_chat_commands_summary_lists_all_supported_commands() -> None:

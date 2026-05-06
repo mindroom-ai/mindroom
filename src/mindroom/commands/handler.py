@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
-from mindroom.commands.parsing import Command, CommandType, get_command_help
+from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
@@ -155,6 +155,7 @@ def generate_welcome_message(room_id: str, config: Config, runtime_paths: Runtim
         welcome_msg += "\n".join(agent_list)
         welcome_msg += "\n\n"
 
+    quick_commands = "\n".join(get_compact_command_entries(format_code=True))
     welcome_msg += (
         "💬 **How to interact:**\n"
         "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
@@ -163,9 +164,7 @@ def generate_welcome_message(room_id: str, config: Config, runtime_paths: Runtim
         "• Multiple agents can collaborate when you mention them together\n"
         "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
         "⚡ **Quick commands:**\n"
-        "• `!hi` - Show this welcome message again\n"
-        "• `!schedule <time> <message>` - Schedule tasks and reminders\n"
-        "• `!help [topic]` - Get detailed help\n\n"
+        f"{quick_commands}\n\n"
         "✨ Feel free to ask any agent for help or start a conversation!"
     )
 
