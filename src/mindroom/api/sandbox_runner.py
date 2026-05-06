@@ -99,7 +99,19 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
         _startup_manifest_from_env(),
     )
     if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
-        return startup_runtime_paths
+        credentials_encryption_key = os.environ.get(constants.CREDENTIALS_ENCRYPTION_KEY_ENV, "").strip()
+        if not credentials_encryption_key:
+            return startup_runtime_paths
+        process_env = dict(startup_runtime_paths.process_env)
+        process_env[constants.CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
+        return constants.RuntimePaths(
+            config_path=startup_runtime_paths.config_path,
+            config_dir=startup_runtime_paths.config_dir,
+            env_path=startup_runtime_paths.env_path,
+            storage_root=startup_runtime_paths.storage_root,
+            process_env=MappingProxyType(process_env),
+            env_file_values=startup_runtime_paths.env_file_values,
+        )
     process_env = dict(startup_runtime_paths.process_env)
     process_env.update(
         {

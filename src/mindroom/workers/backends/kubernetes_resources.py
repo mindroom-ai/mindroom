@@ -799,9 +799,21 @@ class KubernetesResourceManager:
             {"name": "HOME", "value": dedicated_root},
             self._worker_token_env(worker_id=worker_id),
         ]
+        credentials_encryption_key = self.config.extra_env.get(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
+        if credentials_encryption_key is None:
+            credentials_encryption_key = self.runtime_paths.env_value(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
+        if credentials_encryption_key and credentials_encryption_key.strip():
+            env.append(
+                {
+                    "name": constants.CREDENTIALS_ENCRYPTION_KEY_ENV,
+                    "value": credentials_encryption_key.strip(),
+                },
+            )
 
         for name, value in sorted(self.config.extra_env.items()):
             if name in constants.VENDOR_TELEMETRY_ENV_VALUES:
+                continue
+            if name == constants.CREDENTIALS_ENCRYPTION_KEY_ENV:
                 continue
             env.append({"name": name, "value": value})
         for name, value in sorted(constants.VENDOR_TELEMETRY_ENV_VALUES.items()):
@@ -841,12 +853,14 @@ class KubernetesResourceManager:
             local_dedicated_root,
             startup_runtime_paths,
             tool_validation_snapshot=self.tool_validation_snapshot,
+            public_runtime=True,
         )
         return (
             str(constants.sandbox_startup_manifest_path(dedicated_root)),
             constants.startup_manifest_sha256(
                 startup_runtime_paths,
                 tool_validation_snapshot=self.tool_validation_snapshot,
+                public_runtime=True,
             ),
         )
 
