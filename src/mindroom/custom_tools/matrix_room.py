@@ -14,6 +14,7 @@ from aiohttp import ClientError
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_visible_messages import (
     message_preview,
@@ -55,9 +56,7 @@ class MatrixRoomTools(Toolkit):
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
-        payload: dict[str, object] = {"status": status, "tool": "matrix_room"}
-        payload.update(kwargs)
-        return json.dumps(payload, sort_keys=True)
+        return custom_tool_payload("matrix_room", status, **kwargs)
 
     @classmethod
     def _context_error(cls) -> str:

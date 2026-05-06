@@ -14,6 +14,7 @@ from agno.tools import Toolkit
 from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_bookkeeping import (
     MutationThreadImpactState,
@@ -142,9 +143,7 @@ class MatrixApiTools(Toolkit):
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
-        payload: dict[str, object] = {"status": status, "tool": "matrix_api"}
-        payload.update(kwargs)
-        return json.dumps(payload, sort_keys=True)
+        return custom_tool_payload("matrix_api", status, **kwargs)
 
     @classmethod
     def _context_error(cls) -> str:

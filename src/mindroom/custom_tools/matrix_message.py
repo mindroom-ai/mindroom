@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections import defaultdict, deque
 from threading import Lock
 from typing import ClassVar
@@ -12,6 +11,7 @@ from agno.tools import Toolkit
 from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import normalize_str_list, resolve_context_thread_id, room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 
@@ -41,9 +41,7 @@ class MatrixMessageTools(Toolkit):
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
-        payload: dict[str, object] = {"status": status, "tool": "matrix_message"}
-        payload.update(kwargs)
-        return json.dumps(payload, sort_keys=True)
+        return custom_tool_payload("matrix_message", status, **kwargs)
 
     @classmethod
     def _operation_result_payload(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -13,6 +12,7 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_requested_room_id,
     room_access_allowed,
 )
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
     ThreadTagRecord,
@@ -72,9 +72,7 @@ class ThreadTagsTools(Toolkit):
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
-        payload: dict[str, object] = {"status": status, "tool": "thread_tags"}
-        payload.update(kwargs)
-        return json.dumps(payload, sort_keys=True)
+        return custom_tool_payload("thread_tags", status, **kwargs)
 
     @classmethod
     def _context_error(cls) -> str:

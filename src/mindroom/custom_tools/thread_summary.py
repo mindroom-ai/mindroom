@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import (
@@ -11,6 +9,7 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_requested_room_id,
     room_access_allowed,
 )
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
 from mindroom.thread_summary import ThreadSummaryWriteError, set_manual_thread_summary
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -27,9 +26,7 @@ class ThreadSummaryTools(Toolkit):
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
-        payload: dict[str, object] = {"status": status, "tool": "thread_summary"}
-        payload.update(kwargs)
-        return json.dumps(payload, sort_keys=True)
+        return custom_tool_payload("thread_summary", status, **kwargs)
 
     @classmethod
     def _context_error(cls) -> str:
