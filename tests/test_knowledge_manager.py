@@ -42,7 +42,7 @@ from mindroom.knowledge.manager import (
     list_git_tracked_knowledge_files,
     list_knowledge_files,
 )
-from mindroom.knowledge.redaction import credential_free_url_identity, redact_url_credentials
+from mindroom.knowledge.redaction import credential_free_repo_url, credential_free_url_identity, redact_url_credentials
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     _clear_published_indexes,
@@ -6446,7 +6446,7 @@ def test_redact_url_credentials_hides_entire_http_userinfo() -> None:
         == "https://***@example.com/org/repo.git"
     )
     assert (
-        knowledge_manager_module._credential_free_repo_url(
+        credential_free_repo_url(
             "https://user:password@example.com/repo.git?token=secret#frag-secret",
         )
         == "https://example.com/repo.git"
@@ -6456,7 +6456,7 @@ def test_redact_url_credentials_hides_entire_http_userinfo() -> None:
 def test_credential_free_repo_url_preserves_passwordless_ssh_username() -> None:
     """Passwordless SSH transport usernames are part of the clone identity."""
     assert (
-        knowledge_manager_module._credential_free_repo_url(
+        credential_free_repo_url(
             "ssh://git@example.com/org/repo.git;token=secret?query=secret#frag-secret",
         )
         == "ssh://git@example.com/org/repo.git"
@@ -6466,13 +6466,13 @@ def test_credential_free_repo_url_preserves_passwordless_ssh_username() -> None:
 def test_credential_free_repo_url_strips_secret_bearing_userinfo() -> None:
     """Persistent clone URLs must not retain passwords, HTTP userinfo, query strings, or fragments."""
     assert (
-        knowledge_manager_module._credential_free_repo_url(
+        credential_free_repo_url(
             "ssh://git:secret@example.com/org/repo.git;token=secret?query=secret#frag-secret",
         )
         == "ssh://example.com/org/repo.git"
     )
     assert (
-        knowledge_manager_module._credential_free_repo_url(
+        credential_free_repo_url(
             "https://user@example.com/org/repo.git;token=secret?query=secret#frag-secret",
         )
         == "https://example.com/org/repo.git"

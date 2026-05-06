@@ -41,6 +41,7 @@ from mindroom.knowledge.index_metadata import (
     write_index_metadata_payload,
 )
 from mindroom.knowledge.redaction import (
+    credential_free_repo_url,
     credential_free_url_identity,
     embedded_http_userinfo,
     redact_credentials_in_text,
@@ -348,36 +349,6 @@ def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
     raise ValueError(msg)
 
 
-def _credential_free_repo_url(repo_url: str) -> str:
-    """Return a repository URL suitable for persistent Git config."""
-    parsed = urlparse(repo_url)
-    if not parsed.scheme or not parsed.netloc:
-        return repo_url
-    path = parsed.path.split(";", 1)[0]
-    if parsed.scheme == "ssh" and "@" in parsed.netloc and parsed.password is None:
-        userinfo, host = parsed.netloc.rsplit("@", 1)
-        if userinfo and ":" not in userinfo:
-            return urlunparse(
-                parsed._replace(
-                    netloc=f"{userinfo}@{host}",
-                    path=path,
-                    params="",
-                    query="",
-                    fragment="",
-                ),
-            )
-    hostname = parsed.netloc.rsplit("@", 1)[-1]
-    return urlunparse(
-        parsed._replace(
-            netloc=hostname,
-            path=path,
-            params="",
-            query="",
-            fragment="",
-        ),
-    )
-
-
 def _authenticated_repo_url(
     repo_url: str,
     credentials_service: str | None,
@@ -458,7 +429,7 @@ def _git_auth_env(
     runtime_paths: RuntimePaths,
 ) -> dict[str, str] | None:
     """Return process-local Git config that injects credentials without persisting them."""
-    clean_url = _credential_free_repo_url(repo_url)
+    clean_url = credential_free_repo_url(repo_url)
     parsed_clean_url = urlparse(clean_url)
 
     embedded_userinfo = embedded_http_userinfo(repo_url)
@@ -1109,7 +1080,7 @@ class KnowledgeManager:
             self._git_repo_present = True
             await self._ensure_git_lfs_repository_ready(knowledge_root)
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
-            expected_remote = _credential_free_repo_url(git_config.repo_url)
+            expected_remote = credential_free_repo_url(git_config.repo_url)
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
             return False
@@ -1124,7 +1095,7 @@ class KnowledgeManager:
         knowledge_root.parent.mkdir(parents=True, exist_ok=True)
         if git_config.lfs:
             await self._ensure_git_lfs_available(cwd=knowledge_root.parent)
-        clone_url = _credential_free_repo_url(git_config.repo_url)
+        clone_url = credential_free_repo_url(git_config.repo_url)
         await self._run_git(
             [
                 "clone",
