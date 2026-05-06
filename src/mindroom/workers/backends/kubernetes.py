@@ -10,8 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.tool_system.worker_routing import worker_dir_name
-from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.lifecycle import WorkerLockRegistry, effective_idle_status, filter_and_sort_worker_handles
+from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.models import (
     ProgressSink,
     WorkerHandle,
@@ -286,7 +285,8 @@ class KubernetesWorkerBackend:
             tool_validation_snapshot=tool_validation_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
         )
-        self._worker_locks = WorkerLockRegistry()
+        self._worker_locks: dict[str, threading.Lock] = {}
+        self._worker_locks_lock = threading.Lock()
         self._progress_sinks: dict[str, list[ProgressSink]] = {}
         self._progress_snapshots: dict[str, WorkerReadyProgress | None] = {}
         self._progress_sinks_lock = threading.Lock()
@@ -497,7 +497,7 @@ class KubernetesWorkerBackend:
         handles = [
             self._handle_from_deployment(deployment, now=timestamp) for deployment in self._resources.list_deployments()
         ]
-        return filter_and_sort_worker_handles(handles, include_idle=include_idle)
+        return filter_and_sort_worker_handles(handles, include_idle)
 
     def evict_worker(
         self,
@@ -602,7 +602,12 @@ class KubernetesWorkerBackend:
             self._resources.delete_secret(worker_id)
 
     def _worker_lock(self, worker_key: str) -> threading.Lock:
-        return self._worker_locks.lock_for(worker_key)
+        with self._worker_locks_lock:
+            worker_lock = self._worker_locks.get(worker_key)
+            if worker_lock is None:
+                worker_lock = threading.Lock()
+                self._worker_locks[worker_key] = worker_lock
+        return worker_lock
 
     def _worker_id(self, worker_key: str) -> str:
         return resources.worker_id_for_key(worker_key, prefix=self.config.name_prefix)
@@ -670,9 +675,4 @@ class KubernetesWorkerBackend:
         if not self._deployment_ready(deployment):
             return "starting"
         last_used_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_LAST_USED_AT, now)
-        return effective_idle_status(
-            "ready",
-            last_used_at=last_used_at,
-            idle_timeout_seconds=self.idle_timeout_seconds,
-            now=now,
-        )
+        return effective_idle_status("ready", last_used_at, self.idle_timeout_seconds, now)

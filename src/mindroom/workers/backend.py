@@ -5,11 +5,31 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec
+    from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
 
 class WorkerBackendError(RuntimeError):
     """Raised when a worker backend cannot satisfy a request."""
+
+
+def effective_idle_status(
+    status: WorkerStatus,
+    last_used_at: float,
+    idle_timeout_seconds: float,
+    now: float,
+) -> WorkerStatus:
+    """Return the effective status after applying ready-worker idle timeout."""
+    if status == "ready" and now - last_used_at >= idle_timeout_seconds:
+        return "idle"
+    return status
+
+
+def filter_and_sort_worker_handles(handles: list[WorkerHandle], include_idle: bool) -> list[WorkerHandle]:
+    """Apply idle filtering and newest-first worker list ordering."""
+    filtered_handles = list(handles)
+    if not include_idle:
+        filtered_handles = [handle for handle in filtered_handles if handle.status != "idle"]
+    return sorted(filtered_handles, key=lambda handle: handle.last_used_at, reverse=True)
 
 
 class WorkerBackend(Protocol):
