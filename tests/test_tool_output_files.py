@@ -30,6 +30,7 @@ from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
     _wrap_function_for_output_files,
+    ensure_output_path_schema_optional,
     wrap_toolkit_for_output_files,
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
@@ -82,6 +83,28 @@ def _receipt(result: object) -> dict[str, object]:
     envelope = result.get("mindroom_tool_output")
     assert isinstance(envelope, dict)
     return envelope
+
+
+def test_ensure_output_path_schema_optional_preserves_custom_schema_shape() -> None:
+    function = Function(
+        name="attachment_reader",
+        parameters={
+            "type": "object",
+            "properties": {"attachment_id": {"type": "string", "description": "Context attachment."}},
+            "required": ["attachment_id", OUTPUT_PATH_ARGUMENT],
+            "additionalProperties": False,
+        },
+        skip_entrypoint_processing=True,
+    )
+
+    ensure_output_path_schema_optional(function)
+
+    assert function.parameters["additionalProperties"] is False
+    assert function.parameters["properties"]["attachment_id"] == {
+        "type": "string",
+        "description": "Context attachment.",
+    }
+    _assert_output_path_schema_is_optional(function)
 
 
 def _plugin(*callbacks: object) -> object:

@@ -220,9 +220,14 @@ async def test_attachments_tool_get_attachment_schema_describes_output_path(
     del tmp_path
     tool = AttachmentTools()
 
-    schema = tool.async_functions["get_attachment"].parameters["properties"]
+    parameters = tool.async_functions["get_attachment"].parameters
+    schema = parameters["properties"]
 
+    assert schema["attachment_id"]["description"] == "Context-scoped attachment ID returned by list_attachments."
+    assert schema["mindroom_output_path"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert schema["mindroom_output_path"]["default"] is None
     assert "Use this for large output" in schema["mindroom_output_path"]["description"]
+    assert "mindroom_output_path" not in parameters["required"]
     assert "save_to_disk" not in schema
 
 
