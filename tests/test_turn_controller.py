@@ -13,6 +13,7 @@ from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
 from tests.conftest import (
@@ -312,3 +313,127 @@ async def test_on_message_passes_resolved_thread_id_to_interactive_text_response
     mock_handle_text_response.assert_awaited_once()
     assert mock_handle_text_response.await_args.kwargs["resolved_thread_id"] == "$thread-root:localhost"
     mock_dispatch_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sidecar_preview_passes_resolved_thread_id_to_interactive_text_response(
+    tmp_path: Path,
+) -> None:
+    """Sidecar previews should use the same interactive matching thread id as text messages."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+
+    agent_user = AgentMatrixUser(
+        agent_name="general",
+        user_id="@mindroom_general:localhost",
+        display_name="GeneralAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    sidecar_event = nio.RoomMessageFile.from_dict(
+        {
+            "content": {
+                "body": "1 [Message continues in attached file]",
+                "msgtype": "m.file",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/sidecar-selection",
+            },
+            "event_id": "$sidecar-selection:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:localhost",
+        },
+    )
+    sidecar_event.source = {
+        "content": {
+            "body": "1 [Message continues in attached file]",
+            "msgtype": "m.file",
+            "info": {"mimetype": "application/json"},
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://server/sidecar-selection",
+        },
+        "event_id": "$sidecar-selection:localhost",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000000,
+        "type": "m.room.message",
+        "room_id": "!test:localhost",
+    }
+    prepared_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$sidecar-selection:localhost",
+        body="1",
+        source={
+            "content": {
+                "body": "1",
+                "msgtype": "m.text",
+            },
+            "event_id": "$sidecar-selection:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:localhost",
+        },
+        server_timestamp=1000000,
+    )
+
+    wrap_extracted_collaborators(bot, "_turn_policy", "_inbound_turn_normalizer")
+    replace_turn_controller_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        turn_policy=bot._turn_policy,
+        normalizer=bot._inbound_turn_normalizer,
+    )
+
+    with (
+        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        patch.object(bot._turn_policy, "can_reply_to_sender", return_value=True),
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new_callable=AsyncMock,
+            return_value="$thread-root:localhost",
+        ),
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "prepare_file_sidecar_text_event",
+            new_callable=AsyncMock,
+            return_value=prepared_event,
+        ),
+        patch(
+            "mindroom.turn_controller.interactive.handle_text_response",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_handle_text_response,
+        patch.object(
+            bot._turn_controller,
+            "_enqueue_prepared_text_for_dispatch",
+            new_callable=AsyncMock,
+        ) as mock_enqueue,
+    ):
+        await bot._turn_controller._handle_media_message_inner(room, sidecar_event)
+
+    mock_handle_text_response.assert_awaited_once()
+    assert mock_handle_text_response.await_args.kwargs["resolved_thread_id"] == "$thread-root:localhost"
+    mock_enqueue.assert_awaited_once()
+    assert mock_enqueue.await_args.kwargs["prepared_event"] is prepared_event
+    assert mock_enqueue.await_args.kwargs["dispatch_event"] is prepared_event

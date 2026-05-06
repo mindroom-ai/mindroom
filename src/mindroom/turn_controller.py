@@ -643,6 +643,53 @@ class TurnController:
         attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
         return prepared_event
 
+    async def _dispatch_prepared_text_like_ingress(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        prepared_event: PreparedTextEvent,
+        dispatch_event: TextDispatchEvent,
+        requester_user_id: str,
+        dispatch_timing: DispatchPipelineTiming | None,
+    ) -> None:
+        """Run shared ingress dispatch for text events and sidecar text previews."""
+        envelope = self.deps.resolver.build_ingress_envelope(
+            room_id=room.room_id,
+            event=prepared_event,
+            requester_user_id=requester_user_id,
+        )
+        if self._should_skip_deep_synthetic_full_dispatch(
+            event_id=prepared_event.event_id,
+            envelope=envelope,
+        ):
+            return
+        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
+        if should_handle_interactive_text_response(envelope):
+            selection = await interactive.handle_text_response(
+                self._client(),
+                room,
+                prepared_event,
+                self.deps.agent_name,
+                resolved_thread_id=coalescing_thread_id,
+            )
+            if selection is not None:
+                await self.handle_interactive_selection(
+                    room,
+                    selection=selection,
+                    user_id=prepared_event.sender,
+                    source_event_id=prepared_event.event_id,
+                )
+                return
+        await self._enqueue_prepared_text_for_dispatch(
+            room=room,
+            prepared_event=prepared_event,
+            dispatch_event=dispatch_event,
+            envelope=envelope,
+            coalescing_thread_id=coalescing_thread_id,
+            requester_user_id=requester_user_id,
+            dispatch_timing=dispatch_timing,
+        )
+
     async def _enqueue_for_dispatch(
         self,
         event: DispatchEvent,
@@ -1483,7 +1530,7 @@ class TurnController:
         async with self.deps.resolver.turn_thread_cache_scope():
             await self._handle_message_inner(room, event)
 
-    async def _handle_message_inner(  # noqa: PLR0911
+    async def _handle_message_inner(
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
@@ -1549,39 +1596,10 @@ class TurnController:
             prechecked_event.event,
             dispatch_timing=dispatch_timing,
         )
-        envelope = self.deps.resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=prepared_event,
-            requester_user_id=prechecked_event.requester_user_id,
-        )
-        if self._should_skip_deep_synthetic_full_dispatch(
-            event_id=prepared_event.event_id,
-            envelope=envelope,
-        ):
-            return
-        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_event)
-        if should_handle_interactive_text_response(envelope):
-            selection = await interactive.handle_text_response(
-                self._client(),
-                room,
-                prepared_event,
-                self.deps.agent_name,
-                resolved_thread_id=coalescing_thread_id,
-            )
-            if selection is not None:
-                await self.handle_interactive_selection(
-                    room,
-                    selection=selection,
-                    user_id=prepared_event.sender,
-                    source_event_id=prepared_event.event_id,
-                )
-                return
-        await self._enqueue_prepared_text_for_dispatch(
+        await self._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=prepared_event,
             dispatch_event=prechecked_event.event,
-            envelope=envelope,
-            coalescing_thread_id=coalescing_thread_id,
             requester_user_id=prechecked_event.requester_user_id,
             dispatch_timing=dispatch_timing,
         )
@@ -1985,39 +2003,10 @@ class TurnController:
             dispatch_timing.mark("ingress_normalize_ready")
         assert prepared_text_event is not None
         attach_dispatch_pipeline_timing(prepared_text_event.source, dispatch_timing)
-        envelope = self.deps.resolver.build_ingress_envelope(
-            room_id=room.room_id,
-            event=prepared_text_event,
-            requester_user_id=prechecked_event.requester_user_id,
-        )
-        if self._should_skip_deep_synthetic_full_dispatch(
-            event_id=prepared_text_event.event_id,
-            envelope=envelope,
-        ):
-            return True
-        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prepared_text_event)
-        if should_handle_interactive_text_response(envelope):
-            selection = await interactive.handle_text_response(
-                self._client(),
-                room,
-                prepared_text_event,
-                self.deps.agent_name,
-                resolved_thread_id=coalescing_thread_id,
-            )
-            if selection is not None:
-                await self.handle_interactive_selection(
-                    room,
-                    selection=selection,
-                    user_id=prepared_text_event.sender,
-                    source_event_id=prepared_text_event.event_id,
-                )
-                return True
-        await self._enqueue_prepared_text_for_dispatch(
+        await self._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=prepared_text_event,
             dispatch_event=prepared_text_event,
-            envelope=envelope,
-            coalescing_thread_id=coalescing_thread_id,
             requester_user_id=prechecked_event.requester_user_id,
             dispatch_timing=dispatch_timing,
         )
