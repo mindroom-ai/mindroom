@@ -4093,6 +4093,60 @@ def test_trusted_upstream_strict_jwt_rejects_identity_mismatch(
     assert response.json()["detail"] == "Trusted upstream identity does not match JWT claim"
 
 
+def test_trusted_upstream_strict_jwt_rejects_unsigned_user_id_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Strict trusted upstream auth should not accept a user ID that is not bound to the JWT."""
+    private_key = _trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    token = _trusted_upstream_jwt(private_key, email="alice@example.com")
+    api_app = _trusted_auth_test_app(_runtime_paths(tmp_path, process_env=_trusted_upstream_strict_jwt_env(tmp_path)))
+
+    with TestClient(api_app) as client:
+        response = client.get(
+            "/whoami",
+            headers={
+                "X-Trusted-User": "bob@example.com",
+                "X-Trusted-Email": "alice@example.com",
+                "X-Trusted-Jwt": token,
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Trusted upstream identity does not match JWT claim"
+
+
+def test_trusted_upstream_strict_jwt_resolves_jwks_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """JWKS resolution should not block the async request event loop."""
+    private_key = _trusted_upstream_jwt_key()
+    original_get_signing_key = jwt.PyJWKClient.get_signing_key_from_jwt
+    running_loops: list[bool] = []
+
+    def wrapped_get_signing_key(client: jwt.PyJWKClient, token: str | bytes) -> jwt.PyJWK:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            running_loops.append(False)
+        else:
+            running_loops.append(True)
+        return original_get_signing_key(client, token)
+
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    monkeypatch.setattr(jwt.PyJWKClient, "get_signing_key_from_jwt", wrapped_get_signing_key)
+    token = _trusted_upstream_jwt(private_key)
+    api_app = _trusted_auth_test_app(_runtime_paths(tmp_path, process_env=_trusted_upstream_strict_jwt_env(tmp_path)))
+
+    with TestClient(api_app) as client:
+        response = client.get("/whoami", headers=_trusted_upstream_strict_headers(token))
+
+    assert response.status_code == 200
+    assert running_loops == [False]
+
+
 def test_trusted_upstream_auth_prefers_matrix_header_over_email_template(tmp_path: Path) -> None:
     """A real Matrix identity header should win over a derived email mapping."""
     runtime_paths = _runtime_paths(

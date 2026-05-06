@@ -213,6 +213,20 @@ def test_platform_chart_rejects_email_template_without_email_header() -> None:
     ) in completed.stderr
 
 
+def test_platform_chart_rejects_trusted_upstream_without_user_id_header() -> None:
+    """The platform chart should fail before provisioning instances that cannot authenticate users."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/platform"),
+        "provisioner.trustedUpstreamAuth.enabled=true",
+        release_name="mindroom-platform",
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "provisioner.trustedUpstreamAuth.userIdHeader is required when provisioner.trustedUpstreamAuth.enabled=true"
+    ) in completed.stderr
+
+
 def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> None:
     """The runtime chart worker NetworkPolicy selector should match generated worker pod labels."""
     docs = _render_runtime_chart()
