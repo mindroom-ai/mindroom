@@ -1,6 +1,10 @@
 """Tests for comprehensive event relation analysis."""
 
-from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
+from mindroom.matrix.event_info import (
+    EventInfo,
+    origin_server_ts_from_event_source,
+    reply_to_event_id_from_content,
+)
 
 
 class TestEventRelations:
@@ -185,6 +189,25 @@ class TestEventRelations:
 
             assert info.is_reply is False
             assert info.reply_to_event_id is None
+
+    def test_reply_to_event_id_from_content_extracts_only_string_reply_targets(self) -> None:
+        """Reply target extraction should share the Matrix relation traversal."""
+        assert (
+            reply_to_event_id_from_content(
+                {"m.relates_to": {"m.in_reply_to": {"event_id": "$target:localhost"}}},
+            )
+            == "$target:localhost"
+        )
+
+        assert reply_to_event_id_from_content(None) is None
+        assert reply_to_event_id_from_content({"m.relates_to": "invalid"}) is None
+        assert reply_to_event_id_from_content({"m.relates_to": {"m.in_reply_to": "invalid"}}) is None
+        assert (
+            reply_to_event_id_from_content(
+                {"m.relates_to": {"m.in_reply_to": {"event_id": 123}}},
+            )
+            is None
+        )
 
     def test_origin_server_ts_from_event_source_returns_numeric_timestamp(self) -> None:
         """Raw Matrix timestamp extraction should have one shared non-throwing helper."""

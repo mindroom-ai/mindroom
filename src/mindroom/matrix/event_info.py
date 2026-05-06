@@ -21,6 +21,22 @@ def origin_server_ts_from_event_source(event_source: object) -> int | float | No
     return None
 
 
+def reply_to_event_id_from_content(content: Mapping[str, object] | None) -> str | None:
+    """Return the explicit reply target encoded on one Matrix content payload."""
+    if content is None:
+        return None
+    relates_to = content.get("m.relates_to")
+    if not isinstance(relates_to, Mapping):
+        return None
+    relates_to = cast("Mapping[str, object]", relates_to)
+    in_reply_to = relates_to.get("m.in_reply_to")
+    if not isinstance(in_reply_to, Mapping):
+        return None
+    in_reply_to = cast("Mapping[str, object]", in_reply_to)
+    reply_to_event_id = in_reply_to.get("event_id")
+    return reply_to_event_id if isinstance(reply_to_event_id, str) else None
+
+
 @dataclass
 class EventInfo:
     """Comprehensive analysis of Matrix event relations."""
@@ -158,14 +174,8 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     reaction_key = relates_to.get("key") if is_reaction else None
     reaction_target_event_id = relates_to_event_id if is_reaction else None
 
-    # Reply analysis
-    # Replies can exist within threads or as standalone
-    # They have m.in_reply_to field
-    in_reply_to = relates_to.get("m.in_reply_to", {})
-    if not isinstance(in_reply_to, dict):
-        in_reply_to = {}
-    raw_reply_to_event_id = in_reply_to.get("event_id")
-    reply_to_event_id = raw_reply_to_event_id if isinstance(raw_reply_to_event_id, str) else None
+    # Reply analysis: replies can exist within threads or as standalone.
+    reply_to_event_id = reply_to_event_id_from_content(content)
     is_reply = reply_to_event_id is not None
 
     # Determine if this event can be a thread root (per MSC3440)

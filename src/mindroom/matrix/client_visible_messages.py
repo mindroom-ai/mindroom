@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import STREAM_STATUS_KEY
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
 from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
@@ -111,7 +111,7 @@ class ResolvedVisibleMessage:
     @property
     def reply_to_event_id(self) -> str | None:
         """Return the explicit reply target encoded on the visible content."""
-        return _reply_to_event_id_from_content(self.content)
+        return reply_to_event_id_from_content(self.content)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the resolved message back to the public dictionary shape."""
@@ -330,20 +330,6 @@ async def thread_root_body_preview(
         trusted_sender_ids=trusted_sender_ids,
     )
     return message_preview(visible_body)
-
-
-def _reply_to_event_id_from_content(content: Mapping[str, Any] | None) -> str | None:
-    """Return the explicit reply target encoded on one visible content payload."""
-    if content is None:
-        return None
-    relates_to = content.get("m.relates_to")
-    if not isinstance(relates_to, Mapping):
-        return None
-    in_reply_to = relates_to.get("m.in_reply_to")
-    if not isinstance(in_reply_to, Mapping):
-        return None
-    reply_to_event_id = in_reply_to.get("event_id")
-    return reply_to_event_id if isinstance(reply_to_event_id, str) else None
 
 
 def replace_visible_message(
