@@ -314,16 +314,9 @@ def oauth_connect_url(
 
 def build_oauth_connect_instruction(
     provider: OAuthProvider,
-    runtime_paths: RuntimePaths,
-    *,
-    worker_target: ResolvedWorkerTarget | None = None,
+    connect_url: str,
 ) -> str:
     """Return a concise user-facing connection instruction for a tool result."""
-    connect_url = oauth_connect_url(
-        provider,
-        runtime_paths,
-        worker_target=worker_target,
-    )
     return (
         f"{provider.display_name} is not connected for this agent. "
         f"Open this MindRoom link to connect it, then retry the request: {connect_url}"

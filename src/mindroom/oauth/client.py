@@ -146,13 +146,8 @@ class ScopedOAuthClientMixin:
             self._runtime_paths,
             worker_target=self._worker_target,
         )
-        message = build_oauth_connect_instruction(
-            self._oauth_provider,
-            self._runtime_paths,
-            worker_target=self._worker_target,
-        )
         return OAuthConnectionRequired(
-            message,
+            build_oauth_connect_instruction(self._oauth_provider, connect_url),
             provider_id=self._oauth_provider.id,
             connect_url=connect_url,
         )

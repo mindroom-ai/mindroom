@@ -12,6 +12,7 @@ from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, google_drive
 from mindroom.oauth.google_gmail import _GOOGLE_GMAIL_OAUTH_SCOPES, google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import _GOOGLE_SHEETS_OAUTH_SCOPES, google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.oauth.service import build_oauth_connect_instruction
 
 if TYPE_CHECKING:
     from mindroom.oauth.providers import OAuthProvider
@@ -168,3 +169,15 @@ def test_oauth_connection_required_payload_preserves_structured_fields() -> None
         "provider": "google_drive",
         "connect_url": "/api/oauth/google_drive/connect?agent_name=general",
     }
+
+
+def test_build_oauth_connect_instruction_formats_shared_message() -> None:
+    """OAuth connection instructions should have one shared service formatter."""
+    assert build_oauth_connect_instruction(
+        google_drive_oauth_provider(),
+        "/api/oauth/google_drive/connect?agent_name=general",
+    ) == (
+        "Google Drive is not connected for this agent. "
+        "Open this MindRoom link to connect it, then retry the request: "
+        "/api/oauth/google_drive/connect?agent_name=general"
+    )

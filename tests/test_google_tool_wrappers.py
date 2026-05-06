@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -17,7 +18,9 @@ from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
+from mindroom.oauth import client as oauth_client_module
 from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -239,6 +242,64 @@ def test_google_wrappers_load_provider_oauth_credentials(
 
     assert isinstance(tool, (GmailTools, GoogleCalendarTools, GoogleDriveTools, GoogleSheetsTools))
     assert tool._load_token_data() is not None
+
+
+def test_scoped_oauth_client_structured_auth_failure_returns_oauth_required_json_string() -> None:
+    """Scoped OAuth tools should return the public OAuth-required payload as a JSON string."""
+    tool = object.__new__(GoogleDriveTools)
+    result = tool._structured_auth_failure(
+        OAuthConnectionRequired(
+            "Google Drive is not connected for this agent.",
+            provider_id="google_drive",
+            connect_url="/api/oauth/google_drive/connect?agent_name=general",
+        ),
+    )
+
+    payload = json.loads(result)
+    assert list(payload) == ["error", "oauth_connection_required", "provider", "connect_url"]
+    assert payload == {
+        "error": "Google Drive is not connected for this agent.",
+        "oauth_connection_required": True,
+        "provider": "google_drive",
+        "connect_url": "/api/oauth/google_drive/connect?agent_name=general",
+    }
+
+
+def test_scoped_oauth_client_connection_required_uses_shared_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Client OAuth prompts should share the service-owned instruction text."""
+    tool = object.__new__(GoogleDriveTools)
+    tool._oauth_provider = GoogleDriveTools._oauth_provider
+    tool._runtime_paths = runtime_paths
+    tool._worker_target = None
+
+    def connect_url(provider: object, runtime_paths_arg: RuntimePaths, *, worker_target: object) -> str:
+        assert provider is GoogleDriveTools._oauth_provider
+        assert runtime_paths_arg is runtime_paths
+        assert worker_target is None
+        return "https://connect.example.test"
+
+    monkeypatch.setattr(
+        oauth_client_module,
+        "oauth_connect_url",
+        connect_url,
+    )
+    seen: list[tuple[object, str]] = []
+
+    def build_instruction(provider: object, connect_url: str) -> str:
+        seen.append((provider, connect_url))
+        return f"shared instruction: {connect_url}"
+
+    monkeypatch.setattr(oauth_client_module, "build_oauth_connect_instruction", build_instruction)
+
+    exc = tool._connection_required()
+
+    assert str(exc) == "shared instruction: https://connect.example.test"
+    assert exc.provider_id == "google_drive"
+    assert exc.connect_url == "https://connect.example.test"
+    assert seen == [(GoogleDriveTools._oauth_provider, "https://connect.example.test")]
 
 
 def test_google_wrapper_skips_stored_oauth_when_service_account_env_is_configured(
