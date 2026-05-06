@@ -129,7 +129,7 @@ def _content_str(content: dict[str, Any], key: str) -> str | None:
 
 
 def _created_at_ms(event: dict[str, Any], requested_at: str | None) -> int:
-    parsed = _parse_datetime(requested_at)
+    parsed = parse_approval_datetime(requested_at)
     if parsed is None:
         timestamp = event.get("origin_server_ts")
         return timestamp if isinstance(timestamp, int) and not isinstance(timestamp, bool) else 0
@@ -137,14 +137,15 @@ def _created_at_ms(event: dict[str, Any], requested_at: str | None) -> int:
 
 
 def _timeout_seconds(requested_at: str | None, expires_at: str | None) -> int:
-    requested = _parse_datetime(requested_at)
-    expires = _parse_datetime(expires_at)
+    requested = parse_approval_datetime(requested_at)
+    expires = parse_approval_datetime(expires_at)
     if requested is None or expires is None:
         return 0
     return max(0, int((expires - requested).total_seconds()))
 
 
-def _parse_datetime(value: str | None) -> datetime | None:
+def parse_approval_datetime(value: str | None) -> datetime | None:
+    """Parse an approval ISO timestamp, treating naive timestamps as UTC."""
     if value is None:
         return None
     parsed = datetime.fromisoformat(value)

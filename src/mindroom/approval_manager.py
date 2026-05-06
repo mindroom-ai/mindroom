@@ -19,6 +19,7 @@ from mindroom.approval_events import (
     PendingApproval,
     PendingApprovalStatus,
     is_original_approval_card,
+    parse_approval_datetime,
     terminal_edit_matches_card_sender,
 )
 from mindroom.logging_config import get_logger
@@ -94,13 +95,6 @@ class _BoundedCardEventIds:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    parsed = datetime.fromisoformat(value)
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _compact_preview_text(value: object) -> str:
@@ -1148,11 +1142,13 @@ class _ApprovalManager:
         resolved_by: str | None,
         resolved_at: datetime,
     ) -> dict[str, Any]:
-        requested_at = _parse_datetime(pending.requested_at) or datetime.fromtimestamp(
+        requested_at = parse_approval_datetime(pending.requested_at) or datetime.fromtimestamp(
             pending.created_at_ms / 1000,
             tz=UTC,
         )
-        expires_at = _parse_datetime(pending.expires_at) or requested_at + timedelta(seconds=pending.timeout_seconds)
+        expires_at = parse_approval_datetime(pending.expires_at) or requested_at + timedelta(
+            seconds=pending.timeout_seconds,
+        )
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
             "body": _ApprovalManager._event_body(pending.tool_name, status),
