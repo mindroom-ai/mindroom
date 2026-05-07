@@ -119,7 +119,9 @@ def _install_voice_thread_dispatch_mocks(
     bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
-    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
+        return_value=thread_history_result([], is_full_history=True),
+    )
 
 
 def _make_visible_router_echo_scenario(

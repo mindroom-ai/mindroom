@@ -12,12 +12,12 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol
 
 import nio
 
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_SOURCE_DEGRADED, THREAD_HISTORY_SOURCE_DIAGNOSTIC
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 
 if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -33,13 +33,6 @@ class _SupportsEventId(Protocol):
     """Minimal protocol for snapshot entries used during thread-root checks."""
 
     event_id: str
-
-
-@runtime_checkable
-class _SupportsThreadDiagnostics(Protocol):
-    """Thread-read results may expose diagnostics describing degraded reads."""
-
-    diagnostics: Mapping[str, object]
 
 
 type _ThreadMessagesLookup = Callable[[str, str], Awaitable[Sequence[_SupportsEventId]]]
@@ -388,10 +381,7 @@ async def _thread_messages_root_proof(
         if _is_thread_root_not_found_error(exc):
             return ThreadRootProof.not_a_thread_root()
         return ThreadRootProof.proof_unavailable(exc)
-    if (
-        isinstance(thread_messages, _SupportsThreadDiagnostics)
-        and thread_messages.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC) == THREAD_HISTORY_SOURCE_DEGRADED
-    ):
+    if is_thread_history_degraded(thread_messages):
         msg = "Thread root proof unavailable from degraded thread history"
         return ThreadRootProof.proof_unavailable(RuntimeError(msg))
     has_children = any(message.event_id != thread_root_id for message in thread_messages)

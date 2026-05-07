@@ -325,9 +325,7 @@ class ThreadReadPolicy:
         try:
             if mode.dispatch_safe:
                 await asyncio.wait_for(
-                    # Prevent dispatch timeout cancellation from propagating into
-                    # coordinator fallback tasks that are actively mutating cache state.
-                    asyncio.shield(self._wait_for_pending_thread_cache_updates(room_id, thread_id)),
+                    self._wait_for_pending_thread_cache_updates(room_id, thread_id),
                     timeout=_DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS,
                 )
             else:

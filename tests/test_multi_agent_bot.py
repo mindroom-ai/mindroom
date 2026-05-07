@@ -115,11 +115,13 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
     _merge_response_extra_content,
+    response_trust_for_resolved_thread,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.thread_context_state import ThreadHistoryTrust, ThreadMembershipTrust
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, _shutdown_approval_store
 from mindroom.tool_system.events import ToolTraceEntry
@@ -380,6 +382,7 @@ def _response_request(
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
+    thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread(thread_id)
     return ResponseRequest(
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
@@ -397,6 +400,8 @@ def _response_request(
         target=target,
         matrix_run_metadata=matrix_run_metadata,
         system_enrichment_items=system_enrichment_items,
+        thread_membership_trust=thread_membership_trust,
+        thread_history_trust=thread_history_trust,
     )
 
 
@@ -3672,6 +3677,7 @@ class TestAgentBot:
                 room_id=room.room_id,
                 thread_id=None,
                 reply_to_event_id=event.event_id,
+                thread_start_root_event_id=event.event_id,
             ),
             correlation_id="corr-visible-cancel-note",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
@@ -5277,9 +5283,9 @@ class TestAgentBot:
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch.object(
-                bot._conversation_cache,
-                "get_dispatch_thread_history",
-                new=AsyncMock(return_value=thread_history),
+                bot._conversation_resolver,
+                "fetch_thread_history",
+                new=AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ) as mock_get_thread_history,
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
@@ -5307,7 +5313,8 @@ class TestAgentBot:
 
         assert mock_get_thread_history.await_count >= 1
         assert all(
-            await_args.args == ("!test:localhost", "$thread") for await_args in mock_get_thread_history.await_args_list
+            await_args.args[1:] == ("!test:localhost", "$thread")
+            for await_args in mock_get_thread_history.await_args_list
         )
         mock_thread_summary.assert_awaited_once_with(
             client=bot.client,
@@ -8604,6 +8611,8 @@ class TestAgentBot:
             ],
             mentioned_agents=[],
             has_non_agent_mentions=False,
+            thread_membership_trust=ThreadMembershipTrust.PROVEN,
+            thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
         )
         envelope = MessageEnvelope(
             source_event_id="$followup",
@@ -8876,6 +8885,8 @@ class TestAgentBot:
             ],
             mentioned_agents=[],
             has_non_agent_mentions=False,
+            thread_membership_trust=ThreadMembershipTrust.PROVEN,
+            thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
         )
 
         with (
@@ -8932,6 +8943,7 @@ class TestAgentBot:
                 room_id=room.room_id,
                 thread_id=None,
                 reply_to_event_id=event.event_id,
+                thread_start_root_event_id=event.event_id,
             ),
             correlation_id="$event",
             envelope=_hook_envelope(body="help me", source_event_id="$event"),
@@ -9620,6 +9632,7 @@ class TestAgentBot:
                 room_id=room.room_id,
                 thread_id=None,
                 reply_to_event_id=event.event_id,
+                thread_start_root_event_id=event.event_id,
             ),
             correlation_id="corr-router-coalesced",
             envelope=_hook_envelope(body="hello", source_event_id="$text"),
@@ -10208,6 +10221,8 @@ class TestAgentBot:
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+                thread_membership_trust=ThreadMembershipTrust.PROVEN,
+                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -10296,6 +10311,8 @@ class TestAgentBot:
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+                thread_membership_trust=ThreadMembershipTrust.PROVEN,
+                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -10374,6 +10391,8 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+                thread_membership_trust=ThreadMembershipTrust.PROVEN,
+                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
             ),
         )
         bot._edit_message = AsyncMock(return_value=True)
@@ -10553,6 +10572,8 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+                thread_membership_trust=ThreadMembershipTrust.PROVEN,
+                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -10625,6 +10646,8 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+                thread_membership_trust=ThreadMembershipTrust.PROVEN,
+                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -11176,6 +11199,8 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+                thread_membership_trust=ThreadMembershipTrust.PROVEN,
+                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -11253,6 +11278,8 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+                thread_membership_trust=ThreadMembershipTrust.PROVEN,
+                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -11325,6 +11352,8 @@ class TestAgentBot:
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
                 requires_full_thread_history=False,
+                thread_membership_trust=ThreadMembershipTrust.PROVEN,
+                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -11469,7 +11498,7 @@ class TestAgentBot:
                 event_id="prev2",
             ),
         ]
-        mock_fetch_history.return_value = test1_history
+        mock_fetch_history.return_value = thread_history_result(test1_history, is_full_history=True)
         mock_fetch_snapshot.return_value = thread_history_result(test1_history, is_full_history=False)
 
         # Mock streaming response - return an async generator
@@ -11561,7 +11590,7 @@ class TestAgentBot:
                 event_id="prev3",
             ),
         ]
-        mock_fetch_history.return_value = test2_history
+        mock_fetch_history.return_value = thread_history_result(test2_history, is_full_history=True)
         mock_fetch_snapshot.return_value = thread_history_result(test2_history, is_full_history=False)
 
         # Create a new event with a different ID for Test 2

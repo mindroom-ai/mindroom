@@ -524,7 +524,7 @@ class EventCacheWriteCoordinator:
         thread_id: str | None = None,
     ) -> None:
         try:
-            await pending_task
+            await asyncio.shield(pending_task)
         except asyncio.CancelledError:
             current_task = asyncio.current_task()
             if current_task is not None and current_task.cancelling():

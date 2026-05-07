@@ -95,7 +95,13 @@ from .matrix.room_member_joins import (
     room_member_joins_from_sync_timeline,
 )
 from .media_inputs import MediaInputs
-from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
+from .response_runner import (
+    ResponseRequest,
+    ResponseRunner,
+    ResponseRunnerDeps,
+    prepare_memory_and_model_context,
+    response_trust_for_resolved_thread,
+)
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
@@ -1721,6 +1727,7 @@ class AgentBot:
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot)."""
+        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread(thread_id)
         return await self._response_runner.generate_team_response_helper(
             ResponseRequest(
                 room_id=room_id,
@@ -1739,6 +1746,8 @@ class AgentBot:
                 target=target,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
+                thread_membership_trust=thread_membership_trust,
+                thread_history_trust=thread_history_trust,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
             team_agents=team_agents,
@@ -1796,6 +1805,7 @@ class AgentBot:
             Event ID of the visible response, or None if no visible response landed.
 
         """
+        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread(thread_id)
         return await self._response_runner.generate_response(
             ResponseRequest(
                 room_id=room_id,
@@ -1814,6 +1824,8 @@ class AgentBot:
                 target=target,
                 matrix_run_metadata=matrix_run_metadata,
                 system_enrichment_items=system_enrichment_items,
+                thread_membership_trust=thread_membership_trust,
+                thread_history_trust=thread_history_trust,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
             ),
         )
@@ -2017,6 +2029,7 @@ class TeamBot(AgentBot):
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
+        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread(thread_id)
         if not prompt.strip():
             return await self._response_runner.generate_response_for_empty_prompt(
                 ResponseRequest(
@@ -2036,6 +2049,8 @@ class TeamBot(AgentBot):
                     target=target,
                     matrix_run_metadata=matrix_run_metadata,
                     system_enrichment_items=system_enrichment_items,
+                    thread_membership_trust=thread_membership_trust,
+                    thread_history_trust=thread_history_trust,
                     on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                 ),
                 response_kind="team",

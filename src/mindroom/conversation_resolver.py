@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping, Sequence  # noqa: TC003
+from collections.abc import AsyncIterator, Sequence  # noqa: TC003
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
 
 import nio
 from nio.responses import RoomGetEventError
@@ -18,7 +18,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
 from mindroom.matrix.message_content import resolve_event_source_content
-from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_SOURCE_DEGRADED, THREAD_HISTORY_SOURCE_DIAGNOSTIC
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
@@ -91,21 +91,6 @@ def _source_with_payload_metadata(
     return {**event_source, "content": content}
 
 
-@runtime_checkable
-class _SupportsThreadDiagnostics(Protocol):
-    """Thread-history results may expose diagnostics describing degraded reads."""
-
-    diagnostics: Mapping[str, object]
-
-
-def _thread_history_is_degraded(thread_history: Sequence[ResolvedVisibleMessage]) -> bool:
-    """Return whether one thread-history read explicitly degraded."""
-    return (
-        isinstance(thread_history, _SupportsThreadDiagnostics)
-        and thread_history.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC) == THREAD_HISTORY_SOURCE_DEGRADED
-    )
-
-
 def _thread_history_trust(
     *,
     is_thread: bool,
@@ -115,9 +100,23 @@ def _thread_history_trust(
     """Classify whether thread history is safe input for planning decisions."""
     if not is_thread:
         return ThreadHistoryTrust.NONE
-    if thread_membership_trust is ThreadMembershipTrust.PROVISIONAL or _thread_history_is_degraded(thread_history):
+    if thread_membership_trust is ThreadMembershipTrust.PROVISIONAL or is_thread_history_degraded(thread_history):
         return ThreadHistoryTrust.DEGRADED
     return ThreadHistoryTrust.PLANNING_USABLE
+
+
+def message_trust_for_resolved_thread(
+    thread_id: str | None,
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> tuple[ThreadMembershipTrust, ThreadHistoryTrust]:
+    """Return explicit trust state for manually-built message contexts with resolved targets."""
+    membership_trust = ThreadMembershipTrust.PROVEN if thread_id is not None else ThreadMembershipTrust.ROOM_LEVEL
+    history_trust = _thread_history_trust(
+        is_thread=thread_id is not None,
+        thread_membership_trust=membership_trust,
+        thread_history=thread_history,
+    )
+    return membership_trust, history_trust
 
 
 @dataclass
@@ -147,21 +146,6 @@ class MessageContext:
         if self.thread_history_trust is ThreadHistoryTrust.PLANNING_USABLE:
             return self.thread_history
         return ()
-
-    def __post_init__(self) -> None:
-        """Preserve explicit thread-context state for older construction sites."""
-        if (
-            self.is_thread
-            and self.thread_id is not None
-            and self.thread_membership_trust is ThreadMembershipTrust.ROOM_LEVEL
-        ):
-            self.thread_membership_trust = ThreadMembershipTrust.PROVEN
-        if self.thread_history_trust is ThreadHistoryTrust.NONE and self.is_thread and self.thread_history:
-            self.thread_history_trust = _thread_history_trust(
-                is_thread=self.is_thread,
-                thread_membership_trust=self.thread_membership_trust,
-                thread_history=self.thread_history,
-            )
 
 
 @dataclass(frozen=True)
@@ -731,6 +715,7 @@ class ConversationResolver:
             thread_id = None
             thread_history: list[ResolvedVisibleMessage] = []
             requires_full_thread_history = False
+            thread_membership_trust = ThreadMembershipTrust.ROOM_LEVEL
         else:
             (
                 is_thread,

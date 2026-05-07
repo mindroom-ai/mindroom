@@ -21,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -669,7 +669,7 @@ class TestExtractMessageContextRoomMode:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
         unwrap_extracted_collaborator(bot._conversation_resolver)._resolve_thread_context = AsyncMock(
-            return_value=(True, "$thread123", [{"event_id": "$thread123"}], False),
+            return_value=(True, "$thread123", [{"event_id": "$thread123"}], False, False),
         )
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -1491,7 +1491,9 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
-        bot._conversation_cache.get_strict_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_strict_thread_history = AsyncMock(
+            return_value=thread_history_result([], is_full_history=True),
+        )
 
         asyncio.run(
             unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
@@ -1553,7 +1555,7 @@ class TestExtractedModuleLoggerRebinding:
         client = AsyncMock()
         with patch(
             "mindroom.matrix.conversation_cache.fetch_thread_history",
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
         ) as fetch_thread_history_mock:
             bot.client = client
             await bot._conversation_cache.get_thread_history(
@@ -1681,7 +1683,7 @@ class TestExtractedModuleLoggerRebinding:
         bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
             side_effect=lambda _room_id, event_id: "$threadroot" if event_id == "$reply-seed:localhost" else None,
         )
-        thread_id = await bot._conversation_resolver._explicit_thread_id_for_event(
+        thread_id, thread_membership_provisional = await bot._conversation_resolver._explicit_thread_id_for_event(
             room.room_id,
             event.event_id,
             EventInfo.from_event(event.source),
@@ -1691,6 +1693,7 @@ class TestExtractedModuleLoggerRebinding:
         )
 
         assert thread_id == "$threadroot"
+        assert thread_membership_provisional is False
 
     @pytest.mark.asyncio
     async def test_direct_thread_dispatch_preview_still_requires_full_thread_history(

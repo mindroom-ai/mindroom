@@ -1373,7 +1373,7 @@ class TestMatrixConversationCacheThreadReads:
         with patch.object(
             access._reads,
             "read_thread",
-            new=AsyncMock(return_value=expected_history),
+            new=AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_read_thread:
             async with access.turn_scope():
                 first_history = await access.get_dispatch_thread_history("!test:localhost", "$thread_root")
@@ -7855,7 +7855,7 @@ class TestThreadingBehavior:
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=expected_history),
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -7915,7 +7915,7 @@ class TestThreadingBehavior:
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=expected_history),
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -8027,7 +8027,7 @@ class TestThreadingBehavior:
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=expected_history),
+                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_fetch,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -8089,12 +8089,12 @@ class TestThreadingBehavior:
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=expected_history),
+                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_fetch,
             patch.object(
                 bot._conversation_cache,
                 "get_thread_snapshot",
-                AsyncMock(return_value=expected_history),
+                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_snapshot,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -8178,11 +8178,14 @@ class TestThreadingBehavior:
                 bot._conversation_cache,
                 "get_thread_history",
                 AsyncMock(
-                    return_value=[
-                        _message(event_id="$thread_root:localhost", body="Root message"),
-                        _message(event_id="$thread_msg:localhost", body="Thread reply"),
-                        _message(event_id="$plain_reply_1:localhost", body="first bridge reply"),
-                    ],
+                    return_value=thread_history_result(
+                        [
+                            _message(event_id="$thread_root:localhost", body="Root message"),
+                            _message(event_id="$thread_msg:localhost", body="Thread reply"),
+                            _message(event_id="$plain_reply_1:localhost", body="first bridge reply"),
+                        ],
+                        is_full_history=True,
+                    ),
                 ),
             ) as mock_fetch,
         ):
@@ -8257,7 +8260,12 @@ class TestThreadingBehavior:
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=[_message(event_id="$thread_root:localhost", body="root")]),
+                AsyncMock(
+                    return_value=thread_history_result(
+                        [_message(event_id="$thread_root:localhost", body="root")],
+                        is_full_history=True,
+                    ),
+                ),
             ) as mock_fetch,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -8340,7 +8348,7 @@ class TestThreadingBehavior:
             with patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=expected_history),
+                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_fetch:
                 context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -8412,7 +8420,7 @@ class TestThreadingBehavior:
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=expected_history),
+                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
             ) as mock_history,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -8499,7 +8507,7 @@ class TestThreadingBehavior:
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=expected_history),
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -8729,7 +8737,7 @@ class TestThreadingBehavior:
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=expected_history),
+            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -8793,7 +8801,7 @@ class TestThreadingBehavior:
             },
         )
 
-        thread_id = await bot._conversation_resolver._explicit_thread_id_for_event(
+        thread_id, thread_membership_provisional = await bot._conversation_resolver._explicit_thread_id_for_event(
             "!test:localhost",
             "$incoming-edit:localhost",
             event_info,
@@ -8803,6 +8811,7 @@ class TestThreadingBehavior:
         )
 
         assert thread_id is None
+        assert thread_membership_provisional is False
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_plain_reply_inherits_thread_and_marks_full_history_required(
@@ -9333,7 +9342,7 @@ class TestThreadingBehavior:
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=thread_history),
+                AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ) as mock_history,
         ):
             (
@@ -9569,11 +9578,11 @@ class TestThreadingBehavior:
                 ),
                 patch(
                     "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-                    AsyncMock(return_value=[]),
+                    AsyncMock(return_value=thread_history_result([], is_full_history=True)),
                 ),
                 patch(
                     "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-                    AsyncMock(return_value=[]),
+                    AsyncMock(return_value=thread_history_result([], is_full_history=True)),
                 ),
             ):
                 # Process the command
@@ -9662,7 +9671,7 @@ class TestThreadingBehavior:
         with (
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_snapshot",
@@ -9670,7 +9679,7 @@ class TestThreadingBehavior:
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_snapshot",
@@ -9859,11 +9868,11 @@ class TestThreadingBehavior:
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_dispatch_thread_history",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
             patch(
                 "mindroom.matrix.conversation_cache.MatrixConversationCache.get_thread_history",
-                AsyncMock(return_value=[]),
+                AsyncMock(return_value=thread_history_result([], is_full_history=True)),
             ),
         ):
             # Process the message

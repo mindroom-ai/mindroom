@@ -121,11 +121,15 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
         bot.client = mock_client
         install_runtime_cache_support(bot)
-        bot._conversation_cache.get_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_thread_history = AsyncMock(
+            return_value=thread_history_result([], is_full_history=True),
+        )
         bot._conversation_cache.get_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
+            return_value=thread_history_result([], is_full_history=True),
+        )
         bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
@@ -369,9 +373,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                     event_id="msg2",
                 ),
             ]
-            mock_fetch.return_value = thread_history
+            mock_fetch.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
-            mock_dispatch_history.return_value = thread_history
+            mock_dispatch_history.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
@@ -437,9 +441,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                     event_id="msg3",
                 ),
             ]
-            mock_fetch.return_value = thread_history
+            mock_fetch.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
-            mock_dispatch_history.return_value = thread_history
+            mock_dispatch_history.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
             bot.client.room_send.side_effect = [
                 nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
@@ -519,9 +523,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                     event_id="msg3",
                 ),
             ]
-            mock_fetch.return_value = thread_history
+            mock_fetch.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
-            mock_dispatch_history.return_value = thread_history
+            mock_dispatch_history.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")

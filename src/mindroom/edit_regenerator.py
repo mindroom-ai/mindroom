@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.coalescing_batch import coalesced_prompt
-from mindroom.conversation_resolver import MessageContext
+from mindroom.conversation_resolver import MessageContext, message_trust_for_resolved_thread
 from mindroom.handled_turns import HandledTurnRecord, HandledTurnState
 from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
@@ -104,6 +104,10 @@ class EditRegenerator:
             conversation_target.resolved_thread_id,
             caller_label="edit_regeneration_context",
         )
+        thread_membership_trust, thread_history_trust = message_trust_for_resolved_thread(
+            conversation_target.resolved_thread_id,
+            thread_history,
+        )
         return MessageContext(
             am_i_mentioned=context.am_i_mentioned,
             is_thread=True,
@@ -113,6 +117,8 @@ class EditRegenerator:
             has_non_agent_mentions=context.has_non_agent_mentions,
             replay_guard_history=thread_history,
             requires_full_thread_history=context.requires_full_thread_history,
+            thread_membership_trust=thread_membership_trust,
+            thread_history_trust=thread_history_trust,
         )
 
     async def handle_message_edit(  # noqa: C901, PLR0911, PLR0912, PLR0915

@@ -336,17 +336,14 @@ class ResponseRequest:
         """Return whether the thread id is an unproven dispatch candidate."""
         return self.thread_membership_trust is ThreadMembershipTrust.PROVISIONAL
 
-    def __post_init__(self) -> None:
-        """Default manually-built threaded requests to proven, planning-usable context."""
-        if self.thread_id is not None and self.thread_membership_trust is ThreadMembershipTrust.ROOM_LEVEL:
-            object.__setattr__(self, "thread_membership_trust", ThreadMembershipTrust.PROVEN)
-        if (
-            self.thread_id is not None
-            and self.thread_history
-            and self.thread_history_trust is ThreadHistoryTrust.NONE
-            and self.thread_membership_trust is not ThreadMembershipTrust.PROVISIONAL
-        ):
-            object.__setattr__(self, "thread_history_trust", ThreadHistoryTrust.PLANNING_USABLE)
+
+def response_trust_for_resolved_thread(
+    thread_id: str | None,
+) -> tuple[ThreadMembershipTrust, ThreadHistoryTrust]:
+    """Return explicit trust state for manually-built requests with resolved targets."""
+    if thread_id is None:
+        return ThreadMembershipTrust.ROOM_LEVEL, ThreadHistoryTrust.NONE
+    return ThreadMembershipTrust.PROVEN, ThreadHistoryTrust.PLANNING_USABLE
 
 
 class PostLockRequestPreparationError(RuntimeError):

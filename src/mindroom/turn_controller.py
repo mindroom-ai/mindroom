@@ -76,7 +76,11 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
+from mindroom.response_runner import (
+    PostLockRequestPreparationError,
+    ResponseRequest,
+    response_trust_for_resolved_thread,
+)
 from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import (
     check_agent_mentioned,
@@ -1023,6 +1027,7 @@ class TurnController:
             ),
         )
 
+        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread(selection.thread_id)
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 room_id=room.room_id,
@@ -1035,6 +1040,8 @@ class TurnController:
                 user_id=user_id,
                 target=response_target,
                 matrix_run_metadata=selection_matrix_run_metadata,
+                thread_membership_trust=thread_membership_trust,
+                thread_history_trust=thread_history_trust,
             ),
         )
         if response_event_id is not None:
