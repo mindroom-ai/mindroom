@@ -6,7 +6,6 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from string import Formatter
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
@@ -64,13 +63,20 @@ from mindroom.matrix_identifiers import (
     managed_space_alias_localpart,
 )
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
-from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS, PROMPT_TEMPLATE_FIELDS
+from mindroom.prompts import (
+    PROMPT_DEFAULT_NAMES,
+    PROMPT_DEFAULTS,
+    render_prompt_template,
+    validate_prompt_template_fields,
+)
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.entity_resolution import MatrixID
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
@@ -87,7 +93,6 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "matrix_message",
 )
 logger = get_logger(__name__)
-_PROMPT_TEMPLATE_FORMATTER = Formatter()
 
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
@@ -148,47 +153,6 @@ def format_invalid_config_message(
     if footer:
         response = f"{response}\n\n{footer}"
     return response
-
-
-def _prompt_template_field_names(template: str) -> set[str]:
-    fields: set[str] = set()
-    for _, field_name, format_spec, conversion in _PROMPT_TEMPLATE_FORMATTER.parse(template):
-        if field_name is not None:
-            if not field_name:
-                msg = "Empty template fields are not supported"
-                raise ValueError(msg)
-            if "." in field_name or "[" in field_name or "]" in field_name:
-                msg = f"Compound template fields are not supported: {field_name}"
-                raise ValueError(msg)
-            if conversion is not None:
-                msg = f"Template field conversions are not supported: {field_name}!{conversion}"
-                raise ValueError(msg)
-            if format_spec:
-                msg = f"Template field format specs are not supported: {field_name}:{format_spec}"
-                raise ValueError(msg)
-            fields.add(field_name)
-    return fields
-
-
-def _validate_prompt_template_fields(prompt_name: str, prompt_text: str) -> None:
-    allowed_fields = PROMPT_TEMPLATE_FIELDS.get(prompt_name)
-    if allowed_fields is None:
-        return
-
-    try:
-        field_names = _prompt_template_field_names(prompt_text)
-    except ValueError as exc:
-        msg = f"Invalid template syntax for prompt override {prompt_name}: {exc}"
-        raise ValueError(msg) from exc
-
-    unsupported_fields = sorted(field_names - allowed_fields)
-    if unsupported_fields:
-        unsupported = ", ".join(unsupported_fields)
-        allowed = ", ".join(sorted(allowed_fields))
-        msg = (
-            f"Unsupported template field(s) for prompt override {prompt_name}: {unsupported}. Allowed fields: {allowed}"
-        )
-        raise ValueError(msg)
 
 
 _RESERVED_DYNAMIC_TOOLKIT_TOOLS = frozenset({"delegate", "dynamic_tools", "self_config"})
@@ -472,7 +436,7 @@ class Config(BaseModel):
             msg = f"Unknown prompt override(s): {unknown}. Allowed prompt names: {allowed}"
             raise ValueError(msg)
         for prompt_name, prompt_text in value.items():
-            _validate_prompt_template_fields(prompt_name, prompt_text)
+            validate_prompt_template_fields(prompt_name, prompt_text)
         return value
 
     def get_prompt(self, name: str) -> str:
@@ -480,6 +444,10 @@ class Config(BaseModel):
         if name in self.prompts:
             return self.prompts[name]
         return PROMPT_DEFAULTS[name]
+
+    def render_prompt(self, name: str, fields: Mapping[str, object] | None = None, **kwargs: object) -> str:
+        """Render one configured prompt with MindRoom's small bare-field template syntax."""
+        return render_prompt_template(self.get_prompt(name), fields, **kwargs)
 
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:

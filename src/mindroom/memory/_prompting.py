@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from mindroom.prompts import MEMORY_CONTEXT_PROMPT_TEMPLATE
+from mindroom.prompts import MEMORY_CONTEXT_PROMPT_TEMPLATE, render_prompt_template
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -28,7 +28,7 @@ def format_memories_as_context(
         return ""
 
     memory_lines = "\n".join(f"- {memory.get('memory', '')}" for memory in memories)
-    return prompt_template.format(context_type=context_type, memory_lines=memory_lines)
+    return render_prompt_template(prompt_template, context_type=context_type, memory_lines=memory_lines)
 
 
 def strip_user_turn_time_prefix(text: str) -> str:

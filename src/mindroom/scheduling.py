@@ -775,7 +775,8 @@ async def _parse_workflow_schedule(
     assert available_agents, "No agents available for scheduling"
     agent_list = ", ".join(f"@{a.username}" for a in available_agents)
 
-    prompt = config.get_prompt("WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE").format(
+    prompt = config.render_prompt(
+        "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
         current_time=current_time.isoformat(),
         request=request,
         agent_list=agent_list,

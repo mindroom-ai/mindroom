@@ -64,7 +64,8 @@ class DelegateTools(Toolkit):
         for target_name in self._delegate_to:
             description = describe_agent(target_name, self._config)
             lines.append(description)
-        return self._config.get_prompt("DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE").format(
+        return self._config.render_prompt(
+            "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
             agent_descriptions="\n\n".join(lines),
         )
 

@@ -31,6 +31,7 @@ from mindroom.prompts import (
     DATETIME_CONTEXT_TEMPLATE,
     PERSONALITY_CONTEXT_SECTION_HEADING,
     build_agent_identity_context,
+    render_prompt_template,
 )
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
@@ -172,7 +173,8 @@ def _get_datetime_context(
     date_str = now.strftime("%A, %B %d, %Y")
     timezone_abbrev = now.tzname() or timezone_str
 
-    return datetime_context_template.format(
+    return render_prompt_template(
+        datetime_context_template,
         date_str=date_str,
         timezone_str=timezone_str,
         timezone_abbrev=timezone_abbrev,
@@ -322,7 +324,7 @@ def _apply_preload_cap(
     if omitted_chars <= 0:
         return rendered, 0
 
-    marker = truncation_marker_template.format(omitted_chars=omitted_chars)
+    marker = render_prompt_template(truncation_marker_template, omitted_chars=omitted_chars)
     marker_block = f"\n\n{marker}\n\n"
     budget = max_preload_chars - len(marker_block)
     if budget <= 0:
@@ -746,7 +748,8 @@ def _build_dynamic_tooling_instruction_block(
     current_toolkits = ", ".join(loaded_toolkits) if loaded_toolkits else "(none)"
     sticky_toolkits = ", ".join(agent_config.initial_toolkits) if agent_config.initial_toolkits else "(none)"
     toolkit_catalog = "\n".join(toolkit_lines)
-    return config.get_prompt("DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE").format(
+    return config.render_prompt(
+        "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
         toolkit_catalog=toolkit_catalog,
         current_toolkits=current_toolkits,
         sticky_toolkits=sticky_toolkits,

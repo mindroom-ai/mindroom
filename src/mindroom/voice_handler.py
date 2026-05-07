@@ -421,7 +421,8 @@ async def _process_transcription(
         )
 
         # Build the prompt for the AI
-        prompt = config.get_prompt("VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE").format(
+        prompt = config.render_prompt(
+            "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE",
             agent_list=agent_list,
             team_list=team_list,
             transcription=transcription,

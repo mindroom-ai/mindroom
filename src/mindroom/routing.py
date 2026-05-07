@@ -61,7 +61,8 @@ async def suggest_agent(
 
         agents_info = "\n\n".join(agent_descriptions)
 
-        prompt = config.get_prompt("ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE").format(
+        prompt = config.render_prompt(
+            "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE",
             agents_info=agents_info,
             message=message,
         )

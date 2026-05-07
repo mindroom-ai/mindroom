@@ -296,7 +296,7 @@ async def _generate_summary(
     conversation = _build_conversation_text(thread_history)
     session_hash = hashlib.sha256(conversation.encode()).hexdigest()[:8]
 
-    prompt = config.get_prompt("THREAD_SUMMARY_USER_PROMPT_TEMPLATE").format(conversation=conversation)
+    prompt = config.render_prompt("THREAD_SUMMARY_USER_PROMPT_TEMPLATE", conversation=conversation)
     agent = Agent(
         name="ThreadSummarizer",
         instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS").splitlines(),

@@ -450,12 +450,13 @@ async def _extract_memory_summary(
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
     existing_block = (
-        config.get_prompt("MEMORY_EXISTING_SNIPPETS_TEMPLATE").format(existing_context=existing_context)
+        config.render_prompt("MEMORY_EXISTING_SNIPPETS_TEMPLATE", existing_context=existing_context)
         if existing_context
         else config.get_prompt("MEMORY_NO_EXISTING_SNIPPETS")
     )
     excerpt = "\n".join(lines)
-    prompt = config.get_prompt("MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE").format(
+    prompt = config.render_prompt(
+        "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE",
         no_reply_token=extractor.no_reply_token,
         existing_block=existing_block,
         excerpt=excerpt,

@@ -570,7 +570,8 @@ async def _select_team_mode(
         TeamMode.COORDINATE or TeamMode.COLLABORATE
 
     """
-    prompt = config.get_prompt("TEAM_MODE_SELECTION_PROMPT_TEMPLATE").format(
+    prompt = config.render_prompt(
+        "TEAM_MODE_SELECTION_PROMPT_TEMPLATE",
         message=message,
         agent_names=", ".join(agent_names),
     )

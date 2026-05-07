@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config
+from mindroom.prompts import PromptTemplateError, render_prompt_template
 
 
 def test_config_accepts_known_prompt_override() -> None:
@@ -19,6 +20,26 @@ def test_config_accepts_known_prompt_override() -> None:
     )
 
     assert config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE") == "Custom identity for {display_name}."
+
+
+def test_config_render_prompt_replaces_bare_fields_and_escaped_braces() -> None:
+    """Configured prompt templates render with MindRoom's small template syntax."""
+    config = Config.model_validate(
+        {
+            "prompts": {
+                "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": "{{message}} {message} {agents_info}",
+            },
+        },
+    )
+
+    assert (
+        config.render_prompt(
+            "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE",
+            agents_info="General: general assistant",
+            message="hello",
+        )
+        == "{message} hello General: general assistant"
+    )
 
 
 def test_config_rejects_unknown_prompt_override() -> None:
@@ -68,6 +89,7 @@ def test_config_rejects_prompt_override_with_compound_template_field(template: s
     "template",
     [
         "{message:.2f}",
+        "{message:}",
         "{message:{agents_info}}",
         "{message:{message.nope}}",
     ],
@@ -90,7 +112,13 @@ def test_config_rejects_prompt_override_with_template_field_conversion() -> None
         Config.model_validate(
             {
                 "prompts": {
-                    "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": "{message!x}",
+                    "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": "{message!r}",
                 },
             },
         )
+
+
+def test_render_prompt_template_rejects_missing_field_value() -> None:
+    """Runtime rendering fails clearly when a call site forgets a field value."""
+    with pytest.raises(PromptTemplateError, match="Missing template field value: agents_info"):
+        render_prompt_template("{message} {agents_info}", message="hello")

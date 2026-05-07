@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from types import MappingProxyType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping
 
 __all__ = [
     "AGENT_IDENTITY_CONTEXT_TEMPLATE",
@@ -56,8 +61,94 @@ __all__ = [
     "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
     "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE",
     "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
+    "PromptTemplateError",
     "build_agent_identity_context",
+    "prompt_template_field_names",
+    "render_prompt_template",
+    "validate_prompt_template_fields",
 ]
+
+_PROMPT_TEMPLATE_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class PromptTemplateError(ValueError):
+    """Prompt template syntax is outside MindRoom's deliberately small renderer."""
+
+
+def _validate_prompt_template_field_name(field_name: str) -> None:
+    if not field_name:
+        msg = "Empty template fields are not supported"
+        raise PromptTemplateError(msg)
+    if ":" in field_name:
+        msg = f"Template field format specs are not supported: {field_name}"
+        raise PromptTemplateError(msg)
+    if "!" in field_name:
+        msg = f"Template field conversions are not supported: {field_name}"
+        raise PromptTemplateError(msg)
+    if "." in field_name or "[" in field_name or "]" in field_name:
+        msg = f"Compound template fields are not supported: {field_name}"
+        raise PromptTemplateError(msg)
+    if "{" in field_name or "}" in field_name or _PROMPT_TEMPLATE_FIELD_RE.fullmatch(field_name) is None:
+        msg = f"Only bare template field names are supported: {field_name}"
+        raise PromptTemplateError(msg)
+
+
+def _iter_prompt_template_parts(template: str) -> Iterator[tuple[str, str]]:
+    index = 0
+    while index < len(template):
+        char = template[index]
+        if char == "{":
+            if index + 1 < len(template) and template[index + 1] == "{":
+                yield "literal", "{"
+                index += 2
+                continue
+            close_index = template.find("}", index + 1)
+            if close_index == -1:
+                msg = "Single '{' is not allowed in prompt templates"
+                raise PromptTemplateError(msg)
+            field_name = template[index + 1 : close_index]
+            _validate_prompt_template_field_name(field_name)
+            yield "field", field_name
+            index = close_index + 1
+            continue
+        if char == "}":
+            if index + 1 < len(template) and template[index + 1] == "}":
+                yield "literal", "}"
+                index += 2
+                continue
+            msg = "Single '}' is not allowed in prompt templates"
+            raise PromptTemplateError(msg)
+        next_special_index = len(template)
+        next_open_index = template.find("{", index)
+        next_close_index = template.find("}", index)
+        if next_open_index != -1:
+            next_special_index = min(next_special_index, next_open_index)
+        if next_close_index != -1:
+            next_special_index = min(next_special_index, next_close_index)
+        yield "literal", template[index:next_special_index]
+        index = next_special_index
+
+
+def prompt_template_field_names(template: str) -> frozenset[str]:
+    """Return bare field names used by one MindRoom prompt template."""
+    return frozenset(value for kind, value in _iter_prompt_template_parts(template) if kind == "field")
+
+
+def render_prompt_template(template: str, fields: Mapping[str, object] | None = None, **kwargs: object) -> str:
+    """Render a MindRoom prompt template with exact bare-field replacement only."""
+    values = dict(fields or {})
+    values.update(kwargs)
+    rendered_parts: list[str] = []
+    for kind, value in _iter_prompt_template_parts(template):
+        if kind == "literal":
+            rendered_parts.append(value)
+            continue
+        if value not in values:
+            msg = f"Missing template field value: {value}"
+            raise PromptTemplateError(msg)
+        rendered_parts.append(str(values[value]))
+    return "".join(rendered_parts)
+
 
 # Universal identity context template for all agents
 AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
@@ -91,7 +182,8 @@ def build_agent_identity_context(
     openai_compat_history_guidance: str = OPENAI_COMPAT_HISTORY_GUIDANCE,
 ) -> str:
     """Render the shared identity prompt with optional OpenAI-compatible guidance."""
-    return identity_context_template.format(
+    return render_prompt_template(
+        identity_context_template,
         display_name=display_name,
         matrix_id=matrix_id,
         model_provider=model_provider,
@@ -1403,6 +1495,28 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         ),
     },
 )
+
+
+def validate_prompt_template_fields(prompt_name: str, prompt_text: str) -> None:
+    """Validate one configured prompt override against its runtime field contract."""
+    allowed_fields = PROMPT_TEMPLATE_FIELDS.get(prompt_name)
+    if allowed_fields is None:
+        return
+
+    try:
+        field_names = prompt_template_field_names(prompt_text)
+    except PromptTemplateError as exc:
+        msg = f"Invalid template syntax for prompt override {prompt_name}: {exc}"
+        raise ValueError(msg) from exc
+
+    unsupported_fields = sorted(field_names - allowed_fields)
+    if unsupported_fields:
+        unsupported = ", ".join(unsupported_fields)
+        allowed = ", ".join(sorted(allowed_fields))
+        msg = (
+            f"Unsupported template field(s) for prompt override {prompt_name}: {unsupported}. Allowed fields: {allowed}"
+        )
+        raise ValueError(msg)
 
 
 def _prompt_defaults() -> dict[str, str]:
