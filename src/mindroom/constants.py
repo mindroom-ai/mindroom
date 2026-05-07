@@ -295,14 +295,6 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     }
 
 
-def _is_isolated_runtime_public_env_name(name: str) -> bool:
-    return runtime_env_policy.is_isolated_worker_runtime_env_name(name)
-
-
-def _is_sandbox_execution_runtime_env_name(name: str) -> bool:
-    return runtime_env_policy.is_execution_runtime_env_name(name)
-
-
 def _serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
     process_env = runtime_env_policy.public_worker_startup_env(runtime_paths.process_env)
@@ -481,28 +473,18 @@ def is_runtime_database_url_env_name(name: str) -> bool:
     return runtime_env_policy.is_runtime_database_url_env_name(name)
 
 
-def _is_execution_runtime_process_env_name(
-    name: str,
-) -> bool:
-    return runtime_env_policy.is_execution_runtime_process_env_name(name)
-
-
-def _is_allowed_execution_runtime_env_file_name(
-    name: str,
-) -> bool:
-    return runtime_env_policy.is_execution_runtime_env_file_name(name)
-
-
 def _execution_runtime_env_layers(
     runtime_paths: RuntimePaths,
 ) -> tuple[dict[str, str], dict[str, str]]:
     env_file_values = {
         key: value
         for key, value in runtime_paths.env_file_values.items()
-        if _is_allowed_execution_runtime_env_file_name(key)
+        if runtime_env_policy.is_execution_runtime_env_file_name(key)
     }
     process_env = {
-        key: value for key, value in runtime_paths.process_env.items() if _is_execution_runtime_process_env_name(key)
+        key: value
+        for key, value in runtime_paths.process_env.items()
+        if runtime_env_policy.is_execution_runtime_process_env_name(key)
     }
     return process_env, env_file_values
 
@@ -513,10 +495,12 @@ def _sandbox_execution_runtime_env_layers(
     env_file_values = {
         key: value
         for key, value in runtime_paths.env_file_values.items()
-        if _is_sandbox_execution_runtime_env_name(key)
+        if runtime_env_policy.is_execution_runtime_env_name(key)
     }
     process_env = {
-        key: value for key, value in runtime_paths.process_env.items() if _is_sandbox_execution_runtime_env_name(key)
+        key: value
+        for key, value in runtime_paths.process_env.items()
+        if runtime_env_policy.is_execution_runtime_env_name(key)
     }
     return process_env, env_file_values
 
@@ -525,10 +509,14 @@ def _isolated_runtime_env_layers(
     runtime_paths: RuntimePaths,
 ) -> tuple[dict[str, str], dict[str, str]]:
     env_file_values = {
-        key: value for key, value in runtime_paths.env_file_values.items() if _is_isolated_runtime_public_env_name(key)
+        key: value
+        for key, value in runtime_paths.env_file_values.items()
+        if runtime_env_policy.is_isolated_worker_runtime_env_name(key)
     }
     process_env = {
-        key: value for key, value in runtime_paths.process_env.items() if _is_isolated_runtime_public_env_name(key)
+        key: value
+        for key, value in runtime_paths.process_env.items()
+        if runtime_env_policy.is_isolated_worker_runtime_env_name(key)
     }
     return process_env, env_file_values
 
