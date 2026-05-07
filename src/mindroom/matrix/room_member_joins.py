@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 import nio
 
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
-_ROOM_MEMBER_JOIN_LOCKS: dict[Path, Lock] = {}
+_ROOM_MEMBER_JOIN_LOCKS: WeakValueDictionary[Path, Lock] = WeakValueDictionary()
 _ROOM_MEMBER_JOIN_LOCKS_LOCK = Lock()
 
 
@@ -38,7 +39,6 @@ class RoomMemberJoin:
     avatar_url: str | None
     membership: str
     prev_membership: str | None
-    first_join: bool
 
 
 def _room_member_join_tracking_path(storage_root: Path) -> Path:
@@ -87,7 +87,7 @@ def _load_room_member_joins(path: Path) -> dict[str, set[str]]:
     return seen
 
 
-def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> None:
+def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> bool:
     """Persist seen room-member joins atomically."""
     temp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
     payload = {room_id: sorted(user_ids) for room_id, user_ids in sorted(seen.items())}
@@ -100,6 +100,9 @@ def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> None:
         safe_replace(temp_path, path)
     except OSError:
         logger.exception("failed_to_save_room_member_joins", path=str(path))
+        return False
+    else:
+        return True
     finally:
         temp_path.unlink(missing_ok=True)
 
@@ -114,8 +117,7 @@ def _mark_room_member_join_seen(storage_root: Path, *, room_id: str, user_id: st
             return False
 
         room_user_ids.add(user_id)
-        _save_room_member_joins(path, seen)
-        return True
+        return _save_room_member_joins(path, seen)
 
 
 def room_member_join_from_event(
@@ -141,8 +143,7 @@ def room_member_join_from_event(
     ):
         return None
 
-    first_join = _mark_room_member_join_seen(storage_root, room_id=room.room_id, user_id=user_id)
-    if not first_join:
+    if not _mark_room_member_join_seen(storage_root, room_id=room.room_id, user_id=user_id):
         return None
 
     return RoomMemberJoin(
@@ -154,7 +155,6 @@ def room_member_join_from_event(
         avatar_url=_optional_string(event.content, "avatar_url"),
         membership=event.membership,
         prev_membership=event.prev_membership,
-        first_join=first_join,
     )
 
 

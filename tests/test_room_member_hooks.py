@@ -189,7 +189,6 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
     assert context.prev_membership == "leave"
     assert context.display_name == "Alice"
     assert context.avatar_url == "mxc://localhost/alice"
-    assert context.first_join is True
     assert context.matrix_admin is not None
 
 
@@ -510,6 +509,32 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     assert seen == ["$live"]
 
 
+def test_room_member_joined_ignores_join_when_tracking_save_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A join should not emit when durable de-duplication cannot be written."""
+    bot = _router_bot(tmp_path)
+    room = _room()
+
+    def failing_replace(source: Path, target: Path) -> None:
+        del source, target
+        raise OSError
+
+    monkeypatch.setattr(room_member_joins, "safe_replace", failing_replace)
+
+    join = room_member_joins.room_member_join_from_event(
+        room,
+        _room_member_event(event_id="$join"),
+        config=bot.config,
+        runtime_paths=bot.runtime_paths,
+        storage_root=bot.runtime_paths.storage_root,
+    )
+
+    assert join is None
+    assert not (bot.runtime_paths.storage_root / "tracking" / "room_member_joins.json").exists()
+
+
 @pytest.mark.asyncio
 async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
     tmp_path: Path,
@@ -522,38 +547,51 @@ async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
     release_save = threading.Event()
     original_save = room_member_joins._save_room_member_joins
 
-    def delayed_save(path: Path, seen: dict[str, set[str]]) -> None:
+    def delayed_save(path: Path, seen: dict[str, set[str]]) -> bool:
         save_started.set()
         assert release_save.wait(timeout=2.0)
-        original_save(path, seen)
+        return original_save(path, seen)
 
     monkeypatch.setattr(room_member_joins, "_save_room_member_joins", delayed_save)
 
-    first_task = asyncio.create_task(
-        asyncio.to_thread(
-            room_member_joins.room_member_join_from_event,
-            room,
-            _room_member_event(event_id="$join1"),
-            config=bot.config,
-            runtime_paths=bot.runtime_paths,
-            storage_root=bot.runtime_paths.storage_root,
-        ),
-    )
-    assert await asyncio.to_thread(save_started.wait, 2.0)
-    second_task = asyncio.create_task(
-        asyncio.to_thread(
-            room_member_joins.room_member_join_from_event,
-            room,
-            _room_member_event(event_id="$join2"),
-            config=bot.config,
-            runtime_paths=bot.runtime_paths,
-            storage_root=bot.runtime_paths.storage_root,
-        ),
-    )
-    await asyncio.sleep(0.05)
-    release_save.set()
+    first_task: asyncio.Task[room_member_joins.RoomMemberJoin | None] | None = None
+    second_task: asyncio.Task[room_member_joins.RoomMemberJoin | None] | None = None
+    try:
+        first_task = asyncio.create_task(
+            asyncio.to_thread(
+                room_member_joins.room_member_join_from_event,
+                room,
+                _room_member_event(event_id="$join1"),
+                config=bot.config,
+                runtime_paths=bot.runtime_paths,
+                storage_root=bot.runtime_paths.storage_root,
+            ),
+        )
+        assert await asyncio.to_thread(save_started.wait, 2.0)
+        second_task = asyncio.create_task(
+            asyncio.to_thread(
+                room_member_joins.room_member_join_from_event,
+                room,
+                _room_member_event(event_id="$join2"),
+                config=bot.config,
+                runtime_paths=bot.runtime_paths,
+                storage_root=bot.runtime_paths.storage_root,
+            ),
+        )
+        await asyncio.sleep(0.05)
+        release_save.set()
 
-    results = await asyncio.gather(first_task, second_task)
+        results = await asyncio.gather(first_task, second_task)
+    finally:
+        release_save.set()
+        pending = [task for task in (first_task, second_task) if task is not None and not task.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=1.0)
+        pending = [task for task in (first_task, second_task) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     joins = [result for result in results if result is not None]
     assert len(joins) == 1

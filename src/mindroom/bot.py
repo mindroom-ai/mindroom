@@ -786,7 +786,6 @@ class AgentBot:
             avatar_url=join.avatar_url,
             membership=join.membership,
             prev_membership=join.prev_membership,
-            first_join=join.first_join,
         )
         await emit(self.hook_registry, EVENT_ROOM_MEMBER_JOINED, context)
 

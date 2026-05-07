@@ -613,7 +613,6 @@ RoomMemberJoinedContext(
     avatar_url: str | None,
     membership: str,
     prev_membership: str | None,
-    first_join: bool,
 )
 
 ToolBeforeCallContext(
