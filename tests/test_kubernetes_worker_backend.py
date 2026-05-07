@@ -526,7 +526,6 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
     assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" in env_names
-    assert "MINDROOM_SANDBOX_ALLOWED_TOOL_NAMES_JSON" not in env_names
     assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT" not in env_names
     assert "VIRTUAL_ENV" in env_names
     assert "PATH" in env_names

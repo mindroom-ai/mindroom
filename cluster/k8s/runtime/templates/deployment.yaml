@@ -288,8 +288,6 @@ spec:
               value: {{ .Values.config.mountPath | quote }}
             - name: MINDROOM_STORAGE_PATH
               value: {{ .Values.storage.mountPath | quote }}
-            - name: MINDROOM_SANDBOX_WORKER_ROOT
-              value: {{ default (printf "%s/workers" .Values.storage.mountPath) .Values.workers.staticRunner.workerRoot | quote }}
             - name: HOME
               value: {{ .Values.storage.mountPath | quote }}
             {{- if $proxyTokenSecretName }}
