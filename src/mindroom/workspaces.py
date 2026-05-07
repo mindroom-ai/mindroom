@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -302,8 +303,8 @@ def _effective_workspace(
 def _template_unavailable_for_dedicated_worker(template_dir: Path, runtime_paths: RuntimePaths) -> bool:
     """Return whether a dedicated worker should rely on the control plane's existing scaffold."""
     return (
-        runtime_paths.env_flag("MINDROOM_SANDBOX_RUNNER_MODE")
-        and bool(runtime_paths.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", default=""))
+        runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
+        and bool(runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default=""))
         and not template_dir.expanduser().is_dir()
     )
 

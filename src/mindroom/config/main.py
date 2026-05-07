@@ -63,6 +63,7 @@ from mindroom.matrix_identifiers import (
     managed_space_alias_localpart,
 )
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
@@ -312,8 +313,8 @@ def _skip_private_template_dir_validation(runtime_paths: RuntimePaths | None) ->
     """Return whether runtime-local workers should skip control-plane template validation."""
     if runtime_paths is None:
         return False
-    return runtime_paths.env_flag("MINDROOM_SANDBOX_RUNNER_MODE") and bool(
-        runtime_paths.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", default=""),
+    return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]) and bool(
+        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default=""),
     )
 
 

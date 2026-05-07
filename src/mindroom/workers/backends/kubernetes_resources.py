@@ -19,6 +19,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     VENDOR_TELEMETRY_ENV_VALUES,
     is_worker_backend_config_env_name,
@@ -60,10 +61,6 @@ _LABEL_NAME_VALUE = "mindroom-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 
 _CONTAINER_NAME = "sandbox-runner"
-_TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
-_RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
-_DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
-_DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
@@ -647,7 +644,7 @@ class KubernetesResourceManager:
             "kind": "Secret",
             "metadata": metadata,
             "type": "Opaque",
-            "stringData": {_TOKEN_ENV_NAME: worker_token},
+            "stringData": {SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: worker_token},
         }
 
     def _auth_secret_patch(self, *, worker_key: str, worker_id: str) -> dict[str, object]:
@@ -660,7 +657,7 @@ class KubernetesResourceManager:
         return {
             "metadata": metadata,
             "type": "Opaque",
-            "data": {_TOKEN_ENV_NAME: _secret_data_value(worker_token)},
+            "data": {SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: _secret_data_value(worker_token)},
         }
 
     def _deployment_manifest(
@@ -785,9 +782,9 @@ class KubernetesResourceManager:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
         venv_path = f"{dedicated_root}/venv"
         env: list[dict[str, object]] = [
-            {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
-            {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
-            {"name": _RUNNER_PORT_ENV_NAME, "value": str(self.config.worker_port)},
+            {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"], "value": "true"},
+            {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], "value": "subprocess"},
+            {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"], "value": str(self.config.worker_port)},
             {
                 "name": SANDBOX_STARTUP_MANIFEST_PATH_ENV,
                 "value": startup_manifest_path,
@@ -800,8 +797,8 @@ class KubernetesResourceManager:
                 "name": SHARED_CREDENTIALS_PATH_ENV,
                 "value": f"{dedicated_root}/.shared_credentials",
             },
-            {"name": _DEDICATED_WORKER_KEY_ENV, "value": worker_key},
-            {"name": _DEDICATED_WORKER_ROOT_ENV, "value": dedicated_root},
+            {"name": SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], "value": worker_key},
+            {"name": SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"], "value": dedicated_root},
             {"name": "HOME", "value": dedicated_root},
             self._worker_token_env(worker_id=worker_id),
         ]
@@ -816,11 +813,13 @@ class KubernetesResourceManager:
 
     def _worker_token_env(self, *, worker_id: str) -> dict[str, object]:
         return {
-            "name": _TOKEN_ENV_NAME,
+            "name": SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
             "valueFrom": {
                 "secretKeyRef": {
                     "name": self.config.auth_secret_name or worker_id,
-                    "key": worker_id if self.config.auth_secret_name is not None else _TOKEN_ENV_NAME,
+                    "key": worker_id
+                    if self.config.auth_secret_name is not None
+                    else SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
                 },
             },
         }
@@ -873,15 +872,15 @@ class KubernetesResourceManager:
         env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         process_env.update(
             {
-                "MINDROOM_SANDBOX_RUNNER_MODE": "true",
-                "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
-                _RUNNER_PORT_ENV_NAME: str(self.config.worker_port),
+                SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
+                SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "subprocess",
+                SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"]: str(self.config.worker_port),
                 "MINDROOM_CONFIG_PATH": str(config_path),
                 "MINDROOM_STORAGE_PATH": str(dedicated_root),
                 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV: self.config.storage_subpath_prefix,
                 SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
-                _DEDICATED_WORKER_KEY_ENV: worker_key,
-                _DEDICATED_WORKER_ROOT_ENV: str(dedicated_root),
+                SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
+                SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
             },
         )
         process_env.update(

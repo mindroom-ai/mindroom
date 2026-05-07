@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.manager import WorkerManager
@@ -21,8 +22,6 @@ if TYPE_CHECKING:
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_WORKER_API_ROOT = "/api/sandbox-runner"
-_WORKER_ENDPOINT_ENV = "MINDROOM_SANDBOX_WORKER_ENDPOINT"
-_WORKER_IDLE_TIMEOUT_ENV = "MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS"
 _SHARED_INITIALIZATION_LOCK = threading.Lock()
 _SHARED_INITIALIZATION_LOCKS: dict[str, threading.Lock] = {}
 
@@ -61,7 +60,7 @@ def _default_worker_root(runtime_paths: RuntimePaths) -> Path:
 
 def _read_idle_timeout_seconds(runtime_paths: RuntimePaths) -> float:
     raw_timeout = runtime_paths.env_value(
-        _WORKER_IDLE_TIMEOUT_ENV,
+        SANDBOX_RUNTIME_ENV_BY_KEY["worker_idle_timeout_seconds"],
         default=str(_DEFAULT_IDLE_TIMEOUT_SECONDS),
     ) or str(_DEFAULT_IDLE_TIMEOUT_SECONDS)
     try:
@@ -80,7 +79,10 @@ def _normalize_worker_api_root(raw_endpoint: str) -> str:
 
 
 def _read_worker_api_root(runtime_paths: RuntimePaths) -> str:
-    raw_api_root = runtime_paths.env_value(_WORKER_ENDPOINT_ENV, default=_DEFAULT_WORKER_API_ROOT)
+    raw_api_root = runtime_paths.env_value(
+        SANDBOX_RUNTIME_ENV_BY_KEY["worker_endpoint"],
+        default=_DEFAULT_WORKER_API_ROOT,
+    )
     return _normalize_worker_api_root(raw_api_root or _DEFAULT_WORKER_API_ROOT)
 
 

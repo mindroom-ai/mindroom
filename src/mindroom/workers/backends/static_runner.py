@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
@@ -67,10 +68,10 @@ class StaticSandboxRunnerBackend:
         """Resolve or create one worker handle for the shared sandbox runner."""
         del progress_sink
         if not self.api_root:
-            msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
+            msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
             raise WorkerBackendError(msg)
         if self.auth_token is None:
-            msg = "MINDROOM_SANDBOX_PROXY_TOKEN must be set when sandbox proxying is enabled."
+            msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_token']} must be set when sandbox proxying is enabled."
             raise WorkerBackendError(msg)
 
         timestamp = time.time() if now is None else now

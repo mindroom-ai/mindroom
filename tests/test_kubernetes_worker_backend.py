@@ -835,7 +835,11 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         process_env={
+            "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON": '{"shell":["github"]}',
             "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+            "MINDROOM_SANDBOX_PROXY_TOOLS": "*",
+            "MINDROOM_SANDBOX_PROXY_URL": "http://runner.example.invalid",
+            "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT": str(tmp_path / "primary-shared-root"),
             "MINDROOM_LOCAL_CLIENT_SECRET": "client-secret",
         },
     )
@@ -865,7 +869,11 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert committed_runtime.env_value("OPENAI_BASE_URL") is None
     assert committed_runtime.env_value("CUSTOM_API_TOKEN") is None
     assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON") is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOOLS") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_URL") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
     assert not local_credentials_path.exists()
 

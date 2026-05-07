@@ -20,6 +20,7 @@ import httpx
 
 from mindroom.constants import sandbox_execution_runtime_env_values, sandbox_shell_execution_runtime_env_values
 from mindroom.credentials import load_scoped_credentials
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
@@ -147,14 +148,14 @@ class _SandboxProxyConfig:
 
 
 def _read_proxy_url(runtime_paths: RuntimePaths) -> str | None:
-    value = (runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_URL", default="") or "").strip()
+    value = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_url"], default="") or "").strip()
     if not value:
         return None
     return value.rstrip("/")
 
 
 def _read_proxy_token(runtime_paths: RuntimePaths) -> str | None:
-    value = (runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_TOKEN", default="") or "").strip()
+    value = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"], default="") or "").strip()
     if not value:
         return None
     return value
@@ -162,7 +163,7 @@ def _read_proxy_token(runtime_paths: RuntimePaths) -> str | None:
 
 def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
     raw = runtime_paths.env_value(
-        "MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS",
+        SANDBOX_RUNTIME_ENV_BY_KEY["proxy_timeout_seconds"],
         default=str(_DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS),
     )
     try:
@@ -188,7 +189,7 @@ def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
 
 
 def _read_execution_mode(runtime_paths: RuntimePaths) -> str | None:
-    raw = runtime_paths.env_value("MINDROOM_SANDBOX_EXECUTION_MODE")
+    raw = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["execution_mode"])
     if raw is None:
         return None
     normalized = raw.strip().lower()
@@ -199,7 +200,7 @@ def _read_execution_mode(runtime_paths: RuntimePaths) -> str | None:
 
 def _read_credential_lease_ttl(runtime_paths: RuntimePaths) -> int:
     raw = runtime_paths.env_value(
-        "MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS",
+        SANDBOX_RUNTIME_ENV_BY_KEY["credential_lease_ttl_seconds"],
         default=str(_DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS),
     )
     try:
@@ -211,7 +212,7 @@ def _read_credential_lease_ttl(runtime_paths: RuntimePaths) -> int:
 
 def _read_proxy_tools(runtime_paths: RuntimePaths, execution_mode: str | None) -> set[str] | None:
     default = "" if execution_mode in {"selective", "sandbox_selective"} else "*"
-    raw_value = (runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_TOOLS", default=default) or default).strip()
+    raw_value = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_tools"], default=default) or default).strip()
     if raw_value == "*":
         return None
     if not raw_value:
@@ -220,7 +221,9 @@ def _read_proxy_tools(runtime_paths: RuntimePaths, execution_mode: str | None) -
 
 
 def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str, ...]]:
-    raw_policy = (runtime_paths.env_value("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON", default="") or "").strip()
+    raw_policy = (
+        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["credential_policy_json"], default="") or ""
+    ).strip()
     if not raw_policy:
         return {}
 
@@ -249,7 +252,7 @@ def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
     """Return sandbox proxy settings for one explicit runtime context."""
     execution_mode = _read_execution_mode(runtime_paths)
     return _SandboxProxyConfig(
-        runner_mode=runtime_paths.env_flag("MINDROOM_SANDBOX_RUNNER_MODE"),
+        runner_mode=runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
         proxy_url=_read_proxy_url(runtime_paths),
         proxy_token=_read_proxy_token(runtime_paths),
         proxy_timeout_seconds=_read_proxy_timeout(runtime_paths),
@@ -523,7 +526,7 @@ def _request_headers_for_handle(
 ) -> dict[str, str]:
     token = worker_handle.auth_token if worker_handle is not None else proxy_config.proxy_token
     if token is None:
-        msg = "MINDROOM_SANDBOX_PROXY_TOKEN must be set when sandbox proxying is enabled."
+        msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_token']} must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
     return {_SANDBOX_PROXY_TOKEN_HEADER: token}
 
@@ -885,7 +888,7 @@ def _call_proxy_sync(  # noqa: C901
     if tool_config_overrides:
         payload["tool_config_overrides"] = to_json_compatible(tool_config_overrides)
     if worker_handle is None and proxy_config.proxy_url is None:
-        msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
+        msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
 
     try:

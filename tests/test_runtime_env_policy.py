@@ -14,7 +14,17 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
         "MINDROOM_CONFIG_PATH": "/app/config.yaml",
         "MINDROOM_STORAGE_PATH": "/app/storage",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "proxy-secret",
+        "MINDROOM_SANDBOX_PROXY_URL": "http://runner.example.invalid",
+        "MINDROOM_SANDBOX_PROXY_TOOLS": "*",
+        "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON": '{"shell":["github"]}',
+        "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT": "/shared/storage",
+        "MINDROOM_SANDBOX_FUTURE_CONTROL": "future-control",
         "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH": "/app/.runtime/startup.json",
+        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+        "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
+        "MINDROOM_SANDBOX_RUNNER_PORT": "8766",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-key",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/app/worker/workers/worker-key",
         "MINDROOM_CREDENTIAL_SEEDS_JSON": "{}",
         "MINDROOM_API_KEY": "runtime-secret",
         "OPENAI_API_KEY": "provider-secret",
@@ -42,6 +52,11 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
         "AGNO_TELEMETRY": "false",
         "POD_NAMESPACE": "mindroom",
         "CUSTOMER_ID": "customer-123",
+        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+        "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
+        "MINDROOM_SANDBOX_RUNNER_PORT": "8766",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-key",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/app/worker/workers/worker-key",
     }
 
 
@@ -80,6 +95,8 @@ def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_contro
         "MINDROOM_SANDBOX_PROXY_TOKEN": "runner-secret",
         "MINDROOM_SANDBOX_RUNNER_MODE": "true",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-key",
+        "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON": '{"shell":["github"]}',
+        "MINDROOM_SANDBOX_FUTURE_CONTROL": "future-control",
         "MINDROOM_SHARED_CREDENTIALS_PATH": "/app/storage/.shared_credentials",
         "MATRIX_HOMESERVER": "https://matrix.example.invalid",
     }
@@ -87,6 +104,8 @@ def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_contro
     result = runtime_env_policy.sandbox_execution_runtime_env(env)
 
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in result
+    assert "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON" not in result
+    assert "MINDROOM_SANDBOX_FUTURE_CONTROL" not in result
     assert result["MINDROOM_SANDBOX_RUNNER_MODE"] == "true"
     assert result["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-key"
     assert result["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/storage/.shared_credentials"
@@ -158,18 +177,22 @@ def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filt
     }
 
 
-def test_kubernetes_backend_config_env_literals_stay_in_policy_module() -> None:
-    """Python callers should import Kubernetes backend config env names from the policy module."""
+def test_runtime_control_env_literals_stay_in_policy_module() -> None:
+    """Python callers should import centralized runtime env names from the policy module."""
     source_root = Path(__file__).resolve().parents[1] / "src" / "mindroom"
     allowed_path = source_root / "runtime_env_policy.py"
-    backend_env_names = runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES
+    policy_owned_env_names = {
+        *runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES,
+        *runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY.values(),
+        runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+    }
 
     violations: dict[str, list[str]] = {}
     for path in source_root.rglob("*.py"):
         if path == allowed_path:
             continue
         text = path.read_text(encoding="utf-8")
-        leaked_names = [name for name in backend_env_names if repr(name) in text or f'"{name}"' in text]
+        leaked_names = [name for name in policy_owned_env_names if repr(name) in text or f'"{name}"' in text]
         if leaked_names:
             violations[str(path.relative_to(source_root))] = sorted(leaked_names)
 

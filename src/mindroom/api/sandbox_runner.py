@@ -36,7 +36,11 @@ from mindroom.config.main import Config, load_config, normalized_config_data
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
-from mindroom.runtime_env_policy import SANDBOX_STARTUP_MANIFEST_PATH_ENV, sandbox_runner_startup_process_env
+from mindroom.runtime_env_policy import (
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+    sandbox_runner_startup_process_env,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -77,7 +81,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
-_RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
 
 
@@ -125,13 +128,13 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
 
 def startup_runner_token_from_env() -> str | None:
     """Read and remove the runner auth token from process env after startup."""
-    if _RUNNER_TOKEN_ENV not in os.environ:
+    if SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"] not in os.environ:
         return None
-    raw_token = os.environ.get(_RUNNER_TOKEN_ENV, "")
-    raw_process_entry = _process_environment_entry(_RUNNER_TOKEN_ENV)
+    raw_token = os.environ.get(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"], "")
+    raw_process_entry = _process_environment_entry(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"])
     if raw_process_entry is not None:
         _wipe_process_environment_entry(*raw_process_entry)
-    os.environ.pop(_RUNNER_TOKEN_ENV, None)
+    os.environ.pop(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"], None)
     return raw_token.strip() or None
 
 

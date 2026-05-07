@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.credential_policy import credential_service_policy
 from mindroom.logging_config import get_logger
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_root_path
 
 if TYPE_CHECKING:
@@ -25,8 +26,6 @@ _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 _WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
 _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 SHARED_CREDENTIALS_PATH_ENV = "MINDROOM_SHARED_CREDENTIALS_PATH"
-_DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
-_DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"env", "ui", None})
 logger = get_logger(__name__)
 
@@ -241,13 +240,13 @@ def _runtime_shared_credentials_base_path(runtime_paths: RuntimePaths, base_path
 
 
 def _runtime_dedicated_worker_key(runtime_paths: RuntimePaths) -> str | None:
-    raw_worker_key = runtime_paths.env_value(_DEDICATED_WORKER_KEY_ENV, default="") or ""
+    raw_worker_key = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default="") or ""
     normalized = raw_worker_key.strip()
     return normalized or None
 
 
 def _runtime_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
-    raw_worker_root = runtime_paths.env_value(_DEDICATED_WORKER_ROOT_ENV, default="") or ""
+    raw_worker_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"], default="") or ""
     if not raw_worker_root.strip():
         return None
     return Path(raw_worker_root).expanduser().resolve()

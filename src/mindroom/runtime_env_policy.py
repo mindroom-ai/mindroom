@@ -14,6 +14,7 @@ __all__ = [
     "CREDENTIAL_SEEDS_JSON_ENV",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES",
+    "SANDBOX_RUNTIME_ENV_BY_KEY",
     "SANDBOX_STARTUP_MANIFEST_PATH_ENV",
     "VENDOR_TELEMETRY_ENV_VALUES",
     "VERTEXAI_CLAUDE_ENV_KEYS",
@@ -94,6 +95,28 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
 )
 KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES = frozenset(KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values())
 
+SANDBOX_RUNTIME_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "credential_lease_ttl_seconds": "MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS",
+        "credential_policy_json": "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON",
+        "dedicated_worker_key": "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY",
+        "dedicated_worker_root": "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT",
+        "execution_mode": "MINDROOM_SANDBOX_EXECUTION_MODE",
+        "proxy_timeout_seconds": "MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS",
+        "proxy_token": "MINDROOM_SANDBOX_PROXY_TOKEN",
+        "proxy_tools": "MINDROOM_SANDBOX_PROXY_TOOLS",
+        "proxy_url": "MINDROOM_SANDBOX_PROXY_URL",
+        "runner_execution_mode": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE",
+        "runner_mode": "MINDROOM_SANDBOX_RUNNER_MODE",
+        "runner_port": "MINDROOM_SANDBOX_RUNNER_PORT",
+        "runner_subprocess_timeout_seconds": "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS",
+        "shared_storage_root": "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT",
+        "worker_endpoint": "MINDROOM_SANDBOX_WORKER_ENDPOINT",
+        "worker_idle_timeout_seconds": "MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS",
+    },
+)
+_SANDBOX_RUNTIME_ENV_PREFIX = "MINDROOM_SANDBOX_"
+
 _CREDENTIAL_SEED_DECLARATION_ENV_NAMES = frozenset(
     {
         CREDENTIAL_SEEDS_JSON_ENV,
@@ -129,7 +152,21 @@ _ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset(
 )
 _WORKER_RUNTIME_STATE_ENV_NAMES = frozenset(
     {
+        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],
         "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX",
+    },
+)
+_PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES = frozenset(
+    {
+        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],
     },
 )
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
@@ -137,7 +174,7 @@ _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
         *_CREDENTIAL_SEED_DECLARATION_ENV_NAMES,
         "MINDROOM_EVENT_CACHE_DATABASE_URL",
         "MINDROOM_LOCAL_CLIENT_ID",
-        "MINDROOM_SANDBOX_PROXY_TOKEN",
+        SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
@@ -161,7 +198,7 @@ _RUNNER_CONTROL_ENV_EXCLUDED_NAMES = frozenset(
     {
         "MINDROOM_API_KEY",
         "MINDROOM_LOCAL_CLIENT_SECRET",
-        "MINDROOM_SANDBOX_PROXY_TOKEN",
+        SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
@@ -236,7 +273,7 @@ def is_runtime_control_env_name(name: str) -> bool:
     return (
         name in _RUNNER_CONTROL_ENV_EXCLUDED_NAMES
         or name in _CREDENTIAL_SEED_DECLARATION_ENV_NAMES
-        or name.startswith("MINDROOM_SANDBOX_")
+        or name.startswith(_SANDBOX_RUNTIME_ENV_PREFIX)
         or is_worker_backend_config_env_name(name)
     )
 
@@ -257,6 +294,8 @@ def is_public_worker_startup_env_name(name: str) -> bool:
         return False
     if is_runtime_database_url_env_name(name):
         return False
+    if name.startswith(_SANDBOX_RUNTIME_ENV_PREFIX) and name not in _PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES:
+        return False
     if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _RUNTIME_STARTUP_ENV_EXTRA_KEYS):
         return False
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
@@ -267,6 +306,8 @@ def is_isolated_worker_runtime_env_name(name: str) -> bool:
     if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
         return False
     if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
+        return False
+    if name.startswith(_SANDBOX_RUNTIME_ENV_PREFIX) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
     if is_runtime_database_url_env_name(name):
         return False
