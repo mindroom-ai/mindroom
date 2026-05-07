@@ -63,6 +63,41 @@ _CPU_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"]
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
 _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret_name"]
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
+_PRIMARY_CONFIG_ENV_NAMES = frozenset(
+    {
+        _NAMESPACE_ENV,
+        _IMAGE_ENV,
+        _IMAGE_PULL_POLICY_ENV,
+        _PORT_ENV,
+        _SERVICE_ACCOUNT_ENV,
+        _STORAGE_PVC_ENV,
+        _STORAGE_MOUNT_PATH_ENV,
+        _STORAGE_SUBPATH_PREFIX_ENV,
+        _CONFIG_MAP_NAME_ENV,
+        _CONFIG_KEY_ENV,
+        _CONFIG_PATH_ENV,
+        _IDLE_TIMEOUT_ENV,
+        _READY_TIMEOUT_ENV,
+        _NAME_PREFIX_ENV,
+        _NODE_NAME_ENV,
+        _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV,
+        _EXTRA_ENV_JSON_ENV,
+        _EXTRA_LABELS_JSON_ENV,
+        _EXTRA_ANNOTATIONS_JSON_ENV,
+        _OWNER_DEPLOYMENT_NAME_ENV,
+        _MEMORY_REQUEST_ENV,
+        _MEMORY_LIMIT_ENV,
+        _CPU_REQUEST_ENV,
+        _CPU_LIMIT_ENV,
+        _ENABLE_SERVICE_LINKS_ENV,
+        _AUTH_SECRET_NAME_ENV,
+    },
+)
+
+
+def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
+    """Return whether an env var configures the primary-side Kubernetes worker backend."""
+    return name in _PRIMARY_CONFIG_ENV_NAMES
 
 
 def _read_env(env: Mapping[str, str], name: str, default: str = "") -> str:

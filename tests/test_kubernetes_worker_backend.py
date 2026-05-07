@@ -672,10 +672,14 @@ def test_kubernetes_worker_credentials_encryption_key_uses_runtime_source_not_ex
     """Worker credential encryption should use the same runtime key source as CredentialsManager."""
     runtime_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     extra_env_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii")
+    carrier_env = json.dumps({CREDENTIALS_ENCRYPTION_KEY_ENV: extra_env_key})
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
-        process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: runtime_key},
+        process_env={
+            CREDENTIALS_ENCRYPTION_KEY_ENV: runtime_key,
+            "MINDROOM_KUBERNETES_WORKER_ENV_JSON": carrier_env,
+        },
     )
     backend, apps_api, core_api = _backend(
         runtime_paths=runtime_paths,
@@ -690,6 +694,7 @@ def test_kubernetes_worker_credentials_encryption_key_uses_runtime_source_not_ex
     assert extra_env_key not in json.dumps(deployment)
     assert extra_env_key not in json.dumps(core_api.created_secret_bodies)
     assert extra_env_key not in json.dumps(startup_manifest)
+    assert "MINDROOM_KUBERNETES_WORKER_ENV_JSON" not in json.dumps(startup_manifest)
 
 
 def test_kubernetes_worker_credentials_encryption_key_rotation_changes_template_hash(tmp_path: Path) -> None:

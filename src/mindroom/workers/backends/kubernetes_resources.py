@@ -26,7 +26,10 @@ from mindroom.runtime_env_policy import (
 )
 from mindroom.tool_system import worker_routing
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.kubernetes_config import credentials_encryption_key_hash
+from mindroom.workers.backends.kubernetes_config import (
+    credentials_encryption_key_hash,
+    is_kubernetes_worker_backend_config_env_name,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -936,9 +939,17 @@ class KubernetesResourceManager:
             if self.config.config_map_name is not None
             else self.runtime_paths.config_path.expanduser().resolve()
         )
-        process_env = dict(self.runtime_paths.process_env)
+        process_env = {
+            key: value
+            for key, value in self.runtime_paths.process_env.items()
+            if not is_kubernetes_worker_backend_config_env_name(key)
+        }
         process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        env_file_values = dict(self.runtime_paths.env_file_values)
+        env_file_values = {
+            key: value
+            for key, value in self.runtime_paths.env_file_values.items()
+            if not is_kubernetes_worker_backend_config_env_name(key)
+        }
         env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         process_env.update(
             {
