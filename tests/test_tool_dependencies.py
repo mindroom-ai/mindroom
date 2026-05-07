@@ -359,6 +359,8 @@ def test_install_via_uv_sync_targets_active_virtualenv(monkeypatch: pytest.Monke
         "--inexact",
         "--no-dev",
         "--active",
+        "--python",
+        sys.executable,
         "--extra",
         "wikipedia",
         "-q",

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.models.anthropic import Claude
@@ -35,10 +37,44 @@ logger = get_logger(__name__)
 
 __all__ = ["get_model_instance"]
 
+_GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
 
 def _canonical_provider(provider: str) -> str:
     """Return normalized provider key for model dispatch."""
     return provider.strip().lower().replace("-", "_")
+
+
+def _google_adc_file_type(credentials_path: str) -> str | None:
+    try:
+        with Path(credentials_path).open(encoding="utf-8") as credentials_file:
+            credentials_info = json.load(credentials_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(credentials_info, dict):
+        return None
+    credentials_type = credentials_info.get("type")
+    return credentials_type if isinstance(credentials_type, str) else None
+
+
+def _load_google_application_credentials(credentials_path: str) -> object:
+    """Load Google ADC credentials for Vertex-backed model clients."""
+    if _google_adc_file_type(credentials_path) == "service_account":
+        service_account = importlib.import_module("google.oauth2.service_account")
+        credentials_cls = service_account.Credentials
+        return credentials_cls.from_service_account_file(
+            credentials_path,
+            scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
+        )
+
+    google_auth = importlib.import_module("google.auth")
+    load_credentials_from_file = google_auth.load_credentials_from_file
+    credentials, _project_id = load_credentials_from_file(
+        credentials_path,
+        scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
+    )
+    return credentials
 
 
 def _create_model_for_provider(  # noqa: C901, PLR0912
@@ -77,13 +113,7 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
         if "credentials" not in client_params and (
             google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
         ):
-            google_auth = importlib.import_module("google.auth")
-            load_credentials_from_file = google_auth.load_credentials_from_file
-            credentials, _project_id = load_credentials_from_file(
-                str(google_application_credentials),
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-            client_params["credentials"] = credentials
+            client_params["credentials"] = _load_google_application_credentials(str(google_application_credentials))
         if client_params:
             extra_kwargs["client_params"] = client_params
 

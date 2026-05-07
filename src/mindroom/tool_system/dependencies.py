@@ -179,7 +179,7 @@ def _install_via_uv_sync(extras: list[str], *, quiet: bool) -> bool:
     env.update(vendor_telemetry_env_values())
     if _in_virtualenv():
         # Ensure uv targets the interpreter that is currently running MindRoom.
-        cmd.append("--active")
+        cmd.extend(["--active", "--python", sys.executable])
         env["VIRTUAL_ENV"] = sys.prefix
     for extra in extras:
         cmd.extend(["--extra", extra])
