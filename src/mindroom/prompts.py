@@ -43,6 +43,7 @@ __all__ = [
     "PREVIOUS_CONVERSATION_THREAD_HEADER",
     "PROMPT_DEFAULTS",
     "PROMPT_DEFAULT_NAMES",
+    "PROMPT_TEMPLATE_FIELDS",
     "QUEUED_MESSAGE_NOTICE_TEXT",
     "RESEARCH_AGENT_PROMPT",
     "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE",
@@ -1367,6 +1368,41 @@ DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can delegate tasks to the follow
 {agent_descriptions}
 
 Use delegate_task to send a task to one of these agents. The agent will execute the task independently and return its response."""
+
+
+PROMPT_TEMPLATE_FIELDS = MappingProxyType(
+    {
+        "AGENT_IDENTITY_CONTEXT_TEMPLATE": frozenset(
+            {
+                "display_name",
+                "matrix_id",
+                "model_provider",
+                "model_id",
+                "openai_compat_history_guidance",
+            },
+        ),
+        "CONTEXT_TRUNCATION_MARKER_TEMPLATE": frozenset({"omitted_chars"}),
+        "DATETIME_CONTEXT_TEMPLATE": frozenset({"date_str", "timezone_str", "timezone_abbrev"}),
+        "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE": frozenset({"agent_descriptions"}),
+        "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE": frozenset(
+            {"toolkit_catalog", "current_toolkits", "sticky_toolkits"},
+        ),
+        "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE": frozenset(
+            {"no_reply_token", "existing_block", "excerpt"},
+        ),
+        "MEMORY_CONTEXT_PROMPT_TEMPLATE": frozenset({"context_type", "memory_lines"}),
+        "MEMORY_EXISTING_SNIPPETS_TEMPLATE": frozenset({"existing_context"}),
+        "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": frozenset({"agents_info", "message"}),
+        "TEAM_MODE_SELECTION_PROMPT_TEMPLATE": frozenset({"message", "agent_names"}),
+        "THREAD_SUMMARY_USER_PROMPT_TEMPLATE": frozenset({"conversation"}),
+        "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE": frozenset(
+            {"agent_list", "team_list", "transcription"},
+        ),
+        "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE": frozenset(
+            {"current_time", "request", "agent_list"},
+        ),
+    },
+)
 
 
 def _prompt_defaults() -> dict[str, str]:

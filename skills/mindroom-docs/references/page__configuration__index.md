@@ -507,18 +507,15 @@ prompts:
 
     {agents_info}
 
-    Recent conversation context:
-    {thread_context}
-
     User message: {message}
 
     Return only the agent name.
 ```
 
 Discover allowed names by inspecting `src/mindroom/prompts.py` or by importing `PROMPT_DEFAULT_NAMES` from `mindroom.prompts`.
-Prompt defaults that contain `{...}` placeholders are formatted by MindRoom at runtime.
-When overriding one of those prompts, keep every placeholder from the default global in the override.
-If an override omits a required placeholder, runtime formatting for that prompt can fail.
+For prompts formatted with `{...}` placeholders, discover the allowed fields from `PROMPT_TEMPLATE_FIELDS` in `mindroom.prompts`.
+MindRoom validates configured template fields at config load, and unsupported fields fail validation before runtime.
+Escape literal braces as `{{` and `}}` inside formatted prompt overrides.
 Changing root prompt overrides in a running process restarts existing agents, teams, and the router through hot reload.
 
 ## Managed Avatars

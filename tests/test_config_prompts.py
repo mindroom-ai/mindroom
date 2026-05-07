@@ -31,3 +31,15 @@ def test_config_rejects_unknown_prompt_override() -> None:
                 },
             },
         )
+
+
+def test_config_rejects_prompt_override_with_unsupported_template_field() -> None:
+    """Prompt template overrides must use fields supplied by their call site."""
+    with pytest.raises(ValidationError, match="Unsupported template field"):
+        Config.model_validate(
+            {
+                "prompts": {
+                    "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": "{agents_info} {message} {thread_context}",
+                },
+            },
+        )

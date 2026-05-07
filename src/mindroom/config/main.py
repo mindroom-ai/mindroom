@@ -6,6 +6,7 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from string import Formatter
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
@@ -63,7 +64,7 @@ from mindroom.matrix_identifiers import (
     managed_space_alias_localpart,
 )
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
-from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
+from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS, PROMPT_TEMPLATE_FIELDS
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
@@ -86,6 +87,7 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "matrix_message",
 )
 logger = get_logger(__name__)
+_PROMPT_TEMPLATE_FORMATTER = Formatter()
 
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
@@ -146,6 +148,40 @@ def format_invalid_config_message(
     if footer:
         response = f"{response}\n\n{footer}"
     return response
+
+
+def _prompt_template_field_names(template: str) -> set[str]:
+    fields: set[str] = set()
+    for _, field_name, format_spec, _ in _PROMPT_TEMPLATE_FORMATTER.parse(template):
+        if field_name is not None:
+            if not field_name:
+                msg = "Empty template fields are not supported"
+                raise ValueError(msg)
+            fields.add(field_name.partition(".")[0].partition("[")[0])
+        if format_spec:
+            fields.update(_prompt_template_field_names(format_spec))
+    return fields
+
+
+def _validate_prompt_template_fields(prompt_name: str, prompt_text: str) -> None:
+    allowed_fields = PROMPT_TEMPLATE_FIELDS.get(prompt_name)
+    if allowed_fields is None:
+        return
+
+    try:
+        field_names = _prompt_template_field_names(prompt_text)
+    except ValueError as exc:
+        msg = f"Invalid template syntax for prompt override {prompt_name}: {exc}"
+        raise ValueError(msg) from exc
+
+    unsupported_fields = sorted(field_names - allowed_fields)
+    if unsupported_fields:
+        unsupported = ", ".join(unsupported_fields)
+        allowed = ", ".join(sorted(allowed_fields))
+        msg = (
+            f"Unsupported template field(s) for prompt override {prompt_name}: {unsupported}. Allowed fields: {allowed}"
+        )
+        raise ValueError(msg)
 
 
 _RESERVED_DYNAMIC_TOOLKIT_TOOLS = frozenset({"delegate", "dynamic_tools", "self_config"})
@@ -428,6 +464,8 @@ class Config(BaseModel):
             unknown = ", ".join(unknown_names)
             msg = f"Unknown prompt override(s): {unknown}. Allowed prompt names: {allowed}"
             raise ValueError(msg)
+        for prompt_name, prompt_text in value.items():
+            _validate_prompt_template_fields(prompt_name, prompt_text)
         return value
 
     def get_prompt(self, name: str) -> str:
