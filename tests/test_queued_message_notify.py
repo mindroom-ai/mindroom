@@ -41,6 +41,7 @@ from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
@@ -56,6 +57,7 @@ from mindroom.post_response_effects import (
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
+from mindroom.thread_context_state import ThreadHistoryTrust, ThreadMembershipTrust
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
@@ -799,6 +801,78 @@ async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(
         caller_label="dispatch_post_lock_refresh",
     )
     assert request.thread_history == fresh_history
+
+
+@pytest.mark.asyncio
+async def test_refresh_thread_history_after_lock_reproves_provisional_thread_membership(
+    tmp_path: Path,
+) -> None:
+    """Post-lock refresh must not treat an indeterminate dispatch candidate as proven."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+    event_info = EventInfo.from_event(
+        {
+            "content": {
+                "body": "plain reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$plain_root"}},
+            },
+            "event_id": "$event",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+    target = MessageTarget.resolve("!room:localhost", "$plain_root", "$event")
+    envelope = _envelope(source_event_id="$event", target=target)
+
+    with (
+        patch.object(
+            resolver,
+            "resolve_strict_thread_context",
+            new=AsyncMock(return_value=(None, [])),
+        ) as mock_resolve_strict_context,
+        patch.object(
+            resolver,
+            "fetch_thread_history",
+            new=AsyncMock(side_effect=AssertionError("candidate roots must be re-proved before refresh")),
+        ),
+    ):
+        request = await coordinator._refresh_thread_history_after_lock(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$plain_root",
+                thread_history=[],
+                prompt="hello",
+                user_id="@user:localhost",
+                response_envelope=envelope,
+                target=target,
+                requires_full_thread_history=True,
+                thread_membership_trust=ThreadMembershipTrust.PROVISIONAL,
+                thread_history_trust=ThreadHistoryTrust.DEGRADED,
+                thread_membership_event_info=event_info,
+            ),
+        )
+
+    mock_resolve_strict_context.assert_awaited_once_with(
+        "!room:localhost",
+        "$event",
+        event_info,
+        caller_label="dispatch_post_lock_membership",
+    )
+    assert request.thread_id is None
+    assert request.thread_history == []
+    assert request.requires_full_thread_history is False
+    assert request.thread_membership_provisional is False
+    assert request.thread_membership_trust is ThreadMembershipTrust.ROOM_LEVEL
+    assert request.thread_history_trust is ThreadHistoryTrust.NONE
+    assert request.target is not None
+    assert request.target.resolved_thread_id is None
+    assert request.response_envelope is not None
+    assert request.response_envelope.target.resolved_thread_id is None
 
 
 @pytest.mark.asyncio

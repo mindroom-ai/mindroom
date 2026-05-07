@@ -33,6 +33,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
+from mindroom.conversation_resolver import MessageContext
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix import thread_bookkeeping
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
@@ -81,6 +82,7 @@ from mindroom.runtime_support import (
     close_owned_runtime_support,
     sync_owned_runtime_support,
 )
+from mindroom.thread_context_state import ThreadHistoryTrust, ThreadMembershipTrust
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -9008,6 +9010,11 @@ class TestThreadingBehavior:
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history is degraded_snapshot
         assert context.requires_full_thread_history is True
+        assert context.thread_membership_provisional is True
+        assert context.thread_membership_trust is ThreadMembershipTrust.PROVISIONAL
+        assert context.thread_history_trust is ThreadHistoryTrust.DEGRADED
+        assert context.planning_thread_history == ()
+        assert context.thread_membership_event_info is not None
         mock_lookup.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         mock_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         assert mock_read.await_count == 2
@@ -9084,6 +9091,85 @@ class TestThreadingBehavior:
         assert context.is_thread is False
         assert context.thread_id is None
         assert context.thread_history == []
+        assert context.requires_full_thread_history is False
+
+    @pytest.mark.asyncio
+    async def test_hydrate_dispatch_context_recovers_degraded_unmentioned_thread_history_for_planning(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Unmentioned threaded follow-ups need strict history before policy decisions."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "follow-up", "msgtype": "m.text"},
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        degraded_history = ThreadHistoryResult(
+            [],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+            },
+        )
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread_root:localhost",
+            thread_history=degraded_history,
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+            requires_full_thread_history=True,
+            thread_membership_trust=ThreadMembershipTrust.PROVEN,
+            thread_history_trust=ThreadHistoryTrust.DEGRADED,
+        )
+        degraded_full_context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread_root:localhost",
+            thread_history=degraded_history,
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+            requires_full_thread_history=True,
+            thread_membership_trust=ThreadMembershipTrust.PROVEN,
+            thread_history_trust=ThreadHistoryTrust.DEGRADED,
+        )
+        strict_history = [
+            _message(event_id="$thread_root:localhost", body="Root"),
+            _message(event_id="$agent_reply:localhost", body="Agent reply", sender="@mindroom_general:localhost"),
+        ]
+        resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
+
+        with (
+            patch.object(
+                resolver,
+                "extract_message_context_impl",
+                AsyncMock(return_value=degraded_full_context),
+            ) as mock_extract_full_context,
+            patch.object(
+                resolver,
+                "resolve_strict_thread_context",
+                AsyncMock(return_value=("$thread_root:localhost", strict_history)),
+            ) as mock_resolve_strict_context,
+        ):
+            await resolver.hydrate_dispatch_context(room, event, context)
+
+        mock_extract_full_context.assert_awaited_once()
+        mock_resolve_strict_context.assert_awaited_once()
+        assert context.thread_id == "$thread_root:localhost"
+        assert context.thread_history == strict_history
+        assert context.planning_thread_history == strict_history
+        assert context.thread_membership_trust is ThreadMembershipTrust.PROVEN
+        assert context.thread_history_trust is ThreadHistoryTrust.PLANNING_USABLE
         assert context.requires_full_thread_history is False
 
     @pytest.mark.asyncio
@@ -9255,6 +9341,7 @@ class TestThreadingBehavior:
                 thread_id,
                 history,
                 requires_full_thread_history,
+                thread_membership_provisional,
             ) = await bot._conversation_resolver._resolve_thread_context(
                 room_id,
                 incoming_event_id,
@@ -9271,6 +9358,7 @@ class TestThreadingBehavior:
             "$thread_reply:localhost",
         ]
         assert requires_full_thread_history is False
+        assert thread_membership_provisional is False
         mock_lookup.assert_awaited_once_with(room_id, "$thread_root:localhost")
         mock_get_event.assert_awaited_once_with(room_id, "$thread_root:localhost")
         assert mock_history.await_count == 2

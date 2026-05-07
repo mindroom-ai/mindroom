@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import nio
@@ -1327,12 +1327,21 @@ class TurnController:
             try:
 
                 async def prepare_request_after_lock(request: ResponseRequest) -> ResponseRequest:
+                    nonlocal dispatch
                     nonlocal payload_ready_monotonic
                     if dispatch_timing is not None:
                         dispatch_timing.mark("response_payload_start")
+                    if request.target is not None and request.target != dispatch.target:
+                        dispatch = replace(
+                            dispatch,
+                            target=request.target,
+                            envelope=request.response_envelope or dispatch.envelope,
+                        )
                     dispatch.context.thread_history = request.thread_history
                     dispatch.context.thread_id = request.thread_id
                     dispatch.context.requires_full_thread_history = False
+                    dispatch.context.thread_membership_trust = request.thread_membership_trust
+                    dispatch.context.thread_history_trust = request.thread_history_trust
                     payload_builder_started = time.monotonic()
                     payload_builder_outcome = "failed"
                     try:
@@ -1394,6 +1403,9 @@ class TurnController:
                         matrix_run_metadata=request.matrix_run_metadata,
                         system_enrichment_items=prepared_payload.system_enrichment_items,
                         requires_full_thread_history=False,
+                        thread_membership_trust=request.thread_membership_trust,
+                        thread_history_trust=request.thread_history_trust,
+                        thread_membership_event_info=request.thread_membership_event_info,
                         on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
                         pipeline_timing=request.pipeline_timing,
                         queued_notice_reservation=request.queued_notice_reservation,
@@ -1415,6 +1427,9 @@ class TurnController:
                             target=dispatch.target,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_full_thread_history=dispatch.context.requires_full_thread_history,
+                            thread_membership_trust=dispatch.context.thread_membership_trust,
+                            thread_history_trust=dispatch.context.thread_history_trust,
+                            thread_membership_event_info=dispatch.context.thread_membership_event_info,
                             prepare_after_lock=prepare_request_after_lock,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
@@ -1436,6 +1451,9 @@ class TurnController:
                             target=dispatch.target,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_full_thread_history=dispatch.context.requires_full_thread_history,
+                            thread_membership_trust=dispatch.context.thread_membership_trust,
+                            thread_history_trust=dispatch.context.thread_history_trust,
+                            thread_membership_event_info=dispatch.context.thread_membership_event_info,
                             prepare_after_lock=prepare_request_after_lock,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
@@ -1728,12 +1746,29 @@ class TurnController:
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
             hydrate_kwargs = {"payload_metadata": payload_metadata} if payload_metadata is not None else {}
+            had_provisional_thread_membership = dispatch.context.thread_membership_provisional
             await self.deps.resolver.hydrate_dispatch_context(
                 room,
                 event,
                 dispatch.context,
                 **hydrate_kwargs,
             )
+            hydrated_target = (
+                dispatch.target.with_thread_root(None)
+                if had_provisional_thread_membership and dispatch.context.thread_id is None
+                else self.deps.resolver.build_message_target(
+                    room_id=room.room_id,
+                    thread_id=dispatch.context.thread_id,
+                    reply_to_event_id=event.event_id,
+                    event_source=event.source,
+                )
+            )
+            if hydrated_target != dispatch.target:
+                dispatch = replace(
+                    dispatch,
+                    target=hydrated_target,
+                    envelope=replace(dispatch.envelope, target=hydrated_target),
+                )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_plan_start")
             plan = await self.deps.turn_policy.plan_turn(

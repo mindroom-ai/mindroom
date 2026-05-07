@@ -396,11 +396,12 @@ class TurnPolicy:
         materializable_agent_names: set[str] | None = None,
     ) -> TeamResolution:
         """Decide team formation using sender-visible candidates without losing explicit intent."""
+        planning_thread_history = context.planning_thread_history
         if (
             context.is_thread
             and not context.mentioned_agents
             and has_multiple_non_agent_users_in_thread(
-                context.thread_history,
+                planning_thread_history,
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
             )
@@ -408,7 +409,7 @@ class TurnPolicy:
             return TeamResolution.none()
 
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(
-            context.thread_history,
+            planning_thread_history,
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
@@ -447,10 +448,11 @@ class TurnPolicy:
             return None
 
         context = dispatch.context
+        planning_thread_history = context.planning_thread_history
         requester_user_id = dispatch.requester_user_id
         if not context.mentioned_agents and not context.has_non_agent_mentions:
             if context.is_thread and thread_requires_explicit_agent_targeting(
-                context.thread_history,
+                planning_thread_history,
                 sender_id=requester_user_id,
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
@@ -524,8 +526,9 @@ class TurnPolicy:
         has_active_response_for_target: Callable[[MessageTarget], bool] | None = None,
     ) -> ResponseAction:
         """Decide whether to respond as a team, individually, or not at all."""
+        planning_thread_history = context.planning_thread_history
         agents_in_thread = get_agents_in_thread(
-            context.thread_history,
+            planning_thread_history,
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
@@ -554,7 +557,7 @@ class TurnPolicy:
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
             room=room,
-            thread_history=context.thread_history,
+            thread_history=planning_thread_history,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             mentioned_agents=context.mentioned_agents,

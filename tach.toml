@@ -873,6 +873,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.thread_summary",
+    "mindroom.thread_context_state",
     "mindroom.tool_system.runtime_context", "mindroom.tool_system.worker_routing",
 ]
 
@@ -1539,8 +1540,10 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.thread_membership",
     "mindroom.runtime_protocols",
+    "mindroom.thread_context_state",
 ]
 
 [[modules]]
@@ -1551,6 +1554,10 @@ depends_on = [
     "mindroom.history",
     "mindroom.runtime_protocols",
 ]
+
+[[modules]]
+path = "mindroom.thread_context_state"
+depends_on = []
 
 [[modules]]
 path = "mindroom.bot"
