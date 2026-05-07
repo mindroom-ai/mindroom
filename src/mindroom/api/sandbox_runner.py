@@ -36,6 +36,7 @@ from mindroom.config.main import Config, load_config, normalized_config_data
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.runtime_env_policy import public_worker_startup_env
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -104,13 +105,7 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
     if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
         return startup_runtime_paths
     process_env = dict(startup_runtime_paths.process_env)
-    process_env.update(
-        {
-            key: value
-            for key, value in os.environ.items()
-            if key not in {_RUNNER_TOKEN_ENV, constants.SANDBOX_STARTUP_MANIFEST_PATH_ENV}
-        },
-    )
+    process_env.update(public_worker_startup_env(os.environ))
     resolved_runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=startup_runtime_paths.config_path,
         storage_path=startup_runtime_paths.storage_root,

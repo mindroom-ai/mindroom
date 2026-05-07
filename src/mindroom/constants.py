@@ -1,11 +1,5 @@
-"""Shared constants for the mindroom package.
+"""Shared constants and runtime path helpers for the mindroom package."""
 
-This module contains constants that are used across multiple modules
-to avoid circular imports. It does not import anything from the internal
-codebase.
-"""
-
-import fnmatch
 import hashlib
 import json
 import os
@@ -20,6 +14,8 @@ from typing import TypeGuard, cast
 
 from dotenv import dotenv_values
 
+from mindroom import runtime_env_policy
+
 # Agent names
 ROUTER_AGENT_NAME = "router"
 MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
@@ -27,10 +23,10 @@ MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
-SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
+SANDBOX_STARTUP_MANIFEST_PATH_ENV = runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV
 _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
-CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
-CREDENTIAL_SEEDS_FILE_ENV = "MINDROOM_CREDENTIAL_SEEDS_FILE"
+CREDENTIAL_SEEDS_JSON_ENV = runtime_env_policy.CREDENTIAL_SEEDS_JSON_ENV
+CREDENTIAL_SEEDS_FILE_ENV = runtime_env_policy.CREDENTIAL_SEEDS_FILE_ENV
 _CREDENTIAL_SEED_DECLARATION_ENV_NAMES = frozenset(
     {
         CREDENTIAL_SEEDS_JSON_ENV,
@@ -38,124 +34,10 @@ _CREDENTIAL_SEED_DECLARATION_ENV_NAMES = frozenset(
     },
 )
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
-_RUNTIME_STARTUP_ENV_PREFIXES = ("MINDROOM_", "MATRIX_", "BROWSER_")
 # Evidence sources: installed package code in .venv; vendor docs only for
-# frontend/W&B controls. Python runtime envs are centralized here so
+# frontend/W&B controls. Python runtime envs are centralized in runtime_env_policy so
 # deployments do not repeat them.
-VENDOR_TELEMETRY_ENV_VALUES: Mapping[str, str] = MappingProxyType(
-    {
-        "AGNO_TELEMETRY": "false",
-        "ANONYMIZED_TELEMETRY": "false",
-        "CHROMA_OTEL_COLLECTION_ENDPOINT": "",
-        "CHROMA_OTEL_GRANULARITY": "none",
-        "COMPOSIO_DISABLE_SENTRY": "true",
-        "COMPOSIO_DISABLE_VERSION_CHECK": "true",
-        "DISABLE_TELEMETRY": "1",
-        "DO_NOT_TRACK": "1",
-        "HF_HUB_DISABLE_TELEMETRY": "1",
-        "LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS": "true",
-        "LITELLM_LOCAL_MODEL_COST_MAP": "true",
-        "MEM0_TELEMETRY": "false",
-        "MEM0_TELEMETRY_SAMPLE_RATE": "0",
-        "NEXT_TELEMETRY_DISABLED": "1",
-        "OTEL_SDK_DISABLED": "true",
-        "TURBO_TELEMETRY_DISABLED": "1",
-        "WANDB_MODE": "disabled",
-    },
-)
-_VENDOR_TELEMETRY_ENV_NAMES = frozenset(VENDOR_TELEMETRY_ENV_VALUES)
-_RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
-    {
-        "ACCOUNT_ID",
-        "ANTHROPIC_VERTEX_BASE_URL",
-        "ANTHROPIC_VERTEX_PROJECT_ID",
-        "CLOUD_ML_REGION",
-        "CUSTOMER_ID",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        "GOOGLE_CLOUD_LOCATION",
-        "GOOGLE_CLOUD_PROJECT",
-        "OLLAMA_HOST",
-        "OPENAI_BASE_URL",
-        "POD_NAMESPACE",
-        *_VENDOR_TELEMETRY_ENV_NAMES,
-    },
-)
-_ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset(
-    {
-        "ACCOUNT_ID",
-        "CUSTOMER_ID",
-        "POD_NAMESPACE",
-        *_VENDOR_TELEMETRY_ENV_NAMES,
-    },
-)
-_RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
-    {
-        *_CREDENTIAL_SEED_DECLARATION_ENV_NAMES,
-        "MINDROOM_EVENT_CACHE_DATABASE_URL",
-        "MINDROOM_LOCAL_CLIENT_ID",
-        "MINDROOM_SANDBOX_PROXY_TOKEN",
-    },
-)
-# Startup/public runtime env scoping still withholds common credential suffixes
-# before booting isolated workers. This is separate from explicit shell
-# passthrough and workspace hook overlays, which trust user-selected values.
-_RUNTIME_STARTUP_SECRET_SUFFIXES = (
-    "_API_KEY",
-    "_API_KEYS",
-    "_PASSWORD",
-    "_SECRET",
-    "_TOKEN",
-)
-_RUNTIME_DATABASE_URL_NAMES = frozenset({"DATABASE_URL"})
-_RUNTIME_DATABASE_URL_SUFFIXES = ("_DATABASE_URL",)
-_EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
-    {
-        *_RUNTIME_STARTUP_EXCLUDED_NAMES,
-        "MINDROOM_API_KEY",
-        "MINDROOM_LOCAL_CLIENT_SECRET",
-        SANDBOX_STARTUP_MANIFEST_PATH_ENV,
-    },
-)
-_RUNNER_CONTROL_ENV_EXCLUDED_NAMES = frozenset(
-    {
-        "MINDROOM_API_KEY",
-        "MINDROOM_LOCAL_CLIENT_SECRET",
-        "MINDROOM_SANDBOX_PROXY_TOKEN",
-        SANDBOX_STARTUP_MANIFEST_PATH_ENV,
-    },
-)
-_SANDBOX_SHELL_SYSTEM_ENV_NAMES = frozenset(
-    {
-        "CURL_CA_BUNDLE",
-        "HOME",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "LD_LIBRARY_PATH",
-        "NIX_LD",
-        "NIX_LD_LIBRARY_PATH",
-        "NO_PROXY",
-        "PATH",
-        "PIP_CACHE_DIR",
-        "PYTHONPATH",
-        "PYTHONPYCACHEPREFIX",
-        "REQUESTS_CA_BUNDLE",
-        "SHELL",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "TERM",
-        "TMPDIR",
-        "USER",
-        "UV_CACHE_DIR",
-        "VIRTUAL_ENV",
-        "XDG_CACHE_HOME",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-    },
-)
+VENDOR_TELEMETRY_ENV_VALUES = runtime_env_policy.VENDOR_TELEMETRY_ENV_VALUES
 
 # Bash bookkeeping vars that change every time printenv runs and are never
 # meaningful overlay output from `.mindroom/worker-env.sh`.
@@ -228,9 +110,7 @@ def is_workspace_env_overlay_name_allowed(name: str) -> bool:
     """
     if not name:
         return False
-    if name in _RUNNER_CONTROL_ENV_EXCLUDED_NAMES:
-        return False
-    return not name.startswith("MINDROOM_SANDBOX_")
+    return runtime_env_policy.is_shell_passthrough_allowed_env_name(name)
 
 
 @dataclass(frozen=True)
@@ -422,43 +302,21 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
 
 
 def _is_public_runtime_startup_env_name(name: str) -> bool:
-    if name in _RUNTIME_STARTUP_EXCLUDED_NAMES:
-        return False
-    if is_runtime_database_url_env_name(name):
-        return False
-    if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _RUNTIME_STARTUP_ENV_EXTRA_KEYS):
-        return False
-    return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
+    return runtime_env_policy.is_public_worker_startup_env_name(name)
 
 
 def _is_isolated_runtime_public_env_name(name: str) -> bool:
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
-        return False
-    if is_runtime_database_url_env_name(name):
-        return False
-    if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _ISOLATED_RUNTIME_ENV_EXTRA_KEYS):
-        return False
-    return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
+    return runtime_env_policy.is_isolated_worker_runtime_env_name(name)
 
 
 def _is_sandbox_execution_runtime_env_name(name: str) -> bool:
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
-        return False
-    if is_runtime_database_url_env_name(name):
-        return False
-    if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _ISOLATED_RUNTIME_ENV_EXTRA_KEYS):
-        return False
-    return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
+    return runtime_env_policy.is_execution_runtime_env_name(name)
 
 
 def _serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     """Return a JSON payload for pod-visible worker startup without secrets."""
-    process_env = {
-        key: value for key, value in runtime_paths.process_env.items() if _is_public_runtime_startup_env_name(key)
-    }
-    env_file_values = {
-        key: value for key, value in runtime_paths.env_file_values.items() if _is_public_runtime_startup_env_name(key)
-    }
+    process_env = runtime_env_policy.public_worker_startup_env(runtime_paths.process_env)
+    env_file_values = runtime_env_policy.public_worker_startup_env(runtime_paths.env_file_values)
     return {
         "config_path": str(runtime_paths.config_path),
         "storage_root": str(runtime_paths.storage_root),
@@ -638,21 +496,19 @@ def _is_known_worker_credential_env_name(name: str) -> bool:
 
 def is_runtime_database_url_env_name(name: str) -> bool:
     """Return whether an env name conventionally carries a database connection URL."""
-    return name in _RUNTIME_DATABASE_URL_NAMES or name.endswith(_RUNTIME_DATABASE_URL_SUFFIXES)
+    return runtime_env_policy.is_runtime_database_url_env_name(name)
 
 
 def _is_execution_runtime_process_env_name(
     name: str,
 ) -> bool:
-    return name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES and (
-        _is_public_runtime_startup_env_name(name) or _is_known_worker_credential_env_name(name)
-    )
+    return runtime_env_policy.is_execution_runtime_process_env_name(name)
 
 
 def _is_allowed_execution_runtime_env_file_name(
     name: str,
 ) -> bool:
-    return name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES and not is_runtime_database_url_env_name(name)
+    return runtime_env_policy.is_execution_runtime_env_file_name(name)
 
 
 def _execution_runtime_env_layers(
@@ -711,17 +567,8 @@ def shell_extra_env_values(
     if not patterns:
         return cast("Mapping[str, str]", MappingProxyType({}))
 
-    selected_env: dict[str, str] = {}
     source_env = os.environ if process_env is None else process_env
-
-    for key, value in source_env.items():
-        if key in _RUNNER_CONTROL_ENV_EXCLUDED_NAMES:
-            continue
-        if key.startswith("MINDROOM_SANDBOX_"):
-            continue
-        if any(fnmatch.fnmatchcase(key, pattern) for pattern in patterns):
-            selected_env[key] = value
-
+    selected_env = runtime_env_policy.shell_passthrough_env(source_env, patterns=patterns)
     return cast("Mapping[str, str]", MappingProxyType(selected_env))
 
 
@@ -731,10 +578,7 @@ def _sandbox_shell_system_env_values(
 ) -> Mapping[str, str]:
     """Return the non-secret system env shell commands may receive by default."""
     source_env = os.environ if process_env is None else process_env
-    return cast(
-        "Mapping[str, str]",
-        MappingProxyType({key: value for key, value in source_env.items() if key in _SANDBOX_SHELL_SYSTEM_ENV_NAMES}),
-    )
+    return runtime_env_policy.sandbox_shell_system_env(source_env)
 
 
 def execution_runtime_env_values(

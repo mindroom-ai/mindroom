@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from mindroom import constants
 from mindroom.constants import RuntimePaths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import is_worker_backend_config_env_name
 from mindroom.tool_system import worker_routing
 from mindroom.workers.backend import WorkerBackendError
 
@@ -801,7 +802,7 @@ class KubernetesResourceManager:
         ]
 
         for name, value in sorted(self.config.extra_env.items()):
-            if name in constants.VENDOR_TELEMETRY_ENV_VALUES:
+            if name in constants.VENDOR_TELEMETRY_ENV_VALUES or is_worker_backend_config_env_name(name):
                 continue
             env.append({"name": name, "value": value})
         for name, value in sorted(constants.VENDOR_TELEMETRY_ENV_VALUES.items()):
@@ -861,9 +862,17 @@ class KubernetesResourceManager:
             if self.config.config_map_name is not None
             else self.runtime_paths.config_path.expanduser().resolve()
         )
-        process_env = dict(self.runtime_paths.process_env)
+        process_env = {
+            name: value
+            for name, value in self.runtime_paths.process_env.items()
+            if not is_worker_backend_config_env_name(name)
+        }
         process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        env_file_values = dict(self.runtime_paths.env_file_values)
+        env_file_values = {
+            name: value
+            for name, value in self.runtime_paths.env_file_values.items()
+            if not is_worker_backend_config_env_name(name)
+        }
         env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         process_env.update(
             {
@@ -878,7 +887,13 @@ class KubernetesResourceManager:
                 _DEDICATED_WORKER_ROOT_ENV: str(dedicated_root),
             },
         )
-        process_env.update(self.config.extra_env)
+        process_env.update(
+            {
+                name: value
+                for name, value in self.config.extra_env.items()
+                if not is_worker_backend_config_env_name(name)
+            },
+        )
         process_env.update(constants.VENDOR_TELEMETRY_ENV_VALUES)
         return constants.isolated_runtime_paths(
             RuntimePaths(

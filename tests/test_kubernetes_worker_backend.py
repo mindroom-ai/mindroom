@@ -370,6 +370,7 @@ def _backend(
     worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     resource_requests: dict[str, str] | None = None,
     resource_limits: dict[str, str] | None = None,
+    extra_env: dict[str, str] | None = None,
     extra_annotations: dict[str, str] | None = None,
     enable_service_links: bool = False,
     auth_secret_name: str | None = None,
@@ -391,7 +392,7 @@ def _backend(
         name_prefix=name_prefix,
         node_name=node_name,
         colocate_with_control_plane_node=colocate_with_control_plane_node,
-        extra_env={},
+        extra_env=extra_env or {},
         extra_labels={"mindroom.ai/tenant": "test"},
         extra_annotations=extra_annotations or {},
         owner_deployment_name=owner_deployment_name,
@@ -1167,6 +1168,60 @@ def test_kubernetes_backend_renders_configured_annotations_on_worker_pod_templat
     )
     assert annotations[ANNOTATION_WORKER_KEY] != "user-supplied-value"
     assert annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] != "user-supplied-value"
+
+
+def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifest(tmp_path: Path) -> None:
+    """Primary-side backend config carriers do not reach worker pods or startup manifests."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+        process_env={
+            "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"OPENAI_API_KEY": "nested-secret"}),
+            "MINDROOM_KUBERNETES_WORKER_LABELS_JSON": "{}",
+            "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON": "{}",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "mindroom-storage",
+            "MINDROOM_SHARED_CREDENTIALS_PATH": str(tmp_path / "primary-shared-credentials"),
+            "MATRIX_HOMESERVER": "https://matrix.example.invalid",
+        },
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        extra_env={
+            "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"ANTHROPIC_API_KEY": "nested-secret"}),
+            "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME": "primary-worker-auth",
+            "MINDROOM_WORKER_TOOL_VALUE": "visible",
+        },
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    container = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    startup_manifest = _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)
+    committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
+    committed_env = dict(committed_runtime.process_env) | dict(committed_runtime.env_file_values)
+
+    for name in (
+        "MINDROOM_KUBERNETES_WORKER_ENV_JSON",
+        "MINDROOM_KUBERNETES_WORKER_LABELS_JSON",
+        "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON",
+        "MINDROOM_KUBERNETES_WORKER_IMAGE",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME",
+        "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
+    ):
+        assert name not in env_values
+        assert name not in committed_env
+
+    assert env_values["MINDROOM_WORKER_TOOL_VALUE"] == "visible"
+    assert committed_runtime.env_value("MINDROOM_WORKER_TOOL_VALUE") == "visible"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_MODE") == "true"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_PORT") == "8766"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY") == _TEST_SCOPED_WORKER_KEY_A
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT")
+    assert committed_runtime.env_value("MINDROOM_SHARED_CREDENTIALS_PATH")
+    assert committed_runtime.env_value("MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX") == "workers"
 
 
 def test_kubernetes_backend_rejects_unknown_worker_keys_for_scoped_mounts() -> None:
