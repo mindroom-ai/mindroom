@@ -227,12 +227,10 @@ _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
         "MINDROOM_LOCAL_CLIENT_SECRET",
     },
 )
-_RUNNER_CONTROL_ENV_EXCLUDED_NAMES = frozenset(
+_NON_SANDBOX_RUNTIME_CONTROL_ENV_NAMES = frozenset(
     {
         "MINDROOM_API_KEY",
         "MINDROOM_LOCAL_CLIENT_SECRET",
-        SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
-        SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
 _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES = frozenset(
@@ -283,7 +281,7 @@ _KNOWN_WORKER_CREDENTIAL_ENV_NAMES = frozenset(
 def is_runtime_control_env_name(name: str) -> bool:
     """Return whether an env var is internal runtime/control-plane material."""
     return (
-        name in _RUNNER_CONTROL_ENV_EXCLUDED_NAMES
+        name in _NON_SANDBOX_RUNTIME_CONTROL_ENV_NAMES
         or name in _CREDENTIAL_SEED_DECLARATION_ENV_NAMES
         or name.startswith(_SANDBOX_RUNTIME_ENV_PREFIX)
         or is_worker_backend_config_env_name(name)

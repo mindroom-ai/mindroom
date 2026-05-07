@@ -3,9 +3,48 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 from pathlib import Path
 
 from mindroom import runtime_env_policy
+
+_POLICY_OWNED_ENV_PREFIXES = (
+    "MINDROOM_CREDENTIAL_SEEDS_",
+    "MINDROOM_KUBERNETES_WORKER_",
+    "MINDROOM_SANDBOX_",
+    "MINDROOM_SHARED_CREDENTIALS_",
+    "MINDROOM_WORKER_BACKEND",
+)
+_POLICY_OWNED_ENV_EXTRA_NAMES = frozenset(runtime_env_policy.VERTEXAI_CLAUDE_ENV_BY_KEY.values())
+_PYTHON_STRING_LITERAL_RE = re.compile(
+    r"""(?P<prefix>[rubfRUBF]*)?(?P<quote>["'])(?P<value>[A-Z][A-Z0-9_]+)(?P=quote)""",
+)
+
+
+def _policy_owned_env_values(value: object) -> set[str]:
+    if isinstance(value, str):
+        if value.startswith(_POLICY_OWNED_ENV_PREFIXES) or value in _POLICY_OWNED_ENV_EXTRA_NAMES:
+            return {value}
+        return set()
+    if isinstance(value, Mapping):
+        values: set[str] = set()
+        for item in value.values():
+            values.update(_policy_owned_env_values(item))
+        return values
+    if isinstance(value, frozenset | tuple):
+        values = set()
+        for item in value:
+            values.update(_policy_owned_env_values(item))
+        return values
+    return set()
+
+
+def _runtime_policy_owned_env_names() -> set[str]:
+    names: set[str] = set()
+    for export_name in runtime_env_policy.__all__:
+        names.update(_policy_owned_env_values(getattr(runtime_env_policy, export_name)))
+    return names
 
 
 def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
@@ -226,20 +265,16 @@ def test_runtime_control_env_literals_stay_in_policy_module() -> None:
     """Python callers should import centralized runtime env names from the policy module."""
     source_root = Path(__file__).resolve().parents[1] / "src" / "mindroom"
     allowed_path = source_root / "runtime_env_policy.py"
-    policy_owned_env_names = {
-        *runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES,
-        *runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY.values(),
-        runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV,
-        runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV,
-    }
+    policy_owned_env_names = _runtime_policy_owned_env_names()
 
     violations: dict[str, list[str]] = {}
     for path in source_root.rglob("*.py"):
         if path == allowed_path:
             continue
         text = path.read_text(encoding="utf-8")
-        leaked_names = [name for name in policy_owned_env_names if repr(name) in text or f'"{name}"' in text]
+        literal_names = {match.group("value") for match in _PYTHON_STRING_LITERAL_RE.finditer(text)}
+        leaked_names = sorted(policy_owned_env_names & literal_names)
         if leaked_names:
-            violations[str(path.relative_to(source_root))] = sorted(leaked_names)
+            violations[str(path.relative_to(source_root))] = leaked_names
 
     assert violations == {}
