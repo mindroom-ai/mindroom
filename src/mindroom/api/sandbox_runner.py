@@ -973,6 +973,7 @@ async def _execute_request_inprocess(
         runtime_paths,
         execution_env,
         include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
+        include_credentials_encryption_key=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
         trusted_env_overlay=trusted_env_overlay,
     )
     execution_identity: ToolExecutionIdentity | None = None
@@ -1141,6 +1142,7 @@ def _execute_request_subprocess_sync(
         execution_env,
         trusted_env_overlay=trusted_overlay,
         include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
+        include_credentials_encryption_key=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
     )
     subprocess_request = request.model_copy(update={"execution_env": execution_env})
     envelope = sandbox_protocol.serialize_subprocess_envelope(

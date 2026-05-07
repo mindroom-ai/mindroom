@@ -1149,9 +1149,92 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     assert child_runtime.env_file_values["MINDROOM_NAMESPACE"] == "alpha1234"
     assert child_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert child_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
+    assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert "dotenv-key" not in json.dumps(captured_payload)
+
+
+def test_subprocess_python_runtime_payload_omits_credentials_encryption_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Python subprocess execution should not receive the credential encryption key through runtime payloads."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    encryption_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    captured_payload: dict[str, object] = {}
+
+    def fake_run(
+        cmd: list[str],
+        **run_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del cmd
+        envelope = json.loads(str(run_kwargs["input"]))
+        captured_payload.update(envelope["runtime_paths"])
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
+        )
+
+    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="python",
+            function_name="run_python_code",
+            args=["result = 1", "result"],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+    child_runtime = sandbox_runner_module.constants.deserialize_runtime_paths(captured_payload)
+
+    assert response.ok is True
     assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
     assert encryption_key not in json.dumps(captured_payload)
-    assert "dotenv-key" not in json.dumps(captured_payload)
+
+
+def test_non_execution_tool_runtime_keeps_credentials_encryption_key(tmp_path: Path) -> None:
+    """Trusted non-execution tool runtime paths should keep the key needed to load encrypted credentials."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    encryption_key = base64.urlsafe_b64encode(b"2" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    credentials = {"token": "secret", "_source": "ui"}
+    get_runtime_credentials_manager(runtime_paths).save_credentials("custom_tool", credentials)
+
+    effective_runtime = sandbox_exec_module.runtime_paths_with_execution_env(
+        runtime_paths,
+        {},
+        include_credentials_encryption_key=True,
+    )
+    python_runtime = sandbox_exec_module.runtime_paths_with_execution_env(
+        runtime_paths,
+        {},
+        include_base_execution_env=False,
+    )
+
+    assert effective_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert get_runtime_credentials_manager(effective_runtime).load_credentials("custom_tool") == credentials
+    assert python_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert get_runtime_credentials_manager(python_runtime).load_credentials("custom_tool") is None
 
 
 def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Path) -> None:
