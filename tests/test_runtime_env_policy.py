@@ -53,6 +53,7 @@ def test_shell_passthrough_globs_do_not_expose_runtime_control_env() -> None:
         "MINDROOM_SANDBOX_RUNNER_MODE": "true",
         "MINDROOM_KUBERNETES_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
         "MINDROOM_KUBERNETES_WORKER_ENV_JSON": "{}",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
         "MINDROOM_USER_SELECTED": "allowed",
         "PUBLIC_TOOL_VALUE": "allowed",
     }
@@ -99,6 +100,7 @@ def test_sandbox_runner_startup_process_env_keeps_ambient_values_and_drops_contr
         "MINDROOM_SANDBOX_PROXY_TOKEN": "runner-secret",
         "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH": "/app/.runtime/startup.json",
         "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"OPENAI_API_KEY": "nested-secret"}),
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
     }
 
     result = runtime_env_policy.sandbox_runner_startup_process_env(env)
@@ -113,6 +115,7 @@ def test_worker_backend_config_names_are_classified_and_excluded_from_public_sta
     """Primary-side Kubernetes backend config env names are never public startup env."""
     backend_names = {
         "MINDROOM_KUBERNETES_WORKER_IMAGE",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX",
         "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME",
         "MINDROOM_KUBERNETES_WORKER_ENV_JSON",
         "MINDROOM_KUBERNETES_WORKER_LABELS_JSON",
@@ -126,3 +129,19 @@ def test_worker_backend_config_names_are_classified_and_excluded_from_public_sta
 
     assert all(runtime_env_policy.is_worker_backend_config_env_name(name) for name in backend_names)
     assert runtime_env_policy.public_worker_startup_env(env) == {}
+
+
+def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filtering() -> None:
+    """Storage subpath is backend config when inherited, but explicit worker runtime state when re-added."""
+    env = {
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
+        "MINDROOM_KUBERNETES_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+    }
+
+    assert runtime_env_policy.is_worker_backend_config_env_name("MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX")
+    assert runtime_env_policy.is_isolated_worker_runtime_env_name(
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX",
+    )
+    assert runtime_env_policy.isolated_worker_runtime_env(env) == {
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
+    }

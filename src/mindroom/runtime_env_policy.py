@@ -68,6 +68,7 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES = frozenset(
         "MINDROOM_KUBERNETES_WORKER_SERVICE_ACCOUNT_NAME",
         "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME",
         "MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX",
         "MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME",
         "MINDROOM_KUBERNETES_WORKER_CONFIG_KEY",
         "MINDROOM_KUBERNETES_WORKER_CONFIG_PATH",
@@ -117,8 +118,14 @@ _ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset(
     {
         "ACCOUNT_ID",
         "CUSTOMER_ID",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX",
         "POD_NAMESPACE",
         *_VENDOR_TELEMETRY_ENV_NAMES,
+    },
+)
+_WORKER_RUNTIME_STATE_ENV_NAMES = frozenset(
+    {
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX",
     },
 )
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
@@ -229,7 +236,9 @@ def is_public_worker_startup_env_name(name: str) -> bool:
 
 def is_isolated_worker_runtime_env_name(name: str) -> bool:
     """Return whether inherited env may remain visible inside isolated workers."""
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES or is_worker_backend_config_env_name(name):
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+        return False
+    if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
     if is_runtime_database_url_env_name(name):
         return False

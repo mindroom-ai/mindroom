@@ -27,12 +27,6 @@ SANDBOX_STARTUP_MANIFEST_PATH_ENV = runtime_env_policy.SANDBOX_STARTUP_MANIFEST_
 _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
 CREDENTIAL_SEEDS_JSON_ENV = runtime_env_policy.CREDENTIAL_SEEDS_JSON_ENV
 CREDENTIAL_SEEDS_FILE_ENV = runtime_env_policy.CREDENTIAL_SEEDS_FILE_ENV
-_CREDENTIAL_SEED_DECLARATION_ENV_NAMES = frozenset(
-    {
-        CREDENTIAL_SEEDS_JSON_ENV,
-        CREDENTIAL_SEEDS_FILE_ENV,
-    },
-)
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 # Evidence sources: installed package code in .venv; vendor docs only for
 # frontend/W&B controls. Python runtime envs are centralized in runtime_env_policy so
@@ -301,10 +295,6 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     }
 
 
-def _is_public_runtime_startup_env_name(name: str) -> bool:
-    return runtime_env_policy.is_public_worker_startup_env_name(name)
-
-
 def _is_isolated_runtime_public_env_name(name: str) -> bool:
     return runtime_env_policy.is_isolated_worker_runtime_env_name(name)
 
@@ -484,14 +474,6 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
-
-
-def _is_known_worker_credential_env_name(name: str) -> bool:
-    return name in {
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        "GITHUB_TOKEN",
-        *VERTEXAI_CLAUDE_ENV_KEYS,
-    }
 
 
 def is_runtime_database_url_env_name(name: str) -> bool:
