@@ -73,6 +73,7 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
 _STALE_RECORD_SECONDS = 600  # 10 minutes
 _MAX_BACKGROUNDED = 16
 _MAX_OUTPUT_LINES = 10_000
+_MAX_OUTPUT_BYTES = 50 * 1024
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
 _SHELL_ARGS_ERROR = '\'args\' must be a flat list of strings. Send args like ["bash", "-lc", "ls"].'
@@ -207,6 +208,49 @@ def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> 
 
 
 @dataclass
+class _OutputBuffer:
+    """Bound shell output by both line count and encoded byte size."""
+
+    max_lines: int = _MAX_OUTPUT_LINES
+    max_bytes: int = _MAX_OUTPUT_BYTES
+    lines: deque[str] = field(default_factory=deque)
+    byte_count: int = 0
+    truncated: bool = False
+
+    def append(self, line: str) -> None:
+        encoded = line.encode("utf-8", errors="replace")
+        if len(encoded) > self.max_bytes:
+            line = encoded[-self.max_bytes :].decode("utf-8", errors="ignore")
+            encoded = line.encode("utf-8", errors="replace")
+            self.truncated = True
+
+        self.lines.append(line)
+        self.byte_count += len(encoded)
+
+        while self.lines and (len(self.lines) > self.max_lines or self.byte_count > self.max_bytes):
+            removed = self.lines.popleft()
+            self.byte_count -= len(removed.encode("utf-8", errors="replace"))
+            self.truncated = True
+
+    def render(self, *, tail: int | None = None) -> str:
+        output_lines = list(self.lines)
+        if tail is not None:
+            output_lines = output_lines[-tail:]
+        output = "\n".join(output_lines)
+        if not self.truncated:
+            return output
+
+        notice = (
+            f"[Output truncated to the last {self.max_bytes} bytes. "
+            "Redirect command output to a file for complete results.]"
+        )
+        return f"{notice}\n{output}" if output else notice
+
+    def __len__(self) -> int:
+        return len(self.lines)
+
+
+@dataclass
 class _ProcessRecord:
     """Tracks a backgrounded shell process."""
 
@@ -215,8 +259,8 @@ class _ProcessRecord:
     pid: int
     args: list[str]
     process: asyncio.subprocess.Process
-    stdout_buf: deque[str] = field(default_factory=lambda: deque(maxlen=_MAX_OUTPUT_LINES))
-    stderr_buf: deque[str] = field(default_factory=lambda: deque(maxlen=_MAX_OUTPUT_LINES))
+    stdout_buf: _OutputBuffer = field(default_factory=_OutputBuffer)
+    stderr_buf: _OutputBuffer = field(default_factory=_OutputBuffer)
     started_at: float = field(default_factory=time.monotonic)
     tail: int = 100
     finished: bool = False
@@ -390,8 +434,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             except Exception as exc:
                 return f"Error: {exc}"
 
-            stdout_buf: deque[str] = deque(maxlen=_MAX_OUTPUT_LINES)
-            stderr_buf: deque[str] = deque(maxlen=_MAX_OUTPUT_LINES)
+            stdout_buf = _OutputBuffer()
+            stderr_buf = _OutputBuffer()
             background_handle: str | None = None
             background_monitor_task: asyncio.Task[None] | None = None
 
@@ -455,8 +499,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 raise
 
             if process.returncode != 0:
-                return f"Error: {chr(10).join(stderr_buf)}"
-            return "\n".join(list(stdout_buf)[-tail:])
+                return f"Error: {stderr_buf.render()}"
+            return stdout_buf.render(tail=tail)
 
         def check_shell_command(self, handle: str) -> str:
             """Poll the status of a backgrounded shell command.
@@ -479,15 +523,15 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             elapsed = time.monotonic() - record.started_at
 
             if record.finished:
-                output = "\n".join(list(record.stdout_buf)[-record.tail :])
-                errors = "\n".join(record.stderr_buf)
+                output = record.stdout_buf.render(tail=record.tail)
+                errors = record.stderr_buf.render()
                 result = f"Status: FINISHED (exit code {record.return_code}, ran for {elapsed:.1f}s)\n"
                 if record.return_code != 0 and errors:
                     result += f"Stderr:\n{errors}\n"
                 result += f"Output:\n{output}"
                 return result
 
-            partial = "\n".join(list(record.stdout_buf)[-50:])
+            partial = record.stdout_buf.render(tail=50)
             return (
                 f"Status: RUNNING (PID {record.pid}, elapsed {elapsed:.1f}s)\n"
                 f"Partial output ({len(record.stdout_buf)} lines so far):\n{partial}"
@@ -540,7 +584,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
 _log = get_logger(__name__)
 
 
-async def _read_stream(stream: asyncio.StreamReader | None, buf: deque[str]) -> None:
+async def _read_stream(stream: asyncio.StreamReader | None, buf: _OutputBuffer) -> None:
     """Read lines from an async stream into *buf* until EOF."""
     if stream is None:
         return
