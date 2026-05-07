@@ -1,0 +1,10 @@
+"""Shared Matrix thread-read diagnostic keys."""
+
+THREAD_HISTORY_SOURCE_DIAGNOSTIC = "thread_read_source"
+THREAD_HISTORY_SOURCE_CACHE = "cache"
+THREAD_HISTORY_SOURCE_HOMESERVER = "homeserver"
+THREAD_HISTORY_SOURCE_STALE_CACHE = "stale_cache"
+THREAD_HISTORY_SOURCE_DEGRADED = "degraded"
+THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC = "cache_reject_reason"
+THREAD_HISTORY_ERROR_DIAGNOSTIC = "thread_read_error"
+THREAD_HISTORY_DEGRADED_DIAGNOSTIC = "thread_read_degraded"

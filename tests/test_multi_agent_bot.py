@@ -5067,14 +5067,10 @@ class TestAgentBot:
             _room_id: str,
             _thread_id: str,
             *,
-            full_history: bool,
-            dispatch_safe: bool,
             caller_label: str,
-        ) -> list[ResolvedVisibleMessage]:
-            assert full_history is True
-            assert dispatch_safe is True
+        ) -> ThreadHistoryResult:
             assert caller_label == "dispatch_post_lock_refresh"
-            return fresh_history
+            return ThreadHistoryResult(fresh_history, is_full_history=True)
 
         with (
             patch.object(
@@ -5096,7 +5092,7 @@ class TestAgentBot:
             ),
             patch.object(
                 bot._conversation_cache,
-                "get_thread_messages",
+                "get_strict_thread_history",
                 new=AsyncMock(side_effect=cached_history_refresh),
             ) as mock_get_thread_history,
             patch_response_runner_module(
@@ -5120,8 +5116,6 @@ class TestAgentBot:
         mock_get_thread_history.assert_awaited_once_with(
             "!test:localhost",
             "$thread",
-            full_history=True,
-            dispatch_safe=True,
             caller_label="dispatch_post_lock_refresh",
         )
         request = mock_process.await_args.args[0]

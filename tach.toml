@@ -834,6 +834,7 @@ depends_on = [
     "mindroom.matrix.client_session",
     "mindroom.matrix.rooms",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.users",
     "mindroom.matrix_identifiers",
     "mindroom.memory",
@@ -862,6 +863,7 @@ depends_on = [
     "mindroom.history.turn_recorder",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.thread_diagnostics",
     "mindroom.memory",
     "mindroom.orchestration.runtime",
     "mindroom.post_response_effects",
@@ -1208,7 +1210,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.cache.thread_history_result"
-depends_on = []
+depends_on = ["mindroom.matrix.thread_diagnostics"]
 
 [[modules]]
 path = "mindroom.matrix.cache.thread_write_cache_ops"
@@ -1495,7 +1497,7 @@ depends_on = ["mindroom.matrix.event_info", "mindroom.matrix.thread_membership"]
 
 [[modules]]
 path = "mindroom.matrix.thread_membership"
-depends_on = ["mindroom.matrix.event_info"]
+depends_on = ["mindroom.matrix.event_info", "mindroom.matrix.thread_diagnostics"]
 
 [[modules]]
 path = "mindroom.matrix.thread_bookkeeping"
@@ -2302,7 +2304,7 @@ visibility = ["mindroom.matrix.conversation_cache"]
 exclusive = true
 
 [[interfaces]]
-expose = ["ThreadReadPolicy"]
+expose = ["ThreadReadMode", "ThreadReadPolicy"]
 from = ["mindroom.matrix.cache.thread_reads"]
 visibility = ["mindroom.matrix.conversation_cache"]
 exclusive = true

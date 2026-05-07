@@ -21,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.conversation_resolver import MessageContext
-from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.cache import THREAD_HISTORY_DEGRADED_DIAGNOSTIC, ThreadHistoryResult
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -915,6 +915,107 @@ class TestExtractMessageContextRoomMode:
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
+    def test_build_message_target_new_thread_root_uses_live_event_without_history_proof(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """New root replies should route from the live event without thread-history proof."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot._conversation_cache.get_thread_messages = AsyncMock(
+            side_effect=AssertionError("new thread root targeting must not fetch thread history"),
+        )
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$new-root:localhost",
+            event_source={
+                "content": {"body": "voice note", "msgtype": "m.audio"},
+                "event_id": "$new-root:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        assert target.reply_to_event_id == "$new-root:localhost"
+        assert target.source_thread_id is None
+        assert target.resolved_thread_id == "$new-root:localhost"
+        assert target.session_id == create_session_id("!room:localhost", "$new-root:localhost")
+        bot._conversation_cache.get_thread_messages.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extract_message_context_keeps_full_hydration_required_for_degraded_history(
+        self,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Degraded full-history reads should remain visible to later prompt preparation."""
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot.client = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "follow up",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root:localhost"},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        degraded_history = ThreadHistoryResult(
+            [],
+            is_full_history=False,
+            diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True},
+        )
+
+        with patch.object(
+            bot._conversation_cache,
+            "get_thread_messages",
+            AsyncMock(return_value=degraded_history),
+            create=True,
+        ):
+            context = await bot._conversation_resolver.extract_message_context_impl(
+                room,
+                event,
+                full_history=True,
+                dispatch_safe=True,
+                caller_label="dispatch_hydration",
+            )
+
+        assert context.is_thread is True
+        assert context.thread_id == "$thread-root:localhost"
+        assert context.thread_history is degraded_history
+        assert context.requires_full_thread_history is True
+
     @pytest.mark.parametrize("relation_type", ["m.replace", "m.annotation", "m.reference"])
     def test_build_message_target_plain_reply_relation_does_not_infer_thread_identity(
         self,
@@ -1389,7 +1490,7 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
-        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+        bot._conversation_cache.get_strict_thread_history = AsyncMock(return_value=[])
 
         asyncio.run(
             unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
@@ -1399,8 +1500,8 @@ class TestExtractedModuleLoggerRebinding:
             ),
         )
 
-        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once()
-        assert bot._conversation_cache.get_dispatch_thread_history.await_args.args == (
+        bot._conversation_cache.get_strict_thread_history.assert_awaited_once()
+        assert bot._conversation_cache.get_strict_thread_history.await_args.args == (
             "!room:localhost",
             "$threadroot",
         )

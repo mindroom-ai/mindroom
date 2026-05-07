@@ -6,6 +6,8 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, overload
 
+from mindroom.matrix import thread_diagnostics
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -13,13 +15,14 @@ if TYPE_CHECKING:
 
 type _ThreadHistoryDiagnosticValue = str | int | float | bool
 
-THREAD_HISTORY_SOURCE_DIAGNOSTIC = "thread_read_source"
-THREAD_HISTORY_SOURCE_CACHE = "cache"
-THREAD_HISTORY_SOURCE_HOMESERVER = "homeserver"
-THREAD_HISTORY_SOURCE_STALE_CACHE = "stale_cache"
-THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC = "cache_reject_reason"
-THREAD_HISTORY_ERROR_DIAGNOSTIC = "thread_read_error"
-THREAD_HISTORY_DEGRADED_DIAGNOSTIC = "thread_read_degraded"
+THREAD_HISTORY_SOURCE_DIAGNOSTIC = thread_diagnostics.THREAD_HISTORY_SOURCE_DIAGNOSTIC
+THREAD_HISTORY_SOURCE_CACHE = thread_diagnostics.THREAD_HISTORY_SOURCE_CACHE
+THREAD_HISTORY_SOURCE_HOMESERVER = thread_diagnostics.THREAD_HISTORY_SOURCE_HOMESERVER
+THREAD_HISTORY_SOURCE_STALE_CACHE = thread_diagnostics.THREAD_HISTORY_SOURCE_STALE_CACHE
+THREAD_HISTORY_SOURCE_DEGRADED = thread_diagnostics.THREAD_HISTORY_SOURCE_DEGRADED
+THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC = thread_diagnostics.THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC
+THREAD_HISTORY_ERROR_DIAGNOSTIC = thread_diagnostics.THREAD_HISTORY_ERROR_DIAGNOSTIC
+THREAD_HISTORY_DEGRADED_DIAGNOSTIC = thread_diagnostics.THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 
 
 @dataclass(slots=True, eq=False)

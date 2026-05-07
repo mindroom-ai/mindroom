@@ -12,11 +12,12 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import nio
 
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_SOURCE_DEGRADED, THREAD_HISTORY_SOURCE_DIAGNOSTIC
 
 if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -32,6 +33,13 @@ class _SupportsEventId(Protocol):
     """Minimal protocol for snapshot entries used during thread-root checks."""
 
     event_id: str
+
+
+@runtime_checkable
+class _SupportsThreadDiagnostics(Protocol):
+    """Thread-read results may expose diagnostics describing degraded reads."""
+
+    diagnostics: Mapping[str, object]
 
 
 type _ThreadMessagesLookup = Callable[[str, str], Awaitable[Sequence[_SupportsEventId]]]
@@ -83,6 +91,7 @@ class ThreadResolution:
 
     state: ThreadResolutionState
     thread_id: str | None = None
+    candidate_thread_root_id: str | None = None
     error: Exception | None = None
 
     @classmethod
@@ -96,9 +105,13 @@ class ThreadResolution:
         return cls(ThreadResolutionState.ROOM_LEVEL)
 
     @classmethod
-    def indeterminate(cls, error: Exception) -> ThreadResolution:
+    def indeterminate(cls, error: Exception, candidate_thread_root_id: str | None = None) -> ThreadResolution:
         """Return one unresolved result caused by proof failure."""
-        return cls(ThreadResolutionState.INDETERMINATE, error=error)
+        return cls(
+            ThreadResolutionState.INDETERMINATE,
+            candidate_thread_root_id=candidate_thread_root_id,
+            error=error,
+        )
 
     @property
     def is_threaded(self) -> bool:
@@ -146,7 +159,7 @@ def _resolution_from_root_proof(
     if proof.state is _ThreadRootProofState.NOT_A_THREAD_ROOT:
         return ThreadResolution.room_level()
     assert proof.error is not None
-    return ThreadResolution.indeterminate(proof.error)
+    return ThreadResolution.indeterminate(proof.error, candidate_thread_root_id=thread_root_id)
 
 
 def _strict_thread_id_from_resolution(
@@ -290,7 +303,7 @@ async def resolve_event_thread_id_best_effort(
         event_id=event_id,
         allow_current_root=allow_current_root,
     )
-    return resolution.thread_id
+    return resolution.thread_id if resolution.state is ThreadResolutionState.THREADED else None
 
 
 async def resolve_related_event_thread_id_best_effort(
@@ -305,7 +318,7 @@ async def resolve_related_event_thread_id_best_effort(
         related_event_id,
         access=access,
     )
-    return resolution.thread_id
+    return resolution.thread_id if resolution.state is ThreadResolutionState.THREADED else None
 
 
 def map_backed_thread_membership_access(
@@ -375,6 +388,12 @@ async def _thread_messages_root_proof(
         if _is_thread_root_not_found_error(exc):
             return ThreadRootProof.not_a_thread_root()
         return ThreadRootProof.proof_unavailable(exc)
+    if (
+        isinstance(thread_messages, _SupportsThreadDiagnostics)
+        and thread_messages.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC) == THREAD_HISTORY_SOURCE_DEGRADED
+    ):
+        msg = "Thread root proof unavailable from degraded thread history"
+        return ThreadRootProof.proof_unavailable(RuntimeError(msg))
     has_children = any(message.event_id != thread_root_id for message in thread_messages)
     return ThreadRootProof.proven() if has_children else ThreadRootProof.not_a_thread_root()
 

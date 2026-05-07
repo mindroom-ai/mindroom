@@ -26,6 +26,7 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_system_enrich
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC, THREAD_HISTORY_ERROR_DIAGNOSTIC
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import (
     mark_auto_flush_dirty_session,
@@ -707,6 +708,19 @@ class ResponseRunner:
                 room_id=request.room_id,
                 thread_id=request.thread_id,
                 error=str(exc),
+            )
+            return request
+        thread_read_degraded = refreshed_history.diagnostics.get(THREAD_HISTORY_DEGRADED_DIAGNOSTIC, False)
+        if request.requires_full_thread_history and (not refreshed_history.is_full_history or thread_read_degraded):
+            msg = "Thread history refresh after lock returned degraded context"
+            raise RuntimeError(msg)
+        if not refreshed_history.is_full_history or thread_read_degraded:
+            self.deps.logger.warning(
+                "Thread history refresh after lock returned incomplete history; continuing with existing history",
+                room_id=request.room_id,
+                thread_id=request.thread_id,
+                thread_read_degraded=thread_read_degraded,
+                thread_read_error=refreshed_history.diagnostics.get(THREAD_HISTORY_ERROR_DIAGNOSTIC),
             )
             return request
         return replace(request, thread_history=refreshed_history, requires_full_thread_history=False)

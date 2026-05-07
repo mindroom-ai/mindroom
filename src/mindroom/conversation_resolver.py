@@ -22,6 +22,7 @@ from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
     resolve_event_thread_id_best_effort,
+    resolve_event_thread_membership,
     resolve_related_event_thread_id_best_effort,
     thread_messages_thread_membership_access,
 )
@@ -368,6 +369,18 @@ class ConversationResolver:
         caller_label: str,
     ) -> str | None:
         """Resolve canonical thread membership for one event."""
+        if dispatch_safe:
+            resolution = await resolve_event_thread_membership(
+                room_id,
+                event_info,
+                event_id=event_id,
+                access=self.thread_membership_access(
+                    full_history=full_history,
+                    dispatch_safe=dispatch_safe,
+                    caller_label=caller_label,
+                ),
+            )
+            return resolution.thread_id or resolution.candidate_thread_root_id
         return await resolve_event_thread_id(
             room_id,
             event_info,
@@ -497,9 +510,6 @@ class ConversationResolver:
             dispatch_safe=dispatch_safe,
             caller_label=caller_label,
         )
-        if full_history:
-            return True, thread_id, thread_messages, False
-
         return True, thread_id, thread_messages, not thread_messages.is_full_history
 
     async def extract_dispatch_context(
@@ -681,7 +691,7 @@ class ConversationResolver:
         context.thread_history = full_context.thread_history
         context.is_thread = full_context.is_thread
         context.thread_id = full_context.thread_id
-        context.requires_full_thread_history = False
+        context.requires_full_thread_history = full_context.requires_full_thread_history
 
     def cached_room(self, room_id: str) -> nio.MatrixRoom | None:
         """Return room from client cache when available."""
@@ -704,11 +714,9 @@ class ConversationResolver:
         *,
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
-        """Fetch strict post-lock thread history through the shared conversation-cache policy."""
-        return await self._read_thread_messages(
+        """Fetch strict full thread history through the shared conversation-cache policy."""
+        return await self.deps.conversation_cache.get_strict_thread_history(
             room_id,
             thread_id,
-            full_history=True,
-            dispatch_safe=True,
             caller_label=caller_label,
         )

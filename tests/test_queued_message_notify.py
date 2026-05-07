@@ -39,6 +39,11 @@ from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.interactive import InteractiveMetadata
+from mindroom.matrix.cache import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    ThreadHistoryResult,
+)
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -759,7 +764,17 @@ async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
-    fresh_history = [SimpleNamespace(event_id="$reply", body="updated")]
+    fresh_history = ThreadHistoryResult(
+        [
+            ResolvedVisibleMessage.synthetic(
+                sender="@user:localhost",
+                body="updated",
+                event_id="$reply",
+                content={"body": "updated"},
+            ),
+        ],
+        is_full_history=True,
+    )
 
     with patch.object(
         resolver,
@@ -784,6 +799,88 @@ async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(
         caller_label="dispatch_post_lock_refresh",
     )
     assert request.thread_history == fresh_history
+
+
+@pytest.mark.asyncio
+async def test_refresh_thread_history_after_lock_rejects_degraded_required_history(tmp_path: Path) -> None:
+    """Post-lock required full-history refreshes must not accept degraded context as complete."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=True,
+        diagnostics={
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+        },
+    )
+
+    with (
+        patch.object(
+            resolver,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=degraded_history),
+        ),
+        pytest.raises(RuntimeError, match="degraded context"),
+    ):
+        await coordinator._refresh_thread_history_after_lock(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=[],
+                prompt="hello",
+                user_id="@user:localhost",
+                requires_full_thread_history=True,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_refresh_thread_history_after_lock_keeps_existing_history_when_optional_refresh_degrades(
+    tmp_path: Path,
+) -> None:
+    """Optional post-lock refreshes should not replace existing history with degraded context."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+    existing_history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@user:localhost",
+            body="Existing root",
+            event_id="$thread",
+            content={"body": "Existing root"},
+        ),
+    ]
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=True,
+        diagnostics={
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+        },
+    )
+
+    with patch.object(
+        resolver,
+        "fetch_thread_history",
+        new=AsyncMock(return_value=degraded_history),
+    ):
+        request = await coordinator._refresh_thread_history_after_lock(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                thread_history=existing_history,
+                prompt="hello",
+                user_id="@user:localhost",
+                requires_full_thread_history=False,
+            ),
+        )
+
+    assert request.thread_history is existing_history
+    assert request.requires_full_thread_history is False
 
 
 @pytest.mark.asyncio
