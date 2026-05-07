@@ -174,12 +174,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                 "resource_type": resource_type,
                 "resource_id": resource_id,
                 "details": redact_audit_details(
-                    {
-                        **normalized_details,
-                        "path": path,
-                        "status_code": status_code,
-                        "user_email": user_email,
-                    },
+                    {**normalized_details, "path": path, "status_code": status_code, "user_email": user_email}
                 ),
                 "ip_address": ip_address,
                 "created_at": datetime.now(UTC).isoformat(),
