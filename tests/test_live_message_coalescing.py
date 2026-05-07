@@ -47,9 +47,17 @@ from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
     _BatchMediaAttachmentResult,
 )
+from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DEGRADED,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+)
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.thread_context_state import ThreadHistoryTrust
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.conftest import (
@@ -2984,6 +2992,67 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
     # Older message should be skipped — resolve_dispatch_action never called
+    action_mock.assert_not_awaited()
+    assert bot._turn_store.is_handled("$m1")
+
+
+@pytest.mark.asyncio
+async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_positive_proof(tmp_path: Path) -> None:
+    """Degraded empty thread history must not prove that no newer thread message exists."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="old",
+        source={"content": {"msgtype": "m.text", "body": "old"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="old", thread_id="$thread")
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=False,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+        },
+    )
+    dispatch.context.am_i_mentioned = False
+    dispatch.context.thread_history = degraded_history
+    dispatch.context.replay_guard_history = degraded_history
+    dispatch.context.thread_history_trust = ThreadHistoryTrust.DEGRADED
+    dispatch.context.requires_full_thread_history = True
+    newer_event_source = {
+        "event_id": "$m2",
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "room_id": room.room_id,
+        "type": "m.room.message",
+        "content": {
+            "msgtype": "m.text",
+            "body": "newer",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    }
+    bot.event_cache.get_recent_room_events.return_value = [newer_event_source]
+
+    action_mock = AsyncMock()
+    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    with (
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+    ):
+        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+
+    history_guard.assert_not_called()
+    bot.event_cache.get_recent_room_events.assert_awaited_once_with(
+        room.room_id,
+        event_type="m.room.message",
+        since_ts_ms=1001,
+    )
     action_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$m1")
 

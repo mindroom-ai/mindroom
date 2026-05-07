@@ -157,6 +157,11 @@ class MessageContext:
             return self.thread_history
         return ()
 
+    @property
+    def replay_guard_history_degraded(self) -> bool:
+        """Return whether replay history cannot prove that no newer thread message exists."""
+        return self.thread_history_trust is ThreadHistoryTrust.DEGRADED
+
     def replace_thread_state(self, other: MessageContext) -> None:
         """Copy the thread-derived state from another context after hydration."""
         self.is_thread = other.is_thread

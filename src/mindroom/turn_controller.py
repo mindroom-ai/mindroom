@@ -391,6 +391,120 @@ class TurnController:
             return True
         return False
 
+    def _should_skip_newer_cached_thread_lookup(
+        self,
+        event: TextDispatchEvent,
+        *,
+        thread_id: str | None,
+        source_kind: str | None,
+    ) -> bool:
+        if thread_id is None or event.server_timestamp is None:
+            return True
+        return is_automation_source_kind(source_kind or "") or (
+            source_kind is None
+            and isinstance(event, PreparedTextEvent)
+            and is_automation_source_kind(event.source_kind_override or "")
+        )
+
+    @staticmethod
+    def _cached_event_is_in_thread(event_source: dict[str, Any], thread_id: str) -> bool:
+        event_info = EventInfo.from_event(event_source)
+        return thread_id in {event_info.thread_id, event_info.thread_id_from_edit}
+
+    def _unresponded_requester_event_id(
+        self,
+        event_source: dict[str, Any],
+        *,
+        skipped_event_id: str,
+        requester_user_id: str,
+    ) -> str | None:
+        event_id = event_source.get("event_id")
+        sender = event_source.get("sender")
+        if not isinstance(event_id, str) or event_id == skipped_event_id or not isinstance(sender, str):
+            return None
+        if self._requester_user_id(sender=sender, source=event_source) != requester_user_id:
+            return None
+        if self.deps.turn_store.is_handled(event_id):
+            return None
+        content = event_source.get("content")
+        body = content.get("body") if isinstance(content, dict) else None
+        if isinstance(body, str) and command_parser.parse(body.strip()) is not None:
+            return None
+        return event_id
+
+    def _newer_unresponded_cached_thread_event_id(
+        self,
+        recent_events: Sequence[dict[str, Any]],
+        *,
+        skipped_event_id: str,
+        requester_user_id: str,
+        thread_id: str,
+    ) -> str | None:
+        for event_source in recent_events:
+            if not self._cached_event_is_in_thread(event_source, thread_id):
+                continue
+            event_id = self._unresponded_requester_event_id(
+                event_source,
+                skipped_event_id=skipped_event_id,
+                requester_user_id=requester_user_id,
+            )
+            if event_id is not None:
+                return event_id
+        return None
+
+    async def _has_newer_unresponded_cached_thread_event(
+        self,
+        *,
+        room_id: str,
+        event: TextDispatchEvent,
+        requester_user_id: str,
+        thread_id: str | None,
+        source_kind: str | None = None,
+    ) -> bool:
+        """Return positive replay proof from raw cached room events when thread history degraded."""
+        if self._should_skip_newer_cached_thread_lookup(
+            event,
+            thread_id=thread_id,
+            source_kind=source_kind,
+        ):
+            return False
+        assert thread_id is not None
+        assert event.server_timestamp is not None
+        event_cache = self.deps.runtime.event_cache
+        if event_cache is None:
+            return False
+        try:
+            recent_events = await event_cache.get_recent_room_events(
+                room_id,
+                event_type="m.room.message",
+                since_ts_ms=int(event.server_timestamp) + 1,
+            )
+        except Exception as exc:
+            self.deps.logger.warning(
+                "Failed to read cached room events for degraded thread replay guard",
+                event_id=event.event_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+            return False
+
+        event_id = self._newer_unresponded_cached_thread_event_id(
+            recent_events,
+            skipped_event_id=event.event_id,
+            requester_user_id=requester_user_id,
+            thread_id=thread_id,
+        )
+        if event_id is not None:
+            self.deps.logger.info(
+                "Skipping older message — newer cached event from same sender in degraded thread replay guard",
+                skipped_event_id=event.event_id,
+                newer_event_id=event_id,
+                thread_id=thread_id,
+            )
+            return True
+        return False
+
     def _should_skip_deep_synthetic_full_dispatch(
         self,
         *,
@@ -1781,12 +1895,31 @@ class TurnController:
                     target=hydrated_target,
                     envelope=replace(dispatch.envelope, target=hydrated_target),
                 )
-            if self._has_newer_unresponded_in_thread(
-                event,
-                requester_user_id,
-                dispatch.context.replay_guard_history,
-                source_kind=dispatch.envelope.source_kind,
-            ):
+            replay_guard_skips_turn = False
+            if dispatch.context.replay_guard_history_degraded:
+                replay_guard_skips_turn = await self._has_newer_unresponded_cached_thread_event(
+                    room_id=room.room_id,
+                    event=event,
+                    requester_user_id=requester_user_id,
+                    thread_id=dispatch.context.thread_id,
+                    source_kind=dispatch.envelope.source_kind,
+                )
+                if not replay_guard_skips_turn:
+                    self.deps.logger.warning(
+                        "Thread replay guard degraded; proceeding without negative newer-message proof",
+                        event_id=event.event_id,
+                        room_id=room.room_id,
+                        thread_id=dispatch.context.thread_id,
+                        thread_read_degraded=True,
+                    )
+            else:
+                replay_guard_skips_turn = self._has_newer_unresponded_in_thread(
+                    event,
+                    requester_user_id,
+                    dispatch.context.replay_guard_history,
+                    source_kind=dispatch.envelope.source_kind,
+                )
+            if replay_guard_skips_turn:
                 self._mark_source_events_responded(handled_turn)
                 return
             if dispatch_timing is not None:
