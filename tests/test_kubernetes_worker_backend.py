@@ -1201,6 +1201,7 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
     startup_manifest = _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)
     committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
     committed_env = dict(committed_runtime.process_env) | dict(committed_runtime.env_file_values)
+    expected_worker_root = f"/app/worker/workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
 
     for name in (
         "MINDROOM_KUBERNETES_WORKER_ENV_JSON",
@@ -1219,8 +1220,10 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_PORT") == "8766"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY") == _TEST_SCOPED_WORKER_KEY_A
-    assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT")
-    assert committed_runtime.env_value("MINDROOM_SHARED_CREDENTIALS_PATH")
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT") == expected_worker_root
+    assert committed_runtime.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") == (
+        f"{expected_worker_root}/.shared_credentials"
+    )
     assert committed_runtime.env_value("MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX") == "workers"
 
 

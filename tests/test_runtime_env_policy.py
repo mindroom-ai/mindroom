@@ -113,22 +113,13 @@ def test_sandbox_runner_startup_process_env_keeps_ambient_values_and_drops_contr
 
 def test_worker_backend_config_names_are_classified_and_excluded_from_public_startup() -> None:
     """Primary-side Kubernetes backend config env names are never public startup env."""
-    backend_names = {
-        "MINDROOM_KUBERNETES_WORKER_IMAGE",
-        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX",
-        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME",
-        "MINDROOM_KUBERNETES_WORKER_ENV_JSON",
-        "MINDROOM_KUBERNETES_WORKER_LABELS_JSON",
-        "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON",
-        "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
-        "MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME",
-        "MINDROOM_KUBERNETES_WORKER_MEMORY_REQUEST",
-        "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
-    }
+    backend_names = runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES
     env = dict.fromkeys(backend_names, "value")
 
     assert all(runtime_env_policy.is_worker_backend_config_env_name(name) for name in backend_names)
     assert runtime_env_policy.public_worker_startup_env(env) == {}
+    assert runtime_env_policy.shell_passthrough_env(env, patterns=("*",)) == {}
+    assert not any(runtime_env_policy.is_execution_runtime_env_file_name(name) for name in backend_names)
 
 
 def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filtering() -> None:
