@@ -136,6 +136,7 @@ save_file("temporary notes\n", "scratch/notes.txt")
 `shell` exposes `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
 `run_shell_command()` expects a list of arguments, not a shell-parsed string.
 If the command exits within `timeout`, the tool returns the last `tail` lines of stdout, or stderr on non-zero exit.
+Shell output is also capped to the most recent 51200 bytes, with a truncation notice when older output is dropped.
 If the timeout is exceeded, the process keeps running in the background and the tool returns a `shell:...` handle.
 Use `check_shell_command(handle)` to poll a backgrounded command and `kill_shell_command(handle)` to stop it.
 MindRoom keeps up to 16 backgrounded shell processes per runner and automatically sweeps finished handle records after roughly 10 minutes.

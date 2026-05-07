@@ -224,12 +224,14 @@ class _OutputBuffer:
             encoded = line.encode("utf-8", errors="replace")
             self.truncated = True
 
+        separator_bytes = 1 if self.lines else 0
         self.lines.append(line)
-        self.byte_count += len(encoded)
+        self.byte_count += separator_bytes + len(encoded)
 
         while self.lines and (len(self.lines) > self.max_lines or self.byte_count > self.max_bytes):
             removed = self.lines.popleft()
-            self.byte_count -= len(removed.encode("utf-8", errors="replace"))
+            removed_separator_bytes = 1 if self.lines else 0
+            self.byte_count -= len(removed.encode("utf-8", errors="replace")) + removed_separator_bytes
             self.truncated = True
 
     def render(self, *, tail: int | None = None) -> str:
