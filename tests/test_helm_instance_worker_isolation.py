@@ -279,6 +279,25 @@ def test_platform_chart_rejects_trusted_upstream_without_user_id_header() -> Non
     ) in completed.stderr
 
 
+def test_platform_chart_wires_instance_credentials_encryption_secret() -> None:
+    """The platform chart should mount the stable instance credential key derivation secret."""
+    docs = _render_chart(
+        Path("cluster/k8s/platform"),
+        "provisioner.apiKey=test-api-key",
+        release_name="mindroom-platform",
+        set_string_args=("provisioner.instanceCredentialsEncryptionSecret=root-secret",),
+    )
+    secret = _resource(docs, "Secret", "platform-secrets")
+    deployment = _resource(docs, "Deployment", "platform-backend")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+
+    assert secret["stringData"]["instance_credentials_encryption_secret"] == "root-secret"  # noqa: S105
+    assert env_values["INSTANCE_CREDENTIALS_ENCRYPTION_SECRET_FILE"] == (
+        "/etc/secrets/instance_credentials_encryption_secret"  # noqa: S105
+    )
+
+
 def test_runtime_chart_worker_network_policy_selects_dynamic_worker_labels() -> None:
     """The runtime chart worker NetworkPolicy selector should match generated worker pod labels."""
     docs = _render_runtime_chart()

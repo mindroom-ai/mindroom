@@ -1,5 +1,6 @@
 """Real integration tests for provisioner that actually test functionality."""
 
+import base64
 import os
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -110,12 +111,31 @@ class TestProvisionerCommandValidation:
         assert "openai_key" in set_args or "openai" in str(set_args)
         assert "sandbox_proxy_token" in set_args
         assert set_args["sandbox_proxy_token"] != ""
+        assert "credentials_encryption_key" in set_args
+        assert len(base64.urlsafe_b64decode(f"{set_args['credentials_encryption_key']}=")) == 32
 
         # Verify we're not passing wrong values
         # Skip check if both are empty (not set in env during tests)
         if "openrouter_key" in set_args and "openai_key" in set_args:
             if set_args["openrouter_key"] and set_args["openai_key"]:
                 assert set_args["openrouter_key"] != set_args["openai_key"]
+
+    def test_instance_credentials_encryption_key_is_stable_and_instance_scoped(self):
+        """Provisioner-derived credential keys should be stable without sharing one key across instances."""
+        import backend.routes.provisioner as provisioner
+
+        with patch.multiple(
+            "backend.routes.provisioner",
+            INSTANCE_CREDENTIALS_ENCRYPTION_SECRET="root-secret",
+            PROVISIONER_API_KEY="fallback-secret",
+        ):
+            first = provisioner._instance_credentials_encryption_key("123")
+            second = provisioner._instance_credentials_encryption_key("123")
+            other = provisioner._instance_credentials_encryption_key("456")
+
+        assert first == second
+        assert first != other
+        assert len(base64.urlsafe_b64decode(f"{first}=")) == 32
 
     @pytest.mark.asyncio
     async def test_helm_install_command_honors_instance_overrides(self):

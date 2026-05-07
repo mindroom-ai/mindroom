@@ -27,6 +27,7 @@ stripe:
 # Provisioner
 provisioner:
   apiKey: ""
+  instanceCredentialsEncryptionSecret: ""
   instanceBaseDomain: ""
   instanceStorageClassName: ""
   instanceMindroomImage: ""

@@ -300,7 +300,9 @@ def is_runtime_database_url_env_name(name: str) -> bool:
 
 def is_public_worker_startup_env_name(name: str) -> bool:
     """Return whether an env var may be serialized into public worker startup manifests."""
-    if name in _RUNTIME_STARTUP_EXCLUDED_NAMES or is_worker_backend_config_env_name(name):
+    if name in _RUNTIME_STARTUP_EXCLUDED_NAMES:
+        return False
+    if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
     if is_runtime_database_url_env_name(name):
         return False

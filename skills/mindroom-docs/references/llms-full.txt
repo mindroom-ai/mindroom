@@ -13945,7 +13945,7 @@ curl -X POST "https://api.mindroom.chat/system/provision" \
   -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "starter"}'
 ```
 
-The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
+The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase. For provisioned instance charts, set `provisioner.instanceCredentialsEncryptionSecret` to a stable high-entropy value so the provisioner can derive stable per-instance `credentials_encryption_key` chart values. If `provisioner.instanceCredentialsEncryptionSecret` is unset, the provisioner falls back to `PROVISIONER_API_KEY`, so rotating the provisioner API key also rotates derived credential encryption keys.
 
 ## Deployment Scripts
 

@@ -1,5 +1,7 @@
 """Instance provisioning and management routes."""
 
+import base64
+import hashlib
 import hmac
 import secrets
 from datetime import UTC, datetime
@@ -10,6 +12,7 @@ from backend.config import (
     DEEPSEEK_API_KEY,
     GOOGLE_API_KEY,
     INSTANCE_BASE_DOMAIN,
+    INSTANCE_CREDENTIALS_ENCRYPTION_SECRET,
     INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS,
     INSTANCE_MINDROOM_IMAGE,
     INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
@@ -76,6 +79,20 @@ def _require_provisioner_auth(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
     if not hmac.compare_digest(token, PROVISIONER_API_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _instance_credentials_encryption_key(instance_id: str) -> str:
+    """Derive a stable per-instance credential encryption key."""
+    root_secret = (INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY).strip()
+    if not root_secret:
+        msg = "INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY must be configured"
+        raise HTTPException(status_code=500, detail=msg)
+    digest = hmac.digest(
+        root_secret.encode("utf-8"),
+        f"mindroom.instance-credentials.v1:{instance_id}".encode("utf-8"),
+        hashlib.sha256,
+    )
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 @router.post("/system/provision", response_model=ProvisionResponse)
@@ -180,6 +197,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 
     # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
     sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)
+    credentials_encryption_key = _instance_credentials_encryption_key(customer_id)
 
     try:
         # Use upgrade --install to handle both new and re-provisioning cases
@@ -215,6 +233,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             f"deepseek_key={DEEPSEEK_API_KEY}",
             "--set",
             f"sandbox_proxy_token={sandbox_proxy_token}",
+            "--set",
+            f"credentials_encryption_key={credentials_encryption_key}",
         ]
         if INSTANCE_STORAGE_CLASS_NAME:
             helm_args += ["--set", f"storageClassName={INSTANCE_STORAGE_CLASS_NAME}"]
