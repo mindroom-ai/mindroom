@@ -127,7 +127,7 @@ def room_member_join_from_event(
     config: Config,
     runtime_paths: RuntimePaths,
     storage_root: Path,
-    require_previous_membership: bool = False,
+    require_previous_membership: bool = True,
 ) -> RoomMemberJoin | None:
     """Return hook payload data for one live human join event, or None when ignored."""
     if event.membership != "join" or event.prev_membership == "join":
