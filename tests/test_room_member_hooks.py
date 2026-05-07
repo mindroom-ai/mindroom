@@ -349,6 +349,38 @@ async def test_router_ignores_sync_state_member_snapshot_without_previous_member
 
 
 @pytest.mark.asyncio
+async def test_router_ignores_limited_sync_state_member_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Limited sync state is not a live join stream."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot,
+        "_sync_cache_result_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True, limited_room_ids=(room.room_id,))),
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [_room_member_event(event_id="$limited-state")],
+        ),
+    )
+
+    assert seen == []
+
+
+@pytest.mark.asyncio
 async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
