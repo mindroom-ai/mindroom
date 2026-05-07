@@ -1101,9 +1101,11 @@ class AgentBot:
         """Return room-member join hook actions for one certified sync response."""
         if decision.reset_client_token:
             return _RoomMemberJoinSyncHookPlan(arm_after_response=False)
+        # The first restored-token sync is requested with full_state=True, so its
+        # state block is a current snapshot. Only the timeline is a catch-up stream.
         return _RoomMemberJoinSyncHookPlan(
             arm_after_response=True,
-            emit_state=restored_token_first_sync_response or (not first_sync_response and hooks_were_armed),
+            emit_state=not first_sync_response and hooks_were_armed,
             emit_timeline=restored_token_first_sync_response,
         )
 
