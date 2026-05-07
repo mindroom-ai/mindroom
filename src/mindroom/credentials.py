@@ -173,21 +173,16 @@ class CredentialsManager:
             else None
         )
 
-        # Ensure the directory exists
-        if self.encrypted_storage_enabled:
+        encrypted_storage_enabled = self._encryption_key is not None
+        if encrypted_storage_enabled:
             _ensure_private_directory(self.base_path, harden_existing=True)
         else:
             self.base_path.mkdir(parents=True, exist_ok=True)
         if self.shared_base_path != self.base_path:
-            if self.encrypted_storage_enabled:
+            if encrypted_storage_enabled:
                 _ensure_private_directory(self.shared_base_path, harden_existing=True)
             else:
                 self.shared_base_path.mkdir(parents=True, exist_ok=True)
-
-    @property
-    def encrypted_storage_enabled(self) -> bool:
-        """Return whether credential files are encrypted at rest."""
-        return self._encryption_key is not None
 
     @property
     def storage_root(self) -> Path:
@@ -239,6 +234,9 @@ class CredentialsManager:
 
         """
         normalized_service = validate_service_name(service)
+        return self._credentials_file(normalized_service)
+
+    def _credentials_file(self, normalized_service: str) -> Path:
         return self.base_path / f"{normalized_service}_credentials.json"
 
     def load_credentials(self, service: str) -> dict[str, Any] | None:
@@ -252,7 +250,10 @@ class CredentialsManager:
 
         """
         normalized_service = validate_service_name(service)
-        credentials_path = self.base_path / f"{normalized_service}_credentials.json"
+        credentials_path = self._credentials_file(normalized_service)
+        return self._load_credentials_file(normalized_service, credentials_path)
+
+    def _load_credentials_file(self, normalized_service: str, credentials_path: Path) -> dict[str, Any] | None:
         if credentials_path.exists():
             if self._encryption_key is not None:
                 try:
@@ -264,7 +265,7 @@ class CredentialsManager:
                 except (OSError, TypeError, ValueError, json.JSONDecodeError, InvalidTag, binascii.Error) as exc:
                     logger.warning(
                         "Failed to load encrypted credentials",
-                        service=service,
+                        service=normalized_service,
                         path=str(credentials_path),
                         error_type=type(exc).__name__,
                     )
@@ -276,7 +277,7 @@ class CredentialsManager:
             except (OSError, TypeError, ValueError):
                 logger.exception(
                     "Failed to load credentials",
-                    service=service,
+                    service=normalized_service,
                     path=str(credentials_path),
                 )
                 return None
@@ -291,7 +292,15 @@ class CredentialsManager:
 
         """
         normalized_service = validate_service_name(service)
-        credentials_path = self.base_path / f"{normalized_service}_credentials.json"
+        credentials_path = self._credentials_file(normalized_service)
+        self._save_credentials_file(normalized_service, credentials_path, credentials)
+
+    def _save_credentials_file(
+        self,
+        normalized_service: str,
+        credentials_path: Path,
+        credentials: dict[str, Any],
+    ) -> None:
         if self._encryption_key is not None:
             payload = _encrypted_credentials_payload(
                 credentials,
@@ -355,15 +364,15 @@ class CredentialsManager:
 
         """
         normalized_service = validate_service_name(service)
-        credentials_path = self.base_path / f"{normalized_service}_credentials.json"
-        credentials = self.load_credentials(normalized_service)
+        credentials_path = self._credentials_file(normalized_service)
+        credentials = self._load_credentials_file(normalized_service, credentials_path)
         if credentials is None:
             if credentials_path.exists():
                 msg = f"Stored credentials for {normalized_service} could not be loaded; refusing to overwrite"
                 raise ValueError(msg)
             credentials = {}
         credentials[key_name] = api_key
-        self.save_credentials(normalized_service, credentials)
+        self._save_credentials_file(normalized_service, credentials_path, credentials)
 
 
 def _credentials_base_path(storage_root: Path) -> Path:
