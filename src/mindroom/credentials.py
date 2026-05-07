@@ -131,7 +131,6 @@ def _atomic_write_private_file(path: Path, payload: bytes) -> None:
             f.flush()
             os.fsync(f.fileno())
         tmp_path.replace(path)
-        path.chmod(0o600)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -244,6 +243,9 @@ class CredentialsManager:
 
         """
         normalized_service = validate_service_name(service)
+        return self._credentials_path_for_normalized_service(normalized_service)
+
+    def _credentials_path_for_normalized_service(self, normalized_service: str) -> Path:
         return self.base_path / f"{normalized_service}_credentials.json"
 
     def load_credentials(self, service: str) -> dict[str, Any] | None:
@@ -257,7 +259,7 @@ class CredentialsManager:
 
         """
         normalized_service = validate_service_name(service)
-        credentials_path = self.get_credentials_path(service)
+        credentials_path = self._credentials_path_for_normalized_service(normalized_service)
         if credentials_path.exists():
             if self._encryption_key is not None:
                 try:
@@ -278,7 +280,7 @@ class CredentialsManager:
                 with credentials_path.open(encoding="utf-8") as f:
                     data: dict[str, Any] = json.load(f)
                     return data
-            except (OSError, TypeError, ValueError, json.JSONDecodeError, InvalidTag, binascii.Error):
+            except (OSError, TypeError, ValueError):
                 logger.exception(
                     "Failed to load credentials",
                     service=service,
@@ -296,7 +298,7 @@ class CredentialsManager:
 
         """
         normalized_service = validate_service_name(service)
-        credentials_path = self.get_credentials_path(service)
+        credentials_path = self._credentials_path_for_normalized_service(normalized_service)
         if self._encryption_key is not None:
             payload = _encrypted_credentials_payload(
                 credentials,

@@ -106,12 +106,11 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
     startup_runtime_paths, _tool_validation_snapshot = constants.deserialize_startup_manifest(
         _startup_manifest_from_env(),
     )
-    if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
-        credentials_encryption_key = _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
-        if credentials_encryption_key is None:
-            return startup_runtime_paths
-        process_env = dict(startup_runtime_paths.process_env)
+    credentials_encryption_key = _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
+    process_env = dict(startup_runtime_paths.process_env)
+    if credentials_encryption_key is not None:
         process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
+    if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
         return constants.RuntimePaths(
             config_path=startup_runtime_paths.config_path,
             config_dir=startup_runtime_paths.config_dir,
@@ -120,7 +119,6 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
             process_env=MappingProxyType(process_env),
             env_file_values=startup_runtime_paths.env_file_values,
         )
-    process_env = dict(startup_runtime_paths.process_env)
     process_env.update(sandbox_runner_startup_process_env(os.environ))
     resolved_runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=startup_runtime_paths.config_path,
