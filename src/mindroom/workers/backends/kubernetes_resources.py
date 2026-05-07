@@ -23,6 +23,7 @@ from mindroom.runtime_env_policy import (
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     VENDOR_TELEMETRY_ENV_VALUES,
+    credentials_encryption_key_value,
     worker_extra_env,
 )
 from mindroom.tool_system import worker_routing
@@ -655,12 +656,16 @@ class KubernetesResourceManager:
         owner_reference = self._owner_reference_or_none()
         if owner_reference is not None:
             metadata["ownerReferences"] = [owner_reference]
+        credentials_encryption_key = self._credentials_encryption_key()
         return {
             "apiVersion": "v1",
             "kind": "Secret",
             "metadata": metadata,
             "type": "Opaque",
-            "stringData": self._worker_auth_secret_string_data(worker_token=worker_token),
+            "stringData": self._worker_auth_secret_string_data(
+                worker_token=worker_token,
+                credentials_encryption_key=credentials_encryption_key,
+            ),
         }
 
     def _auth_secret_patch(self, *, worker_key: str, worker_id: str) -> dict[str, object]:
@@ -676,19 +681,27 @@ class KubernetesResourceManager:
             "data": self._worker_auth_secret_data(worker_token=worker_token),
         }
 
-    def _worker_auth_secret_string_data(self, *, worker_token: str) -> dict[str, str]:
+    def _worker_auth_secret_string_data(
+        self,
+        *,
+        worker_token: str,
+        credentials_encryption_key: str | None,
+    ) -> dict[str, str]:
         string_data = {SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: worker_token}
-        credentials_encryption_key = self._credentials_encryption_key()
         if credentials_encryption_key is not None:
             string_data[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
         return string_data
 
     def _worker_auth_secret_data(self, *, worker_token: str) -> dict[str, str | None]:
+        credentials_encryption_key = self._credentials_encryption_key()
         secret_data: dict[str, str | None] = {
             name: _secret_data_value(value)
-            for name, value in self._worker_auth_secret_string_data(worker_token=worker_token).items()
+            for name, value in self._worker_auth_secret_string_data(
+                worker_token=worker_token,
+                credentials_encryption_key=credentials_encryption_key,
+            ).items()
         }
-        if self._credentials_encryption_key() is None:
+        if credentials_encryption_key is None:
             secret_data[CREDENTIALS_ENCRYPTION_KEY_ENV] = None
         return secret_data
 
@@ -888,13 +901,7 @@ class KubernetesResourceManager:
         }
 
     def _credentials_encryption_key(self) -> str | None:
-        credentials_encryption_key = self.runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
-        if credentials_encryption_key is None:
-            return None
-        normalized_key = credentials_encryption_key.strip()
-        if not normalized_key:
-            return None
-        return normalized_key
+        return credentials_encryption_key_value(self.runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV))
 
     def _worker_auth_token(self, worker_key: str) -> str:
         worker_token = worker_auth_token(self.auth_token, worker_key)

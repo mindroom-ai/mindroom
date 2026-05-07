@@ -228,6 +228,21 @@ class TestCredentialsManager:
         mode = stat.S_IMODE(manager.base_path.stat().st_mode)
         assert mode == 0o700
 
+    def test_encrypted_save_does_not_rechmod_existing_directory(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Credential saves should not repeatedly chmod a directory hardened during construction."""
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+        manager = CredentialsManager(tmp_path / "credentials")
+        manager.base_path.chmod(0o755)
+
+        manager.save_credentials("oauth_service", {"token": "test-token"})
+
+        mode = stat.S_IMODE(manager.base_path.stat().st_mode)
+        assert mode == 0o755
+
     def test_encrypted_scoped_credentials_directories_are_private(
         self,
         tmp_path: Path,
@@ -962,6 +977,23 @@ class TestCredentialsManager:
         assert creds is not None
         assert creds["api_key"] == "new"
         assert creds["field1"] == "value1"
+
+    def test_encrypted_set_api_key_refuses_to_overwrite_unreadable_credentials(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """set_api_key should fail closed when encrypted mode cannot load an existing credential file."""
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+        manager = CredentialsManager(tmp_path / "credentials")
+        creds_path = manager.get_credentials_path("oauth_service")
+        original_payload = b'{"refresh_token":"plaintext-refresh-token"}'
+        creds_path.write_bytes(original_payload)
+
+        with pytest.raises(ValueError, match="refusing to overwrite"):
+            manager.set_api_key("oauth_service", "new-api-key")
+
+        assert creds_path.read_bytes() == original_payload
 
 
 class TestGlobalCredentialsManager:

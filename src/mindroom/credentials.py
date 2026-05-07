@@ -35,7 +35,6 @@ _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"env", "ui", None})
 _ENCRYPTED_CREDENTIALS_MAGIC = b"MINDROOM-CREDENTIALS-V1\n"
 _AES_GCM_NONCE_SIZE = 12
-_CREDENTIALS_ENCRYPTION_KEY_ENV = _runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV
 logger = get_logger(__name__)
 
 
@@ -57,21 +56,16 @@ def _scoped_credentials_dir_part(value: str) -> str:
     return f"{safe_prefix or 'scope'}-{digest}"
 
 
-def _configured_credentials_encryption_key() -> str | None:
-    value = os.environ.get(_CREDENTIALS_ENCRYPTION_KEY_ENV, "").strip()
-    return value or None
-
-
 def _decode_credentials_encryption_key(value: str) -> bytes:
     normalized = value.strip()
     padding = "=" * (-len(normalized) % 4)
     try:
         key = base64.b64decode(f"{normalized}{padding}".encode("ascii"), altchars=b"-_", validate=True)
     except (binascii.Error, UnicodeEncodeError) as exc:
-        msg = f"{_CREDENTIALS_ENCRYPTION_KEY_ENV} must be a base64-encoded 32-byte key"
+        msg = f"{_runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV} must be a base64-encoded 32-byte key"
         raise ValueError(msg) from exc
     if len(key) != 32:
-        msg = f"{_CREDENTIALS_ENCRYPTION_KEY_ENV} must decode to exactly 32 bytes"
+        msg = f"{_runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV} must decode to exactly 32 bytes"
         raise ValueError(msg)
     return key
 
@@ -108,7 +102,7 @@ def _decrypt_credentials_payload(payload: bytes, *, service: str, key: bytes) ->
     return data
 
 
-def _ensure_private_directory(path: Path) -> None:
+def _ensure_private_directory(path: Path, *, harden_existing: bool = False) -> None:
     missing_paths: list[Path] = []
     current_path = path
     while not current_path.exists():
@@ -116,7 +110,7 @@ def _ensure_private_directory(path: Path) -> None:
         current_path = current_path.parent
 
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    directories_to_chmod = reversed(missing_paths) if missing_paths else [path]
+    directories_to_chmod = reversed(missing_paths) if missing_paths else ([path] if harden_existing else [])
     for directory_path in directories_to_chmod:
         directory_path.chmod(0o700)
 
@@ -169,7 +163,9 @@ class CredentialsManager:
             Path(current_worker_root).expanduser().resolve() if current_worker_root is not None else None
         )
         self._encryption_key_config = (
-            encryption_key.strip() if encryption_key is not None else _configured_credentials_encryption_key()
+            _runtime_env_policy.credentials_encryption_key_value(encryption_key)
+            if encryption_key is not None
+            else _runtime_env_policy.credentials_encryption_key_from_env(os.environ)
         )
         self._encryption_key = (
             _decode_credentials_encryption_key(self._encryption_key_config)
@@ -179,12 +175,12 @@ class CredentialsManager:
 
         # Ensure the directory exists
         if self.encrypted_storage_enabled:
-            _ensure_private_directory(self.base_path)
+            _ensure_private_directory(self.base_path, harden_existing=True)
         else:
             self.base_path.mkdir(parents=True, exist_ok=True)
         if self.shared_base_path != self.base_path:
             if self.encrypted_storage_enabled:
-                _ensure_private_directory(self.shared_base_path)
+                _ensure_private_directory(self.shared_base_path, harden_existing=True)
             else:
                 self.shared_base_path.mkdir(parents=True, exist_ok=True)
 
@@ -243,9 +239,6 @@ class CredentialsManager:
 
         """
         normalized_service = validate_service_name(service)
-        return self._credentials_path_for_normalized_service(normalized_service)
-
-    def _credentials_path_for_normalized_service(self, normalized_service: str) -> Path:
         return self.base_path / f"{normalized_service}_credentials.json"
 
     def load_credentials(self, service: str) -> dict[str, Any] | None:
@@ -259,7 +252,7 @@ class CredentialsManager:
 
         """
         normalized_service = validate_service_name(service)
-        credentials_path = self._credentials_path_for_normalized_service(normalized_service)
+        credentials_path = self.base_path / f"{normalized_service}_credentials.json"
         if credentials_path.exists():
             if self._encryption_key is not None:
                 try:
@@ -298,7 +291,7 @@ class CredentialsManager:
 
         """
         normalized_service = validate_service_name(service)
-        credentials_path = self._credentials_path_for_normalized_service(normalized_service)
+        credentials_path = self.base_path / f"{normalized_service}_credentials.json"
         if self._encryption_key is not None:
             payload = _encrypted_credentials_payload(
                 credentials,
@@ -361,9 +354,16 @@ class CredentialsManager:
             key_name: Name of the key field (default: 'api_key')
 
         """
-        credentials = self.load_credentials(service) or {}
+        normalized_service = validate_service_name(service)
+        credentials_path = self.base_path / f"{normalized_service}_credentials.json"
+        credentials = self.load_credentials(normalized_service)
+        if credentials is None:
+            if credentials_path.exists():
+                msg = f"Stored credentials for {normalized_service} could not be loaded; refusing to overwrite"
+                raise ValueError(msg)
+            credentials = {}
         credentials[key_name] = api_key
-        self.save_credentials(service, credentials)
+        self.save_credentials(normalized_service, credentials)
 
 
 def _credentials_base_path(storage_root: Path) -> Path:
@@ -429,7 +429,7 @@ def _get_credentials_manager(*, storage_root: Path) -> CredentialsManager:
 
     base_path = _credentials_base_path(storage_root)
     shared_base_path = _default_shared_credentials_base_path(base_path)
-    encryption_key = _configured_credentials_encryption_key()
+    encryption_key = _runtime_env_policy.credentials_encryption_key_from_env(os.environ)
     current_signature = (
         base_path,
         shared_base_path,
@@ -454,8 +454,9 @@ def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsM
 
     base_path = _credentials_base_path(runtime_paths.storage_root)
     shared_base_path = _runtime_shared_credentials_base_path(runtime_paths, base_path)
-    encryption_key = runtime_paths.env_value(_CREDENTIALS_ENCRYPTION_KEY_ENV, default="") or ""
-    encryption_key = encryption_key.strip() or None
+    encryption_key = _runtime_env_policy.credentials_encryption_key_value(
+        runtime_paths.env_value(_runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV),
+    )
     current_signature = (
         base_path,
         shared_base_path,

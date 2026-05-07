@@ -202,6 +202,17 @@ def test_instance_chart_static_runner_uses_shared_credentials_encryption_key_sec
     }
 
 
+def test_instance_chart_omits_credentials_encryption_env_when_key_is_unset() -> None:
+    """Instance runtime containers should not mount an empty credential encryption key."""
+    docs = _render_chart(Path("cluster/k8s/instance"))
+    deployment = _resource(docs, "Deployment", "mindroom-demo")
+    mindroom_container = _container(deployment, "mindroom")
+    runner_container = _container(deployment, "sandbox-runner")
+
+    assert "MINDROOM_CREDENTIALS_ENCRYPTION_KEY" not in _env_by_name(mindroom_container)
+    assert "MINDROOM_CREDENTIALS_ENCRYPTION_KEY" not in _env_by_name(runner_container)
+
+
 def test_instance_chart_rejects_email_template_without_email_header() -> None:
     """Email-to-Matrix derivation requires the trusted email header name."""
     completed = _run_helm_template(

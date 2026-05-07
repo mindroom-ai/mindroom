@@ -11,6 +11,7 @@ from mindroom.constants import runtime_env_values
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    credentials_encryption_key_value,
     is_worker_backend_config_env_name,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -255,9 +256,7 @@ def kubernetes_backend_config_signature(
 
 def credentials_encryption_key_hash(encryption_key: str | None) -> str | None:
     """Return a stable non-secret marker for the credential encryption key."""
-    if encryption_key is None:
-        return None
-    normalized_key = encryption_key.strip()
-    if not normalized_key:
+    normalized_key = credentials_encryption_key_value(encryption_key)
+    if normalized_key is None:
         return None
     return hashlib.sha256(normalized_key.encode("utf-8")).hexdigest()
