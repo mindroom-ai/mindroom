@@ -10,7 +10,6 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from google.auth.transport import requests as google_requests
-from google.oauth2 import credentials as google_credentials
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProvider, oauth_connection_required_payload
@@ -190,6 +189,7 @@ class ScopedOAuthClientMixin:
     def _credentials_from_token_data(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
         """Create a Google Credentials object from stored token data."""
         ensure_tool_deps(_GOOGLE_OAUTH_DEPS, self._oauth_tool_name, self._runtime_paths)
+        from google.oauth2.credentials import Credentials as GoogleOAuthCredentials  # noqa: PLC0415
 
         client_config = self._oauth_provider.client_config(self._runtime_paths)
         if client_config is None:
@@ -201,7 +201,7 @@ class ScopedOAuthClientMixin:
         scopes = token_data.get("scopes")
         if not isinstance(scopes, list):
             scopes = list(self._oauth_provider.scopes)
-        return google_credentials.Credentials(
+        return GoogleOAuthCredentials(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
             token_uri=token_data.get("token_uri") or self._oauth_provider.token_url,
