@@ -995,6 +995,7 @@ async def test_compaction_summary_uses_configured_system_prompt() -> None:
         summary_prompt="Custom compaction instructions.",
     )
 
+    assert model.seen_messages[0].role == "system"
     assert model.seen_messages[0].content == "Custom compaction instructions."
 
 

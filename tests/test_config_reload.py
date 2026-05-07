@@ -1398,8 +1398,8 @@ def test_get_changed_agents_detects_tool_override_updates() -> None:
     assert changed == {"agent1"}
 
 
-def test_config_update_plan_restarts_running_entities_when_root_prompts_change() -> None:
-    """Root prompt overrides should restart running agents, teams, and router."""
+def test_config_update_plan_restarts_running_entities_when_construction_prompts_change() -> None:
+    """Construction-time root prompt overrides should restart running agents, teams, and router."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -1439,6 +1439,49 @@ def test_config_update_plan_restarts_running_entities_when_root_prompts_change()
 
     assert plan.entities_to_restart == running_entities
     assert plan.only_support_service_changes is False
+
+
+def test_config_update_plan_does_not_restart_for_request_time_prompt_change() -> None:
+    """Request-time prompt overrides should not tear down running entities."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            teams={
+                "team1": TeamConfig(
+                    display_name="Team 1",
+                    role="Collaborate",
+                    agents=["general"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            teams={
+                "team1": TeamConfig(
+                    display_name="Team 1",
+                    role="Collaborate",
+                    agents=["general"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+            prompts={"ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": "Pick one agent: {agents_info}\n{message}"},
+        ),
+    )
+
+    running_entities = {ROUTER_AGENT_NAME, "general", "team1"}
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == set()
+    assert plan.only_support_service_changes is True
 
 
 @pytest.fixture

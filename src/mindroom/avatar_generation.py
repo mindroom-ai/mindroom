@@ -26,13 +26,6 @@ from mindroom.matrix.rooms import get_room_id
 from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
-from mindroom.prompts import (
-    AVATAR_AGENT_SYSTEM_PROMPT,
-    AVATAR_CHARACTER_STYLE,
-    AVATAR_ROOM_STYLE,
-    AVATAR_ROOM_SYSTEM_PROMPT,
-    AVATAR_TEAM_SYSTEM_PROMPT,
-)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -86,17 +79,6 @@ class _AvatarTarget:
     entity_name: str
     role: str
     team_members: tuple[_AvatarTeamMember, ...] = ()
-
-
-@dataclass(frozen=True)
-class _AvatarPromptSettings:
-    """Resolved prompt/style settings used for managed avatar generation."""
-
-    character_style: str
-    room_style: str
-    agent_system_prompt: str
-    team_system_prompt: str
-    room_system_prompt: str
 
 
 @cache
@@ -154,56 +136,23 @@ def _has_missing_managed_avatars(config: Config, runtime_paths: constants.Runtim
     return bool(_missing_avatar_targets(config, runtime_paths))
 
 
-def _resolve_avatar_prompt_settings(config: Config) -> _AvatarPromptSettings:
-    """Resolve avatar prompt settings from config with built-in fallbacks."""
-    avatar_prompt_overrides = config.avatars.prompts
-    return _AvatarPromptSettings(
-        character_style=config.get_prompt("AVATAR_CHARACTER_STYLE")
-        if avatar_prompt_overrides is None or avatar_prompt_overrides.character_style is None
-        else avatar_prompt_overrides.character_style,
-        room_style=config.get_prompt("AVATAR_ROOM_STYLE")
-        if avatar_prompt_overrides is None or avatar_prompt_overrides.room_style is None
-        else avatar_prompt_overrides.room_style,
-        agent_system_prompt=(
-            config.get_prompt("AVATAR_AGENT_SYSTEM_PROMPT")
-            if avatar_prompt_overrides is None or avatar_prompt_overrides.agent_system_prompt is None
-            else avatar_prompt_overrides.agent_system_prompt
-        ),
-        team_system_prompt=(
-            config.get_prompt("AVATAR_TEAM_SYSTEM_PROMPT")
-            if avatar_prompt_overrides is None or avatar_prompt_overrides.team_system_prompt is None
-            else avatar_prompt_overrides.team_system_prompt
-        ),
-        room_system_prompt=config.get_prompt("AVATAR_ROOM_SYSTEM_PROMPT")
-        if avatar_prompt_overrides is None or avatar_prompt_overrides.room_system_prompt is None
-        else avatar_prompt_overrides.room_system_prompt,
-    )
-
-
 async def _generate_prompt(
     client: genai.Client,
     target: _AvatarTarget,
-    prompt_settings: _AvatarPromptSettings | None = None,
+    config: Config,
 ) -> str:
     """Generate an image prompt based on the entity's role using AI."""
-    resolved_prompt_settings = prompt_settings or _AvatarPromptSettings(
-        character_style=AVATAR_CHARACTER_STYLE,
-        room_style=AVATAR_ROOM_STYLE,
-        agent_system_prompt=AVATAR_AGENT_SYSTEM_PROMPT,
-        team_system_prompt=AVATAR_TEAM_SYSTEM_PROMPT,
-        room_system_prompt=AVATAR_ROOM_SYSTEM_PROMPT,
-    )
     if target.entity_type in {"rooms", "spaces"}:
-        system_prompt = resolved_prompt_settings.room_system_prompt
+        system_prompt = config.get_prompt("AVATAR_ROOM_SYSTEM_PROMPT")
         user_prompt = f"Room name: {target.entity_name}\nPurpose: {target.role}"
     elif target.entity_type == "teams":
-        system_prompt = resolved_prompt_settings.team_system_prompt
+        system_prompt = config.get_prompt("AVATAR_TEAM_SYSTEM_PROMPT")
         user_prompt = f"Team name: {target.entity_name}\nTeam role: {target.role}"
         if target.team_members:
             members_info = "\n".join(f"- {member.name}: {member.role}" for member in target.team_members)
             user_prompt = f"{user_prompt}\nTeam members:\n{members_info}"
     else:
-        system_prompt = resolved_prompt_settings.agent_system_prompt
+        system_prompt = config.get_prompt("AVATAR_AGENT_SYSTEM_PROMPT")
         user_prompt = f"Agent name: {target.entity_name}\nRole: {target.role}\nType: {target.entity_type}"
 
     response = await client.aio.models.generate_content(
@@ -221,9 +170,9 @@ async def _generate_prompt(
 
     visual_elements = response.text.strip()
     base_style = (
-        resolved_prompt_settings.room_style
+        config.get_prompt("AVATAR_ROOM_STYLE")
         if target.entity_type in {"rooms", "spaces"}
-        else resolved_prompt_settings.character_style
+        else config.get_prompt("AVATAR_CHARACTER_STYLE")
     )
     final_prompt = f"{base_style}, {visual_elements}"
 
@@ -249,9 +198,9 @@ async def _generate_avatar(
     client: genai.Client,
     target: _AvatarTarget,
     runtime_paths: constants.RuntimePaths,
+    config: Config,
     *,
     force: bool = False,
-    prompt_settings: _AvatarPromptSettings | None = None,
 ) -> None:
     """Generate an avatar for a single entity if it does not exist."""
     avatar_path = _get_avatar_path(target.entity_type, target.entity_name, runtime_paths)
@@ -267,7 +216,7 @@ async def _generate_avatar(
     if target.team_members:
         console.print(f"   [dim]Team members: {', '.join(member.name for member in target.team_members)}[/dim]")
 
-    prompt = await _generate_prompt(client, target, prompt_settings)
+    prompt = await _generate_prompt(client, target, config)
     response = await client.aio.models.generate_content(
         model=_IMAGE_MODEL,
         contents=prompt,
@@ -562,7 +511,6 @@ async def _generate_missing_avatars(
         return False
 
     client = genai.Client(api_key=api_key)
-    prompt_settings = _resolve_avatar_prompt_settings(config)
     targets = _build_avatar_generation_targets(config, selected_targets)
     _print_avatar_generation_plan(selected_targets)
 
@@ -579,8 +527,8 @@ async def _generate_missing_avatars(
                         client,
                         target,
                         runtime_paths,
+                        config,
                         force=force,
-                        prompt_settings=prompt_settings,
                     )
                     for target in targets
                 ),
