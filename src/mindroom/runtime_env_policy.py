@@ -15,7 +15,7 @@ __all__ = [
     "SANDBOX_RUNTIME_ENV_BY_KEY",
     "SANDBOX_STARTUP_MANIFEST_PATH_ENV",
     "VENDOR_TELEMETRY_ENV_VALUES",
-    "VERTEXAI_CLAUDE_ENV_KEYS",
+    "VERTEXAI_CLAUDE_ENV_BY_KEY",
     "is_execution_runtime_env_file_name",
     "is_execution_runtime_process_env_name",
     "is_isolated_worker_runtime_env_name",
@@ -37,7 +37,12 @@ __all__ = [
 SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
 CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
 CREDENTIAL_SEEDS_FILE_ENV = "MINDROOM_CREDENTIAL_SEEDS_FILE"
-VERTEXAI_CLAUDE_ENV_KEYS: tuple[str, str] = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
+VERTEXAI_CLAUDE_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "project_id": "ANTHROPIC_VERTEX_PROJECT_ID",
+        "region": "CLOUD_ML_REGION",
+    },
+)
 
 VENDOR_TELEMETRY_ENV_VALUES: Mapping[str, str] = MappingProxyType(
     {
@@ -128,8 +133,6 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
     {
         "ACCOUNT_ID",
         "ANTHROPIC_VERTEX_BASE_URL",
-        "ANTHROPIC_VERTEX_PROJECT_ID",
-        "CLOUD_ML_REGION",
         "CUSTOMER_ID",
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GOOGLE_CLOUD_LOCATION",
@@ -137,6 +140,7 @@ _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
         "OLLAMA_HOST",
         "OPENAI_BASE_URL",
         "POD_NAMESPACE",
+        *VERTEXAI_CLAUDE_ENV_BY_KEY.values(),
         *_VENDOR_TELEMETRY_ENV_NAMES,
     },
 )
@@ -173,6 +177,16 @@ _PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES = frozenset(
 _WORKER_EXTRA_ENV_SANDBOX_ENV_NAMES = frozenset(
     {
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
+    },
+)
+_SANDBOX_RUNNER_STARTUP_ENV_NAMES = frozenset(
+    {
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["worker_endpoint"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["worker_idle_timeout_seconds"],
     },
 )
 _WORKER_EXTRA_ENV_GENERATED_NAMES = frozenset(
@@ -279,7 +293,7 @@ _KNOWN_WORKER_CREDENTIAL_ENV_NAMES = frozenset(
     {
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GITHUB_TOKEN",
-        *VERTEXAI_CLAUDE_ENV_KEYS,
+        *VERTEXAI_CLAUDE_ENV_BY_KEY.values(),
     },
 )
 
@@ -374,7 +388,11 @@ def isolated_worker_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
 
 def sandbox_runner_startup_process_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return ambient process env safe for non-dedicated sandbox runner startup rehydration."""
-    return {key: value for key, value in env.items() if not is_runtime_control_env_name(key)}
+    return {
+        key: value
+        for key, value in env.items()
+        if key in _SANDBOX_RUNNER_STARTUP_ENV_NAMES or not is_runtime_control_env_name(key)
+    }
 
 
 def worker_extra_env(env: Mapping[str, str]) -> dict[str, str]:

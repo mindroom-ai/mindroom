@@ -45,14 +45,8 @@ EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 
 def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
     """Return the configured sandbox runner execution mode."""
-    return (
-        (
-            runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], default="inprocess")
-            or "inprocess"
-        )
-        .strip()
-        .lower()
-    )
+    raw_mode = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], default="inprocess")
+    return (raw_mode or "inprocess").strip().lower()
 
 
 def runner_uses_subprocess(runtime_paths: RuntimePaths) -> bool:
@@ -81,9 +75,8 @@ def runner_dedicated_worker_key(runtime_paths: RuntimePaths) -> str | None:
 
 def runner_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
     """Return the dedicated worker root visible to this runner."""
-    dedicated_root = (
-        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"], default="") or ""
-    ).strip()
+    raw_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"], default="")
+    dedicated_root = (raw_root or "").strip()
     if dedicated_root:
         return Path(dedicated_root).expanduser().resolve()
     return runtime_paths.storage_root.resolve()

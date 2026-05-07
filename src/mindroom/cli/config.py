@@ -37,7 +37,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.credentials_sync import get_secret_from_env
-from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_KEYS
+from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.workspaces import ensure_workspace_template
 
@@ -613,7 +613,7 @@ def _find_missing_env_keys(
         if provider == "vertexai_claude":
             missing.extend(
                 (provider, env_key)
-                for env_key in VERTEXAI_CLAUDE_ENV_KEYS
+                for env_key in VERTEXAI_CLAUDE_ENV_BY_KEY.values()
                 if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue

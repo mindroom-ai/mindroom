@@ -122,6 +122,12 @@ def test_sandbox_runner_startup_process_env_keeps_ambient_values_and_drops_contr
         "TEST_EXECUTION_ENV": "worker-visible",
         "MINDROOM_NAMESPACE": "alpha1234",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "runner-secret",
+        "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
+        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+        "MINDROOM_SANDBOX_RUNNER_PORT": "8766",
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "9",
+        "MINDROOM_SANDBOX_WORKER_ENDPOINT": "/api/sandbox-runner",
+        "MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS": "60",
         "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH": "/app/.runtime/startup.json",
         "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"OPENAI_API_KEY": "nested-secret"}),
         "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
@@ -132,6 +138,12 @@ def test_sandbox_runner_startup_process_env_keeps_ambient_values_and_drops_contr
     assert result == {
         "TEST_EXECUTION_ENV": "worker-visible",
         "MINDROOM_NAMESPACE": "alpha1234",
+        "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
+        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+        "MINDROOM_SANDBOX_RUNNER_PORT": "8766",
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "9",
+        "MINDROOM_SANDBOX_WORKER_ENDPOINT": "/api/sandbox-runner",
+        "MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS": "60",
     }
 
 
