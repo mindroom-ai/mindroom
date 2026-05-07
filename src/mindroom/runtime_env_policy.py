@@ -16,8 +16,8 @@ __all__ = [
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES",
     "SANDBOX_STARTUP_MANIFEST_PATH_ENV",
     "VENDOR_TELEMETRY_ENV_VALUES",
+    "VERTEXAI_CLAUDE_ENV_KEYS",
     "is_execution_runtime_env_file_name",
-    "is_execution_runtime_env_name",
     "is_execution_runtime_process_env_name",
     "is_isolated_worker_runtime_env_name",
     "is_public_worker_startup_env_name",
@@ -36,6 +36,7 @@ __all__ = [
 SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
 CREDENTIAL_SEEDS_JSON_ENV = "MINDROOM_CREDENTIAL_SEEDS_JSON"
 CREDENTIAL_SEEDS_FILE_ENV = "MINDROOM_CREDENTIAL_SEEDS_FILE"
+VERTEXAI_CLAUDE_ENV_KEYS: tuple[str, str] = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
 
 VENDOR_TELEMETRY_ENV_VALUES: Mapping[str, str] = MappingProxyType(
     {
@@ -199,8 +200,7 @@ _KNOWN_WORKER_CREDENTIAL_ENV_NAMES = frozenset(
     {
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GITHUB_TOKEN",
-        "ANTHROPIC_VERTEX_PROJECT_ID",
-        "CLOUD_ML_REGION",
+        *VERTEXAI_CLAUDE_ENV_KEYS,
     },
 )
 
@@ -249,11 +249,6 @@ def is_isolated_worker_runtime_env_name(name: str) -> bool:
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
 
 
-def is_execution_runtime_env_name(name: str) -> bool:
-    """Return whether an env var may be visible to sandbox execution runtime construction."""
-    return is_isolated_worker_runtime_env_name(name)
-
-
 def is_execution_runtime_env_file_name(name: str) -> bool:
     """Return whether a config-adjacent env value may be visible to local execution tools."""
     return (
@@ -287,7 +282,7 @@ def isolated_worker_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
 
 def sandbox_execution_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return env safe for sandboxed python/tool runtime reconstruction."""
-    return {key: value for key, value in env.items() if is_execution_runtime_env_name(key)}
+    return {key: value for key, value in env.items() if is_isolated_worker_runtime_env_name(key)}
 
 
 def sandbox_runner_startup_process_env(env: Mapping[str, str]) -> dict[str, str]:

@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.constants import (
-    is_runtime_database_url_env_name,
     resolve_config_relative_path,
     runtime_mindroom_namespace,
 )
 from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
+from mindroom.runtime_env_policy import is_runtime_database_url_env_name
 
 if TYPE_CHECKING:
     from pathlib import Path

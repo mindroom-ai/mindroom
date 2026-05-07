@@ -36,7 +36,7 @@ from mindroom.config.main import Config, load_config, normalized_config_data
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
-from mindroom.runtime_env_policy import sandbox_runner_startup_process_env
+from mindroom.runtime_env_policy import SANDBOX_STARTUP_MANIFEST_PATH_ENV, sandbox_runner_startup_process_env
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
@@ -82,9 +82,9 @@ _WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
 
 
 def _startup_manifest_path_from_env() -> Path:
-    raw_path = os.environ.get(constants.SANDBOX_STARTUP_MANIFEST_PATH_ENV, "").strip()
+    raw_path = os.environ.get(SANDBOX_STARTUP_MANIFEST_PATH_ENV, "").strip()
     if not raw_path:
-        msg = f"{constants.SANDBOX_STARTUP_MANIFEST_PATH_ENV} must be set for sandbox runner startup."
+        msg = f"{SANDBOX_STARTUP_MANIFEST_PATH_ENV} must be set for sandbox runner startup."
         raise RuntimeError(msg)
     return Path(raw_path).expanduser()
 
@@ -92,7 +92,7 @@ def _startup_manifest_path_from_env() -> Path:
 def _startup_manifest_from_env() -> dict[str, object]:
     payload = json.loads(_startup_manifest_path_from_env().read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        msg = f"{constants.SANDBOX_STARTUP_MANIFEST_PATH_ENV} must point to a JSON object."
+        msg = f"{SANDBOX_STARTUP_MANIFEST_PATH_ENV} must point to a JSON object."
         raise TypeError(msg)
     return payload
 

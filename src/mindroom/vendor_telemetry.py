@@ -7,7 +7,7 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
-from mindroom.constants import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping

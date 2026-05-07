@@ -29,7 +29,6 @@ from mindroom.config.main import (
 from mindroom.constants import (
     OWNER_MATRIX_USER_ID_ENV,
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
-    VERTEXAI_CLAUDE_ENV_KEYS,
     RuntimePaths,
     config_search_locations,
     env_key_for_provider,
@@ -38,6 +37,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.credentials_sync import get_secret_from_env
+from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_KEYS
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.workspaces import ensure_workspace_template
 

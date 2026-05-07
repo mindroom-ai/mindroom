@@ -17,7 +17,11 @@ from typing import TYPE_CHECKING, Protocol, cast
 from mindroom import constants
 from mindroom.constants import RuntimePaths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
-from mindroom.runtime_env_policy import is_worker_backend_config_env_name
+from mindroom.runtime_env_policy import (
+    SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+    VENDOR_TELEMETRY_ENV_VALUES,
+    is_worker_backend_config_env_name,
+)
 from mindroom.tool_system import worker_routing
 from mindroom.workers.backend import WorkerBackendError
 
@@ -784,7 +788,7 @@ class KubernetesResourceManager:
             {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
             {"name": _RUNNER_PORT_ENV_NAME, "value": str(self.config.worker_port)},
             {
-                "name": constants.SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+                "name": SANDBOX_STARTUP_MANIFEST_PATH_ENV,
                 "value": startup_manifest_path,
             },
             {"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path},
@@ -802,10 +806,10 @@ class KubernetesResourceManager:
         ]
 
         for name, value in sorted(self.config.extra_env.items()):
-            if name in constants.VENDOR_TELEMETRY_ENV_VALUES or is_worker_backend_config_env_name(name):
+            if name in VENDOR_TELEMETRY_ENV_VALUES or is_worker_backend_config_env_name(name):
                 continue
             env.append({"name": name, "value": value})
-        for name, value in sorted(constants.VENDOR_TELEMETRY_ENV_VALUES.items()):
+        for name, value in sorted(VENDOR_TELEMETRY_ENV_VALUES.items()):
             env.append({"name": name, "value": value})
         return env
 
@@ -862,17 +866,9 @@ class KubernetesResourceManager:
             if self.config.config_map_name is not None
             else self.runtime_paths.config_path.expanduser().resolve()
         )
-        process_env = {
-            name: value
-            for name, value in self.runtime_paths.process_env.items()
-            if not is_worker_backend_config_env_name(name)
-        }
+        process_env = dict(self.runtime_paths.process_env)
         process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        env_file_values = {
-            name: value
-            for name, value in self.runtime_paths.env_file_values.items()
-            if not is_worker_backend_config_env_name(name)
-        }
+        env_file_values = dict(self.runtime_paths.env_file_values)
         env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         process_env.update(
             {
@@ -894,7 +890,7 @@ class KubernetesResourceManager:
                 if not is_worker_backend_config_env_name(name)
             },
         )
-        process_env.update(constants.VENDOR_TELEMETRY_ENV_VALUES)
+        process_env.update(VENDOR_TELEMETRY_ENV_VALUES)
         return constants.isolated_runtime_paths(
             RuntimePaths(
                 config_path=config_path,

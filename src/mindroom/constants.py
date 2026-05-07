@@ -23,15 +23,8 @@ MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
-SANDBOX_STARTUP_MANIFEST_PATH_ENV = runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV
 _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
-CREDENTIAL_SEEDS_JSON_ENV = runtime_env_policy.CREDENTIAL_SEEDS_JSON_ENV
-CREDENTIAL_SEEDS_FILE_ENV = runtime_env_policy.CREDENTIAL_SEEDS_FILE_ENV
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
-# Evidence sources: installed package code in .venv; vendor docs only for
-# frontend/W&B controls. Python runtime envs are centralized in runtime_env_policy so
-# deployments do not repeat them.
-VENDOR_TELEMETRY_ENV_VALUES = runtime_env_policy.VENDOR_TELEMETRY_ENV_VALUES
 
 # Bash bookkeeping vars that change every time printenv runs and are never
 # meaningful overlay output from `.mindroom/worker-env.sh`.
@@ -468,11 +461,6 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
-def is_runtime_database_url_env_name(name: str) -> bool:
-    """Return whether an env name conventionally carries a database connection URL."""
-    return runtime_env_policy.is_runtime_database_url_env_name(name)
-
-
 def _execution_runtime_env_layers(
     runtime_paths: RuntimePaths,
 ) -> tuple[dict[str, str], dict[str, str]]:
@@ -495,12 +483,12 @@ def _sandbox_execution_runtime_env_layers(
     env_file_values = {
         key: value
         for key, value in runtime_paths.env_file_values.items()
-        if runtime_env_policy.is_execution_runtime_env_name(key)
+        if runtime_env_policy.is_isolated_worker_runtime_env_name(key)
     }
     process_env = {
         key: value
         for key, value in runtime_paths.process_env.items()
-        if runtime_env_policy.is_execution_runtime_env_name(key)
+        if runtime_env_policy.is_isolated_worker_runtime_env_name(key)
     }
     return process_env, env_file_values
 
@@ -870,7 +858,6 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
 # Dedicated workers start with no mirrored/shared credentials by default.
 # Any service exposure into an isolated worker runtime must be explicitly authored.
 DEFAULT_WORKER_GRANTABLE_CREDENTIALS = frozenset()
-VERTEXAI_CLAUDE_ENV_KEYS: tuple[str, str] = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
 
 _CHROMADB_PY314_PATCHED = False
 

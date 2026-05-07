@@ -34,7 +34,6 @@ import mindroom.tools.shell as shell_tool_module
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, load_config
 from mindroom.constants import (
-    VENDOR_TELEMETRY_ENV_VALUES,
     RuntimePaths,
     isolated_runtime_paths,
     resolve_runtime_paths,
@@ -45,6 +44,7 @@ from mindroom.constants import (
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import HookRegistry
+from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
