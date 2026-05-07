@@ -10,9 +10,6 @@ import mindroom.credentials
 from mindroom.api.credentials import RequestCredentialsTarget
 from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials import (
-    _DEDICATED_WORKER_KEY_ENV,
-    _DEDICATED_WORKER_ROOT_ENV,
-    SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
     _get_credentials_manager,
     _merge_scoped_credentials,
@@ -21,6 +18,7 @@ from mindroom.credentials import (
     save_scoped_credentials,
     sync_shared_credentials_to_worker,
 )
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 
 
@@ -891,8 +889,8 @@ class TestGlobalCredentialsManager:
             storage_path=worker_root,
             process_env={
                 SHARED_CREDENTIALS_PATH_ENV: str(worker_root / ".shared_credentials"),
-                _DEDICATED_WORKER_KEY_ENV: worker_key,
-                _DEDICATED_WORKER_ROOT_ENV: str(worker_root),
+                SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
+                SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(worker_root),
             },
         )
         manager = get_runtime_credentials_manager(runtime_paths)

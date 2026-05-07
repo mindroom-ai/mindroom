@@ -73,8 +73,6 @@
     value: "/app/config.yaml"
   - name: MINDROOM_STORAGE_PATH
     value: {{ $values.storagePath }}
-  - name: MINDROOM_SANDBOX_WORKER_ROOT
-    value: "{{ $values.storagePath }}/workers"
   - name: HOME
     value: {{ $values.storagePath }}
   volumeMounts:

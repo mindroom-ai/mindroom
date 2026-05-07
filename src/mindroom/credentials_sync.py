@@ -20,14 +20,16 @@ from pathlib import Path
 from typing import Any, cast
 
 from mindroom.constants import (
-    CREDENTIAL_SEEDS_FILE_ENV,
-    CREDENTIAL_SEEDS_JSON_ENV,
     PROVIDER_ENV_KEYS,
     RuntimePaths,
     runtime_env_path,
 )
 from mindroom.credentials import get_runtime_shared_credentials_manager, validate_service_name
 from mindroom.logging_config import get_logger
+from mindroom.runtime_env_policy import (
+    CREDENTIAL_SEEDS_FILE_ENV,
+    CREDENTIAL_SEEDS_JSON_ENV,
+)
 
 logger = get_logger(__name__)
 

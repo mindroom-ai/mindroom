@@ -17,6 +17,12 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom import constants
+from mindroom.runtime_env_policy import (
+    KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    sandbox_runner_runtime_state_env,
+    sandbox_subprocess_system_env,
+)
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
@@ -33,40 +39,15 @@ _WORKSPACE_ENV_HOOK_MAX_SCRIPT_BYTES = 64 * 1024
 _WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES = 256 * 1024
 _WORKSPACE_ENV_HOOK_MAX_VALUE_BYTES = 32 * 1024
 _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES = 128 * 1024
-_RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
-_RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
-_DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
-_DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
-_SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
-_KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"
+_KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
-_SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
-    {
-        "CURL_CA_BUNDLE",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "LANG",
-        "LD_LIBRARY_PATH",
-        "LC_ALL",
-        "LC_CTYPE",
-        "NIX_LD",
-        "NIX_LD_LIBRARY_PATH",
-        "NO_PROXY",
-        "REQUESTS_CA_BUNDLE",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "TMPDIR",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-    },
-)
 
 
 def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
     """Return the configured sandbox runner execution mode."""
-    return (runtime_paths.env_value(_RUNNER_EXECUTION_MODE_ENV, default="inprocess") or "inprocess").strip().lower()
+    raw_mode = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], default="inprocess")
+    return (raw_mode or "inprocess").strip().lower()
 
 
 def runner_uses_subprocess(runtime_paths: RuntimePaths) -> bool:
@@ -77,7 +58,7 @@ def runner_uses_subprocess(runtime_paths: RuntimePaths) -> bool:
 def runner_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
     """Return the bounded subprocess timeout for sandbox execution."""
     raw_timeout = runtime_paths.env_value(
-        _RUNNER_SUBPROCESS_TIMEOUT_ENV,
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
         default=str(_DEFAULT_SUBPROCESS_TIMEOUT_SECONDS),
     )
     try:
@@ -89,13 +70,14 @@ def runner_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
 
 def runner_dedicated_worker_key(runtime_paths: RuntimePaths) -> str | None:
     """Return the pinned dedicated worker key when configured."""
-    raw = (runtime_paths.env_value(_DEDICATED_WORKER_KEY_ENV, default="") or "").strip()
+    raw = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default="") or "").strip()
     return raw or None
 
 
 def runner_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
     """Return the dedicated worker root visible to this runner."""
-    dedicated_root = (runtime_paths.env_value(_DEDICATED_WORKER_ROOT_ENV, default="") or "").strip()
+    raw_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"], default="")
+    dedicated_root = (raw_root or "").strip()
     if dedicated_root:
         return Path(dedicated_root).expanduser().resolve()
     return runtime_paths.storage_root.resolve()
@@ -123,7 +105,7 @@ def _shared_root_from_dedicated_worker_root(
 
 def _runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
     """Return the shared storage root for worker-visible agent paths."""
-    shared_root = (runtime_paths.env_value(_SHARED_STORAGE_ROOT_ENV, default="") or "").strip()
+    shared_root = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"], default="") or "").strip()
     if shared_root:
         return Path(shared_root).expanduser().resolve()
 
@@ -194,6 +176,7 @@ def runtime_paths_with_execution_env(
         return runtime_paths
 
     process_env = dict(constants.execution_runtime_env_values(runtime_paths)) if include_base_execution_env else {}
+    process_env.update(sandbox_runner_runtime_state_env(runtime_paths.process_env))
     process_env.update(execution_env)
     env_file_values = dict(runtime_paths.env_file_values) if include_base_execution_env else {}
     if trusted_env_overlay:
@@ -232,17 +215,13 @@ def _current_runtime_site_packages() -> list[str]:
 
 def _subprocess_passthrough_env() -> dict[str, str]:
     """Return the small set of host env vars forwarded to subprocesses."""
-    return {key: value for key, value in os.environ.items() if key in _SUBPROCESS_ENV_PASSTHROUGH_KEYS}
+    return dict(sandbox_subprocess_system_env(os.environ))
 
 
 def generic_subprocess_env() -> dict[str, str]:
     """Build the baseline subprocess env for non-worker execution."""
     env = _subprocess_passthrough_env()
     env.update(vendor_telemetry_env_values())
-    for key in ("HOME", "PATH", "PYTHONPATH", "VIRTUAL_ENV"):
-        value = os.environ.get(key)
-        if value:
-            env[key] = value
     return env
 
 

@@ -11,7 +11,7 @@ import pytest
 
 import mindroom
 from mindroom import vendor_telemetry
-from mindroom.constants import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
 from mindroom.tools.composio import composio_tools
 from mindroom.vendor_telemetry import disable_vendor_telemetry
 

@@ -370,6 +370,7 @@ def _backend(
     worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     resource_requests: dict[str, str] | None = None,
     resource_limits: dict[str, str] | None = None,
+    extra_env: dict[str, str] | None = None,
     extra_annotations: dict[str, str] | None = None,
     enable_service_links: bool = False,
     auth_secret_name: str | None = None,
@@ -391,7 +392,7 @@ def _backend(
         name_prefix=name_prefix,
         node_name=node_name,
         colocate_with_control_plane_node=colocate_with_control_plane_node,
-        extra_env={},
+        extra_env=extra_env or {},
         extra_labels={"mindroom.ai/tenant": "test"},
         extra_annotations=extra_annotations or {},
         owner_deployment_name=owner_deployment_name,
@@ -525,7 +526,6 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
     assert "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH" in env_names
-    assert "MINDROOM_SANDBOX_ALLOWED_TOOL_NAMES_JSON" not in env_names
     assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT" not in env_names
     assert "VIRTUAL_ENV" in env_names
     assert "PATH" in env_names
@@ -834,7 +834,11 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         process_env={
+            "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON": '{"shell":["github"]}',
             "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+            "MINDROOM_SANDBOX_PROXY_TOOLS": "*",
+            "MINDROOM_SANDBOX_PROXY_URL": "http://runner.example.invalid",
+            "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT": str(tmp_path / "primary-shared-root"),
             "MINDROOM_LOCAL_CLIENT_SECRET": "client-secret",
         },
     )
@@ -864,7 +868,11 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert committed_runtime.env_value("OPENAI_BASE_URL") is None
     assert committed_runtime.env_value("CUSTOM_API_TOKEN") is None
     assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON") is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOOLS") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_URL") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
     assert not local_credentials_path.exists()
 
@@ -1167,6 +1175,90 @@ def test_kubernetes_backend_renders_configured_annotations_on_worker_pod_templat
     )
     assert annotations[ANNOTATION_WORKER_KEY] != "user-supplied-value"
     assert annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] != "user-supplied-value"
+
+
+def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifest(tmp_path: Path) -> None:
+    """Primary-side backend config carriers do not reach worker pods or startup manifests."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+        process_env={
+            "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"OPENAI_API_KEY": "nested-secret"}),
+            "MINDROOM_KUBERNETES_WORKER_LABELS_JSON": "{}",
+            "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON": "{}",
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "mindroom-storage",
+            "MINDROOM_SHARED_CREDENTIALS_PATH": str(tmp_path / "primary-shared-credentials"),
+            "MATRIX_HOMESERVER": "https://matrix.example.invalid",
+        },
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        extra_env={
+            "HOME": "/unsafe/home",
+            "MINDROOM_API_KEY": "runtime-api-key",
+            "MINDROOM_CONFIG_PATH": "/unsafe/config.yaml",
+            "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"ANTHROPIC_API_KEY": "nested-secret"}),
+            "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME": "primary-worker-auth",
+            "MINDROOM_LOCAL_CLIENT_SECRET": "runtime-client-secret",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "extra-env-token",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/unsafe/root",
+            "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
+            "MINDROOM_SHARED_CREDENTIALS_PATH": "/unsafe/shared-credentials",
+            "MINDROOM_STORAGE_PATH": "/unsafe/storage",
+            "PATH": "/unsafe/bin",
+            "VIRTUAL_ENV": "/unsafe/venv",
+            "MINDROOM_WORKER_TOOL_VALUE": "visible",
+        },
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    container = apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    startup_manifest = _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)
+    committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
+    committed_env = dict(committed_runtime.process_env) | dict(committed_runtime.env_file_values)
+    expected_worker_root = f"/app/worker/workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
+    env_names = [env["name"] for env in container["env"]]
+
+    for name in (
+        "MINDROOM_KUBERNETES_WORKER_ENV_JSON",
+        "MINDROOM_KUBERNETES_WORKER_LABELS_JSON",
+        "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON",
+        "MINDROOM_KUBERNETES_WORKER_IMAGE",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME",
+        "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
+        "MINDROOM_API_KEY",
+        "MINDROOM_LOCAL_CLIENT_SECRET",
+    ):
+        assert name not in env_values
+        assert name not in committed_env
+
+    assert env_values["MINDROOM_WORKER_TOOL_VALUE"] == "visible"
+    assert committed_runtime.env_value("MINDROOM_WORKER_TOOL_VALUE") == "visible"
+    assert env_values["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "45"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS") == "45"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_MODE") == "true"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_PORT") == "8766"
+    assert env_names.count("MINDROOM_SANDBOX_PROXY_TOKEN") == 1
+    assert env_values["MINDROOM_SANDBOX_PROXY_TOKEN"] is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+    assert env_names.count("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT") == 1
+    assert env_values["HOME"] == expected_worker_root
+    assert env_values["MINDROOM_CONFIG_PATH"] != "/unsafe/config.yaml"
+    assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
+    assert env_values["PATH"] != "/unsafe/bin"
+    assert env_values["VIRTUAL_ENV"] == f"{expected_worker_root}/venv"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY") == _TEST_SCOPED_WORKER_KEY_A
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT") == expected_worker_root
+    assert committed_runtime.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") == (
+        f"{expected_worker_root}/.shared_credentials"
+    )
+    assert committed_runtime.env_value("MINDROOM_CONFIG_PATH") != "/unsafe/config.yaml"
+    assert committed_runtime.env_value("MINDROOM_STORAGE_PATH") == expected_worker_root
+    assert committed_runtime.env_value("MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX") == "workers"
 
 
 def test_kubernetes_backend_rejects_unknown_worker_keys_for_scoped_mounts() -> None:

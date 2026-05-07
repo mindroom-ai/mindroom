@@ -232,7 +232,7 @@ Committed runtime `.env` values and provider credentials are not forwarded impli
 Worker startup env also denies provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` by default.
 Configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit.
 `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries.
-To prevent the runner from leaking its own control-plane credentials to tools, shell passthrough drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`.
+To prevent runtime control material from reaching tools, shell passthrough drops credential seed declarations, Kubernetes worker backend config env names, runner control names, and any name starting with `MINDROOM_SANDBOX_`.
 Everything else that matches your configured names or globs passes through, including service tokens and provider credentials.
 If you don't want a value to reach shell commands, don't match it with `extra_env_passthrough`.
 
@@ -282,7 +282,7 @@ The runner sources this script with `bash` after applying the workspace home con
 **Filtering:**
 
 `.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.).
-To prevent the runner from leaking its own control-plane credentials to tools, the overlay drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`.
+To prevent runtime control material from reaching tools, the overlay drops credential seed declarations, Kubernetes worker backend config env names, runner control names, and any name starting with `MINDROOM_SANDBOX_`.
 Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export.
 After MindRoom-owned env names are reasserted, other exported values pass through, including service tokens and provider credentials you intentionally export from the hook.
 If you don't want a value to reach tools, don't export it.

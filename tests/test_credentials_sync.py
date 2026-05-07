@@ -8,7 +8,7 @@ import pytest
 
 from mindroom import constants as constants_mod
 from mindroom import credentials_sync as credentials_sync_mod
-from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, CredentialsManager
+from mindroom.credentials import CredentialsManager
 from mindroom.credentials_sync import (
     _ENV_TO_SERVICE_MAP,
     get_api_key_for_provider,
@@ -16,6 +16,7 @@ from mindroom.credentials_sync import (
     get_secret_from_env,
     sync_env_to_credentials,
 )
+from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 
 
 def _runtime_paths(

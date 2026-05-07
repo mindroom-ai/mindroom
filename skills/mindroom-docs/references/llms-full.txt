@@ -882,7 +882,7 @@ Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICA
 | `MINDROOM_SANDBOX_PROXY_URL`   | Sandbox proxy endpoint URL (static runner) | *(none)* |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy           | *(none)* |
 
-See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the full list of `MINDROOM_SANDBOX_*` variables, including Kubernetes backend variables (`MINDROOM_SANDBOX_KUBERNETES_*`).
+See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for the full list of `MINDROOM_SANDBOX_*` variables and Kubernetes backend variables (`MINDROOM_KUBERNETES_WORKER_*`).
 
 ### SaaS-Only
 
@@ -2792,7 +2792,7 @@ kill_shell_command("shell:abcd1234")
 
 ### Notes
 
-- `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries. MindRoom forwards no committed runtime `.env` values by default; matched values pass through except runner control names (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and names starting with `MINDROOM_SANDBOX_`.
+- `extra_env_passthrough` only affects sandboxed `shell` calls and matches exported process env, not config-adjacent `.env` entries. MindRoom forwards no committed runtime `.env` values by default; matched values pass through except credential seed declarations, Kubernetes worker backend config env names, runner control names, and names starting with `MINDROOM_SANDBOX_`.
 - In authored YAML, `extra_env_passthrough` and `shell_path_prepend` can be written as lists, and MindRoom normalizes them to the tool's comma-or-newline form.
 - Background handles survive multiple requests to the same long-lived runner process, but they do not survive runner restarts.
 - `shell_path_prepend` deduplicates PATH entries and only changes subprocess PATH, not the main MindRoom process PATH.
@@ -13469,7 +13469,7 @@ When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker e
 
 ## Shell env and PATH
 
-When `shell` runs through the sandbox proxy, it receives only a small non-secret system env by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale variables, proxy variables, and certificate path variables. Committed runtime `.env` values and provider credentials are not forwarded implicitly. Worker startup env also denies provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` by default. Configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit. `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries. To prevent the runner from leaking its own control-plane credentials to tools, shell passthrough drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`. Everything else that matches your configured names or globs passes through, including service tokens and provider credentials. If you don't want a value to reach shell commands, don't match it with `extra_env_passthrough`.
+When `shell` runs through the sandbox proxy, it receives only a small non-secret system env by default, such as `PATH`, `HOME`, `USER`, `TMPDIR`, locale variables, proxy variables, and certificate path variables. Committed runtime `.env` values and provider credentials are not forwarded implicitly. Worker startup env also denies provider API keys such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` by default. Configure `extra_env_passthrough` with exact names or glob patterns for exported process env variables you want shell execution to inherit. `extra_env_passthrough` matches exported process env, not config-adjacent `.env` entries. To prevent runtime control material from reaching tools, shell passthrough drops credential seed declarations, Kubernetes worker backend config env names, runner control names, and any name starting with `MINDROOM_SANDBOX_`. Everything else that matches your configured names or globs passes through, including service tokens and provider credentials. If you don't want a value to reach shell commands, don't match it with `extra_env_passthrough`.
 
 If proxied shell commands need extra PATH entries such as wrapper directories, configure `shell_path_prepend`. This prepends the configured entries ahead of the runtime PATH while preserving the existing PATH order and removing duplicates. That keeps PATH handling deployment-specific instead of baking host-specific directories into the shell tool itself.
 
@@ -13502,7 +13502,7 @@ The runner sources this script with `bash` after applying the workspace home con
 
 **Filtering:**
 
-`.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.). To prevent the runner from leaking its own control-plane credentials to tools, the overlay drops names in a small explicit denylist (`MINDROOM_API_KEY`, `MINDROOM_LOCAL_CLIENT_SECRET`, `MINDROOM_SANDBOX_PROXY_TOKEN`, `MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH`) and any name starting with `MINDROOM_SANDBOX_`. Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export. After MindRoom-owned env names are reasserted, other exported values pass through, including service tokens and provider credentials you intentionally export from the hook. If you don't want a value to reach tools, don't export it.
+`.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.). To prevent runtime control material from reaching tools, the overlay drops credential seed declarations, Kubernetes worker backend config env names, runner control names, and any name starting with `MINDROOM_SANDBOX_`. Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export. After MindRoom-owned env names are reasserted, other exported values pass through, including service tokens and provider credentials you intentionally export from the hook. If you don't want a value to reach tools, don't export it.
 
 **Limits and failure handling:**
 
@@ -13799,6 +13799,8 @@ Important behavior and constraints:
 - Dedicated workers start with no shared credentials by default.
 - Only services listed in `defaults.worker_grantable_credentials` are available inside a dedicated worker.
 - `google_vertex_adc` is intentionally unsupported for dedicated workers because workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep Vertex ADC usage in the primary runtime.
+- `workers.kubernetes.extraEnv` and `MINDROOM_KUBERNETES_WORKER_ENV_JSON` are filtered before reaching worker pods or startup manifests: generated worker env, runtime control env, Kubernetes backend config env, and vendor telemetry env are dropped.
+- The one sandbox-control value intentionally allowed through Kubernetes worker extra env is `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`, so operators can tune runner subprocess timeouts.
 - Dedicated worker runtime env stays deny-by-default for provider and arbitrary `.env` values, while basic runtime plumbing such as `PATH`, `VIRTUAL_ENV`, and linker vars is set separately.
 - This matches the broader sandbox-proxy contract for `python` and `shell`: proxied execution is intentionally stricter than direct local execution and does not inherit ordinary runtime `.env` or provider env by default.
 - For agent-editable per-workspace env (extra PATH entries, package indexes, npm cache dirs, etc.), use the request-time `.mindroom/worker-env.sh` overlay documented in [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh). The overlay is sourced inside the running worker per request, so it does not change the worker Deployment, the startup manifest, the pod-template hash, or any Helm value, and does not require a worker restart when edited.

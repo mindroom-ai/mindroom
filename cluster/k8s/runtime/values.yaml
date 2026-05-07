@@ -207,7 +207,6 @@ workers:
       value: ""
   staticRunner:
     port: 8766
-    workerRoot: ""
     resources:
       requests:
         cpu: 100m

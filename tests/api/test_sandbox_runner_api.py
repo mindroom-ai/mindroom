@@ -88,7 +88,6 @@ def _load_tools() -> None:
 def _reset_worker_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
     monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
-    monkeypatch.delenv("MINDROOM_SANDBOX_WORKER_ROOT", raising=False)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
 
 
@@ -476,6 +475,9 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     manifest_path = _write_startup_manifest(runtime_paths=payload_runtime, public_runtime=True)
     _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS", "9")
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(tmp_path / "shared-storage"))
     monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
 
     startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
@@ -484,6 +486,9 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     assert startup_runtime.env_value("OPENAI_API_KEY") == "dotenv-secret"
     assert startup_runtime.env_value("TEST_EXECUTION_ENV") == "worker-visible"
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+    assert startup_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
+    assert startup_runtime.env_value("MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS") == "9"
+    assert startup_runtime.env_value("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT") == str(tmp_path / "shared-storage")
 
 
 def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
@@ -3347,7 +3352,6 @@ def test_dedicated_worker_mode_uses_mounted_root(
         assert isinstance(cwd, str)
         assert cwd == str(worker_root / "workspace")
         assert "MINDROOM_STORAGE_PATH" not in env
-        assert "MINDROOM_SANDBOX_WORKER_ROOT" not in env
         request_envelope = json.loads(request_input)
         request_payload = request_envelope["request"]
         runtime_payload = request_envelope["runtime_paths"]
@@ -3533,13 +3537,11 @@ def test_dedicated_worker_runner_rejects_sibling_worker_token(
 
 
 def test_prepare_worker_uses_explicit_runtime_storage_root_for_local_workers(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Local worker state roots should come from the committed runtime storage root."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
-    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(tmp_path / "ambient-workers"))
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "explicit-storage",

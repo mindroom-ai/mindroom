@@ -19,6 +19,7 @@ from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
+from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 
 from .config import activate_cli_runtime, console, load_config_quiet
 
@@ -291,13 +292,15 @@ def _validate_vertexai_claude_connection(
 ) -> tuple[bool | None, str]:
     """Validate the configured Vertex AI Claude model with the runtime request path."""
     extra_kwargs = dict(model_config.extra_kwargs or {})
-    project_id = extra_kwargs.get("project_id") or runtime_paths.env_value("ANTHROPIC_VERTEX_PROJECT_ID")
-    region = extra_kwargs.get("region") or runtime_paths.env_value("CLOUD_ML_REGION")
+    project_env = VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]
+    region_env = VERTEXAI_CLAUDE_ENV_BY_KEY["region"]
+    project_id = extra_kwargs.get("project_id") or runtime_paths.env_value(project_env)
+    region = extra_kwargs.get("region") or runtime_paths.env_value(region_env)
     missing = []
     if not project_id:
-        missing.append("ANTHROPIC_VERTEX_PROJECT_ID")
+        missing.append(project_env)
     if not region:
-        missing.append("CLOUD_ML_REGION")
+        missing.append(region_env)
     if missing:
         return None, f"missing {', '.join(missing)}"
 
