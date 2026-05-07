@@ -176,6 +176,26 @@ class TestCredentialsManager:
 
         assert creds_path.read_bytes() == original_payload
 
+    def test_plaintext_save_refuses_to_overwrite_encrypted_credentials_without_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A missing encryption key should not turn an existing encrypted file into plaintext JSON."""
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+        encrypted_manager = CredentialsManager(tmp_path / "credentials")
+        encrypted_manager.save_credentials("oauth_service", {"api_key": "old", "other": "preserve-me"})
+        creds_path = encrypted_manager.get_credentials_path("oauth_service")
+        original_payload = creds_path.read_bytes()
+
+        monkeypatch.delenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY")
+        plaintext_manager = CredentialsManager(tmp_path / "credentials")
+
+        with pytest.raises(ValueError, match="refusing to overwrite without a key"):
+            plaintext_manager.save_credentials("oauth_service", {"api_key": "new"})
+
+        assert creds_path.read_bytes() == original_payload
+
     def test_encrypted_credentials_reject_plaintext_without_traceback_logging(
         self,
         tmp_path: Path,

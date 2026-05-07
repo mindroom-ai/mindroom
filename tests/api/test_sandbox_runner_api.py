@@ -649,7 +649,7 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
         process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
     )
     assert not constants_module.is_workspace_env_overlay_name_allowed(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV)
-    assert subprocess_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert subprocess_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
 
 
 def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_environ(tmp_path: Path) -> None:
@@ -1105,10 +1105,15 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
         encoding="utf-8",
     )
     (config_dir / ".env").write_text(
-        "MINDROOM_NAMESPACE=alpha1234\nMATRIX_HOMESERVER=http://dotenv-hs\n",
+        f"MINDROOM_NAMESPACE=alpha1234\nMATRIX_HOMESERVER=http://dotenv-hs\n"
+        f"{runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV}=dotenv-key\n",
         encoding="utf-8",
     )
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+    encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
     captured_payload: dict[str, object] = {}
 
     def fake_run(
@@ -1144,6 +1149,9 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     assert child_runtime.env_file_values["MINDROOM_NAMESPACE"] == "alpha1234"
     assert child_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert child_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
+    assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert encryption_key not in json.dumps(captured_payload)
+    assert "dotenv-key" not in json.dumps(captured_payload)
 
 
 def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Path) -> None:

@@ -130,6 +130,11 @@ def _atomic_write_private_file(path: Path, payload: bytes) -> None:
             tmp_path.unlink()
 
 
+def _has_encrypted_credentials_magic(path: Path) -> bool:
+    with path.open("rb") as f:
+        return f.read(len(_ENCRYPTED_CREDENTIALS_MAGIC)) == _ENCRYPTED_CREDENTIALS_MAGIC
+
+
 class CredentialsManager:
     """Centralized credentials storage and retrieval for MindRoom."""
 
@@ -312,6 +317,9 @@ class CredentialsManager:
             )
             _atomic_write_private_file(credentials_path, payload)
             return
+        if credentials_path.exists() and _has_encrypted_credentials_magic(credentials_path):
+            msg = f"Stored credentials for {normalized_service} are encrypted; refusing to overwrite without a key"
+            raise ValueError(msg)
         with credentials_path.open("w", encoding="utf-8") as f:
             json.dump(credentials, f, indent=2)
 
