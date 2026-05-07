@@ -556,7 +556,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             partial = record.stdout_buf.render(tail=50)
             return (
                 f"Status: RUNNING (PID {record.pid}, elapsed {elapsed:.1f}s)\n"
-                f"Partial output ({len(record.stdout_buf)} lines so far):\n{partial}"
+                f"Partial output ({len(record.stdout_buf)} lines buffered):\n{partial}"
             )
 
         def kill_shell_command(self, handle: str, force: bool = False) -> str:

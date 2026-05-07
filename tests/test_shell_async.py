@@ -514,6 +514,8 @@ async def test_check_shell_command_partial_output(tmp_path: Path) -> None:
 
     status = check_fn(handle)
     assert "RUNNING" in status
+    assert "lines buffered" in status
+    assert "lines so far" not in status
     assert "partial-line" in status
 
     # Clean up
