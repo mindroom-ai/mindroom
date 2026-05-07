@@ -188,6 +188,23 @@ def test_sandbox_runner_startup_process_env_keeps_ambient_values_and_drops_contr
     }
 
 
+def test_sandbox_runner_runtime_state_keeps_dedicated_storage_subpath_prefix() -> None:
+    """Dedicated runner subprocesses keep the worker storage prefix needed to resolve shared roots."""
+    env = {
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:shared:general",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/shared/nested/workers/worker-dir",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "nested/workers",
+        "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"OPENAI_API_KEY": "nested-secret"}),
+        "MINDROOM_SANDBOX_PROXY_TOKEN": "runner-secret",
+    }
+
+    assert runtime_env_policy.sandbox_runner_runtime_state_env(env) == {
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:shared:general",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/shared/nested/workers/worker-dir",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "nested/workers",
+    }
+
+
 def test_worker_backend_config_names_are_classified_and_excluded_from_public_startup() -> None:
     """Primary-side Kubernetes backend config env names are never public startup env."""
     backend_names = runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES
