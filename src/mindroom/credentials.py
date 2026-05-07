@@ -262,7 +262,7 @@ class CredentialsManager:
                         service=normalized_service,
                         key=self._encryption_key,
                     )
-                except (OSError, TypeError, ValueError, json.JSONDecodeError, InvalidTag, binascii.Error) as exc:
+                except (OSError, TypeError, ValueError, InvalidTag) as exc:
                     logger.warning(
                         "Failed to load encrypted credentials",
                         service=normalized_service,
@@ -302,6 +302,9 @@ class CredentialsManager:
         credentials: dict[str, Any],
     ) -> None:
         if self._encryption_key is not None:
+            if credentials_path.exists() and self._load_credentials_file(normalized_service, credentials_path) is None:
+                msg = f"Stored credentials for {normalized_service} could not be loaded; refusing to overwrite"
+                raise ValueError(msg)
             payload = _encrypted_credentials_payload(
                 credentials,
                 service=normalized_service,

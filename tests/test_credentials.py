@@ -159,6 +159,23 @@ class TestCredentialsManager:
 
         assert manager.load_credentials("oauth_service") is None
 
+    def test_encrypted_save_refuses_to_overwrite_unreadable_credentials(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted save should fail closed when an existing credential file cannot be loaded."""
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+        manager = CredentialsManager(tmp_path / "credentials")
+        creds_path = manager.get_credentials_path("oauth_service")
+        original_payload = b'{"api_key":"old","other":"preserve-me"}'
+        creds_path.write_bytes(original_payload)
+
+        with pytest.raises(ValueError, match="refusing to overwrite"):
+            manager.save_credentials("oauth_service", {"api_key": "new"})
+
+        assert creds_path.read_bytes() == original_payload
+
     def test_encrypted_credentials_reject_plaintext_without_traceback_logging(
         self,
         tmp_path: Path,
