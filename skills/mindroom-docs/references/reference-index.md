@@ -20,7 +20,9 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Teams | `configuration/teams.md` | `configuration/teams/index.md` | `page__configuration__teams__index.md` |
 | Cultures | `configuration/cultures.md` | `configuration/cultures/index.md` | `page__configuration__cultures__index.md` |
 | Router | `configuration/router.md` | `configuration/router/index.md` | `page__configuration__router__index.md` |
+| Toolkits | `configuration/toolkits.md` | `configuration/toolkits/index.md` | `page__configuration__toolkits__index.md` |
 | Overview | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
+| Dynamic Toolkits | `tools/dynamic-toolkits.md` | `tools/dynamic-toolkits/index.md` | `page__tools__dynamic-toolkits__index.md` |
 | Execution & Coding | `tools/execution-and-coding.md` | `tools/execution-and-coding/index.md` | `page__tools__execution-and-coding__index.md` |
 | Data & Databases | `tools/data-and-databases.md` | `tools/data-and-databases/index.md` | `page__tools__data-and-databases__index.md` |
 | Web Search | `tools/web-search.md` | `tools/web-search/index.md` | `page__tools__web-search__index.md` |
@@ -37,10 +39,11 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Automation & Platforms | `tools/automation-and-platforms.md` | `tools/automation-and-platforms/index.md` | `page__tools__automation-and-platforms__index.md` |
 | Location, Commerce & Home | `tools/location-commerce-and-home.md` | `tools/location-commerce-and-home/index.md` | `page__tools__location-commerce-and-home__index.md` |
 | All Tools (Redirect) | `tools/builtin.md` | `tools/builtin/index.md` | `page__tools__builtin__index.md` |
-| MCP (Planned) | `tools/mcp.md` | `tools/mcp/index.md` | `page__tools__mcp__index.md` |
+| MCP | `mcp.md` | `mcp/index.md` | `page__mcp__index.md` |
 | OpenClaw Import | `openclaw.md` | `openclaw/index.md` | `page__openclaw__index.md` |
 | Skills | `skills.md` | `skills/index.md` | `page__skills__index.md` |
 | Plugins | `plugins.md` | `plugins/index.md` | `page__plugins__index.md` |
+| Hooks | `hooks.md` | `hooks/index.md` | `page__hooks__index.md` |
 | OAuth Framework | `oauth-framework.md` | `oauth-framework/index.md` | `page__oauth-framework__index.md` |
 | Knowledge Bases | `knowledge.md` | `knowledge/index.md` | `page__knowledge__index.md` |
 | Memory System | `memory.md` | `memory/index.md` | `page__memory__index.md` |
