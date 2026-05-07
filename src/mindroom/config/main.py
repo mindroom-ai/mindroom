@@ -157,7 +157,10 @@ def _prompt_template_field_names(template: str) -> set[str]:
             if not field_name:
                 msg = "Empty template fields are not supported"
                 raise ValueError(msg)
-            fields.add(field_name.partition(".")[0].partition("[")[0])
+            if "." in field_name or "[" in field_name or "]" in field_name:
+                msg = f"Compound template fields are not supported: {field_name}"
+                raise ValueError(msg)
+            fields.add(field_name)
         if format_spec:
             fields.update(_prompt_template_field_names(format_spec))
     return fields

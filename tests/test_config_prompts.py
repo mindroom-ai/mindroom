@@ -43,3 +43,23 @@ def test_config_rejects_prompt_override_with_unsupported_template_field() -> Non
                 },
             },
         )
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{message.nope}",
+        "{message[999]}",
+        "{message:{message.nope}}",
+    ],
+)
+def test_config_rejects_prompt_override_with_compound_template_field(template: str) -> None:
+    """Prompt template overrides must not use compound field access."""
+    with pytest.raises(ValidationError, match="Compound template fields are not supported"):
+        Config.model_validate(
+            {
+                "prompts": {
+                    "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": template,
+                },
+            },
+        )

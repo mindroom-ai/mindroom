@@ -1223,7 +1223,7 @@ prompts:
     Return only the agent name.
 ```
 
-Discover allowed names by inspecting `src/mindroom/prompts.py` or by importing `PROMPT_DEFAULT_NAMES` from `mindroom.prompts`. For prompts formatted with `{...}` placeholders, discover the allowed fields from `PROMPT_TEMPLATE_FIELDS` in `mindroom.prompts`. MindRoom validates configured template fields at config load, and unsupported fields fail validation before runtime. Escape literal braces as `{{` and `}}` inside formatted prompt overrides. Changing root prompt overrides in a running process restarts existing agents, teams, and the router through hot reload.
+Discover allowed names by inspecting `src/mindroom/prompts.py` or by importing `PROMPT_DEFAULT_NAMES` from `mindroom.prompts`. For prompts formatted with `{...}` placeholders, discover the allowed fields from `PROMPT_TEMPLATE_FIELDS` in `mindroom.prompts`. MindRoom validates configured template fields at config load, and unsupported fields fail validation before runtime. Only direct field names are supported; compound access such as `{message.text}` or `{message[0]}` is rejected. Escape literal braces as `{{` and `}}` inside formatted prompt overrides. Changing root prompt overrides in a running process restarts existing agents, teams, and the router through hot reload.
 
 ## Managed Avatars
 
