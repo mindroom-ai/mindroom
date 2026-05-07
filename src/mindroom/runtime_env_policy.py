@@ -151,20 +151,8 @@ _ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset(
     {
         "ACCOUNT_ID",
         "CUSTOMER_ID",
-        KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"],
         "POD_NAMESPACE",
         *_VENDOR_TELEMETRY_ENV_NAMES,
-    },
-)
-_WORKER_RUNTIME_STATE_ENV_NAMES = frozenset(
-    {
-        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
-        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"],
-        SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"],
-        SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"],
-        SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],
-        SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
-        KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"],
     },
 )
 _PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES = frozenset(
@@ -175,6 +163,11 @@ _PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES = frozenset(
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
+    },
+)
+_WORKER_RUNTIME_STATE_ENV_NAMES = _PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES | frozenset(
+    {
+        KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"],
     },
 )
 _WORKER_EXTRA_ENV_SANDBOX_ENV_NAMES = frozenset(
@@ -242,38 +235,6 @@ _RUNNER_CONTROL_ENV_EXCLUDED_NAMES = frozenset(
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
 )
-_SANDBOX_SHELL_SYSTEM_ENV_NAMES = frozenset(
-    {
-        "CURL_CA_BUNDLE",
-        "HOME",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "LD_LIBRARY_PATH",
-        "NIX_LD",
-        "NIX_LD_LIBRARY_PATH",
-        "NO_PROXY",
-        "PATH",
-        "PIP_CACHE_DIR",
-        "PYTHONPATH",
-        "PYTHONPYCACHEPREFIX",
-        "REQUESTS_CA_BUNDLE",
-        "SHELL",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "TERM",
-        "TMPDIR",
-        "USER",
-        "UV_CACHE_DIR",
-        "VIRTUAL_ENV",
-        "XDG_CACHE_HOME",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-    },
-)
 _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES = frozenset(
     {
         "CURL_CA_BUNDLE",
@@ -297,6 +258,17 @@ _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES = frozenset(
         "http_proxy",
         "https_proxy",
         "no_proxy",
+    },
+)
+_SANDBOX_SHELL_SYSTEM_ENV_NAMES = _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES | frozenset(
+    {
+        "PIP_CACHE_DIR",
+        "PYTHONPYCACHEPREFIX",
+        "SHELL",
+        "TERM",
+        "USER",
+        "UV_CACHE_DIR",
+        "XDG_CACHE_HOME",
     },
 )
 _KNOWN_WORKER_CREDENTIAL_ENV_NAMES = frozenset(

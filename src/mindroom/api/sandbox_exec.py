@@ -222,10 +222,6 @@ def generic_subprocess_env() -> dict[str, str]:
     """Build the baseline subprocess env for non-worker execution."""
     env = _subprocess_passthrough_env()
     env.update(vendor_telemetry_env_values())
-    for key in ("HOME", "PATH", "PYTHONPATH", "VIRTUAL_ENV"):
-        value = os.environ.get(key)
-        if value:
-            env[key] = value
     return env
 
 
