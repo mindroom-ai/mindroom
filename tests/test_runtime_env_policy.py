@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from mindroom import runtime_env_policy
 
@@ -122,6 +123,25 @@ def test_worker_backend_config_names_are_classified_and_excluded_from_public_sta
     assert not any(runtime_env_policy.is_execution_runtime_env_file_name(name) for name in backend_names)
 
 
+def test_sandbox_subprocess_system_env_uses_policy_allowlist() -> None:
+    """Subprocess host env passthrough is centralized with the runtime env policy."""
+    env = {
+        "PATH": "/usr/bin",
+        "PYTHONPATH": "/app/src",
+        "HTTP_PROXY": "http://proxy.example.invalid",
+        "TERM": "xterm-256color",
+        "OPENAI_API_KEY": "provider-secret",
+        "MINDROOM_SANDBOX_PROXY_TOKEN": "runner-secret",
+        "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"OPENAI_API_KEY": "nested-secret"}),
+    }
+
+    assert runtime_env_policy.sandbox_subprocess_system_env(env) == {
+        "PATH": "/usr/bin",
+        "PYTHONPATH": "/app/src",
+        "HTTP_PROXY": "http://proxy.example.invalid",
+    }
+
+
 def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filtering() -> None:
     """Storage subpath is backend config when inherited, but explicit worker runtime state when re-added."""
     env = {
@@ -136,3 +156,21 @@ def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filt
     assert runtime_env_policy.isolated_worker_runtime_env(env) == {
         "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
     }
+
+
+def test_kubernetes_backend_config_env_literals_stay_in_policy_module() -> None:
+    """Python callers should import Kubernetes backend config env names from the policy module."""
+    source_root = Path(__file__).resolve().parents[1] / "src" / "mindroom"
+    allowed_path = source_root / "runtime_env_policy.py"
+    backend_env_names = runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES
+
+    violations: dict[str, list[str]] = {}
+    for path in source_root.rglob("*.py"):
+        if path == allowed_path:
+            continue
+        text = path.read_text(encoding="utf-8")
+        leaked_names = [name for name in backend_env_names if repr(name) in text or f'"{name}"' in text]
+        if leaked_names:
+            violations[str(path.relative_to(source_root))] = sorted(leaked_names)
+
+    assert violations == {}

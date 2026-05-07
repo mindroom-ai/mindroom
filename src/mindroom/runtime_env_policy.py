@@ -30,6 +30,7 @@ __all__ = [
     "sandbox_execution_runtime_env",
     "sandbox_runner_startup_process_env",
     "sandbox_shell_system_env",
+    "sandbox_subprocess_system_env",
     "shell_passthrough_env",
 ]
 
@@ -196,6 +197,31 @@ _SANDBOX_SHELL_SYSTEM_ENV_NAMES = frozenset(
         "no_proxy",
     },
 )
+_SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES = frozenset(
+    {
+        "CURL_CA_BUNDLE",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LD_LIBRARY_PATH",
+        "NIX_LD",
+        "NIX_LD_LIBRARY_PATH",
+        "NO_PROXY",
+        "PATH",
+        "PYTHONPATH",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TMPDIR",
+        "VIRTUAL_ENV",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    },
+)
 _KNOWN_WORKER_CREDENTIAL_ENV_NAMES = frozenset(
     {
         "GOOGLE_APPLICATION_CREDENTIALS",
@@ -310,4 +336,12 @@ def sandbox_shell_system_env(env: Mapping[str, str]) -> Mapping[str, str]:
     return cast(
         "Mapping[str, str]",
         MappingProxyType({key: value for key, value in env.items() if key in _SANDBOX_SHELL_SYSTEM_ENV_NAMES}),
+    )
+
+
+def sandbox_subprocess_system_env(env: Mapping[str, str]) -> Mapping[str, str]:
+    """Return the non-secret system env sandbox subprocesses may receive by default."""
+    return cast(
+        "Mapping[str, str]",
+        MappingProxyType({key: value for key, value in env.items() if key in _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES}),
     )

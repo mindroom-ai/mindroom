@@ -17,6 +17,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom import constants
+from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY, sandbox_subprocess_system_env
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
@@ -38,30 +39,9 @@ _RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SEC
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
-_KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"
+_KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
-_SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
-    {
-        "CURL_CA_BUNDLE",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "LANG",
-        "LD_LIBRARY_PATH",
-        "LC_ALL",
-        "LC_CTYPE",
-        "NIX_LD",
-        "NIX_LD_LIBRARY_PATH",
-        "NO_PROXY",
-        "REQUESTS_CA_BUNDLE",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "TMPDIR",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-    },
-)
 
 
 def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
@@ -232,7 +212,7 @@ def _current_runtime_site_packages() -> list[str]:
 
 def _subprocess_passthrough_env() -> dict[str, str]:
     """Return the small set of host env vars forwarded to subprocesses."""
-    return {key: value for key, value in os.environ.items() if key in _SUBPROCESS_ENV_PASSTHROUGH_KEYS}
+    return dict(sandbox_subprocess_system_env(os.environ))
 
 
 def generic_subprocess_env() -> dict[str, str]:

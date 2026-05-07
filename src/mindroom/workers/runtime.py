@@ -9,6 +9,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, kubernetes_backend_config_signature
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-_PRIMARY_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
+_PRIMARY_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
 _PRIMARY_WORKER_MANAGER: WorkerManager | None = None
 _PRIMARY_WORKER_MANAGER_CONFIG: tuple[str, ...] | None = None
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
