@@ -177,27 +177,10 @@ class _StaticCompactionConfigSemantics:
     authored_model: _AuthoredOptionalModel
 
 
-class AvatarPromptsConfig(BaseModel):
-    """Optional prompt/style overrides for managed avatar generation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    character_style: str | None = Field(default=None, description="Base style for agent and team avatars")
-    room_style: str | None = Field(default=None, description="Base style for room and space avatars")
-    agent_system_prompt: str | None = Field(default=None, description="Prompt template for agent avatars")
-    team_system_prompt: str | None = Field(default=None, description="Prompt template for team avatars")
-    room_system_prompt: str | None = Field(default=None, description="Prompt template for room and space avatars")
-
-
 class AvatarConfig(BaseModel):
     """Managed avatar generation configuration."""
 
     model_config = ConfigDict(extra="forbid")
-
-    prompts: AvatarPromptsConfig | None = Field(
-        default=None,
-        description="Optional prompt/style overrides for managed avatar generation",
-    )
 
 
 def _history_policy_from_limits(

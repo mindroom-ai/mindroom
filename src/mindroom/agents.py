@@ -1156,7 +1156,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths=runtime_paths,
     )
 
-    logger.info("using_yaml_agent_config", agent=agent_name)
     role = full_context + agent_config.role
     instructions = list(agent_config.instructions)
 

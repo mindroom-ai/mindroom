@@ -91,8 +91,8 @@ def test_get_console_returns_shared_console_instance() -> None:
     assert generate_avatars._get_console() is generate_avatars._get_console()
 
 
-def test_resolve_avatar_prompt_settings_applies_overrides_and_defaults(tmp_path: Path) -> None:
-    """Avatar prompt settings should honor authored overrides and fall back to built-ins."""
+def test_config_prompt_overrides_drive_avatar_prompt_generation(tmp_path: Path) -> None:
+    """Avatar generation should use root prompt overrides for avatar styles."""
     config = _config_with_runtime_paths(
         {
             "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
@@ -103,23 +103,19 @@ def test_resolve_avatar_prompt_settings_applies_overrides_and_defaults(tmp_path:
                     "model": "default",
                 },
             },
-            "avatars": {
-                "prompts": {
-                    "character_style": "custom character style",
-                    "room_system_prompt": "custom room system prompt",
-                },
+            "prompts": {
+                "AVATAR_CHARACTER_STYLE": "custom character style",
+                "AVATAR_ROOM_SYSTEM_PROMPT": "custom room system prompt",
             },
         },
         tmp_path,
     )
 
-    prompt_settings = generate_avatars._resolve_avatar_prompt_settings(config)
-
-    assert prompt_settings.character_style == "custom character style"
-    assert prompt_settings.room_system_prompt == "custom room system prompt"
-    assert prompt_settings.room_style == AVATAR_ROOM_STYLE
-    assert prompt_settings.agent_system_prompt == AVATAR_AGENT_SYSTEM_PROMPT
-    assert prompt_settings.team_system_prompt == AVATAR_TEAM_SYSTEM_PROMPT
+    assert config.get_prompt("AVATAR_CHARACTER_STYLE") == "custom character style"
+    assert config.get_prompt("AVATAR_ROOM_SYSTEM_PROMPT") == "custom room system prompt"
+    assert config.get_prompt("AVATAR_ROOM_STYLE") == AVATAR_ROOM_STYLE
+    assert config.get_prompt("AVATAR_AGENT_SYSTEM_PROMPT") == AVATAR_AGENT_SYSTEM_PROMPT
+    assert config.get_prompt("AVATAR_TEAM_SYSTEM_PROMPT") == AVATAR_TEAM_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
@@ -475,6 +471,7 @@ async def test_generate_prompt_uses_gemini_prompt_model() -> None:
     """Prompt generation should call the Gemini text model and compose the base style."""
     generate_content = AsyncMock(return_value=SimpleNamespace(text="teal and copper, visor eyes"))
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    config = generate_avatars.Config()
 
     prompt = await generate_avatars._generate_prompt(
         client,
@@ -483,6 +480,7 @@ async def test_generate_prompt_uses_gemini_prompt_model() -> None:
             entity_name="research",
             role="Finds information",
         ),
+        config,
     )
 
     assert prompt == f"{AVATAR_CHARACTER_STYLE}, teal and copper, visor eyes"
@@ -497,6 +495,7 @@ async def test_generate_prompt_uses_room_style_for_spaces() -> None:
     """Space avatars should use the same icon-style prompt path as rooms."""
     generate_content = AsyncMock(return_value=SimpleNamespace(text="deep blue, doorway outline"))
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    config = generate_avatars.Config()
 
     prompt = await generate_avatars._generate_prompt(
         client,
@@ -505,6 +504,7 @@ async def test_generate_prompt_uses_room_style_for_spaces() -> None:
             entity_name="root_space",
             role="Workspace space that organizes rooms",
         ),
+        config,
     )
 
     assert prompt == f"{AVATAR_ROOM_STYLE}, deep blue, doorway outline"
@@ -540,6 +540,7 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
             role="Helpful assistant",
         ),
         _runtime_paths(tmp_path),
+        generate_avatars.Config(),
     )
 
     assert avatar_path.read_bytes() == b"avatar-bytes"
@@ -572,6 +573,7 @@ async def test_generate_avatar_skips_existing_file_without_force(
             role="Helpful assistant",
         ),
         _runtime_paths(tmp_path),
+        generate_avatars.Config(),
     )
 
     assert avatar_path.read_bytes() == b"existing-avatar"
@@ -611,6 +613,7 @@ async def test_generate_avatar_force_overwrites_existing_file(
             role="Helpful assistant",
         ),
         _runtime_paths(tmp_path),
+        generate_avatars.Config(),
         force=True,
     )
 
@@ -650,13 +653,13 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
         _client: object,
         target: generate_avatars._AvatarTarget,
         runtime_paths: constants_mod.RuntimePaths,
+        _config: generate_avatars.Config,
         *,
         force: bool = False,
-        prompt_settings: generate_avatars._AvatarPromptSettings | None = None,
     ) -> None:
         del runtime_paths
+        del _config
         del force
-        del prompt_settings
         avatar_path = workspace_avatar_dir / target.entity_type / f"{target.entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"generated")

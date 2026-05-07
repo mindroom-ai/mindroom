@@ -518,22 +518,22 @@ MindRoom validates configured prompt placeholders at config load, and unsupporte
 Prompt placeholders are not Jinja and not Python `str.format`; MindRoom only replaces exact `{field_name}` placeholders.
 Only bare placeholder names are supported; compound access, conversions, and format specs such as `{message.text}`, `{message!r}`, or `{message:.2f}` are rejected.
 Escape literal braces as `{{` and `}}` inside prompt overrides that use placeholders.
-Changing root prompt overrides in a running process restarts existing agents, teams, and the router through hot reload.
+Changing construction-time root prompt overrides in a running process restarts existing agents, teams, and the router through hot reload.
+Prompt overrides that are read per request are picked up without restarting bots.
 
 ## Managed Avatars
 
 MindRoom can generate managed avatars for agents, teams, rooms, and the optional root Matrix Space.
-Use the optional `avatars.prompts` block to override the built-in prompt styles without editing Python code.
-Every field is optional and falls back to MindRoom's built-in defaults when omitted.
+Use the root `prompts` block to override the built-in avatar prompt styles without editing Python code.
+Every omitted prompt falls back to MindRoom's built-in default.
 
 ```yaml
-avatars:
-  prompts:
-    character_style: "professional AI avatar portrait, abstract geometric silhouette"
-    room_style: "minimalist wayfinding icon, precise geometry, strong silhouette"
-    agent_system_prompt: "You are creating distinctive visual elements for a professional AI agent avatar."
-    team_system_prompt: "You are creating distinctive visual elements for a professional AI team avatar."
-    room_system_prompt: "You are creating a refined, minimalist icon design for a room avatar."
+prompts:
+  AVATAR_CHARACTER_STYLE: "professional AI avatar portrait, abstract geometric silhouette"
+  AVATAR_ROOM_STYLE: "minimalist wayfinding icon, precise geometry, strong silhouette"
+  AVATAR_AGENT_SYSTEM_PROMPT: "You are creating distinctive visual elements for a professional AI agent avatar."
+  AVATAR_TEAM_SYSTEM_PROMPT: "You are creating distinctive visual elements for a professional AI team avatar."
+  AVATAR_ROOM_SYSTEM_PROMPT: "You are creating a refined, minimalist icon design for a room avatar."
 ```
 
 `mindroom avatars generate` only creates missing local avatar files by default.

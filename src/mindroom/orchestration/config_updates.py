@@ -18,6 +18,25 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_ENTITY_CONSTRUCTION_PROMPTS = frozenset(
+    {
+        "AGENT_IDENTITY_CONTEXT_TEMPLATE",
+        "CODEX_DEFAULT_INSTRUCTIONS",
+        "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
+        "DATETIME_CONTEXT_TEMPLATE",
+        "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
+        "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
+        "DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS",
+        "HIDDEN_TOOL_CALLS_PROMPT",
+        "INTERACTIVE_QUESTION_PROMPT",
+        "OPENAI_COMPAT_HISTORY_GUIDANCE",
+        "OUTPUT_REDIRECT_PROMPT",
+        "PERSONALITY_CONTEXT_SECTION_HEADING",
+        "QUEUED_MESSAGE_NOTICE_TEXT",
+        "SKILLS_TOOL_USAGE_PROMPT",
+    },
+)
+
 
 @dataclass(frozen=True)
 class ConfigUpdatePlan:
@@ -183,9 +202,14 @@ def _entities_referencing_mcp_servers(
     return old_entities | new_entities
 
 
-def _root_prompts_changed(config: Config, new_config: Config) -> bool:
-    """Return whether any root built-in prompt overrides changed."""
-    return config.prompts != new_config.prompts
+def _changed_entity_construction_prompts(config: Config, new_config: Config) -> set[str]:
+    """Return root prompt overrides that require entity reconstruction."""
+    changed_prompt_names = {
+        prompt_name
+        for prompt_name in set(config.prompts) | set(new_config.prompts)
+        if config.get_prompt(prompt_name) != new_config.get_prompt(prompt_name)
+    }
+    return changed_prompt_names & _ENTITY_CONSTRUCTION_PROMPTS
 
 
 def build_config_update_plan(
@@ -204,11 +228,13 @@ def build_config_update_plan(
         agent_bots,
         changed_mcp_servers,
     )
-    if _root_prompts_changed(current_config, new_config):
+    changed_entity_construction_prompts = _changed_entity_construction_prompts(current_config, new_config)
+    if changed_entity_construction_prompts:
         prompt_affected_entities = existing_entities & configured_entities
         if prompt_affected_entities:
             logger.info(
-                "root_prompts_changed_restart_required",
+                "entity_construction_prompts_changed_restart_required",
+                prompts=sorted(changed_entity_construction_prompts),
                 entities=sorted(prompt_affected_entities),
             )
         entities_to_restart |= prompt_affected_entities
