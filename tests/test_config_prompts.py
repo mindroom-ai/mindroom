@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config
-from mindroom.prompts import PromptTemplateError, render_prompt_template
+from mindroom.prompt_templates import PromptTemplateError, render_prompt_template
 
 
 def test_config_accepts_known_prompt_override() -> None:

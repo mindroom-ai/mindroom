@@ -26,7 +26,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID
-from mindroom.prompts import build_agent_identity_context, render_prompt_template
+from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,

@@ -63,12 +63,8 @@ from mindroom.matrix_identifiers import (
     managed_space_alias_localpart,
 )
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
-from mindroom.prompts import (
-    PROMPT_DEFAULT_NAMES,
-    PROMPT_DEFAULTS,
-    render_prompt_template,
-    validate_prompt_template_fields,
-)
+from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
+from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from mindroom.prompts import render_prompt_template
+from mindroom.prompt_templates import render_prompt_template
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
