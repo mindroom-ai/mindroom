@@ -23,7 +23,7 @@ def test_config_accepts_known_prompt_override() -> None:
 
 
 def test_config_render_prompt_replaces_bare_fields_and_escaped_braces() -> None:
-    """Configured prompt templates render with MindRoom's small template syntax."""
+    """Configured prompt templates render exact placeholders and escaped braces."""
     config = Config.model_validate(
         {
             "prompts": {
@@ -54,9 +54,9 @@ def test_config_rejects_unknown_prompt_override() -> None:
         )
 
 
-def test_config_rejects_prompt_override_with_unsupported_template_field() -> None:
-    """Prompt template overrides must use fields supplied by their call site."""
-    with pytest.raises(ValidationError, match="Unsupported template field"):
+def test_config_rejects_prompt_override_with_unsupported_placeholder() -> None:
+    """Prompt placeholder overrides must use fields supplied by their call site."""
+    with pytest.raises(ValidationError, match="Unsupported prompt placeholder"):
         Config.model_validate(
             {
                 "prompts": {
@@ -73,9 +73,9 @@ def test_config_rejects_prompt_override_with_unsupported_template_field() -> Non
         "{message[999]}",
     ],
 )
-def test_config_rejects_prompt_override_with_compound_template_field(template: str) -> None:
-    """Prompt template overrides must not use compound field access."""
-    with pytest.raises(ValidationError, match="Compound template fields are not supported"):
+def test_config_rejects_prompt_override_with_compound_placeholder(template: str) -> None:
+    """Prompt placeholder overrides must not use compound field access."""
+    with pytest.raises(ValidationError, match="Compound prompt placeholders are not supported"):
         Config.model_validate(
             {
                 "prompts": {
@@ -94,9 +94,14 @@ def test_config_rejects_prompt_override_with_compound_template_field(template: s
         "{message:{message.nope}}",
     ],
 )
-def test_config_rejects_prompt_override_with_template_field_format_spec(template: str) -> None:
-    """Prompt template overrides must not use field format specs."""
-    with pytest.raises(ValidationError, match="Template field format specs are not supported"):
+def test_config_rejects_prompt_override_with_placeholder_format_spec(template: str) -> None:
+    """Prompt placeholder overrides must not use field format specs."""
+    match = (
+        "Only exact \\{field_name\\} prompt placeholders are supported"
+        if template == "{message:}"
+        else "Prompt placeholder format specs are not supported"
+    )
+    with pytest.raises(ValidationError, match=match):
         Config.model_validate(
             {
                 "prompts": {
@@ -106,9 +111,9 @@ def test_config_rejects_prompt_override_with_template_field_format_spec(template
         )
 
 
-def test_config_rejects_prompt_override_with_template_field_conversion() -> None:
-    """Prompt template overrides must not use field conversion syntax."""
-    with pytest.raises(ValidationError, match="Template field conversions are not supported"):
+def test_config_rejects_prompt_override_with_placeholder_conversion() -> None:
+    """Prompt placeholder overrides must not use field conversion syntax."""
+    with pytest.raises(ValidationError, match="Prompt placeholder conversions are not supported"):
         Config.model_validate(
             {
                 "prompts": {
@@ -120,5 +125,5 @@ def test_config_rejects_prompt_override_with_template_field_conversion() -> None
 
 def test_render_prompt_template_rejects_missing_field_value() -> None:
     """Runtime rendering fails clearly when a call site forgets a field value."""
-    with pytest.raises(PromptTemplateError, match="Missing template field value: agents_info"):
+    with pytest.raises(PromptTemplateError, match="Missing prompt placeholder value: agents_info"):
         render_prompt_template("{message} {agents_info}", message="hello")

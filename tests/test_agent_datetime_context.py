@@ -26,6 +26,7 @@ def _datetime_test_config() -> Config:
             agents={
                 "general": AgentConfig(
                     display_name="GeneralAgent",
+                    role="General assistant",
                     rooms=[],
                     include_default_tools=False,
                 ),
@@ -88,7 +89,7 @@ def test_agent_prompt_includes_datetime() -> None:
     assert "Today is Friday, March 20, 2026." in role
     assert "Timezone: America/Los_Angeles (PDT)" in role
     assert "The current time is" not in role
-    assert "## Core Expertise" in role
+    assert "General assistant" in role
 
 
 def test_agent_prompt_datetime_changes_with_timezone() -> None:

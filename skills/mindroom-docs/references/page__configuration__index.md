@@ -513,11 +513,11 @@ prompts:
 ```
 
 Discover allowed names by inspecting `src/mindroom/prompts.py` or by importing `PROMPT_DEFAULT_NAMES` from `mindroom.prompts`.
-For prompts formatted with `{...}` placeholders, discover the allowed fields from `PROMPT_TEMPLATE_FIELDS` in `mindroom.prompts`.
-MindRoom validates configured template fields at config load, and unsupported fields fail validation before runtime.
-Prompt templates are not Python `str.format`; MindRoom only replaces exact bare `{field_name}` tokens.
-Only bare field names are supported; compound access, conversions, and format specs such as `{message.text}`, `{message!r}`, or `{message:.2f}` are rejected.
-Escape literal braces as `{{` and `}}` inside formatted prompt overrides.
+For prompts with `{...}` placeholders, discover the allowed fields from `PROMPT_TEMPLATE_FIELDS` in `mindroom.prompts`.
+MindRoom validates configured prompt placeholders at config load, and unsupported placeholders fail validation before runtime.
+Prompt placeholders are not Jinja and not Python `str.format`; MindRoom only replaces exact `{field_name}` placeholders.
+Only bare placeholder names are supported; compound access, conversions, and format specs such as `{message.text}`, `{message!r}`, or `{message:.2f}` are rejected.
+Escape literal braces as `{{` and `}}` inside prompt overrides that use placeholders.
 Changing root prompt overrides in a running process restarts existing agents, teams, and the router through hot reload.
 
 ## Managed Avatars

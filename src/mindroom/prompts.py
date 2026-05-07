@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
+from string import Formatter
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Mapping
 
 __all__ = [
     "AGENT_IDENTITY_CONTEXT_TEMPLATE",
@@ -59,85 +60,81 @@ __all__ = [
     "validate_prompt_template_fields",
 ]
 
-_PROMPT_TEMPLATE_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PROMPT_PLACEHOLDER_RE = re.compile(r"(?<!{){([A-Za-z_][A-Za-z0-9_]*)}(?!})")
+_PROMPT_PLACEHOLDER_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class PromptTemplateError(ValueError):
-    """Prompt template syntax is outside MindRoom's deliberately small renderer."""
+    """Prompt placeholders are outside MindRoom's deliberately small syntax."""
 
 
-def _validate_prompt_template_field_name(field_name: str) -> None:
+def _validate_prompt_template_field(
+    field_name: str,
+    *,
+    format_spec: str,
+    conversion: str | None,
+) -> None:
     if not field_name:
-        msg = "Empty template fields are not supported"
+        msg = "Empty prompt placeholders are not supported"
         raise PromptTemplateError(msg)
-    if ":" in field_name:
-        msg = f"Template field format specs are not supported: {field_name}"
+    if format_spec:
+        msg = f"Prompt placeholder format specs are not supported: {field_name}"
         raise PromptTemplateError(msg)
-    if "!" in field_name:
-        msg = f"Template field conversions are not supported: {field_name}"
+    if conversion is not None:
+        msg = f"Prompt placeholder conversions are not supported: {field_name}"
         raise PromptTemplateError(msg)
     if "." in field_name or "[" in field_name or "]" in field_name:
-        msg = f"Compound template fields are not supported: {field_name}"
+        msg = f"Compound prompt placeholders are not supported: {field_name}"
         raise PromptTemplateError(msg)
-    if "{" in field_name or "}" in field_name or _PROMPT_TEMPLATE_FIELD_RE.fullmatch(field_name) is None:
-        msg = f"Only bare template field names are supported: {field_name}"
+    if "{" in field_name or "}" in field_name or _PROMPT_PLACEHOLDER_FIELD_RE.fullmatch(field_name) is None:
+        msg = f"Only bare prompt placeholder names are supported: {field_name}"
         raise PromptTemplateError(msg)
 
 
-def _iter_prompt_template_parts(template: str) -> Iterator[tuple[str, str]]:
-    index = 0
-    while index < len(template):
-        char = template[index]
-        if char == "{":
-            if index + 1 < len(template) and template[index + 1] == "{":
-                yield "literal", "{"
-                index += 2
-                continue
-            close_index = template.find("}", index + 1)
-            if close_index == -1:
-                msg = "Single '{' is not allowed in prompt templates"
-                raise PromptTemplateError(msg)
-            field_name = template[index + 1 : close_index]
-            _validate_prompt_template_field_name(field_name)
-            yield "field", field_name
-            index = close_index + 1
+def _parse_prompt_template(template: str) -> tuple[tuple[str, str | None, str | None, str | None], ...]:
+    try:
+        parsed_parts = tuple(Formatter().parse(template))
+    except ValueError as exc:
+        raise PromptTemplateError(str(exc)) from exc
+
+    parsed_field_count = 0
+    for _, field_name, format_spec, conversion in parsed_parts:
+        if field_name is None:
             continue
-        if char == "}":
-            if index + 1 < len(template) and template[index + 1] == "}":
-                yield "literal", "}"
-                index += 2
-                continue
-            msg = "Single '}' is not allowed in prompt templates"
-            raise PromptTemplateError(msg)
-        next_special_index = len(template)
-        next_open_index = template.find("{", index)
-        next_close_index = template.find("}", index)
-        if next_open_index != -1:
-            next_special_index = min(next_special_index, next_open_index)
-        if next_close_index != -1:
-            next_special_index = min(next_special_index, next_close_index)
-        yield "literal", template[index:next_special_index]
-        index = next_special_index
+        parsed_field_count += 1
+        _validate_prompt_template_field(
+            field_name,
+            format_spec=format_spec or "",
+            conversion=conversion,
+        )
+
+    # Formatter exposes `{name}` and `{name:}` with the same empty format spec, so keep an exact-token check too.
+    exact_placeholder_count = sum(1 for _ in _PROMPT_PLACEHOLDER_RE.finditer(template))
+    if exact_placeholder_count != parsed_field_count:
+        msg = "Only exact {field_name} prompt placeholders are supported"
+        raise PromptTemplateError(msg)
+
+    return parsed_parts
 
 
 def prompt_template_field_names(template: str) -> frozenset[str]:
-    """Return bare field names used by one MindRoom prompt template."""
-    return frozenset(value for kind, value in _iter_prompt_template_parts(template) if kind == "field")
+    """Return exact placeholder names used by one MindRoom prompt template."""
+    return frozenset(field_name for _, field_name, _, _ in _parse_prompt_template(template) if field_name is not None)
 
 
 def render_prompt_template(template: str, fields: Mapping[str, object] | None = None, **kwargs: object) -> str:
-    """Render a MindRoom prompt template with exact bare-field replacement only."""
+    """Render a MindRoom prompt template with exact placeholder replacement only."""
     values = dict(fields or {})
     values.update(kwargs)
     rendered_parts: list[str] = []
-    for kind, value in _iter_prompt_template_parts(template):
-        if kind == "literal":
-            rendered_parts.append(value)
+    for literal_text, field_name, _, _ in _parse_prompt_template(template):
+        rendered_parts.append(literal_text)
+        if field_name is None:
             continue
-        if value not in values:
-            msg = f"Missing template field value: {value}"
+        if field_name not in values:
+            msg = f"Missing prompt placeholder value: {field_name}"
             raise PromptTemplateError(msg)
-        rendered_parts.append(str(values[value]))
+        rendered_parts.append(str(values[field_name]))
     return "".join(rendered_parts)
 
 
@@ -580,7 +577,7 @@ def validate_prompt_template_fields(prompt_name: str, prompt_text: str) -> None:
     try:
         field_names = prompt_template_field_names(prompt_text)
     except PromptTemplateError as exc:
-        msg = f"Invalid template syntax for prompt override {prompt_name}: {exc}"
+        msg = f"Invalid prompt placeholder syntax for prompt override {prompt_name}: {exc}"
         raise ValueError(msg) from exc
 
     unsupported_fields = sorted(field_names - allowed_fields)
@@ -588,7 +585,8 @@ def validate_prompt_template_fields(prompt_name: str, prompt_text: str) -> None:
         unsupported = ", ".join(unsupported_fields)
         allowed = ", ".join(sorted(allowed_fields))
         msg = (
-            f"Unsupported template field(s) for prompt override {prompt_name}: {unsupported}. Allowed fields: {allowed}"
+            f"Unsupported prompt placeholder(s) for prompt override {prompt_name}: {unsupported}. "
+            f"Allowed placeholders: {allowed}"
         )
         raise ValueError(msg)
 
