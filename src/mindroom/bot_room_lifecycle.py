@@ -189,13 +189,16 @@ class BotRoomLifecycle:
             if not response.chunk:
                 self._logger().info("Room is empty, sending welcome message", room_id=room_id)
                 welcome_msg = generate_welcome_message(room_id, self._config(), self.deps.runtime_paths)
-                await self.deps.send_response(
+                event_id = await self.deps.send_response(
                     room_id=room_id,
                     reply_to_event_id=None,
                     response_text=welcome_msg,
                     thread_id=None,
                     skip_mentions=True,
                 )
+                if event_id is None:
+                    self._logger().warning("Welcome message delivery failed", room_id=room_id)
+                    return
                 self._welcomed_room_ids.add(room_id)
                 self._logger().info("Welcome message sent", room_id=room_id)
                 return

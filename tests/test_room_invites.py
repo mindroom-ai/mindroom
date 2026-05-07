@@ -358,6 +358,39 @@ async def test_router_welcome_send_is_idempotent_for_concurrent_empty_room_check
 
 
 @pytest.mark.asyncio
+async def test_router_welcome_send_retries_after_delivery_failure(
+    tmp_path: Path,
+) -> None:
+    """A failed welcome delivery should not suppress a later retry."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!empty:localhost",
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    bot._send_response = AsyncMock(side_effect=[None, "$welcome"])
+
+    await bot._send_welcome_message_if_empty("!empty:localhost")
+    await bot._send_welcome_message_if_empty("!empty:localhost")
+
+    assert bot.client.room_messages.await_count == 2
+    assert bot._send_response.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_router_ignores_invite_when_accept_invites_disabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
