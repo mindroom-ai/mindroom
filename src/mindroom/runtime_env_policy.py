@@ -27,6 +27,7 @@ __all__ = [
     "isolated_worker_runtime_env",
     "public_worker_startup_env",
     "sandbox_execution_runtime_env",
+    "sandbox_runner_startup_process_env",
     "sandbox_shell_system_env",
     "shell_passthrough_env",
 ]
@@ -272,6 +273,11 @@ def isolated_worker_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
 def sandbox_execution_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return env safe for sandboxed python/tool runtime reconstruction."""
     return {key: value for key, value in env.items() if is_execution_runtime_env_name(key)}
+
+
+def sandbox_runner_startup_process_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return ambient process env safe for non-dedicated sandbox runner startup rehydration."""
+    return {key: value for key, value in env.items() if not is_runtime_control_env_name(key)}
 
 
 def shell_passthrough_env(

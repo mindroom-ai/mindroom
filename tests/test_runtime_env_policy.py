@@ -91,6 +91,24 @@ def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_contro
     assert result["MATRIX_HOMESERVER"] == "https://matrix.example.invalid"
 
 
+def test_sandbox_runner_startup_process_env_keeps_ambient_values_and_drops_control() -> None:
+    """Non-dedicated runner startup rehydration preserves ambient env without control material."""
+    env = {
+        "TEST_EXECUTION_ENV": "worker-visible",
+        "MINDROOM_NAMESPACE": "alpha1234",
+        "MINDROOM_SANDBOX_PROXY_TOKEN": "runner-secret",
+        "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH": "/app/.runtime/startup.json",
+        "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"OPENAI_API_KEY": "nested-secret"}),
+    }
+
+    result = runtime_env_policy.sandbox_runner_startup_process_env(env)
+
+    assert result == {
+        "TEST_EXECUTION_ENV": "worker-visible",
+        "MINDROOM_NAMESPACE": "alpha1234",
+    }
+
+
 def test_worker_backend_config_names_are_classified_and_excluded_from_public_startup() -> None:
     """Primary-side Kubernetes backend config env names are never public startup env."""
     backend_names = {
