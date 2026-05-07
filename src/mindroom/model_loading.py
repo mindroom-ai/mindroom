@@ -28,6 +28,7 @@ from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cac
 
 if TYPE_CHECKING:
     from agno.models.base import Model
+    from google.auth.credentials import Credentials as GoogleCredentials
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
@@ -46,10 +47,11 @@ def _canonical_provider(provider: str) -> str:
 
 
 def _google_adc_file_type(credentials_path: str) -> str | None:
+    """Return the ADC JSON credential type without invoking google-auth loaders."""
     try:
         with Path(credentials_path).open(encoding="utf-8") as credentials_file:
             credentials_info = json.load(credentials_file)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
 
     if not isinstance(credentials_info, dict):
@@ -58,15 +60,22 @@ def _google_adc_file_type(credentials_path: str) -> str | None:
     return credentials_type if isinstance(credentials_type, str) else None
 
 
-def _load_google_application_credentials(credentials_path: str) -> object:
+def _load_google_application_credentials(credentials_path: str) -> GoogleCredentials:
     """Load Google ADC credentials for Vertex-backed model clients."""
     if _google_adc_file_type(credentials_path) == "service_account":
         service_account = importlib.import_module("google.oauth2.service_account")
         credentials_cls = service_account.Credentials
-        return credentials_cls.from_service_account_file(
-            credentials_path,
-            scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
-        )
+        try:
+            credentials = credentials_cls.from_service_account_file(
+                credentials_path,
+                scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
+            )
+        except service_account.exceptions.DefaultCredentialsError:
+            raise
+        except (OSError, ValueError) as exc:
+            msg = f"Failed to load service account credentials from {credentials_path}"
+            raise service_account.exceptions.DefaultCredentialsError(msg, exc) from exc
+        return cast("GoogleCredentials", credentials)
 
     google_auth = importlib.import_module("google.auth")
     load_credentials_from_file = google_auth.load_credentials_from_file
@@ -74,7 +83,7 @@ def _load_google_application_credentials(credentials_path: str) -> object:
         credentials_path,
         scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
     )
-    return credentials
+    return cast("GoogleCredentials", credentials)
 
 
 def _create_model_for_provider(  # noqa: C901, PLR0912
