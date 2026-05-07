@@ -10,7 +10,6 @@ import mindroom.credentials
 from mindroom.api.credentials import RequestCredentialsTarget
 from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials import (
-    SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
     _get_credentials_manager,
     _merge_scoped_credentials,
@@ -19,7 +18,7 @@ from mindroom.credentials import (
     save_scoped_credentials,
     sync_shared_credentials_to_worker,
 )
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 
 

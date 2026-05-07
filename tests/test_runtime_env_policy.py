@@ -229,6 +229,7 @@ def test_runtime_control_env_literals_stay_in_policy_module() -> None:
     policy_owned_env_names = {
         *runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES,
         *runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY.values(),
+        runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV,
         runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     }
 

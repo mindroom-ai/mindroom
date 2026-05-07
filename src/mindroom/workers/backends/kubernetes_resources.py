@@ -16,11 +16,11 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths
-from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
+    SHARED_CREDENTIALS_PATH_ENV,
     VENDOR_TELEMETRY_ENV_VALUES,
     worker_extra_env,
 )
