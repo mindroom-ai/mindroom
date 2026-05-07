@@ -586,6 +586,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot.last_sync_time = None
     bot._first_sync_done = False
     bot._sync_shutting_down = False
+    bot._room_member_join_hooks_armed = False
     bot.client = FakeClient()
     bot.orchestrator = None
     bot._runtime_view = BotRuntimeState(
