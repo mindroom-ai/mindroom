@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import fnmatch
+from collections.abc import Mapping  # noqa: TC003 - public annotations support typing.get_type_hints().
 from types import MappingProxyType
-from typing import TYPE_CHECKING, cast
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from typing import cast
 
 __all__ = [
     "CREDENTIAL_SEEDS_FILE_ENV",
@@ -26,13 +24,14 @@ __all__ = [
     "is_runtime_database_url_env_name",
     "is_shell_passthrough_allowed_env_name",
     "is_worker_backend_config_env_name",
+    "is_worker_extra_env_name",
     "isolated_worker_runtime_env",
     "public_worker_startup_env",
-    "sandbox_execution_runtime_env",
     "sandbox_runner_startup_process_env",
     "sandbox_shell_system_env",
     "sandbox_subprocess_system_env",
     "shell_passthrough_env",
+    "worker_extra_env",
 ]
 
 SANDBOX_STARTUP_MANIFEST_PATH_ENV = "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"
@@ -157,6 +156,7 @@ _WORKER_RUNTIME_STATE_ENV_NAMES = frozenset(
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
         "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX",
     },
 )
@@ -167,6 +167,12 @@ _PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES = frozenset(
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
+    },
+)
+_WORKER_EXTRA_ENV_SANDBOX_ENV_NAMES = frozenset(
+    {
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
     },
 )
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
@@ -337,6 +343,17 @@ def is_shell_passthrough_allowed_env_name(name: str) -> bool:
     return not is_runtime_control_env_name(name)
 
 
+def is_worker_extra_env_name(name: str) -> bool:
+    """Return whether backend extra env may be added to worker pods and startup manifests."""
+    if name in _VENDOR_TELEMETRY_ENV_NAMES or name == SANDBOX_STARTUP_MANIFEST_PATH_ENV:
+        return False
+    if is_worker_backend_config_env_name(name):
+        return False
+    if name.startswith(_SANDBOX_RUNTIME_ENV_PREFIX):
+        return name in _WORKER_EXTRA_ENV_SANDBOX_ENV_NAMES
+    return True
+
+
 def public_worker_startup_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return the env safe to serialize into public worker startup manifests."""
     return {key: value for key, value in env.items() if is_public_worker_startup_env_name(key)}
@@ -347,14 +364,14 @@ def isolated_worker_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in env.items() if is_isolated_worker_runtime_env_name(key)}
 
 
-def sandbox_execution_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
-    """Return env safe for sandboxed python/tool runtime reconstruction."""
-    return {key: value for key, value in env.items() if is_isolated_worker_runtime_env_name(key)}
-
-
 def sandbox_runner_startup_process_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return ambient process env safe for non-dedicated sandbox runner startup rehydration."""
     return {key: value for key, value in env.items() if not is_runtime_control_env_name(key)}
+
+
+def worker_extra_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return user-provided worker env after dropping protected runtime and backend controls."""
+    return {key: value for key, value in env.items() if is_worker_extra_env_name(key)}
 
 
 def shell_passthrough_env(

@@ -23,6 +23,7 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
         "MINDROOM_SANDBOX_RUNNER_MODE": "true",
         "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
         "MINDROOM_SANDBOX_RUNNER_PORT": "8766",
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-key",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/app/worker/workers/worker-key",
         "MINDROOM_CREDENTIAL_SEEDS_JSON": "{}",
@@ -55,6 +56,7 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
         "MINDROOM_SANDBOX_RUNNER_MODE": "true",
         "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
         "MINDROOM_SANDBOX_RUNNER_PORT": "8766",
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-key",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/app/worker/workers/worker-key",
     }
@@ -94,6 +96,7 @@ def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_contro
         "MINDROOM_STORAGE_PATH": "/app/storage",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "runner-secret",
         "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "worker-key",
         "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON": '{"shell":["github"]}',
         "MINDROOM_SANDBOX_FUTURE_CONTROL": "future-control",
@@ -101,12 +104,13 @@ def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_contro
         "MATRIX_HOMESERVER": "https://matrix.example.invalid",
     }
 
-    result = runtime_env_policy.sandbox_execution_runtime_env(env)
+    result = runtime_env_policy.isolated_worker_runtime_env(env)
 
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in result
     assert "MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON" not in result
     assert "MINDROOM_SANDBOX_FUTURE_CONTROL" not in result
     assert result["MINDROOM_SANDBOX_RUNNER_MODE"] == "true"
+    assert result["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "45"
     assert result["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-key"
     assert result["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/storage/.shared_credentials"
     assert result["MATRIX_HOMESERVER"] == "https://matrix.example.invalid"
@@ -174,6 +178,25 @@ def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filt
     )
     assert runtime_env_policy.isolated_worker_runtime_env(env) == {
         "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
+    }
+
+
+def test_worker_extra_env_drops_protected_controls_but_keeps_runner_timeout() -> None:
+    """Kubernetes extra env may tune runner timeout without overriding generated worker controls."""
+    env = {
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/unsafe/root",
+        "MINDROOM_SANDBOX_PROXY_TOKEN": "unsafe-token",
+        "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH": "/unsafe/startup.json",
+        "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"MINDROOM_SANDBOX_PROXY_TOKEN": "nested-token"}),
+        "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME": "primary-auth-secret",
+        "AGNO_TELEMETRY": "true",
+        "MINDROOM_WORKER_TOOL_VALUE": "visible",
+    }
+
+    assert runtime_env_policy.worker_extra_env(env) == {
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
+        "MINDROOM_WORKER_TOOL_VALUE": "visible",
     }
 
 

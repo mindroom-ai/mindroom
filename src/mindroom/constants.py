@@ -477,22 +477,6 @@ def _execution_runtime_env_layers(
     return process_env, env_file_values
 
 
-def _sandbox_execution_runtime_env_layers(
-    runtime_paths: RuntimePaths,
-) -> tuple[dict[str, str], dict[str, str]]:
-    env_file_values = {
-        key: value
-        for key, value in runtime_paths.env_file_values.items()
-        if runtime_env_policy.is_isolated_worker_runtime_env_name(key)
-    }
-    process_env = {
-        key: value
-        for key, value in runtime_paths.process_env.items()
-        if runtime_env_policy.is_isolated_worker_runtime_env_name(key)
-    }
-    return process_env, env_file_values
-
-
 def _isolated_runtime_env_layers(
     runtime_paths: RuntimePaths,
 ) -> tuple[dict[str, str], dict[str, str]]:
@@ -559,7 +543,7 @@ def execution_runtime_env_values(
 
 def sandbox_execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied python execution."""
-    process_env, env_file_values = _sandbox_execution_runtime_env_layers(runtime_paths)
+    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     merged_env = dict(env_file_values)
     merged_env.update(process_env)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)

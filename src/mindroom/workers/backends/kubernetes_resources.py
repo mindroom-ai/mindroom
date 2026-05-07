@@ -22,7 +22,7 @@ from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     VENDOR_TELEMETRY_ENV_VALUES,
-    is_worker_backend_config_env_name,
+    worker_extra_env,
 )
 from mindroom.tool_system import worker_routing
 from mindroom.workers.backend import WorkerBackendError
@@ -803,9 +803,7 @@ class KubernetesResourceManager:
             self._worker_token_env(worker_id=worker_id),
         ]
 
-        for name, value in sorted(self.config.extra_env.items()):
-            if name in VENDOR_TELEMETRY_ENV_VALUES or is_worker_backend_config_env_name(name):
-                continue
+        for name, value in sorted(worker_extra_env(self.config.extra_env).items()):
             env.append({"name": name, "value": value})
         for name, value in sorted(VENDOR_TELEMETRY_ENV_VALUES.items()):
             env.append({"name": name, "value": value})
@@ -884,11 +882,7 @@ class KubernetesResourceManager:
             },
         )
         process_env.update(
-            {
-                name: value
-                for name, value in self.config.extra_env.items()
-                if not is_worker_backend_config_env_name(name)
-            },
+            worker_extra_env(self.config.extra_env),
         )
         process_env.update(VENDOR_TELEMETRY_ENV_VALUES)
         return constants.isolated_runtime_paths(

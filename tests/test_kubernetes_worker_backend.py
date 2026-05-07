@@ -1198,6 +1198,9 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
         extra_env={
             "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"ANTHROPIC_API_KEY": "nested-secret"}),
             "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME": "primary-worker-auth",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "extra-env-token",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/unsafe/root",
+            "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
             "MINDROOM_WORKER_TOOL_VALUE": "visible",
         },
     )
@@ -1210,6 +1213,7 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
     committed_runtime = deserialize_runtime_paths(startup_manifest["runtime_paths"])
     committed_env = dict(committed_runtime.process_env) | dict(committed_runtime.env_file_values)
     expected_worker_root = f"/app/worker/workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
+    env_names = [env["name"] for env in container["env"]]
 
     for name in (
         "MINDROOM_KUBERNETES_WORKER_ENV_JSON",
@@ -1224,9 +1228,15 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
 
     assert env_values["MINDROOM_WORKER_TOOL_VALUE"] == "visible"
     assert committed_runtime.env_value("MINDROOM_WORKER_TOOL_VALUE") == "visible"
+    assert env_values["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "45"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS") == "45"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_MODE") == "true"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_PORT") == "8766"
+    assert env_names.count("MINDROOM_SANDBOX_PROXY_TOKEN") == 1
+    assert env_values["MINDROOM_SANDBOX_PROXY_TOKEN"] is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+    assert env_names.count("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT") == 1
     assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY") == _TEST_SCOPED_WORKER_KEY_A
     assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT") == expected_worker_root
     assert committed_runtime.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") == (
