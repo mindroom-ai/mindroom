@@ -863,7 +863,6 @@ depends_on = [
     "mindroom.history.turn_recorder",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
-    "mindroom.matrix.thread_diagnostics",
     "mindroom.memory",
     "mindroom.orchestration.runtime",
     "mindroom.post_response_effects",

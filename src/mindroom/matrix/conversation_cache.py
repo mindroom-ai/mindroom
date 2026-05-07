@@ -473,10 +473,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         cache_key: _ThreadReadCacheKey = (room_id, thread_id, mode)
         turn_cache = self._turn_thread_read_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
-            cached_result = turn_cache[cache_key]
-            if self._thread_read_result_is_memoizable(cached_result, mode=mode):
-                return self._copy_thread_read_result(cached_result)
-            del turn_cache[cache_key]
+            return self._copy_thread_read_result(turn_cache[cache_key])
 
         result = await self._reads.read_thread(
             room_id,
