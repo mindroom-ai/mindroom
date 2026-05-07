@@ -69,6 +69,15 @@ def _conversation_cache_for_thread_reads(
     return MatrixConversationCache(logger=MagicMock(), runtime=runtime)
 
 
+def _pending_thread_cache_update_wait_tasks() -> set[asyncio.Task[object]]:
+    return {
+        task
+        for task in asyncio.all_tasks()
+        if not task.done()
+        and task.get_coro().__qualname__.endswith("ThreadReadPolicy._wait_for_pending_thread_cache_updates")
+    }
+
+
 def test_sqlite_event_cache_is_explicit_concrete_cache(tmp_path: Path) -> None:
     """The SQLite cache implementation should be named at the boundary."""
     cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -290,14 +299,14 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
     read_modes = [
-        (False, False, "fetch_thread_snapshot", False, 101.0, 25.0),
-        (True, False, "fetch_thread_history", True, 102.0, 50.0),
-        (False, True, "fetch_dispatch_thread_snapshot", False, 103.0, 75.0),
-        (True, True, "fetch_dispatch_thread_history", True, 104.0, 100.0),
+        ("get_thread_snapshot", "fetch_thread_snapshot", False, 101.0, 25.0),
+        ("get_thread_history", "fetch_thread_history", True, 102.0, 50.0),
+        ("get_dispatch_thread_snapshot", "fetch_dispatch_thread_snapshot", False, 103.0, 75.0),
+        ("get_dispatch_thread_history", "fetch_dispatch_thread_history", True, 104.0, 100.0),
     ]
     fetchers = {
         name: AsyncMock(return_value=thread_history_result([], is_full_history=is_full_history))
-        for _full_history, _dispatch_safe, name, is_full_history, _guard_started_at, _queue_wait_ms in read_modes
+        for _method_name, name, is_full_history, _guard_started_at, _queue_wait_ms in read_modes
     }
 
     try:
@@ -318,17 +327,21 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 side_effect=[1.0, 1.025, 2.0, 2.05, 3.0, 3.01, 3.075, 4.0, 4.01, 4.1],
             ),
         ):
-            for full_history, dispatch_safe, _name, is_full_history, _guard_started_at, _queue_wait_ms in read_modes:
-                result = await conversation_cache.get_thread_messages(
+            read_methods = {
+                "get_thread_snapshot": conversation_cache.get_thread_snapshot,
+                "get_thread_history": conversation_cache.get_thread_history,
+                "get_dispatch_thread_snapshot": conversation_cache.get_dispatch_thread_snapshot,
+                "get_dispatch_thread_history": conversation_cache.get_dispatch_thread_history,
+            }
+            for method_name, _name, is_full_history, _guard_started_at, _queue_wait_ms in read_modes:
+                result = await read_methods[method_name](
                     "!room:localhost",
                     "$thread:localhost",
-                    full_history=full_history,
-                    dispatch_safe=dispatch_safe,
-                    caller_label=f"caller-{full_history}-{dispatch_safe}",
+                    caller_label=f"caller-{method_name}",
                 )
                 assert result.is_full_history is is_full_history
 
-        for full_history, dispatch_safe, name, _is_full_history, guard_started_at, queue_wait_ms in read_modes:
+        for method_name, name, _is_full_history, guard_started_at, queue_wait_ms in read_modes:
             fetchers[name].assert_awaited_once_with(
                 client,
                 "!room:localhost",
@@ -336,7 +349,7 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 event_cache=event_cache,
                 cache_write_guard_started_at=guard_started_at,
                 trusted_sender_ids=conversation_cache._trusted_sender_ids(),
-                caller_label=f"caller-{full_history}-{dispatch_safe}",
+                caller_label=f"caller-{method_name}",
                 coordinator_queue_wait_ms=queue_wait_ms,
             )
     finally:
@@ -405,6 +418,7 @@ async def test_dispatch_thread_read_timeout_does_not_cancel_pending_cache_write(
     coordinator._thread_update_tasks[("!room:localhost", "$thread:localhost")] = pending_write_task
     coordinator._thread_update_tasks_by_room["!room:localhost"] = {"$thread:localhost": pending_write_task}
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    baseline_wait_tasks = _pending_thread_cache_update_wait_tasks()
 
     try:
         await asyncio.wait_for(write_started.wait(), timeout=0.2)
@@ -427,6 +441,8 @@ async def test_dispatch_thread_read_timeout_does_not_cancel_pending_cache_write(
         assert result.diagnostics["thread_read_error"] == "cache_coordinator_timeout"
         assert pending_write_task.cancelled() is False
         assert pending_write_task.done() is False
+        await asyncio.sleep(0)
+        assert _pending_thread_cache_update_wait_tasks() == baseline_wait_tasks
     finally:
         release_write.set()
         await pending_write_task

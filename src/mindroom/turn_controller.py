@@ -79,7 +79,7 @@ from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
-    response_trust_for_resolved_thread,
+    response_trust_for_resolved_thread_unchecked,
 )
 from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import (
@@ -986,7 +986,6 @@ class TurnController:
         """Execute one validated interactive selection through the normal response path."""
         thread_history = (
             await self.deps.resolver.fetch_thread_history(
-                self._client(),
                 room.room_id,
                 selection.thread_id,
                 caller_label="interactive_selection",
@@ -1027,7 +1026,9 @@ class TurnController:
             ),
         )
 
-        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread(selection.thread_id)
+        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread_unchecked(
+            selection.thread_id,
+        )
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 room_id=room.room_id,
@@ -1332,9 +1333,12 @@ class TurnController:
 
             self.deps.logger.info(processing_log, event_id=event.event_id)
             try:
+                response_history_scope = self.deps.turn_store.response_history_scope(action)
 
                 async def prepare_request_after_lock(request: ResponseRequest) -> ResponseRequest:
                     nonlocal dispatch
+                    nonlocal handled_turn
+                    nonlocal matrix_run_metadata
                     nonlocal payload_ready_monotonic
                     if dispatch_timing is not None:
                         dispatch_timing.mark("response_payload_start")
@@ -1342,13 +1346,22 @@ class TurnController:
                         dispatch = replace(
                             dispatch,
                             target=request.target,
-                            envelope=request.response_envelope or dispatch.envelope,
+                            envelope=request.response_envelope
+                            if request.response_envelope is not None
+                            else dispatch.envelope,
                         )
+                        handled_turn = self.deps.turn_store.attach_response_context(
+                            handled_turn,
+                            history_scope=response_history_scope,
+                            conversation_target=dispatch.target,
+                        )
+                        matrix_run_metadata = self.deps.turn_store.build_run_metadata(handled_turn)
                     dispatch.context.thread_history = request.thread_history
                     dispatch.context.thread_id = request.thread_id
-                    dispatch.context.requires_full_thread_history = False
+                    dispatch.context.requires_full_thread_history = request.requires_full_thread_history
                     dispatch.context.thread_membership_trust = request.thread_membership_trust
                     dispatch.context.thread_history_trust = request.thread_history_trust
+                    dispatch.context.thread_membership_event_info = request.thread_membership_event_info
                     payload_builder_started = time.monotonic()
                     payload_builder_outcome = "failed"
                     try:
@@ -1407,7 +1420,7 @@ class TurnController:
                         response_envelope=prepared_payload.envelope,
                         correlation_id=request.correlation_id,
                         target=request.target,
-                        matrix_run_metadata=request.matrix_run_metadata,
+                        matrix_run_metadata=matrix_run_metadata,
                         system_enrichment_items=prepared_payload.system_enrichment_items,
                         requires_full_thread_history=False,
                         thread_membership_trust=request.thread_membership_trust,
@@ -1724,14 +1737,6 @@ class TurnController:
                         command=command,
                     )
                 return
-            if self._has_newer_unresponded_in_thread(
-                event,
-                requester_user_id,
-                dispatch.context.replay_guard_history,
-                source_kind=dispatch.envelope.source_kind,
-            ):
-                self._mark_source_events_responded(handled_turn)
-                return
             if self._should_skip_deep_synthetic_full_dispatch(
                 event_id=event.event_id,
                 envelope=dispatch.envelope,
@@ -1776,6 +1781,14 @@ class TurnController:
                     target=hydrated_target,
                     envelope=replace(dispatch.envelope, target=hydrated_target),
                 )
+            if self._has_newer_unresponded_in_thread(
+                event,
+                requester_user_id,
+                dispatch.context.replay_guard_history,
+                source_kind=dispatch.envelope.source_kind,
+            ):
+                self._mark_source_events_responded(handled_turn)
+                return
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_plan_start")
             plan = await self.deps.turn_policy.plan_turn(

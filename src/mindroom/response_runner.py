@@ -26,6 +26,7 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_system_enrich
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import (
     mark_auto_flush_dirty_session,
@@ -337,10 +338,10 @@ class ResponseRequest:
         return self.thread_membership_trust is ThreadMembershipTrust.PROVISIONAL
 
 
-def response_trust_for_resolved_thread(
+def response_trust_for_resolved_thread_unchecked(
     thread_id: str | None,
 ) -> tuple[ThreadMembershipTrust, ThreadHistoryTrust]:
-    """Return explicit trust state for manually-built requests with resolved targets."""
+    """Return trust for manually-built requests whose thread id was already proven elsewhere."""
     if thread_id is None:
         return ThreadMembershipTrust.ROOM_LEVEL, ThreadHistoryTrust.NONE
     return ThreadMembershipTrust.PROVEN, ThreadHistoryTrust.PLANNING_USABLE
@@ -636,16 +637,17 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        locked_operation: Callable[[MessageTarget], Awaitable[str | None]],
+        locked_operation: Callable[[ResponseRequest, MessageTarget], Awaitable[str | None]],
     ) -> str | None:
         """Run one locked response operation with shared queued-message bookkeeping."""
+        request = await self._prepare_request_target_before_lock(request)
         resolved_target = self._resolve_request_target(request)
         return await self._lifecycle_coordinator.run_locked_response(
             target=resolved_target,
             response_envelope=request.response_envelope,
             queued_notice_reservation=request.queued_notice_reservation,
             pipeline_timing=request.pipeline_timing,
-            locked_operation=locked_operation,
+            locked_operation=lambda target: locked_operation(request, target),
         )
 
     def _build_persist_response_event_id_effect(
@@ -718,10 +720,10 @@ class ResponseRunner:
                 request.thread_membership_event_info,
                 caller_label="dispatch_post_lock_membership",
             )
-            target = request.target.with_thread_root(strict_thread_id) if request.target is not None else None
+            target = self._resolve_request_target(request).with_thread_root(strict_thread_id)
             response_envelope = (
                 replace(request.response_envelope, target=target)
-                if request.response_envelope is not None and target is not None
+                if request.response_envelope is not None
                 else request.response_envelope
             )
             return replace(
@@ -744,7 +746,6 @@ class ResponseRunner:
 
         try:
             refreshed_history = await self.deps.resolver.fetch_thread_history(
-                self._client(),
                 request.room_id,
                 request.thread_id,
                 caller_label="dispatch_post_lock_refresh",
@@ -763,8 +764,22 @@ class ResponseRunner:
             request,
             thread_history=refreshed_history,
             requires_full_thread_history=False,
-            thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
+            thread_history_trust=ThreadHistoryTrust.DEGRADED
+            if not refreshed_history.is_full_history or is_thread_history_degraded(refreshed_history)
+            else ThreadHistoryTrust.PLANNING_USABLE,
         )
+
+    async def _prepare_request_target_before_lock(
+        self,
+        request: ResponseRequest,
+    ) -> ResponseRequest:
+        """Strictly re-prove provisional targets before choosing the lifecycle lock key."""
+        if request.thread_membership_trust is not ThreadMembershipTrust.PROVISIONAL:
+            return request
+        try:
+            return await self._refresh_thread_history_after_lock(request)
+        except Exception as exc:
+            raise PostLockRequestPreparationError from exc
 
     async def _prepare_request_after_lock(
         self,
@@ -857,13 +872,13 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        resolved_target: MessageTarget,
         response_kind: str,
     ) -> str | None:
         """Finalize one empty prompt through the canonical response lifecycle."""
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
+        resolved_target = self._resolve_request_target(request)
         lifecycle = self._build_lifecycle(
             response_kind=response_kind,
             request=request,
@@ -900,8 +915,8 @@ class ResponseRunner:
         )
         return await self._run_locked_response_lifecycle(
             request,
-            locked_operation=lambda resolved_target: self.generate_team_response_helper_locked(
-                team_request,
+            locked_operation=lambda locked_request, resolved_target: self.generate_team_response_helper_locked(
+                replace(team_request, request=locked_request),
                 resolved_target=resolved_target,
             ),
         )
@@ -915,9 +930,8 @@ class ResponseRunner:
         """Finalize an empty prompt through the locked lifecycle before setup side effects."""
         return await self._run_locked_response_lifecycle(
             request,
-            locked_operation=lambda resolved_target: self._finalize_empty_prompt_locked(
-                request,
-                resolved_target=resolved_target,
+            locked_operation=lambda locked_request, _resolved_target: self._finalize_empty_prompt_locked(
+                locked_request,
                 response_kind=response_kind,
             ),
         )
@@ -933,12 +947,12 @@ class ResponseRunner:
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
                 request,
-                resolved_target=resolved_target,
                 response_kind="team",
             )
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
+        resolved_target = self._resolve_request_target(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         team_request = replace(team_request, request=request)
@@ -977,8 +991,6 @@ class ResponseRunner:
         include_matrix_prompt_context = any(
             _agent_has_matrix_messaging_tool(self.deps.runtime.config, name) for name in agent_names
         )
-        response_thread_id = resolved_target.resolved_thread_id
-        resolved_target = resolved_target.with_thread_root(response_thread_id)
         model_message = _append_matrix_prompt_context(
             prepared_prompt,
             target=resolved_target,
@@ -2134,8 +2146,8 @@ class ResponseRunner:
         """Generate and send/edit an agent response with lifecycle locking."""
         return await self._run_locked_response_lifecycle(
             request,
-            locked_operation=lambda resolved_target: self.generate_response_locked(
-                request,
+            locked_operation=lambda locked_request, resolved_target: self.generate_response_locked(
+                locked_request,
                 resolved_target=resolved_target,
             ),
         )
@@ -2147,17 +2159,15 @@ class ResponseRunner:
         resolved_target: MessageTarget,
     ) -> str | None:
         """Generate one agent response after acquiring the per-thread lock."""
-        delivery_thread_id = resolved_target.resolved_thread_id
-        resolved_target = resolved_target.with_thread_root(delivery_thread_id)
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
                 request,
-                resolved_target=resolved_target,
                 response_kind="ai",
             )
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
+        resolved_target = self._resolve_request_target(request)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (

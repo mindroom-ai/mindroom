@@ -100,7 +100,7 @@ from .response_runner import (
     ResponseRunner,
     ResponseRunnerDeps,
     prepare_memory_and_model_context,
-    response_trust_for_resolved_thread,
+    response_trust_for_resolved_thread_unchecked,
 )
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
@@ -751,9 +751,7 @@ class AgentBot:
                 thread_id = await self._conversation_resolver.resolve_related_event_thread_id_best_effort(
                     room_id,
                     normalized_target_event_id,
-                    access=self._conversation_resolver.thread_membership_access(
-                        full_history=False,
-                        dispatch_safe=True,
+                    access=self._conversation_resolver.dispatch_snapshot_thread_membership_access(
                         caller_label="reaction_hook_context",
                     ),
                 )
@@ -1727,7 +1725,7 @@ class AgentBot:
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot)."""
-        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread(thread_id)
+        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread_unchecked(thread_id)
         return await self._response_runner.generate_team_response_helper(
             ResponseRequest(
                 room_id=room_id,
@@ -1805,7 +1803,7 @@ class AgentBot:
             Event ID of the visible response, or None if no visible response landed.
 
         """
-        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread(thread_id)
+        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread_unchecked(thread_id)
         return await self._response_runner.generate_response(
             ResponseRequest(
                 room_id=room_id,
@@ -2029,7 +2027,7 @@ class TeamBot(AgentBot):
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
     ) -> str | None:
         """Generate a team response instead of individual agent response."""
-        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread(thread_id)
+        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread_unchecked(thread_id)
         if not prompt.strip():
             return await self._response_runner.generate_response_for_empty_prompt(
                 ResponseRequest(

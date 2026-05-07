@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Protocol, Self
+from typing import TYPE_CHECKING, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -69,13 +69,36 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
     from pathlib import Path
+
+    from mindroom.delivery_gateway import FinalDeliveryRequest
 
 
 class _ReservationLike(Protocol):
     def cancel(self) -> None:
         """Release the reserved queued-human notice."""
+
+
+class _NoopResponseLifecycle:
+    def __init__(self) -> None:
+        self.session_thread_ids: list[str | None] = []
+
+    def setup_session_watch(self, **kwargs: object) -> object:
+        thread_id = kwargs["thread_id"]
+        assert isinstance(thread_id, str) or thread_id is None
+        self.session_thread_ids.append(thread_id)
+        return object()
+
+    async def emit_session_started(self, _watch: object) -> None:
+        return
+
+    async def finalize(
+        self,
+        final_delivery_outcome: FinalDeliveryOutcome,
+        **_kwargs: object,
+    ) -> FinalDeliveryOutcome:
+        return final_delivery_outcome
 
 
 def _config(tmp_path: Path) -> Config:
@@ -791,7 +814,6 @@ async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(
         )
 
     mock_fetch_thread_history.assert_awaited_once_with(
-        bot.client,
         "!room:localhost",
         "$thread",
         caller_label="dispatch_post_lock_refresh",
@@ -869,6 +891,192 @@ async def test_refresh_thread_history_after_lock_reproves_provisional_thread_mem
     assert request.target.resolved_thread_id is None
     assert request.response_envelope is not None
     assert request.response_envelope.target.resolved_thread_id is None
+
+
+@pytest.mark.asyncio
+async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -> None:
+    """Agent delivery must use the strict post-lock target, not the provisional candidate."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+    event_info = EventInfo.from_event(
+        {
+            "content": {
+                "body": "plain reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$plain_root"}},
+            },
+            "event_id": "$event",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+    provisional_target = MessageTarget.resolve("!room:localhost", "$plain_root", "$event")
+    observed_run_targets: list[MessageTarget] = []
+    observed_delivery_targets: list[MessageTarget | None] = []
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        target = kwargs["target"]
+        assert isinstance(target, MessageTarget)
+        observed_run_targets.append(target)
+        response_function = cast(
+            "Callable[[object | None], Awaitable[object]]",
+            kwargs["response_function"],
+        )
+        await response_function(None)
+        return "$response"
+
+    async def fake_process_and_respond(
+        request: ResponseRequest,
+        **_kwargs: object,
+    ) -> FinalDeliveryOutcome:
+        observed_delivery_targets.append(request.target)
+        return FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="ok",
+            delivery_kind="sent",
+        )
+
+    with (
+        patch.object(
+            resolver,
+            "resolve_strict_thread_context",
+            new=AsyncMock(return_value=(None, [])),
+        ),
+        patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=_NoopResponseLifecycle())),
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch.object(
+            coordinator,
+            "process_and_respond",
+            new=AsyncMock(side_effect=fake_process_and_respond),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
+    ):
+        result = await coordinator.generate_response(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$plain_root",
+                thread_history=[],
+                prompt="hello",
+                user_id="@user:localhost",
+                response_envelope=_envelope(source_event_id="$event", target=provisional_target),
+                target=provisional_target,
+                requires_full_thread_history=True,
+                thread_membership_trust=ThreadMembershipTrust.PROVISIONAL,
+                thread_history_trust=ThreadHistoryTrust.DEGRADED,
+                thread_membership_event_info=event_info,
+            ),
+        )
+
+    assert result == "$response"
+    assert [target.resolved_thread_id for target in observed_run_targets] == [None]
+    assert [target.resolved_thread_id if target is not None else None for target in observed_delivery_targets] == [None]
+    lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
+    assert ("!room:localhost", None) in lock_keys
+    assert ("!room:localhost", "$plain_root") not in lock_keys
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Path) -> None:
+    """Team delivery/session setup must use the strict post-lock target."""
+    bot = _bot(tmp_path)
+    bot.client = MagicMock()
+    bot.client.rooms = {}
+    bot.client.room_typing = AsyncMock()
+    bot.orchestrator = MagicMock()
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+    event_info = EventInfo.from_event(
+        {
+            "content": {
+                "body": "plain reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$plain_root"}},
+            },
+            "event_id": "$event",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+    provisional_target = MessageTarget.resolve("!room:localhost", "$plain_root", "$event")
+    lifecycle = _NoopResponseLifecycle()
+    observed_run_targets: list[MessageTarget] = []
+    observed_delivery_targets: list[MessageTarget] = []
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        target = kwargs["target"]
+        assert isinstance(target, MessageTarget)
+        observed_run_targets.append(target)
+        response_function = cast(
+            "Callable[[object | None], Awaitable[object]]",
+            kwargs["response_function"],
+        )
+        await response_function(None)
+        return "$response"
+
+    async def fake_deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
+        observed_delivery_targets.append(request.target)
+        return FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body=request.response_text,
+            delivery_kind="sent",
+        )
+
+    with (
+        patch.object(
+            resolver,
+            "resolve_strict_thread_context",
+            new=AsyncMock(return_value=(None, [])),
+        ),
+        patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=lifecycle)),
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.delivery_gateway.DeliveryGateway.deliver_final", new=AsyncMock(side_effect=fake_deliver_final)),
+        patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", AsyncMock(return_value="team ok")),
+    ):
+        result = await coordinator.generate_team_response_helper(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id="$plain_root",
+                thread_history=[],
+                prompt="hello",
+                user_id="@user:localhost",
+                response_envelope=_envelope(source_event_id="$event", target=provisional_target),
+                target=provisional_target,
+                requires_full_thread_history=True,
+                thread_membership_trust=ThreadMembershipTrust.PROVISIONAL,
+                thread_history_trust=ThreadHistoryTrust.DEGRADED,
+                thread_membership_event_info=event_info,
+            ),
+            team_agents=[],
+            team_mode="coordinate",
+        )
+
+    assert result == "$response"
+    assert [target.resolved_thread_id for target in observed_run_targets] == [None]
+    assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
+    assert lifecycle.session_thread_ids == [None]
+    lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
+    assert ("!room:localhost", None) in lock_keys
+    assert ("!room:localhost", "$plain_root") not in lock_keys
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 import typing
-from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.cache.thread_cache_helpers import latest_visible_thread_event_id
@@ -20,6 +19,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
+from mindroom.thread_context_state import ThreadReadMode
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
@@ -36,33 +36,6 @@ _DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS = 1.0
 _DISPATCH_THREAD_READ_FETCH_TIMEOUT_SECONDS = 1.0
 _CACHE_COORDINATOR_TIMEOUT = "cache_coordinator_timeout"
 _DISPATCH_READ_TIMEOUT = "dispatch_read_timeout"
-
-
-class ThreadReadMode(Enum):
-    """Named thread-read policies for cache coordination and source freshness."""
-
-    ADVISORY_SNAPSHOT = auto()
-    ADVISORY_FULL = auto()
-    DISPATCH_SNAPSHOT = auto()
-    DISPATCH_FULL = auto()
-    STRICT_FULL = auto()
-
-    @property
-    def full_history(self) -> bool:
-        """Return whether this mode requires fully hydrated thread history."""
-        return self in {
-            ThreadReadMode.ADVISORY_FULL,
-            ThreadReadMode.DISPATCH_FULL,
-            ThreadReadMode.STRICT_FULL,
-        }
-
-    @property
-    def dispatch_safe(self) -> bool:
-        """Return whether this mode is on the live dispatch fail-open path."""
-        return self in {
-            ThreadReadMode.DISPATCH_SNAPSHOT,
-            ThreadReadMode.DISPATCH_FULL,
-        }
 
 
 class _ThreadHistoryFetcher(typing.Protocol):
@@ -118,6 +91,9 @@ class ThreadReadPolicy:
                 return self.fetch_dispatch_thread_snapshot_from_client
             case ThreadReadMode.DISPATCH_FULL | ThreadReadMode.STRICT_FULL:
                 return self.fetch_dispatch_thread_history_from_client
+            case _:
+                msg = f"Unsupported thread read mode: {mode!r}"
+                raise ValueError(msg)
 
     def _operation_name_for_mode(self, mode: ThreadReadMode) -> str:
         """Return the cache coordinator operation name for one queued read mode."""
@@ -130,6 +106,9 @@ class ThreadReadPolicy:
                 return "matrix_cache_refresh_strict_thread_history"
             case ThreadReadMode.DISPATCH_SNAPSHOT | ThreadReadMode.DISPATCH_FULL:
                 msg = f"Dispatch read mode {mode.name} does not use the refresh queue"
+                raise ValueError(msg)
+            case _:
+                msg = f"Unsupported thread read mode: {mode!r}"
                 raise ValueError(msg)
 
     async def _wait_for_pending_thread_cache_updates(self, room_id: str, thread_id: str) -> None:
@@ -161,58 +140,35 @@ class ThreadReadPolicy:
         thread_id: str,
         caller_label: str,
         queue_wait_started: float,
+        error_code: str,
+        fetch_started: float | None = None,
     ) -> ThreadHistoryResult:
         coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
+        dispatch_fetch_wait_ms = (
+            elapsed_ms_since(fetch_started, clock=time.perf_counter) if fetch_started is not None else None
+        )
         diagnostics = {
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: _CACHE_COORDINATOR_TIMEOUT,
+            THREAD_HISTORY_ERROR_DIAGNOSTIC: error_code,
             "coordinator_queue_wait_ms": coordinator_queue_wait_ms,
             "caller_label": caller_label,
         }
-        self.logger.warning(
-            "matrix_cache_thread_read_degraded",
-            room_id=room_id,
-            thread_id=thread_id,
-            caller_label=caller_label,
-            thread_read_degraded=True,
-            thread_read_error=_CACHE_COORDINATOR_TIMEOUT,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        )
-        return thread_history_result(
-            [],
-            is_full_history=False,
-            diagnostics=diagnostics,
-        )
-
-    def _degraded_dispatch_read_timeout_result(
-        self,
-        *,
-        room_id: str,
-        thread_id: str,
-        caller_label: str,
-        queue_wait_started: float,
-        fetch_started: float,
-    ) -> ThreadHistoryResult:
-        coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
-        dispatch_fetch_wait_ms = elapsed_ms_since(fetch_started, clock=time.perf_counter)
-        diagnostics = {
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
-            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            THREAD_HISTORY_ERROR_DIAGNOSTIC: _DISPATCH_READ_TIMEOUT,
-            "coordinator_queue_wait_ms": coordinator_queue_wait_ms,
-            "dispatch_fetch_wait_ms": dispatch_fetch_wait_ms,
+        if dispatch_fetch_wait_ms is not None:
+            diagnostics["dispatch_fetch_wait_ms"] = dispatch_fetch_wait_ms
+        log_fields = {
+            "room_id": room_id,
+            "thread_id": thread_id,
             "caller_label": caller_label,
+            "thread_read_degraded": True,
+            "thread_read_error": error_code,
+            "coordinator_queue_wait_ms": coordinator_queue_wait_ms,
         }
+        if dispatch_fetch_wait_ms is not None:
+            log_fields["dispatch_fetch_wait_ms"] = dispatch_fetch_wait_ms
         self.logger.warning(
             "matrix_cache_thread_read_degraded",
-            room_id=room_id,
-            thread_id=thread_id,
-            caller_label=caller_label,
-            thread_read_degraded=True,
-            thread_read_error=_DISPATCH_READ_TIMEOUT,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            dispatch_fetch_wait_ms=dispatch_fetch_wait_ms,
+            **log_fields,
         )
         return thread_history_result(
             [],
@@ -253,6 +209,8 @@ class ThreadReadPolicy:
     ) -> ThreadHistoryResult:
         fetch_started = time.perf_counter()
         try:
+            # Dispatch read-through fetches are bounded live reads. Cancelling them on timeout
+            # is intentional; cache mutation tasks are protected by the write coordinator.
             return await asyncio.wait_for(
                 self._load_thread_read(
                     room_id,
@@ -265,11 +223,12 @@ class ThreadReadPolicy:
                 timeout=_DISPATCH_THREAD_READ_FETCH_TIMEOUT_SECONDS,
             )
         except TimeoutError:
-            return self._degraded_dispatch_read_timeout_result(
+            return self._degraded_dispatch_timeout_result(
                 room_id=room_id,
                 thread_id=thread_id,
                 caller_label=caller_label,
                 queue_wait_started=queue_wait_started,
+                error_code=_DISPATCH_READ_TIMEOUT,
                 fetch_started=fetch_started,
             )
 
@@ -336,6 +295,7 @@ class ThreadReadPolicy:
                 thread_id=thread_id,
                 caller_label=caller_label,
                 queue_wait_started=queue_wait_started,
+                error_code=_CACHE_COORDINATOR_TIMEOUT,
             )
         fetcher = self._fetcher_for_mode(mode)
         if mode.dispatch_safe:

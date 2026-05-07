@@ -702,7 +702,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
             bot._conversation_resolver,
             "fetch_thread_history",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=thread_history_result([], is_full_history=True),
         ) as mock_fetch_history,
         patch.object(
             bot._turn_store,
@@ -733,7 +733,6 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         )
 
     mock_fetch_history.assert_awaited_once_with(
-        bot.client,
         room.room_id,
         stored_target.resolved_thread_id,
         caller_label="edit_regeneration_context",
@@ -3645,7 +3644,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         )
         mock_send_text.return_value = "$ack_event:example.com"
         mock_generate_response.return_value = _delivery_resolution("$response_event:example.com")
-        mock_fetch_history.return_value = []
+        mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
         # Process the reaction event
         await bot._on_reaction(room, reaction_event)
@@ -3732,7 +3731,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         )
         mock_send_text.return_value = "$ack_event:example.com"
         mock_generate_response.return_value = _delivery_resolution(None)
-        mock_fetch_history.return_value = []
+        mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
         await bot._on_reaction(room, reaction_event)
 

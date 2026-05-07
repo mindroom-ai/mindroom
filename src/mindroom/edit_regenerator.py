@@ -99,7 +99,6 @@ class EditRegenerator:
         if context.thread_id == conversation_target.resolved_thread_id:
             return context
         thread_history = await self.deps.resolver.fetch_thread_history(
-            self._client(),
             room.room_id,
             conversation_target.resolved_thread_id,
             caller_label="edit_regeneration_context",

@@ -14,6 +14,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import send_streaming_response
 from tests.conftest import (
@@ -88,7 +89,9 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
         thread_id="$thread-root:localhost",
     )
 
-    bot._conversation_resolver.fetch_thread_history = AsyncMock(return_value=[])
+    bot._conversation_resolver.fetch_thread_history = AsyncMock(
+        return_value=thread_history_result([], is_full_history=True),
+    )
     wrap_extracted_collaborators(bot, "_delivery_gateway")
     bot._delivery_gateway.send_text = AsyncMock(return_value="$ack:localhost")
     replace_turn_controller_deps(
@@ -207,7 +210,9 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
         thread_id="$thread-root:localhost",
     )
 
-    bot._conversation_resolver.fetch_thread_history = AsyncMock(return_value=[])
+    bot._conversation_resolver.fetch_thread_history = AsyncMock(
+        return_value=thread_history_result([], is_full_history=True),
+    )
     wrap_extracted_collaborators(bot, "_delivery_gateway")
     bot._delivery_gateway.send_text = AsyncMock(return_value="$ack:localhost")
     replace_turn_controller_deps(

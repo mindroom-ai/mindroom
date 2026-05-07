@@ -88,6 +88,7 @@ from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_na
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_fallback import append_inline_media_fallback_prompt
 from mindroom.media_inputs import MediaInputs
@@ -400,7 +401,9 @@ def _build_response_runner(
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=message_target or MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True),
     )
-    bot._conversation_resolver.fetch_thread_history = AsyncMock(return_value=())
+    bot._conversation_resolver.fetch_thread_history = AsyncMock(
+        return_value=thread_history_result([], is_full_history=True),
+    )
     bot._conversation_resolver.resolve_response_thread_root = MagicMock(
         side_effect=resolve_response_thread_root_for_test,
     )

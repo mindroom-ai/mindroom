@@ -11,6 +11,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -221,7 +222,11 @@ class TestDMMessageContext:
         bot.client.user_id = bot.agent_user.user_id
 
         # Mock fetch_thread_history - DMs now use threads like regular rooms
-        with patch.object(bot._conversation_resolver, "fetch_thread_history", return_value=[]) as mock_fetch:
+        with patch.object(
+            bot._conversation_resolver,
+            "fetch_thread_history",
+            return_value=thread_history_result([], is_full_history=True),
+        ) as mock_fetch:
             # Create a test event
             room = MagicMock()
             room.room_id = "!dm:localhost"
@@ -340,7 +345,11 @@ class TestDMIntegration:
             pass
 
         with (
-            patch.object(bot._conversation_resolver, "fetch_thread_history", return_value=[]),
+            patch.object(
+                bot._conversation_resolver,
+                "fetch_thread_history",
+                return_value=thread_history_result([], is_full_history=True),
+            ),
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
@@ -434,7 +443,11 @@ class TestDMIntegration:
             pass
 
         with (
-            patch.object(bot._conversation_resolver, "fetch_thread_history", return_value=[]),
+            patch.object(
+                bot._conversation_resolver,
+                "fetch_thread_history",
+                return_value=thread_history_result([], is_full_history=True),
+            ),
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),

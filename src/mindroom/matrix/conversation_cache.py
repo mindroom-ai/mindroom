@@ -19,7 +19,7 @@ from mindroom.matrix.cache import (
     normalize_nio_event_for_cache,
     thread_history_result,
 )
-from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
+from mindroom.matrix.cache.thread_reads import ThreadReadPolicy
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadOutboundWritePolicy, ThreadSyncWritePolicy
 from mindroom.matrix.client_thread_history import (
@@ -39,6 +39,7 @@ from mindroom.matrix.thread_membership import (
     resolve_event_thread_id,
 )
 from mindroom.matrix.thread_room_scan import room_scan_membership_access_for_client
+from mindroom.thread_context_state import ThreadReadMode
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
@@ -133,17 +134,6 @@ class ConversationCacheProtocol(Protocol):
 
     async def get_event(self, room_id: str, event_id: str) -> EventLookupResult:
         """Resolve one Matrix event by ID."""
-
-    async def get_thread_messages(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        full_history: bool,
-        dispatch_safe: bool,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve thread context using explicit history and dispatch-safety flags."""
 
     async def get_thread_snapshot(
         self,
@@ -838,36 +828,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             mode=ThreadReadMode.ADVISORY_FULL,
             caller_label=caller_label,
         )
-
-    async def get_thread_messages(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        full_history: bool,
-        dispatch_safe: bool,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve thread context using one explicit read-mode entrypoint."""
-        if dispatch_safe:
-            if full_history:
-                return await self.get_dispatch_thread_history(
-                    room_id,
-                    thread_id,
-                    caller_label=caller_label,
-                )
-            return await self.get_dispatch_thread_snapshot(
-                room_id,
-                thread_id,
-                caller_label=caller_label,
-            )
-        if full_history:
-            return await self.get_thread_history(
-                room_id,
-                thread_id,
-                caller_label=caller_label,
-            )
-        return await self.get_thread_snapshot(room_id, thread_id, caller_label=caller_label)
 
     async def get_dispatch_thread_snapshot(
         self,

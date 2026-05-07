@@ -103,7 +103,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
     """Test that an agent processes messages where it's directly mentioned."""
-    mock_fetch_history.return_value = []
+    mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
     test_room_id = "!test:localhost"
     test_user_id = "@alice:localhost"
 

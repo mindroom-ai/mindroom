@@ -115,7 +115,7 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
     _merge_response_extra_content,
-    response_trust_for_resolved_thread,
+    response_trust_for_resolved_thread_unchecked,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
@@ -382,7 +382,7 @@ def _response_request(
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
-    thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread(thread_id)
+    thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread_unchecked(thread_id)
     return ResponseRequest(
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
@@ -1933,7 +1933,7 @@ class TestAgentBot:
 
         mock_stream_agent_response.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Test response"
-        mock_fetch_history.return_value = []
+        mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
         # Mock the presence check to return same value as enable_streaming
         mock_should_use_streaming.return_value = enable_streaming
         # Mock get_latest_thread_event_id_if_needed
@@ -4535,7 +4535,7 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
         access = MagicMock()
-        bot._conversation_resolver.thread_membership_access = MagicMock(return_value=access)
+        bot._conversation_resolver.dispatch_snapshot_thread_membership_access = MagicMock(return_value=access)
         bot._conversation_resolver.resolve_related_event_thread_id_best_effort = AsyncMock(return_value="$thread-root")
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock()
@@ -4547,9 +4547,7 @@ class TestAgentBot:
         with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)):
             await bot._on_reaction(room, event)
 
-        bot._conversation_resolver.thread_membership_access.assert_called_once_with(
-            full_history=False,
-            dispatch_safe=True,
+        bot._conversation_resolver.dispatch_snapshot_thread_membership_access.assert_called_once_with(
             caller_label="reaction_hook_context",
         )
         bot._conversation_resolver.resolve_related_event_thread_id_best_effort.assert_awaited_once_with(
@@ -4801,7 +4799,7 @@ class TestAgentBot:
             patch.object(
                 bot._conversation_resolver,
                 "fetch_thread_history",
-                new=AsyncMock(return_value=thread_history),
+                new=AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ),
         ):
             mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -4914,7 +4912,7 @@ class TestAgentBot:
             patch.object(
                 bot._conversation_resolver,
                 "fetch_thread_history",
-                new=AsyncMock(return_value=thread_history),
+                new=AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ),
         ):
             mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -5313,8 +5311,7 @@ class TestAgentBot:
 
         assert mock_get_thread_history.await_count >= 1
         assert all(
-            await_args.args[1:] == ("!test:localhost", "$thread")
-            for await_args in mock_get_thread_history.await_args_list
+            await_args.args == ("!test:localhost", "$thread") for await_args in mock_get_thread_history.await_args_list
         )
         mock_thread_summary.assert_awaited_once_with(
             client=bot.client,

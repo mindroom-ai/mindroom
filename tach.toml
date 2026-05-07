@@ -1203,6 +1203,7 @@ depends_on = [
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.thread_diagnostics",
+    "mindroom.thread_context_state",
 ]
 
 [[modules]]
@@ -1299,6 +1300,7 @@ depends_on = [
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_room_scan",
     "mindroom.matrix.visible_body",
+    "mindroom.thread_context_state",
 ]
 
 [[modules]]
@@ -2304,7 +2306,7 @@ visibility = ["mindroom.matrix.conversation_cache"]
 exclusive = true
 
 [[interfaces]]
-expose = ["ThreadReadMode", "ThreadReadPolicy"]
+expose = ["ThreadReadPolicy"]
 from = ["mindroom.matrix.cache.thread_reads"]
 visibility = ["mindroom.matrix.conversation_cache"]
 exclusive = true

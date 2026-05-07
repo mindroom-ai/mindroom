@@ -20,6 +20,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY
+from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -415,7 +416,11 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing_indicator,
         ),
-        patch.object(bot._conversation_resolver, "fetch_thread_history", new=AsyncMock(return_value=[])),
+        patch.object(
+            bot._conversation_resolver,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
+        ),
     ):
         await bot._on_message(room, event)
         await drain_coalescing(bot)

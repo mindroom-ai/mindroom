@@ -30,6 +30,7 @@ from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTI
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import StreamingResponse, send_streaming_response
+from mindroom.thread_context_state import ThreadMembershipTrust, ThreadReadMode
 from mindroom.thread_utils import create_session_id, parse_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -668,8 +669,15 @@ class TestExtractMessageContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
+        thread_context = MagicMock(
+            is_thread=True,
+            thread_id="$thread123",
+            thread_history=[{"event_id": "$thread123"}],
+            requires_full_thread_history=False,
+            membership_trust=ThreadMembershipTrust.PROVEN,
+        )
         unwrap_extracted_collaborator(bot._conversation_resolver)._resolve_thread_context = AsyncMock(
-            return_value=(True, "$thread123", [{"event_id": "$thread123"}], False, False),
+            return_value=thread_context,
         )
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -933,7 +941,10 @@ class TestExtractMessageContextRoomMode:
             tmp_path,
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        bot._conversation_cache.get_thread_messages = AsyncMock(
+        bot._conversation_cache.get_thread_history = AsyncMock(
+            side_effect=AssertionError("new thread root targeting must not fetch thread history"),
+        )
+        bot._conversation_cache.get_thread_snapshot = AsyncMock(
             side_effect=AssertionError("new thread root targeting must not fetch thread history"),
         )
 
@@ -955,7 +966,8 @@ class TestExtractMessageContextRoomMode:
         assert target.source_thread_id is None
         assert target.resolved_thread_id == "$new-root:localhost"
         assert target.session_id == create_session_id("!room:localhost", "$new-root:localhost")
-        bot._conversation_cache.get_thread_messages.assert_not_called()
+        bot._conversation_cache.get_thread_history.assert_not_called()
+        bot._conversation_cache.get_thread_snapshot.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_message_context_keeps_full_hydration_required_for_degraded_history(
@@ -1000,9 +1012,8 @@ class TestExtractMessageContextRoomMode:
 
         with patch.object(
             bot._conversation_cache,
-            "get_thread_messages",
+            "get_dispatch_thread_history",
             AsyncMock(return_value=degraded_history),
-            create=True,
         ):
             context = await bot._conversation_resolver.extract_message_context_impl(
                 room,
@@ -1497,7 +1508,6 @@ class TestExtractedModuleLoggerRebinding:
 
         asyncio.run(
             unwrap_extracted_collaborator(bot._conversation_resolver).fetch_thread_history(
-                bot.client,
                 "!room:localhost",
                 "$threadroot",
             ),
@@ -1683,17 +1693,16 @@ class TestExtractedModuleLoggerRebinding:
         bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
             side_effect=lambda _room_id, event_id: "$threadroot" if event_id == "$reply-seed:localhost" else None,
         )
-        thread_id, thread_membership_provisional = await bot._conversation_resolver._explicit_thread_id_for_event(
+        thread_lookup = await bot._conversation_resolver._explicit_thread_id_for_event(
             room.room_id,
             event.event_id,
             EventInfo.from_event(event.source),
-            full_history=False,
-            dispatch_safe=True,
+            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
             caller_label="thread_mode_test",
         )
 
-        assert thread_id == "$threadroot"
-        assert thread_membership_provisional is False
+        assert thread_lookup.thread_id == "$threadroot"
+        assert thread_lookup.membership_trust is ThreadMembershipTrust.PROVEN
 
     @pytest.mark.asyncio
     async def test_direct_thread_dispatch_preview_still_requires_full_thread_history(
