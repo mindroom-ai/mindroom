@@ -10,13 +10,15 @@ from typing import TYPE_CHECKING
 
 from mindroom.matrix.cache.thread_cache_helpers import latest_visible_thread_event_id
 from mindroom.matrix.cache.thread_history_result import (
+    ThreadHistoryResult,
+    thread_history_result,
+)
+from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
-    ThreadHistoryResult,
-    thread_history_result,
 )
 from mindroom.timing import elapsed_ms_since
 

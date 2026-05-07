@@ -38,16 +38,6 @@ from mindroom.matrix import thread_bookkeeping
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError, ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_history_result import (
-    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
-    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-    THREAD_HISTORY_ERROR_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_CACHE,
-    THREAD_HISTORY_SOURCE_DEGRADED,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
-)
 from mindroom.matrix.cache.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
@@ -64,6 +54,16 @@ from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint
 from mindroom.matrix.sync_tokens import _load_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DEGRADED,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+    THREAD_HISTORY_SOURCE_STALE_CACHE,
+)
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadRootProof,

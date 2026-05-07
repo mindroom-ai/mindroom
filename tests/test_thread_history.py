@@ -22,15 +22,6 @@ from mindroom.constants import STREAM_WARMUP_SUFFIX_KEY
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_history_result import (
-    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
-    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-    THREAD_HISTORY_ERROR_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_CACHE,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
-)
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage, RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_delivery import build_threaded_edit_content as _build_threaded_edit_content_impl
@@ -41,6 +32,15 @@ from mindroom.matrix.client_thread_history import (
     _resolve_thread_history_from_event_sources_timed,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+    THREAD_HISTORY_SOURCE_STALE_CACHE,
+)
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
 

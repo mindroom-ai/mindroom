@@ -1202,6 +1202,7 @@ path = "mindroom.matrix.cache.thread_reads"
 depends_on = [
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.thread_diagnostics",
 ]
 
 [[modules]]
@@ -1210,7 +1211,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.cache.thread_history_result"
-depends_on = ["mindroom.matrix.thread_diagnostics"]
+depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.cache.thread_write_cache_ops"
@@ -2252,13 +2253,6 @@ expose = [
     "AgentMessageSnapshotUnavailable",
     "ConversationEventCache",
     "EventCacheWriteCoordinator",
-    "THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC",
-    "THREAD_HISTORY_DEGRADED_DIAGNOSTIC",
-    "THREAD_HISTORY_ERROR_DIAGNOSTIC",
-    "THREAD_HISTORY_SOURCE_CACHE",
-    "THREAD_HISTORY_SOURCE_DIAGNOSTIC",
-    "THREAD_HISTORY_SOURCE_HOMESERVER",
-    "THREAD_HISTORY_SOURCE_STALE_CACHE",
     "ThreadCacheState",
     "ThreadHistoryResult",
     "normalize_nio_event_for_cache",

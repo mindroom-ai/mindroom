@@ -303,7 +303,7 @@ async def resolve_event_thread_id_best_effort(
         event_id=event_id,
         allow_current_root=allow_current_root,
     )
-    return resolution.thread_id if resolution.state is ThreadResolutionState.THREADED else None
+    return resolution.thread_id
 
 
 async def resolve_related_event_thread_id_best_effort(
@@ -318,7 +318,7 @@ async def resolve_related_event_thread_id_best_effort(
         related_event_id,
         access=access,
     )
-    return resolution.thread_id if resolution.state is ThreadResolutionState.THREADED else None
+    return resolution.thread_id
 
 
 def map_backed_thread_membership_access(

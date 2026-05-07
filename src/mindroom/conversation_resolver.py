@@ -369,27 +369,24 @@ class ConversationResolver:
         caller_label: str,
     ) -> str | None:
         """Resolve canonical thread membership for one event."""
+        access = self.thread_membership_access(
+            full_history=full_history,
+            dispatch_safe=dispatch_safe,
+            caller_label=caller_label,
+        )
         if dispatch_safe:
             resolution = await resolve_event_thread_membership(
                 room_id,
                 event_info,
                 event_id=event_id,
-                access=self.thread_membership_access(
-                    full_history=full_history,
-                    dispatch_safe=dispatch_safe,
-                    caller_label=caller_label,
-                ),
+                access=access,
             )
             return resolution.thread_id or resolution.candidate_thread_root_id
         return await resolve_event_thread_id(
             room_id,
             event_info,
             event_id=event_id,
-            access=self.thread_membership_access(
-                full_history=full_history,
-                dispatch_safe=dispatch_safe,
-                caller_label=caller_label,
-            ),
+            access=access,
         )
 
     async def resolve_related_event_thread_id_best_effort(

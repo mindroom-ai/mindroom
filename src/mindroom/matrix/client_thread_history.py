@@ -13,13 +13,6 @@ from nio.responses import RoomThreadsResponse
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
-    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
-    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-    THREAD_HISTORY_ERROR_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_CACHE,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_HOMESERVER,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
     ThreadCacheState,
     ThreadHistoryResult,
     normalize_nio_event_for_cache,
@@ -33,6 +26,15 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import extract_and_resolve_message, resolve_event_source_content
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+    THREAD_HISTORY_SOURCE_STALE_CACHE,
+)
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
