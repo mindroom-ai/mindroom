@@ -477,6 +477,7 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS", "9")
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(tmp_path / "shared-storage"))
     monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
 
     startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
@@ -487,6 +488,7 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert startup_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
     assert startup_runtime.env_value("MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS") == "9"
+    assert startup_runtime.env_value("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT") == str(tmp_path / "shared-storage")
 
 
 def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(

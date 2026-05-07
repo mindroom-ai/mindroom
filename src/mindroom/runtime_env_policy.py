@@ -27,6 +27,7 @@ __all__ = [
     "is_worker_extra_env_name",
     "isolated_worker_runtime_env",
     "public_worker_startup_env",
+    "sandbox_runner_runtime_state_env",
     "sandbox_runner_startup_process_env",
     "sandbox_shell_system_env",
     "sandbox_subprocess_system_env",
@@ -185,8 +186,15 @@ _SANDBOX_RUNNER_STARTUP_ENV_NAMES = frozenset(
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"],
         SANDBOX_RUNTIME_ENV_BY_KEY["worker_endpoint"],
         SANDBOX_RUNTIME_ENV_BY_KEY["worker_idle_timeout_seconds"],
+    },
+)
+_SANDBOX_RUNNER_RUNTIME_STATE_ENV_NAMES = _SANDBOX_RUNNER_STARTUP_ENV_NAMES | frozenset(
+    {
+        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
+        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"],
     },
 )
 _WORKER_EXTRA_ENV_GENERATED_NAMES = frozenset(
@@ -393,6 +401,11 @@ def sandbox_runner_startup_process_env(env: Mapping[str, str]) -> dict[str, str]
         for key, value in env.items()
         if key in _SANDBOX_RUNNER_STARTUP_ENV_NAMES or not is_runtime_control_env_name(key)
     }
+
+
+def sandbox_runner_runtime_state_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return runner-owned runtime state that must survive request env reconstruction."""
+    return {key: value for key, value in env.items() if key in _SANDBOX_RUNNER_RUNTIME_STATE_ENV_NAMES}
 
 
 def worker_extra_env(env: Mapping[str, str]) -> dict[str, str]:

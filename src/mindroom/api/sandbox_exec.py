@@ -20,6 +20,7 @@ from mindroom import constants
 from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
+    sandbox_runner_runtime_state_env,
     sandbox_subprocess_system_env,
 )
 from mindroom.tool_system.worker_routing import worker_dir_name
@@ -175,6 +176,7 @@ def runtime_paths_with_execution_env(
         return runtime_paths
 
     process_env = dict(constants.execution_runtime_env_values(runtime_paths)) if include_base_execution_env else {}
+    process_env.update(sandbox_runner_runtime_state_env(runtime_paths.process_env))
     process_env.update(execution_env)
     env_file_values = dict(runtime_paths.env_file_values) if include_base_execution_env else {}
     if trusted_env_overlay:
