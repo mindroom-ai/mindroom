@@ -349,6 +349,36 @@ async def test_run_shell_command_truncates_many_short_lines_by_rendered_bytes(tm
 
 
 @pytest.mark.asyncio
+async def test_run_shell_command_truncates_oversized_single_stdout_line(tmp_path: Path) -> None:
+    """Output without newlines should still be retained and byte-capped."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint([sys.executable, "-c", "import sys; sys.stdout.write('A' * 100000)"])
+
+    assert result.startswith("[Output truncated to the last")
+    assert "A" * 100 in result
+    assert len(result.encode("utf-8")) <= _MAX_OUTPUT_BYTES + 200
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_truncates_oversized_single_stderr_line(tmp_path: Path) -> None:
+    """Oversized stderr lines should be surfaced instead of skipped."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(
+        [sys.executable, "-c", "import sys; sys.stderr.write('B' * 100000); sys.exit(1)"],
+    )
+
+    assert result.startswith("Error: [Output truncated to the last")
+    assert "B" * 100 in result
+    assert len(result.encode("utf-8")) <= _MAX_OUTPUT_BYTES + 200
+
+
+@pytest.mark.asyncio
 async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> None:
     """Command exceeding timeout should return a handle."""
     tool = _get_toolkit(tmp_path)

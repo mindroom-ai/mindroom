@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import json
 import os
@@ -26,7 +27,6 @@ from mindroom.constants import (
     subprocess_path_with_prepends,
     workspace_home_identity_env,
 )
-from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
@@ -74,6 +74,7 @@ _STALE_RECORD_SECONDS = 600  # 10 minutes
 _MAX_BACKGROUNDED = 16
 _MAX_OUTPUT_LINES = 10_000
 _MAX_OUTPUT_BYTES = 50 * 1024
+_STREAM_READ_CHUNK_BYTES = 8192
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
 _SHELL_ARGS_ERROR = '\'args\' must be a flat list of strings. Send args like ["bash", "-lc", "ls"].'
@@ -213,29 +214,33 @@ class _OutputBuffer:
 
     max_lines: int = _MAX_OUTPUT_LINES
     max_bytes: int = _MAX_OUTPUT_BYTES
-    lines: deque[str] = field(default_factory=deque)
+    chunks: deque[str] = field(default_factory=deque)
     byte_count: int = 0
     truncated: bool = False
 
-    def append(self, line: str) -> None:
-        encoded = line.encode("utf-8", errors="replace")
+    def append(self, text: str) -> None:
+        if not text:
+            return
+
+        encoded = text.encode("utf-8", errors="replace")
         if len(encoded) > self.max_bytes:
-            line = encoded[-self.max_bytes :].decode("utf-8", errors="ignore")
-            encoded = line.encode("utf-8", errors="replace")
+            text = encoded[-self.max_bytes :].decode("utf-8", errors="ignore")
+            encoded = text.encode("utf-8", errors="replace")
             self.truncated = True
 
-        separator_bytes = 1 if self.lines else 0
-        self.lines.append(line)
-        self.byte_count += separator_bytes + len(encoded)
+        self.chunks.append(text)
+        self.byte_count += len(encoded)
 
-        while self.lines and (len(self.lines) > self.max_lines or self.byte_count > self.max_bytes):
-            removed = self.lines.popleft()
-            removed_separator_bytes = 1 if self.lines else 0
-            self.byte_count -= len(removed.encode("utf-8", errors="replace")) + removed_separator_bytes
+        while self.chunks and self.byte_count > self.max_bytes:
+            removed = self.chunks.popleft()
+            self.byte_count -= len(removed.encode("utf-8", errors="replace"))
             self.truncated = True
+
+        self._trim_to_max_lines()
 
     def render(self, *, tail: int | None = None) -> str:
-        output_lines = list(self.lines)
+        output = self._rendered_text()
+        output_lines = output.split("\n") if output else []
         if tail is not None:
             output_lines = output_lines[-tail:]
         output = "\n".join(output_lines)
@@ -249,7 +254,22 @@ class _OutputBuffer:
         return f"{notice}\n{output}" if output else notice
 
     def __len__(self) -> int:
-        return len(self.lines)
+        output = self._rendered_text()
+        return len(output.split("\n")) if output else 0
+
+    def _rendered_text(self) -> str:
+        return "".join(self.chunks).rstrip("\n")
+
+    def _trim_to_max_lines(self) -> None:
+        output = self._rendered_text()
+        lines = output.split("\n")
+        if len(lines) <= self.max_lines:
+            return
+
+        output = "\n".join(lines[-self.max_lines :])
+        self.chunks = deque([output])
+        self.byte_count = len(output.encode("utf-8", errors="replace"))
+        self.truncated = True
 
 
 @dataclass
@@ -583,22 +603,19 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
     return MindRoomShellTools
 
 
-_log = get_logger(__name__)
-
-
 async def _read_stream(stream: asyncio.StreamReader | None, buf: _OutputBuffer) -> None:
-    """Read lines from an async stream into *buf* until EOF."""
+    """Read bounded chunks from an async stream into *buf* until EOF."""
     if stream is None:
         return
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     while True:
-        try:
-            line = await stream.readline()
-        except ValueError:
-            _log.warning("shell: oversized line exceeded StreamReader buffer limit, skipping")
-            continue
-        if not line:
+        chunk = await stream.read(_STREAM_READ_CHUNK_BYTES)
+        if not chunk:
             break
-        buf.append(line.decode(errors="replace").rstrip("\n"))
+        buf.append(decoder.decode(chunk))
+
+    buf.append(decoder.decode(b"", final=True))
 
 
 async def _cancel_pending_tasks(*tasks: asyncio.Task[None]) -> None:
