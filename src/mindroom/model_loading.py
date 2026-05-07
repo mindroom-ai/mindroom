@@ -20,6 +20,7 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
+from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_KEYS
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.vertex_claude_prompt_cache import install_vertex_claude_prompt_cache_hook
 
@@ -61,11 +62,11 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
 
     if canonical_provider == "vertexai_claude":
         if "project_id" not in extra_kwargs:
-            project_id = runtime_paths.env_value("ANTHROPIC_VERTEX_PROJECT_ID")
+            project_id = runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_KEYS[0])
             if project_id:
                 extra_kwargs["project_id"] = project_id
         if "region" not in extra_kwargs:
-            region = runtime_paths.env_value("CLOUD_ML_REGION")
+            region = runtime_paths.env_value(VERTEXAI_CLAUDE_ENV_KEYS[1])
             if region:
                 extra_kwargs["region"] = region
         if "base_url" not in extra_kwargs:

@@ -184,6 +184,12 @@ def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filt
 def test_worker_extra_env_drops_protected_controls_but_keeps_runner_timeout() -> None:
     """Kubernetes extra env may tune runner timeout without overriding generated worker controls."""
     env = {
+        "HOME": "/unsafe/home",
+        "MINDROOM_API_KEY": "runtime-api-key",
+        "MINDROOM_CONFIG_PATH": "/unsafe/config.yaml",
+        "MINDROOM_LOCAL_CLIENT_SECRET": "runtime-client-secret",
+        "MINDROOM_SHARED_CREDENTIALS_PATH": "/unsafe/shared-credentials",
+        "MINDROOM_STORAGE_PATH": "/unsafe/storage",
         "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
         "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/unsafe/root",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "unsafe-token",
@@ -191,6 +197,8 @@ def test_worker_extra_env_drops_protected_controls_but_keeps_runner_timeout() ->
         "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"MINDROOM_SANDBOX_PROXY_TOKEN": "nested-token"}),
         "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME": "primary-auth-secret",
         "AGNO_TELEMETRY": "true",
+        "PATH": "/unsafe/bin",
+        "VIRTUAL_ENV": "/unsafe/venv",
         "MINDROOM_WORKER_TOOL_VALUE": "visible",
     }
 

@@ -175,6 +175,16 @@ _WORKER_EXTRA_ENV_SANDBOX_ENV_NAMES = frozenset(
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
     },
 )
+_WORKER_EXTRA_ENV_GENERATED_NAMES = frozenset(
+    {
+        "HOME",
+        "MINDROOM_CONFIG_PATH",
+        "MINDROOM_SHARED_CREDENTIALS_PATH",
+        "MINDROOM_STORAGE_PATH",
+        "PATH",
+        "VIRTUAL_ENV",
+    },
+)
 _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
     {
         *_CREDENTIAL_SEED_DECLARATION_ENV_NAMES,
@@ -345,13 +355,11 @@ def is_shell_passthrough_allowed_env_name(name: str) -> bool:
 
 def is_worker_extra_env_name(name: str) -> bool:
     """Return whether backend extra env may be added to worker pods and startup manifests."""
-    if name in _VENDOR_TELEMETRY_ENV_NAMES or name == SANDBOX_STARTUP_MANIFEST_PATH_ENV:
+    if name in _WORKER_EXTRA_ENV_GENERATED_NAMES:
         return False
-    if is_worker_backend_config_env_name(name):
-        return False
-    if name.startswith(_SANDBOX_RUNTIME_ENV_PREFIX):
-        return name in _WORKER_EXTRA_ENV_SANDBOX_ENV_NAMES
-    return True
+    if name in _WORKER_EXTRA_ENV_SANDBOX_ENV_NAMES:
+        return True
+    return name not in _VENDOR_TELEMETRY_ENV_NAMES and not is_runtime_control_env_name(name)
 
 
 def public_worker_startup_env(env: Mapping[str, str]) -> dict[str, str]:

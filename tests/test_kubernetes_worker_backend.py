@@ -1196,11 +1196,19 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
     backend, apps_api, _core_api = _backend(
         runtime_paths=runtime_paths,
         extra_env={
+            "HOME": "/unsafe/home",
+            "MINDROOM_API_KEY": "runtime-api-key",
+            "MINDROOM_CONFIG_PATH": "/unsafe/config.yaml",
             "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"ANTHROPIC_API_KEY": "nested-secret"}),
             "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME": "primary-worker-auth",
+            "MINDROOM_LOCAL_CLIENT_SECRET": "runtime-client-secret",
             "MINDROOM_SANDBOX_PROXY_TOKEN": "extra-env-token",
             "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/unsafe/root",
             "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
+            "MINDROOM_SHARED_CREDENTIALS_PATH": "/unsafe/shared-credentials",
+            "MINDROOM_STORAGE_PATH": "/unsafe/storage",
+            "PATH": "/unsafe/bin",
+            "VIRTUAL_ENV": "/unsafe/venv",
             "MINDROOM_WORKER_TOOL_VALUE": "visible",
         },
     )
@@ -1222,6 +1230,8 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
         "MINDROOM_KUBERNETES_WORKER_IMAGE",
         "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME",
         "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
+        "MINDROOM_API_KEY",
+        "MINDROOM_LOCAL_CLIENT_SECRET",
     ):
         assert name not in env_values
         assert name not in committed_env
@@ -1237,11 +1247,18 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
     assert env_values["MINDROOM_SANDBOX_PROXY_TOKEN"] is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert env_names.count("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT") == 1
+    assert env_values["HOME"] == expected_worker_root
+    assert env_values["MINDROOM_CONFIG_PATH"] != "/unsafe/config.yaml"
+    assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
+    assert env_values["PATH"] != "/unsafe/bin"
+    assert env_values["VIRTUAL_ENV"] == f"{expected_worker_root}/venv"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY") == _TEST_SCOPED_WORKER_KEY_A
     assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT") == expected_worker_root
     assert committed_runtime.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") == (
         f"{expected_worker_root}/.shared_credentials"
     )
+    assert committed_runtime.env_value("MINDROOM_CONFIG_PATH") != "/unsafe/config.yaml"
+    assert committed_runtime.env_value("MINDROOM_STORAGE_PATH") == expected_worker_root
     assert committed_runtime.env_value("MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX") == "workers"
 
 
