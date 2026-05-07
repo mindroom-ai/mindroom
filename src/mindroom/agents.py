@@ -26,13 +26,7 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID
-from mindroom.prompts import (
-    CONTEXT_TRUNCATION_MARKER_TEMPLATE,
-    DATETIME_CONTEXT_TEMPLATE,
-    PERSONALITY_CONTEXT_SECTION_HEADING,
-    build_agent_identity_context,
-    render_prompt_template,
-)
+from mindroom.prompts import build_agent_identity_context, render_prompt_template
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
@@ -155,7 +149,7 @@ def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
 def _get_datetime_context(
     timezone_str: str,
     *,
-    datetime_context_template: str = DATETIME_CONTEXT_TEMPLATE,
+    datetime_context_template: str,
 ) -> str:
     """Generate current date context for the agent.
 
@@ -230,7 +224,7 @@ def _render_context_chunks(section_heading: str, chunks: list[_AdditionalContext
 def _render_additional_context(
     personality_chunks: list[_AdditionalContextChunk],
     *,
-    section_heading: str = PERSONALITY_CONTEXT_SECTION_HEADING,
+    section_heading: str,
 ) -> str:
     """Render full additional context from personality chunks."""
     return _render_context_chunks(section_heading, personality_chunks)
@@ -294,8 +288,8 @@ def _apply_preload_cap(
     personality_chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
     *,
-    section_heading: str = PERSONALITY_CONTEXT_SECTION_HEADING,
-    truncation_marker_template: str = CONTEXT_TRUNCATION_MARKER_TEMPLATE,
+    section_heading: str,
+    truncation_marker_template: str,
 ) -> tuple[str, int]:
     """Apply hard preload cap with deterministic truncation priority.
 
@@ -340,8 +334,8 @@ def _build_additional_context(
     agent_config: AgentConfig,
     max_preload_chars: int,
     *,
-    personality_section_heading: str = PERSONALITY_CONTEXT_SECTION_HEADING,
-    truncation_marker_template: str = CONTEXT_TRUNCATION_MARKER_TEMPLATE,
+    personality_section_heading: str,
+    truncation_marker_template: str,
     workspace_context_files: tuple[Path, ...] = (),
     storage_path: Path,
     runtime_paths: constants.RuntimePaths,

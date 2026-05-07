@@ -59,10 +59,6 @@ _PARTIAL_REPLY_SENDER_LABELS = {
 }
 
 
-def _configured_prompt(config: Config, name: str) -> str:
-    return config.get_prompt(name)
-
-
 class _PartialReplyKind(str, Enum):
     """Classification for a self-authored partial reply preserved in prompt context."""
 
@@ -298,12 +294,12 @@ def _build_unseen_messages_header(
 ) -> str:
     """Choose the unseen-context guidance for the partial-reply mix present."""
     if not partial_reply_kinds:
-        return _configured_prompt(config, "DEFAULT_UNSEEN_MESSAGES_HEADER")
+        return config.get_prompt("DEFAULT_UNSEEN_MESSAGES_HEADER")
     if partial_reply_kinds == {_PartialReplyKind.INTERRUPTED}:
-        return _configured_prompt(config, "INTERRUPTED_PARTIAL_REPLY_HEADER")
+        return config.get_prompt("INTERRUPTED_PARTIAL_REPLY_HEADER")
     if partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}:
-        return _configured_prompt(config, "IN_PROGRESS_PARTIAL_REPLY_HEADER")
-    return _configured_prompt(config, "MIXED_PARTIAL_REPLY_HEADER")
+        return config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")
+    return config.get_prompt("MIXED_PARTIAL_REPLY_HEADER")
 
 
 def _context_message_from_visible_message(
@@ -397,8 +393,8 @@ def _messages_with_current_prompt(
         _build_matrix_prompt_with_history(
             prompt,
             [],
-            header=_configured_prompt(config, "PREVIOUS_CONVERSATION_THREAD_HEADER"),
-            prompt_intro=_configured_prompt(config, "CURRENT_MESSAGE_PROMPT_INTRO"),
+            header=config.get_prompt("PREVIOUS_CONVERSATION_THREAD_HEADER"),
+            prompt_intro=config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO"),
             current_sender=current_sender_id,
         )
         if current_sender_id is not None

@@ -48,7 +48,6 @@ from mindroom.history.types import (
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.metadata_merge import deep_merge_metadata
-from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
@@ -265,7 +264,7 @@ async def compact_scope_history(
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
     reserve_tokens: int,
-    summary_prompt: str = COMPACTION_SUMMARY_PROMPT,
+    summary_prompt: str,
     timing_scope: str | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
@@ -422,7 +421,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901, PLR0912, PLR09
     lifecycle_notice_event_id: str | None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     collect_compaction_hook_messages: bool,
-    summary_prompt: str = COMPACTION_SUMMARY_PROMPT,
+    summary_prompt: str,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
     timing_scope: str | None = None,
 ) -> _CompactionRewriteResult | None:
@@ -1122,7 +1121,7 @@ async def _generate_compaction_summary(
     *,
     model: Model,
     summary_input: str,
-    summary_prompt: str = COMPACTION_SUMMARY_PROMPT,
+    summary_prompt: str,
     timeout_seconds: float | None = None,
     timing_scope: str | None = None,
 ) -> SessionSummary:

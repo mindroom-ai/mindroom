@@ -19,7 +19,6 @@ from agno.session.team import TeamSession
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt
 from mindroom.media_inputs import MediaInputs
-from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT, QUEUED_MESSAGE_NOTICE_TEXT
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -79,7 +78,7 @@ def attach_media_to_run_input(
 def append_inline_media_fallback_to_run_input(
     run_input: ModelRunInput,
     *,
-    fallback_prompt: str = INLINE_MEDIA_FALLBACK_PROMPT,
+    fallback_prompt: str,
 ) -> list[Message]:
     """Append the inline-media fallback note to the current user turn."""
     run_messages = copy_run_input(run_input)
@@ -145,7 +144,7 @@ def _append_queued_notice_if_needed(
     *,
     messages: list[Message],
     function_call_results: Sequence[Message],
-    notice_text: str = QUEUED_MESSAGE_NOTICE_TEXT,
+    notice_text: str,
 ) -> None:
     _strip_queued_notice_messages(messages)
     if any(message.stop_after_tool_call for message in function_call_results):
@@ -270,7 +269,7 @@ def scrub_queued_notice_session_context(
 def install_queued_message_notice_hook(
     model: Model,
     *,
-    notice_text: str = QUEUED_MESSAGE_NOTICE_TEXT,
+    notice_text: str,
 ) -> None:
     """Append a hidden notice after tool results when a newer message is queued."""
     try:

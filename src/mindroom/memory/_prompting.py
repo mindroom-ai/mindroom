@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from mindroom.prompts import MEMORY_CONTEXT_PROMPT_TEMPLATE, render_prompt_template
+from mindroom.prompts import render_prompt_template
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -21,7 +21,7 @@ def format_memories_as_context(
     memories: list[MemoryResult],
     context_type: str = "agent",
     *,
-    prompt_template: str = MEMORY_CONTEXT_PROMPT_TEMPLATE,
+    prompt_template: str,
 ) -> str:
     """Format memories into a context string."""
     if not memories:

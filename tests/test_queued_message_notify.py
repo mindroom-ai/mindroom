@@ -1621,8 +1621,8 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
 def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call() -> None:
     """The injected notice should stay unique, remain last, avoid double wrapping, and skip stop-after-tool-call results."""
     model = _FakeModel()
-    install_queued_message_notice_hook(model)
-    install_queued_message_notice_hook(model)
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
 
     plain_messages = [Message(role="user", content="hello")]
     model.format_function_call_results(
@@ -1644,7 +1644,7 @@ def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call()
 
         stop_after_messages = [Message(role="user", content="hello")]
         stop_after_model = _FakeModel()
-        install_queued_message_notice_hook(stop_after_model)
+        install_queued_message_notice_hook(stop_after_model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
         stop_after_model.format_function_call_results(
             messages=stop_after_messages,
             function_call_results=[Message(role="tool", content="done", stop_after_tool_call=True)],
@@ -1683,7 +1683,7 @@ def test_notice_hook_uses_configured_notice_text() -> None:
 def test_notice_reinjects_at_end_across_multiple_tool_rounds() -> None:
     """Repeated tool rounds should keep exactly one queued notice at the end of the prompt."""
     model = _FakeModel()
-    install_queued_message_notice_hook(model)
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
 
     with queued_message_signal_context(_StaticQueuedState(pending=True)):
         messages = [Message(role="user", content="hello")]
@@ -1700,7 +1700,7 @@ def test_notice_reinjects_at_end_across_multiple_tool_rounds() -> None:
 def test_stop_after_tool_call_strips_stale_notice_without_readding() -> None:
     """A stop-after-tool-call round should remove any stale queued notice and not append a new one."""
     model = _FakeModel()
-    install_queued_message_notice_hook(model)
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
 
     messages = [Message(role="user", content="hello")]
     with queued_message_signal_context(_StaticQueuedState(pending=True)):
@@ -1720,7 +1720,7 @@ def test_stop_after_tool_call_strips_stale_notice_without_readding() -> None:
 def test_notice_reinjects_after_media_follow_up_message() -> None:
     """Agno appends media follow-up messages after tool formatting, so the queued notice must be reappended."""
     model = _FakeModel()
-    install_queued_message_notice_hook(model)
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
 
     with queued_message_signal_context(_StaticQueuedState(pending=True)):
         messages = [Message(role="user", content="hello")]
@@ -1748,7 +1748,7 @@ def test_notice_reinjects_after_media_follow_up_message() -> None:
 def test_notice_hook_still_installs_when_media_handler_is_missing() -> None:
     """Missing media support must not disable queued notices for formatted tool results."""
     model = _FakeModelWithoutFunctionCallMedia()
-    install_queued_message_notice_hook(model)
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
 
     with queued_message_signal_context(_StaticQueuedState(pending=True)):
         messages = [Message(role="user", content="hello")]

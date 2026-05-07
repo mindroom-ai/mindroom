@@ -15,6 +15,7 @@ from mindroom.agents import _get_datetime_context, create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
+from mindroom.prompts import DATETIME_CONTEXT_TEMPLATE
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
@@ -42,7 +43,7 @@ def test_get_datetime_context_format() -> None:
     frozen_now = datetime(2026, 3, 20, 13, 30, tzinfo=ZoneInfo("America/New_York"))
     with patch("mindroom.agents.datetime") as mock_datetime:
         mock_datetime.now.return_value = frozen_now
-        context = _get_datetime_context("America/New_York")
+        context = _get_datetime_context("America/New_York", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
 
     assert context == (
         "## Current Date and Time\nToday is Friday, March 20, 2026.\nTimezone: America/New_York (EDT)\n\n"
@@ -54,7 +55,7 @@ def test_get_datetime_context_utc() -> None:
     frozen_now = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
     with patch("mindroom.agents.datetime") as mock_datetime:
         mock_datetime.now.return_value = frozen_now
-        context = _get_datetime_context("UTC")
+        context = _get_datetime_context("UTC", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
 
     assert context == ("## Current Date and Time\nToday is Friday, March 20, 2026.\nTimezone: UTC (UTC)\n\n")
 
@@ -62,7 +63,7 @@ def test_get_datetime_context_utc() -> None:
 def test_get_datetime_context_invalid_timezone() -> None:
     """Test that invalid timezone raises ZoneInfoNotFoundError."""
     with pytest.raises(ZoneInfoNotFoundError):
-        _get_datetime_context("Invalid/Timezone")
+        _get_datetime_context("Invalid/Timezone", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
 
 
 def test_agent_prompt_includes_datetime() -> None:

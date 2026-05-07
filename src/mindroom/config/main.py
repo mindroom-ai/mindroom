@@ -75,8 +75,6 @@ from mindroom.tool_system.worker_routing import unsupported_shared_only_integrat
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from mindroom.entity_resolution import MatrixID
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
@@ -445,9 +443,9 @@ class Config(BaseModel):
             return self.prompts[name]
         return PROMPT_DEFAULTS[name]
 
-    def render_prompt(self, name: str, fields: Mapping[str, object] | None = None, **kwargs: object) -> str:
+    def render_prompt(self, name: str, **kwargs: object) -> str:
         """Render one configured prompt with MindRoom's small bare-field template syntax."""
-        return render_prompt_template(self.get_prompt(name), fields, **kwargs)
+        return render_prompt_template(self.get_prompt(name), **kwargs)
 
     @model_validator(mode="after")
     def validate_entity_names(self) -> Config:

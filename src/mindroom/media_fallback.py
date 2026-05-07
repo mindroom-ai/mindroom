@@ -5,8 +5,6 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
-
 if TYPE_CHECKING:
     from mindroom.media_inputs import MediaInputs
 
@@ -36,13 +34,10 @@ def should_retry_without_inline_media(error: Exception | str, media_inputs: Medi
 def append_inline_media_fallback_prompt(
     full_prompt: str,
     *,
-    fallback_prompt: str = INLINE_MEDIA_FALLBACK_PROMPT,
+    fallback_prompt: str,
 ) -> str:
     """Append one-time guidance when inline media had to be dropped."""
     if _INLINE_MEDIA_FALLBACK_MARKER in full_prompt:
         return full_prompt
 
-    fallback_text = fallback_prompt
-    if _INLINE_MEDIA_FALLBACK_MARKER not in fallback_text:
-        fallback_text = f"{_INLINE_MEDIA_FALLBACK_MARKER}\n{fallback_text}"
-    return f"{full_prompt.rstrip()}\n\n{fallback_text}"
+    return f"{full_prompt.rstrip()}\n\n{_INLINE_MEDIA_FALLBACK_MARKER}\n{fallback_prompt}"

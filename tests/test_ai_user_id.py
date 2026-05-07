@@ -94,6 +94,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
@@ -5551,7 +5552,10 @@ class TestUserIdPassthrough:
         assert logged_contexts[0]["prompt"] == "raw prompt"
         assert logged_contexts[0]["model_prompt"] == "expanded prompt"
         assert logged_contexts[0]["full_prompt"] == prepared_prompt
-        assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
+        assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(
+            prepared_prompt,
+            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
+        )
         assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
         expected_metadata = {
             "correlation_id": logged_contexts[0]["correlation_id"],
@@ -5799,7 +5803,10 @@ class TestUserIdPassthrough:
         assert logged_contexts[0]["prompt"] == "raw prompt"
         assert logged_contexts[0]["model_prompt"] == "expanded prompt"
         assert logged_contexts[0]["full_prompt"] == prepared_prompt
-        assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(prepared_prompt)
+        assert logged_contexts[1]["full_prompt"] == append_inline_media_fallback_prompt(
+            prepared_prompt,
+            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
+        )
         assert logged_contexts[1]["correlation_id"] == logged_contexts[0]["correlation_id"]
         expected_metadata = {
             "correlation_id": logged_contexts[0]["correlation_id"],
@@ -6043,26 +6050,35 @@ class TestUserIdPassthrough:
     def test_append_inline_media_fallback_prompt_is_idempotent(self) -> None:
         """Fallback marker should only be appended once across retries."""
         initial_prompt = "Inspect this attachment."
-        first = append_inline_media_fallback_prompt(initial_prompt)
-        second = append_inline_media_fallback_prompt(first)
+        assert "[Inline media unavailable for this model]" not in INLINE_MEDIA_FALLBACK_PROMPT
+
+        first = append_inline_media_fallback_prompt(
+            initial_prompt,
+            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
+        )
+        second = append_inline_media_fallback_prompt(
+            first,
+            fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
+        )
         assert first == second
+        assert "[Inline media unavailable for this model]" in first
 
         custom = append_inline_media_fallback_prompt(
             initial_prompt,
-            fallback_prompt="[Inline media unavailable for this model]\nCustom retry guidance.",
+            fallback_prompt="Custom retry guidance.",
         )
         assert "Custom retry guidance." in custom
 
-        custom_without_marker = append_inline_media_fallback_prompt(
+        custom_user_copy = append_inline_media_fallback_prompt(
             initial_prompt,
             fallback_prompt="Use attachment tools instead.",
         )
-        repeated_custom_without_marker = append_inline_media_fallback_prompt(
-            custom_without_marker,
+        repeated_custom_user_copy = append_inline_media_fallback_prompt(
+            custom_user_copy,
             fallback_prompt="Use attachment tools instead.",
         )
-        assert "[Inline media unavailable for this model]" in custom_without_marker
-        assert custom_without_marker == repeated_custom_without_marker
+        assert "[Inline media unavailable for this model]" in custom_user_copy
+        assert custom_user_copy == repeated_custom_user_copy
 
     @pytest.mark.asyncio
     async def test_ai_response_does_not_retry_without_media_validation_match(self, tmp_path: Path) -> None:

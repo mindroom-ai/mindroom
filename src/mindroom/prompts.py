@@ -5,10 +5,6 @@ from __future__ import annotations
 import re
 from string import Formatter
 from types import MappingProxyType
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 __all__ = [
     "AGENT_IDENTITY_CONTEXT_TEMPLATE",
@@ -55,7 +51,6 @@ __all__ = [
     "WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE",
     "PromptTemplateError",
     "build_agent_identity_context",
-    "prompt_template_field_names",
     "render_prompt_template",
     "validate_prompt_template_fields",
 ]
@@ -117,24 +112,22 @@ def _parse_prompt_template(template: str) -> tuple[tuple[str, str | None, str | 
     return parsed_parts
 
 
-def prompt_template_field_names(template: str) -> frozenset[str]:
+def _prompt_template_field_names(template: str) -> frozenset[str]:
     """Return exact placeholder names used by one MindRoom prompt template."""
     return frozenset(field_name for _, field_name, _, _ in _parse_prompt_template(template) if field_name is not None)
 
 
-def render_prompt_template(template: str, fields: Mapping[str, object] | None = None, **kwargs: object) -> str:
+def render_prompt_template(template: str, **kwargs: object) -> str:
     """Render a MindRoom prompt template with exact placeholder replacement only."""
-    values = dict(fields or {})
-    values.update(kwargs)
     rendered_parts: list[str] = []
     for literal_text, field_name, _, _ in _parse_prompt_template(template):
         rendered_parts.append(literal_text)
         if field_name is None:
             continue
-        if field_name not in values:
+        if field_name not in kwargs:
             msg = f"Missing prompt placeholder value: {field_name}"
             raise PromptTemplateError(msg)
-        rendered_parts.append(str(values[field_name]))
+        rendered_parts.append(str(kwargs[field_name]))
     return "".join(rendered_parts)
 
 
@@ -165,9 +158,9 @@ def build_agent_identity_context(
     matrix_id: str,
     model_provider: str,
     model_id: str,
+    identity_context_template: str,
+    openai_compat_history_guidance: str,
     include_openai_compat_guidance: bool = False,
-    identity_context_template: str = AGENT_IDENTITY_CONTEXT_TEMPLATE,
-    openai_compat_history_guidance: str = OPENAI_COMPAT_HISTORY_GUIDANCE,
 ) -> str:
     """Render the shared identity prompt with optional OpenAI-compatible guidance."""
     return render_prompt_template(
@@ -286,7 +279,6 @@ QUEUED_MESSAGE_NOTICE_TEXT = (
     "the original request; do not mention this notice or the queued message."
 )
 INLINE_MEDIA_FALLBACK_PROMPT = (
-    "[Inline media unavailable for this model] "
     "The model rejected inline attachments for this turn. "
     "Use available attachment IDs and tools to inspect files instead."
 )
@@ -575,7 +567,7 @@ def validate_prompt_template_fields(prompt_name: str, prompt_text: str) -> None:
         return
 
     try:
-        field_names = prompt_template_field_names(prompt_text)
+        field_names = _prompt_template_field_names(prompt_text)
     except PromptTemplateError as exc:
         msg = f"Invalid prompt placeholder syntax for prompt override {prompt_name}: {exc}"
         raise ValueError(msg) from exc
