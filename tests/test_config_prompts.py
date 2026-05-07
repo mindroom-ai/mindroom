@@ -50,7 +50,6 @@ def test_config_rejects_prompt_override_with_unsupported_template_field() -> Non
     [
         "{message.nope}",
         "{message[999]}",
-        "{message:{message.nope}}",
     ],
 )
 def test_config_rejects_prompt_override_with_compound_template_field(template: str) -> None:
@@ -60,6 +59,38 @@ def test_config_rejects_prompt_override_with_compound_template_field(template: s
             {
                 "prompts": {
                     "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": template,
+                },
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{message:.2f}",
+        "{message:{agents_info}}",
+        "{message:{message.nope}}",
+    ],
+)
+def test_config_rejects_prompt_override_with_template_field_format_spec(template: str) -> None:
+    """Prompt template overrides must not use field format specs."""
+    with pytest.raises(ValidationError, match="Template field format specs are not supported"):
+        Config.model_validate(
+            {
+                "prompts": {
+                    "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": template,
+                },
+            },
+        )
+
+
+def test_config_rejects_prompt_override_with_template_field_conversion() -> None:
+    """Prompt template overrides must not use field conversion syntax."""
+    with pytest.raises(ValidationError, match="Template field conversions are not supported"):
+        Config.model_validate(
+            {
+                "prompts": {
+                    "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": "{message!x}",
                 },
             },
         )

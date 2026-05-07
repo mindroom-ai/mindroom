@@ -152,7 +152,7 @@ def format_invalid_config_message(
 
 def _prompt_template_field_names(template: str) -> set[str]:
     fields: set[str] = set()
-    for _, field_name, format_spec, _ in _PROMPT_TEMPLATE_FORMATTER.parse(template):
+    for _, field_name, format_spec, conversion in _PROMPT_TEMPLATE_FORMATTER.parse(template):
         if field_name is not None:
             if not field_name:
                 msg = "Empty template fields are not supported"
@@ -160,9 +160,13 @@ def _prompt_template_field_names(template: str) -> set[str]:
             if "." in field_name or "[" in field_name or "]" in field_name:
                 msg = f"Compound template fields are not supported: {field_name}"
                 raise ValueError(msg)
+            if conversion is not None:
+                msg = f"Template field conversions are not supported: {field_name}!{conversion}"
+                raise ValueError(msg)
+            if format_spec:
+                msg = f"Template field format specs are not supported: {field_name}:{format_spec}"
+                raise ValueError(msg)
             fields.add(field_name)
-        if format_spec:
-            fields.update(_prompt_template_field_names(format_spec))
     return fields
 
 
