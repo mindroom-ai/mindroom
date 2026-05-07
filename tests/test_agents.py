@@ -297,9 +297,13 @@ def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
 def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the general agent is created correctly."""
     config = _test_config()
+    config.agents["general"].instructions = ["Use the configured instruction."]
     agent = _create_agent_for_test("general", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "GeneralAgent"
+    assert "General assistant" in agent.role
+    assert "## Core Expertise" not in agent.role
+    assert "Use the configured instruction." in agent.instructions
     assert isinstance(agent.learning, LearningMachine)
     assert isinstance(agent.learning.user_profile, UserProfileConfig)
     assert agent.learning.user_profile.mode is LearningMode.ALWAYS

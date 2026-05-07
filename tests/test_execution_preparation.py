@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from defusedxml.ElementTree import fromstring
 
+from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.execution_preparation import (
     _build_matrix_prompt_with_thread_history,
@@ -12,6 +13,10 @@ from mindroom.execution_preparation import (
     _fallback_static_token_budget,
 )
 from tests.conftest import make_visible_message
+
+
+def _config() -> Config:
+    return Config.model_validate({})
 
 
 def test_collect_history_messages_keeps_visible_body_only() -> None:
@@ -155,6 +160,7 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
+        config=_config(),
     )
 
     assert unseen_event_ids == ["$spawn-root"]
@@ -185,6 +191,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
+        config=_config(),
     )
 
     assert unseen_event_ids == ["$spawn-root"]
@@ -215,6 +222,7 @@ def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
         active_event_ids=(),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id="@alice:localhost",
+        config=_config(),
     )
 
     assert unseen_event_ids == []

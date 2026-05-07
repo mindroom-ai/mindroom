@@ -37,7 +37,6 @@ from mindroom.history import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
-from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply
 from mindroom.timing import timed
 
@@ -60,8 +59,8 @@ _PARTIAL_REPLY_SENDER_LABELS = {
 }
 
 
-def _configured_prompt(config: Config | None, name: str) -> str:
-    return config.get_prompt(name) if config is not None else PROMPT_DEFAULTS[name]
+def _configured_prompt(config: Config, name: str) -> str:
+    return config.get_prompt(name)
 
 
 class _PartialReplyKind(str, Enum):
@@ -295,7 +294,7 @@ def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
 def _build_unseen_messages_header(
     partial_reply_kinds: set[_PartialReplyKind],
     *,
-    config: Config | None = None,
+    config: Config,
 ) -> str:
     """Choose the unseen-context guidance for the partial-reply mix present."""
     if not partial_reply_kinds:
@@ -354,7 +353,7 @@ def _messages_with_capped_context(
     *,
     context_messages: Sequence[Message],
     current_sender_id: str | None,
-    config: Config | None = None,
+    config: Config,
     static_token_budget: int,
     estimate_static_tokens_fn: Callable[[str], int],
     render_messages_text_fn: Callable[[Sequence[Message]], str],
@@ -390,7 +389,7 @@ def _messages_with_current_prompt(
     *,
     context_messages: Sequence[Message] = (),
     current_sender_id: str | None = None,
-    config: Config | None = None,
+    config: Config,
 ) -> tuple[Message, ...]:
     """Return canonical live request messages with the current user turn last."""
     messages = [message.model_copy(deep=True) for message in context_messages]
@@ -434,7 +433,7 @@ def _build_unseen_context_messages(
     active_event_ids: Collection[str],
     response_sender_id: str | None,
     current_sender_id: str | None = None,
-    config: Config | None = None,
+    config: Config,
 ) -> tuple[tuple[Message, ...], list[str]]:
     """Return canonical request messages for unseen thread context plus the current turn."""
     unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
@@ -473,7 +472,7 @@ def _build_thread_history_messages(
     *,
     response_sender_id: str | None,
     current_sender_id: str | None = None,
-    config: Config | None = None,
+    config: Config,
     max_messages: int | None = None,
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,

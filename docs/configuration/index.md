@@ -503,9 +503,9 @@ Keys must match the uppercase global names exactly, and unknown keys fail config
 
 ```yaml
 prompts:
-  GENERAL_AGENT_PROMPT: |
-    ## Core Expertise
-    You are a concise general assistant.
+  HIDDEN_TOOL_CALLS_PROMPT: |
+    Tool calls are hidden from users.
+    Answer directly without narrating internal tool use.
   ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE: |
     Decide which agent should respond to this message.
 

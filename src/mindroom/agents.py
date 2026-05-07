@@ -686,20 +686,6 @@ def _resolve_runtime_worker_tools(
     return default_worker_routed_tools(runtime_tool_names)
 
 
-# Rich prompt mapping - agents that use detailed prompts instead of simple roles
-_RICH_PROMPT_NAMES = {
-    "code": "CODE_AGENT_PROMPT",
-    "research": "RESEARCH_AGENT_PROMPT",
-    "calculator": "CALCULATOR_AGENT_PROMPT",
-    "general": "GENERAL_AGENT_PROMPT",
-    "shell": "SHELL_AGENT_PROMPT",
-    "summary": "SUMMARY_AGENT_PROMPT",
-    "finance": "FINANCE_AGENT_PROMPT",
-    "news": "NEWS_AGENT_PROMPT",
-    "data_analyst": "DATA_ANALYST_AGENT_PROMPT",
-}
-
-
 def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
     """Check if learning is enabled for an agent, falling back to defaults."""
     learning = agent_config.learning if agent_config.learning is not None else defaults.learning
@@ -1176,17 +1162,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths=runtime_paths,
     )
 
-    # Use rich prompt if available, otherwise use YAML config
-    if agent_name in _RICH_PROMPT_NAMES:
-        logger.info("using_rich_prompt", agent=agent_name)
-        # Prepend full context to the rich prompt
-        role = full_context + config.get_prompt(_RICH_PROMPT_NAMES[agent_name])
-        instructions = []  # Instructions are in the rich prompt
-    else:
-        logger.info("using_yaml_agent_config", agent=agent_name)
-        # For YAML agents, prepend full context to role and keep original instructions
-        role = full_context + agent_config.role
-        instructions = list(agent_config.instructions)
+    logger.info("using_yaml_agent_config", agent=agent_name)
+    role = full_context + agent_config.role
+    instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
     model = _load_agent_model_instance(config, runtime_paths, model_name, execution_identity)

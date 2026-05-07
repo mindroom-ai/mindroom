@@ -396,6 +396,7 @@ class TestUnseenMessagesPartialReplies:
             current_event_id="e3",
             active_event_ids={"e2"},
             response_sender_id=agent_id,
+            config=config,
         )
 
         assert unseen_event_ids == []
@@ -464,6 +465,7 @@ class TestUnseenMessagesPartialReplies:
             current_event_id="e2",
             active_event_ids=set(),
             response_sender_id=agent_id,
+            config=config,
         )
 
         assert unseen_event_ids == []

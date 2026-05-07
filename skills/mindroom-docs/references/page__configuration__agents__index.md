@@ -560,14 +560,6 @@ agents:
 Agent and team YAML keys must contain only alphanumeric characters and underscores (matching `^[a-zA-Z0-9_]+$`).
 Agent and team names must be distinct — the same key cannot appear in both `agents:` and `teams:`.
 
-## Rich Prompt Agents
-
-Certain agent names (the YAML key, not `display_name`) have built-in rich prompts:
-
-`code`, `research`, `calculator`, `general`, `shell`, `summary`, `finance`, `news`, `data_analyst`
-
-When using these names, the built-in prompt replaces the `role` field and any custom `instructions` are ignored.
-
 ## Defaults
 
 The `defaults` section sets fallback values for all agents. Any agent that omits a setting inherits the value from here.

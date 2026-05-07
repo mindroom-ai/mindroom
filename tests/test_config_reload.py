@@ -1424,7 +1424,7 @@ def test_config_update_plan_restarts_running_entities_when_root_prompts_change()
                 ),
             },
             router=RouterConfig(model="default"),
-            prompts={"GENERAL_AGENT_PROMPT": "Custom general prompt."},
+            prompts={"HIDDEN_TOOL_CALLS_PROMPT": "Custom hidden tool-call prompt."},
         ),
     )
 
