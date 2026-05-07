@@ -11,7 +11,6 @@ from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
-from google.auth.exceptions import DefaultCredentialsError
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -652,48 +651,6 @@ def test_vertexai_claude_loads_service_account_credentials_directly(
     assert model.client_params is not None
     assert model.client_params["credentials"] is fake_google_credentials
     assert import_order == ["google.oauth2.service_account"]
-
-
-def test_vertexai_claude_malformed_service_account_credentials_raise_google_auth_error() -> None:
-    """Malformed service-account ADC should preserve google-auth's error contract."""
-    config_data = {
-        "models": {
-            "vertex_claude_model": {
-                "provider": "vertexai_claude",
-                "id": "claude-sonnet-4-6",
-                "extra_kwargs": {
-                    "project_id": "demo-project",
-                    "region": "us-central1",
-                },
-            },
-        },
-        "router": {
-            "model": "vertex_claude_model",
-        },
-        "agents": {},
-    }
-
-    runtime_root = Path(tempfile.mkdtemp())
-    credentials_path = runtime_root / "google-credentials.json"
-    credentials_path.write_text(
-        """{
-  "type": "service_account",
-  "client_email": "agent@example.iam.gserviceaccount.com",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "private_key": "not a pem key"
-}
-""",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=runtime_root / "config.yaml",
-        storage_path=runtime_root / "mindroom_data",
-        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
-    )
-    config = Config(**config_data)
-
-    with pytest.raises(DefaultCredentialsError, match="Failed to load service account credentials"):
-        get_model_instance(config, runtime_paths, "vertex_claude_model")
 
 
 if __name__ == "__main__":

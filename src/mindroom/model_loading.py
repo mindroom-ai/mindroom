@@ -65,16 +65,10 @@ def _load_google_application_credentials(credentials_path: str) -> GoogleCredent
     if _google_adc_file_type(credentials_path) == "service_account":
         service_account = importlib.import_module("google.oauth2.service_account")
         credentials_cls = service_account.Credentials
-        try:
-            credentials = credentials_cls.from_service_account_file(
-                credentials_path,
-                scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
-            )
-        except service_account.exceptions.DefaultCredentialsError:
-            raise
-        except (OSError, ValueError) as exc:
-            msg = f"Failed to load service account credentials from {credentials_path}"
-            raise service_account.exceptions.DefaultCredentialsError(msg, exc) from exc
+        credentials = credentials_cls.from_service_account_file(
+            credentials_path,
+            scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE],
+        )
         return cast("GoogleCredentials", credentials)
 
     google_auth = importlib.import_module("google.auth")
