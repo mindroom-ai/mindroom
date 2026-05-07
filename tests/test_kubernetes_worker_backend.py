@@ -17,13 +17,13 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.constants import (
-    CREDENTIALS_ENCRYPTION_KEY_ENV,
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     deserialize_runtime_paths,
     resolve_primary_runtime_paths,
     sandbox_startup_manifest_path,
     startup_manifest_sha256,
 )
+from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,

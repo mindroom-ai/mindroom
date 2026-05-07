@@ -25,7 +25,6 @@ _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
 _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
-CREDENTIALS_ENCRYPTION_KEY_ENV = runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 
 # Bash bookkeeping vars that change every time printenv runs and are never

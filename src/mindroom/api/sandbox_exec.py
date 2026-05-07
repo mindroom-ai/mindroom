@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from mindroom import constants
 from mindroom.runtime_env_policy import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     sandbox_runner_runtime_state_env,
@@ -182,9 +183,9 @@ def runtime_paths_with_execution_env(
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)
-    credentials_encryption_key = runtime_paths.env_value(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
+    credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
     if credentials_encryption_key is not None:
-        process_env[constants.CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
+        process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,

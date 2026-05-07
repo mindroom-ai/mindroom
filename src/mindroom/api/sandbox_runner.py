@@ -37,6 +37,7 @@ from mindroom.credentials import CredentialsManager, get_runtime_credentials_man
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.runtime_env_policy import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     sandbox_runner_startup_process_env,
@@ -106,11 +107,11 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
         _startup_manifest_from_env(),
     )
     if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
-        credentials_encryption_key = _startup_secret_from_env(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
+        credentials_encryption_key = _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
         if credentials_encryption_key is None:
             return startup_runtime_paths
         process_env = dict(startup_runtime_paths.process_env)
-        process_env[constants.CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
+        process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
         return constants.RuntimePaths(
             config_path=startup_runtime_paths.config_path,
             config_dir=startup_runtime_paths.config_dir,

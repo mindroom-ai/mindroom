@@ -552,7 +552,7 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
     monkeypatch.setattr(
         sandbox_runner_module,
         "_process_environment_entry",
-        lambda name: (123, 45) if name == constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV else None,
+        lambda name: (123, 45) if name == runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV else None,
     )
     monkeypatch.setattr(
         sandbox_runner_module,
@@ -575,7 +575,7 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
     manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
     _set_startup_manifest(monkeypatch, manifest_path=manifest_path)
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
-    monkeypatch.setenv(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV, encryption_key)
+    monkeypatch.setenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, encryption_key)
 
     startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
     execution_env = sandbox_exec_module.request_execution_env(
@@ -589,16 +589,16 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
         {"VIRTUAL_ENV": "/worker-venv"},
     )
 
-    assert startup_runtime.env_value(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
-    assert constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV not in os.environ
+    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in os.environ
     assert wiped_entries == [(123, 45)]
-    assert constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
-    assert constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV not in constants_module.shell_extra_env_values(
+    assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
+    assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in constants_module.shell_extra_env_values(
         extra_env_passthrough="MINDROOM_*",
-        process_env={constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
     )
-    assert not constants_module.is_workspace_env_overlay_name_allowed(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV)
-    assert subprocess_runtime.env_value(constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert not constants_module.is_workspace_env_overlay_name_allowed(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV)
+    assert subprocess_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
 
 
 def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_environ(tmp_path: Path) -> None:
@@ -620,15 +620,14 @@ def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_enviro
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     env = os.environ.copy()
     env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(manifest_path)
-    env[constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV] = encryption_key
+    env[runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV] = encryption_key
     script = (
         "import os\n"
-        "from mindroom import constants\n"
         "from mindroom.api import sandbox_runner as m\n"
         "runtime_paths = m._startup_runtime_paths_from_env()\n"
         "raw_environ = open('/proc/self/environ', 'rb').read()\n"
-        f"print(runtime_paths.env_value({constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV!r}))\n"
-        f"print({constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV!r} in os.environ)\n"
+        f"print(runtime_paths.env_value({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r}))\n"
+        f"print({runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV!r} in os.environ)\n"
         "print(b'MINDROOM_CREDENTIALS_ENCRYPTION_KEY=' in raw_environ)\n"
     )
 

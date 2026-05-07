@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from mindroom import constants
 from mindroom.constants import RuntimePaths
 from mindroom.runtime_env_policy import (
+    CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
@@ -679,7 +680,7 @@ class KubernetesResourceManager:
         string_data = {SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: worker_token}
         credentials_encryption_key = self._credentials_encryption_key()
         if credentials_encryption_key is not None:
-            string_data[constants.CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
+            string_data[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
         return string_data
 
     def _worker_auth_secret_data(self, *, worker_token: str) -> dict[str, str | None]:
@@ -688,7 +689,7 @@ class KubernetesResourceManager:
             for name, value in self._worker_auth_secret_string_data(worker_token=worker_token).items()
         }
         if self._credentials_encryption_key() is None:
-            secret_data[constants.CREDENTIALS_ENCRYPTION_KEY_ENV] = None
+            secret_data[CREDENTIALS_ENCRYPTION_KEY_ENV] = None
         return secret_data
 
     def _shared_auth_secret_data(self, *, worker_id: str, worker_token: str) -> dict[str, str | None]:
@@ -873,21 +874,21 @@ class KubernetesResourceManager:
         if self._credentials_encryption_key() is None:
             return None
         return {
-            "name": constants.CREDENTIALS_ENCRYPTION_KEY_ENV,
+            "name": CREDENTIALS_ENCRYPTION_KEY_ENV,
             "valueFrom": {
                 "secretKeyRef": {
                     "name": self.config.auth_secret_name or worker_id,
                     "key": (
                         _worker_credentials_encryption_key_secret_key(worker_id)
                         if self.config.auth_secret_name is not None
-                        else constants.CREDENTIALS_ENCRYPTION_KEY_ENV
+                        else CREDENTIALS_ENCRYPTION_KEY_ENV
                     ),
                 },
             },
         }
 
     def _credentials_encryption_key(self) -> str | None:
-        credentials_encryption_key = self.runtime_paths.env_value(constants.CREDENTIALS_ENCRYPTION_KEY_ENV)
+        credentials_encryption_key = self.runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
         if credentials_encryption_key is None:
             return None
         normalized_key = credentials_encryption_key.strip()
