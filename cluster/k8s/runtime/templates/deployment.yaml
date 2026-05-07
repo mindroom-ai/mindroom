@@ -1,5 +1,6 @@
 {{- $fullname := include "mindroom-runtime.fullname" . -}}
 {{- $proxyTokenSecretName := include "mindroom-runtime.proxyTokenSecretName" . -}}
+{{- $credentialsEncryptionKeySecretName := .Values.workers.sandbox.credentialsEncryptionKey.existingSecret -}}
 {{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
 {{- $workerAuthSecretName := include "mindroom-runtime.workerAuthSecretName" . -}}
 {{- $eventCacheDatabaseUrlSecretName := include "mindroom-runtime.eventCacheDatabaseUrlSecretName" . -}}
@@ -114,6 +115,13 @@ spec:
               value: {{ .Values.workers.sandbox.executionMode | quote }}
             - name: MINDROOM_SANDBOX_PROXY_TOOLS
               value: {{ .Values.workers.sandbox.proxyTools | quote }}
+            {{- if $credentialsEncryptionKeySecretName }}
+            - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsEncryptionKeySecretName }}
+                  key: {{ .Values.workers.sandbox.credentialsEncryptionKey.key }}
+            {{- end }}
             {{- if $proxyTokenSecretName }}
             - name: MINDROOM_SANDBOX_PROXY_TOKEN
               valueFrom:
@@ -296,6 +304,13 @@ spec:
                 secretKeyRef:
                   name: {{ $proxyTokenSecretName }}
                   key: {{ .Values.workers.sandbox.proxyToken.key }}
+            {{- end }}
+            {{- if $credentialsEncryptionKeySecretName }}
+            - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsEncryptionKeySecretName }}
+                  key: {{ .Values.workers.sandbox.credentialsEncryptionKey.key }}
             {{- end }}
           resources:
             {{- toYaml .Values.workers.staticRunner.resources | nindent 12 }}

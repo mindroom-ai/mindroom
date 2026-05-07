@@ -136,6 +136,7 @@ workers:
 - The chart does not create ingress or a Matrix homeserver.
 - The chart can create PostgreSQL for MindRoom's event cache, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
+- Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime and static runner sidecar receive the same Secret-backed key.
 - `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
 - `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.
   In the release namespace, the chart stores derived worker tokens and optional credential-encryption keys as entries in one chart-created worker-auth Secret and grants only `get` and `patch` on that Secret.

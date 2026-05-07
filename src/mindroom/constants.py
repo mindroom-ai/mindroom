@@ -25,15 +25,8 @@ _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
 _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
-SANDBOX_STARTUP_MANIFEST_PATH_ENV = runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV
-CREDENTIAL_SEEDS_JSON_ENV = runtime_env_policy.CREDENTIAL_SEEDS_JSON_ENV
-CREDENTIAL_SEEDS_FILE_ENV = runtime_env_policy.CREDENTIAL_SEEDS_FILE_ENV
 CREDENTIALS_ENCRYPTION_KEY_ENV = runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
-# Evidence sources: installed package code in .venv; vendor docs only for
-# frontend/W&B controls. Python runtime envs are centralized in runtime_env_policy so
-# deployments do not repeat them.
-VENDOR_TELEMETRY_ENV_VALUES = runtime_env_policy.VENDOR_TELEMETRY_ENV_VALUES
 
 # Bash bookkeeping vars that change every time printenv runs and are never
 # meaningful overlay output from `.mindroom/worker-env.sh`.

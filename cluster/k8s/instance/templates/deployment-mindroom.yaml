@@ -122,6 +122,11 @@ spec:
             secretKeyRef:
               name: mindroom-api-keys-{{ .Values.customer }}
               key: sandbox_proxy_token
+        - name: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mindroom-api-keys-{{ .Values.customer }}
+              key: credentials_encryption_key
         - name: MINDROOM_SANDBOX_EXECUTION_MODE
           value: "selective"
         - name: MINDROOM_SANDBOX_PROXY_TOOLS

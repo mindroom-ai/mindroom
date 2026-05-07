@@ -34,6 +34,7 @@ google_key: ""
 openrouter_key: ""
 deepseek_key: ""
 sandbox_proxy_token: ""
+credentials_encryption_key: ""
 
 # Supabase (shared auth)
 supabaseUrl: ""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -89,6 +90,19 @@ def _resource(docs: list[dict[str, Any]], kind: str, name: str) -> dict[str, Any
     raise AssertionError(msg)
 
 
+def _container(deployment: dict[str, Any], name: str) -> dict[str, Any]:
+    containers = deployment["spec"]["template"]["spec"]["containers"]
+    for container in containers:
+        if container["name"] == name:
+            return container
+    msg = f"container {name} was not rendered"
+    raise AssertionError(msg)
+
+
+def _env_by_name(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {env["name"]: env for env in container["env"]}
+
+
 def test_instance_chart_worker_network_policy_allows_runner_ingress_only_from_control_plane() -> None:
     """Worker runner ingress should not allow every pod carrying the instance label."""
     docs = _render_instance_chart()
@@ -152,6 +166,40 @@ def test_instance_chart_uses_tenant_worker_auth_secret() -> None:
     assert worker_auth_secret["metadata"]["namespace"] == "mindroom-instances"
     assert "stringData" not in worker_auth_secret
     assert "data" not in worker_auth_secret
+
+
+def test_instance_chart_static_runner_uses_shared_credentials_encryption_key_secret() -> None:
+    """Static runner mode should give both runtime containers the same Secret-backed credential key."""
+    credentials_encryption_key = "test-encryption-key"
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "credentials_encryption_key=test-encryption-key",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-demo")
+    api_keys_secret = _resource(docs, "Secret", "mindroom-api-keys-demo")
+    mindroom_container = _container(deployment, "mindroom")
+    runner_container = _container(deployment, "sandbox-runner")
+
+    assert api_keys_secret["stringData"]["credentials_encryption_key"] == credentials_encryption_key
+    assert credentials_encryption_key not in json.dumps(deployment)
+    assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == {
+        "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": "mindroom-api-keys-demo",
+                "key": "credentials_encryption_key",
+            },
+        },
+    }
+    assert _env_by_name(runner_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == {
+        "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": "mindroom-api-keys-demo",
+                "key": "credentials_encryption_key",
+            },
+        },
+    }
 
 
 def test_instance_chart_rejects_email_template_without_email_header() -> None:
@@ -281,6 +329,32 @@ def test_runtime_chart_uses_default_worker_auth_secret() -> None:
     assert worker_auth_secret["metadata"]["namespace"] == "default"
     assert "stringData" not in worker_auth_secret
     assert "data" not in worker_auth_secret
+
+
+def test_runtime_chart_static_runner_uses_credentials_encryption_key_secret() -> None:
+    """Static runner mode should wire the optional credential key Secret into both containers."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.sandbox.proxyToken.value=test-token",
+        "workers.sandbox.credentialsEncryptionKey.existingSecret=runtime-credentials",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    mindroom_container = _container(deployment, "mindroom")
+    runner_container = _container(deployment, "sandbox-runner")
+    expected_env = {
+        "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": "runtime-credentials",
+                "key": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
+            },
+        },
+    }
+
+    assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
+    assert _env_by_name(runner_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == expected_env
 
 
 def test_runtime_chart_separate_worker_namespace_can_manage_per_worker_auth_secrets() -> None:

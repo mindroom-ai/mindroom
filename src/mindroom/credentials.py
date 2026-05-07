@@ -35,7 +35,7 @@ _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"env", "ui", None})
 _ENCRYPTED_CREDENTIALS_MAGIC = b"MINDROOM-CREDENTIALS-V1\n"
 _AES_GCM_NONCE_SIZE = 12
-CREDENTIALS_ENCRYPTION_KEY_ENV = _runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV
+_CREDENTIALS_ENCRYPTION_KEY_ENV = _runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV
 logger = get_logger(__name__)
 
 
@@ -58,7 +58,7 @@ def _scoped_credentials_dir_part(value: str) -> str:
 
 
 def _configured_credentials_encryption_key() -> str | None:
-    value = os.environ.get(CREDENTIALS_ENCRYPTION_KEY_ENV, "").strip()
+    value = os.environ.get(_CREDENTIALS_ENCRYPTION_KEY_ENV, "").strip()
     return value or None
 
 
@@ -68,10 +68,10 @@ def _decode_credentials_encryption_key(value: str) -> bytes:
     try:
         key = base64.b64decode(f"{normalized}{padding}".encode("ascii"), altchars=b"-_", validate=True)
     except (binascii.Error, UnicodeEncodeError) as exc:
-        msg = f"{CREDENTIALS_ENCRYPTION_KEY_ENV} must be a base64-encoded 32-byte key"
+        msg = f"{_CREDENTIALS_ENCRYPTION_KEY_ENV} must be a base64-encoded 32-byte key"
         raise ValueError(msg) from exc
     if len(key) != 32:
-        msg = f"{CREDENTIALS_ENCRYPTION_KEY_ENV} must decode to exactly 32 bytes"
+        msg = f"{_CREDENTIALS_ENCRYPTION_KEY_ENV} must decode to exactly 32 bytes"
         raise ValueError(msg)
     return key
 
@@ -452,7 +452,7 @@ def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsM
 
     base_path = _credentials_base_path(runtime_paths.storage_root)
     shared_base_path = _runtime_shared_credentials_base_path(runtime_paths, base_path)
-    encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV, default="") or ""
+    encryption_key = runtime_paths.env_value(_CREDENTIALS_ENCRYPTION_KEY_ENV, default="") or ""
     encryption_key = encryption_key.strip() or None
     current_signature = (
         base_path,

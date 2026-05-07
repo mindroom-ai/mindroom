@@ -13791,7 +13791,7 @@ Both modes store agent data in the same per-agent directory structure.
 
 ### Shared Sidecar Mode
 
-`workerBackend: static_runner` is the default. The primary runtime talks to a shared sidecar over `localhost`. This keeps the deployment simple, but all proxied tool calls share the same runner process. The runner reads and writes the same agent storage directories as the main process.
+`workerBackend: static_runner` is the default. The primary runtime talks to a shared sidecar over `localhost`. This keeps the deployment simple, but all proxied tool calls share the same runner process. The runner reads and writes the same agent storage directories as the main process. When encrypted credential storage is enabled in Helm, configure the credential encryption key through a Secret-backed chart value so the primary runtime and static runner sidecar receive the same key.
 
 ### Dedicated Worker Mode
 

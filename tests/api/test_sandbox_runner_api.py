@@ -27,6 +27,7 @@ import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
+from mindroom import runtime_env_policy
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
@@ -618,7 +619,7 @@ def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_enviro
     manifest_path = _write_startup_manifest(runtime_paths=payload_runtime)
     encryption_key = base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
     env = os.environ.copy()
-    env[constants_module.SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(manifest_path)
+    env[runtime_env_policy.SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(manifest_path)
     env[constants_module.CREDENTIALS_ENCRYPTION_KEY_ENV] = encryption_key
     script = (
         "import os\n"

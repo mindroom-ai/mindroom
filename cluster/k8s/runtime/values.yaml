@@ -205,6 +205,10 @@ workers:
       existingSecret: ""
       key: MINDROOM_SANDBOX_PROXY_TOKEN
       value: ""
+    credentialsEncryptionKey:
+      # Optional Secret reference used by the primary runtime and static runner sidecar.
+      existingSecret: ""
+      key: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
   staticRunner:
     port: 8766
     resources:
