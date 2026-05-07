@@ -243,6 +243,8 @@ class BotRoomLifecycle:
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
             if room.room_id in self._handled_invite_room_ids or self._client_has_joined_room(room.room_id):
                 self._logger().debug("Invite already handled", room_id=room.room_id, sender=event.sender)
+                if self.deps.agent_name == ROUTER_AGENT_NAME:
+                    await self.deps.on_router_invite_joined(room.room_id)
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
