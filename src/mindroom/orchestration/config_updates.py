@@ -183,6 +183,11 @@ def _entities_referencing_mcp_servers(
     return old_entities | new_entities
 
 
+def _root_prompts_changed(config: Config, new_config: Config) -> bool:
+    """Return whether any root built-in prompt overrides changed."""
+    return config.prompts != new_config.prompts
+
+
 def build_config_update_plan(
     *,
     current_config: Config,
@@ -199,6 +204,15 @@ def build_config_update_plan(
         agent_bots,
         changed_mcp_servers,
     )
+    if _root_prompts_changed(current_config, new_config):
+        prompt_affected_entities = existing_entities & configured_entities
+        if prompt_affected_entities:
+            logger.info(
+                "root_prompts_changed_restart_required",
+                entities=sorted(prompt_affected_entities),
+            )
+        entities_to_restart |= prompt_affected_entities
+
     new_entities = configured_entities - existing_entities - entities_to_restart
 
     return ConfigUpdatePlan(

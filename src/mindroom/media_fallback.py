@@ -41,4 +41,8 @@ def append_inline_media_fallback_prompt(
     """Append one-time guidance when inline media had to be dropped."""
     if _INLINE_MEDIA_FALLBACK_MARKER in full_prompt:
         return full_prompt
-    return f"{full_prompt.rstrip()}\n\n{fallback_prompt}"
+
+    fallback_text = fallback_prompt
+    if _INLINE_MEDIA_FALLBACK_MARKER not in fallback_text:
+        fallback_text = f"{_INLINE_MEDIA_FALLBACK_MARKER}\n{fallback_text}"
+    return f"{full_prompt.rstrip()}\n\n{fallback_text}"

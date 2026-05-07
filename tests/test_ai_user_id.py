@@ -6053,6 +6053,17 @@ class TestUserIdPassthrough:
         )
         assert "Custom retry guidance." in custom
 
+        custom_without_marker = append_inline_media_fallback_prompt(
+            initial_prompt,
+            fallback_prompt="Use attachment tools instead.",
+        )
+        repeated_custom_without_marker = append_inline_media_fallback_prompt(
+            custom_without_marker,
+            fallback_prompt="Use attachment tools instead.",
+        )
+        assert "[Inline media unavailable for this model]" in custom_without_marker
+        assert custom_without_marker == repeated_custom_without_marker
+
     @pytest.mark.asyncio
     async def test_ai_response_does_not_retry_without_media_validation_match(self, tmp_path: Path) -> None:
         """Non-media failures should not trigger inline-media retry even when media is present."""

@@ -23,7 +23,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STAT
 from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents
+from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents, build_config_update_plan
 from mindroom.orchestration.plugin_watch import _drop_unconfigured_plugin_root_snapshots, watch_plugins_task
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.orchestrator import _ConfigReloadDrainState, _MultiAgentOrchestrator, _watch_skills_task
@@ -1396,6 +1396,49 @@ def test_get_changed_agents_detects_tool_override_updates() -> None:
 
     changed = _get_changed_agents(old_config, new_config, agent_bots={"agent1": AsyncMock()})
     assert changed == {"agent1"}
+
+
+def test_config_update_plan_restarts_running_entities_when_root_prompts_change() -> None:
+    """Root prompt overrides should restart running agents, teams, and router."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            teams={
+                "team1": TeamConfig(
+                    display_name="Team 1",
+                    role="Collaborate",
+                    agents=["general"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            teams={
+                "team1": TeamConfig(
+                    display_name="Team 1",
+                    role="Collaborate",
+                    agents=["general"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+            prompts={"GENERAL_AGENT_PROMPT": "Custom general prompt."},
+        ),
+    )
+
+    running_entities = {ROUTER_AGENT_NAME, "general", "team1"}
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == running_entities
+    assert plan.only_support_service_changes is False
 
 
 @pytest.fixture

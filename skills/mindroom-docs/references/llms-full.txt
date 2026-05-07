@@ -1202,6 +1202,32 @@ Env refs use the existing secret convention: if `EXAMPLE_CLIENT_SECRET` is unset
 
 `debug.log_llm_requests` enables pre-provider request assembly logging for troubleshooting. When enabled, MindRoom writes JSONL request records under `debug.llm_request_log_dir` or `mindroom_data/logs/llm_requests` by default. Those records include prompts, messages, tool schemas, model parameters, correlation IDs, requester metadata, and source Matrix event metadata. The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs. Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled. Audit logging remains enabled. Credential-bearing fields such as tokens, cookies, passwords, API keys, and authorization headers are redacted before log records are emitted. These artifacts can still contain sensitive non-credential prompt, argument, and result data. Leave the flag disabled unless you are actively debugging.
 
+## Built-In Prompt Overrides
+
+MindRoom keeps built-in prompt defaults as uppercase globals in `src/mindroom/prompts.py`. Use the optional root `prompts` block to override those defaults without editing Python code. Keys must match the uppercase global names exactly, and unknown keys fail config validation.
+
+```
+prompts:
+  GENERAL_AGENT_PROMPT: |
+    ## Core Expertise
+    You are a concise general assistant.
+  ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE: |
+    Decide which agent should respond to this message.
+
+    Available agents and their capabilities:
+
+    {agents_info}
+
+    Recent conversation context:
+    {thread_context}
+
+    User message: {message}
+
+    Return only the agent name.
+```
+
+Discover allowed names by inspecting `src/mindroom/prompts.py` or by importing `PROMPT_DEFAULT_NAMES` from `mindroom.prompts`. Prompt defaults that contain `{...}` placeholders are formatted by MindRoom at runtime. When overriding one of those prompts, keep every placeholder from the default global in the override. If an override omits a required placeholder, runtime formatting for that prompt can fail. Changing root prompt overrides in a running process restarts existing agents, teams, and the router through hot reload.
+
 ## Managed Avatars
 
 MindRoom can generate managed avatars for agents, teams, rooms, and the optional root Matrix Space. Use the optional `avatars.prompts` block to override the built-in prompt styles without editing Python code. Every field is optional and falls back to MindRoom's built-in defaults when omitted.

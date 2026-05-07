@@ -495,6 +495,38 @@ Credential-bearing fields such as tokens, cookies, passwords, API keys, and auth
 These artifacts can still contain sensitive non-credential prompt, argument, and result data.
 Leave the flag disabled unless you are actively debugging.
 
+## Built-In Prompt Overrides
+
+MindRoom keeps built-in prompt defaults as uppercase globals in `src/mindroom/prompts.py`.
+Use the optional root `prompts` block to override those defaults without editing Python code.
+Keys must match the uppercase global names exactly, and unknown keys fail config validation.
+
+```yaml
+prompts:
+  GENERAL_AGENT_PROMPT: |
+    ## Core Expertise
+    You are a concise general assistant.
+  ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE: |
+    Decide which agent should respond to this message.
+
+    Available agents and their capabilities:
+
+    {agents_info}
+
+    Recent conversation context:
+    {thread_context}
+
+    User message: {message}
+
+    Return only the agent name.
+```
+
+Discover allowed names by inspecting `src/mindroom/prompts.py` or by importing `PROMPT_DEFAULT_NAMES` from `mindroom.prompts`.
+Prompt defaults that contain `{...}` placeholders are formatted by MindRoom at runtime.
+When overriding one of those prompts, keep every placeholder from the default global in the override.
+If an override omits a required placeholder, runtime formatting for that prompt can fail.
+Changing root prompt overrides in a running process restarts existing agents, teams, and the router through hot reload.
+
 ## Managed Avatars
 
 MindRoom can generate managed avatars for agents, teams, rooms, and the optional root Matrix Space.
