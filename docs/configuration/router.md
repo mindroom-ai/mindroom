@@ -154,7 +154,7 @@ If no `router` section is configured, it uses the default model.
 
 The router account is not a conversational AI agent to tag directly.
 If a message mentions only the router and no other users, agents, or teams, the router replies with the rules of engagement instead of answering the prompt.
-Mention a specific agent or team when you want that entity to answer, or mention multiple agents when you want them to collaborate.
-When one human and one agent are already talking in a thread, continuing without an explicit tag is fine.
-Once a thread has multiple human users or multiple agent participants, tag the agent or agents you want next.
+Mention a specific agent or team when you want that entity to answer, or mention multiple agents when you want an ad-hoc collaboration.
+When one human and one agent or team are already talking in a thread, continuing without an explicit tag is fine.
+Once a thread has multiple human users or multiple agent/team participants, tag the agent, team, or agents you want next.
 In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.

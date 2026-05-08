@@ -7913,7 +7913,7 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     async def test_router_replies_with_guidance_when_only_router_is_mentioned(self, tmp_path: Path) -> None:
-        """Mentioning only the router should explain that users must tag real agents."""
+        """Mentioning only the router should explain that users must tag routable entities."""
         agent_user = AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
@@ -7967,10 +7967,10 @@ class TestAgentBot:
         content = bot.client.room_send.await_args.kwargs["content"]
         assert content["body"].startswith("🧭")
         assert "router is not a conversational AI agent" in content["body"]
-        assert "mention a specific agent" in content["body"]
-        assert "one human and one agent are already talking in a thread" in content["body"]
-        assert "thread has multiple human users or multiple agent participants" in content["body"]
-        assert "automatic routing can still choose an agent" in content["body"]
+        assert "mention a specific agent or team" in content["body"]
+        assert "one human and one agent or team are already talking in a thread" in content["body"]
+        assert "thread has multiple human users or multiple agent/team participants" in content["body"]
+        assert "automatic routing can still choose an agent or team" in content["body"]
 
     @pytest.mark.asyncio
     async def test_agent_receives_images_from_thread_root_after_routing(

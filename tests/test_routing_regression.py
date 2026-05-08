@@ -287,14 +287,14 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_agent_for_message")
-    async def test_router_filters_by_agent_reply_permissions(
+    async def test_router_bypasses_ai_when_reply_permissions_leave_one_candidate(
         self,
         mock_suggest_agent: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Router should only route to agents that may reply to the current sender."""
+        """Router should route directly when sender permissions leave one candidate."""
         test_room_id = "!research:localhost"
         test_config = _runtime_bound_config(
             Config(
@@ -330,7 +330,7 @@ class TestRoutingRegression:
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
-        mock_suggest_agent.return_value = "news"
+        mock_suggest_agent.side_effect = AssertionError("AI router should not run for one candidate")
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_789"
@@ -363,10 +363,11 @@ class TestRoutingRegression:
             requester_user_id="@bob:localhost",
         )
 
-        mock_suggest_agent.assert_called_once()
-        available_agents = mock_suggest_agent.call_args.args[1]
-        runtime_paths = runtime_paths_for(test_config)
-        assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["news"]
+        mock_suggest_agent.assert_not_awaited()
+        router_bot.client.room_send.assert_awaited_once()
+        content = router_bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"] == "@mindroom_news:localhost could you help with this?"
+        assert content["m.mentions"]["user_ids"] == ["@mindroom_news:localhost"]
 
     @pytest.mark.asyncio
     @patch("mindroom.turn_controller.suggest_agent_for_message")

@@ -1186,17 +1186,22 @@ class TurnController:
             )
             return
 
-        with bound_log_context(room_id=room.room_id, thread_id=thread_id):
-            self.deps.logger.info("Handling AI routing", event_id=event.event_id)
+        if len(available_agents) == 1:
+            suggested_agent = available_agents[0].agent_name(self.deps.runtime.config, self.deps.runtime_paths)
+            with bound_log_context(room_id=room.room_id, thread_id=thread_id):
+                self.deps.logger.info("Handling deterministic routing", event_id=event.event_id)
+        else:
+            with bound_log_context(room_id=room.room_id, thread_id=thread_id):
+                self.deps.logger.info("Handling AI routing", event_id=event.event_id)
 
-        routing_text = message or event.body
-        suggested_agent = await suggest_agent_for_message(
-            routing_text,
-            available_agents,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            thread_history,
-        )
+            routing_text = message or event.body
+            suggested_agent = await suggest_agent_for_message(
+                routing_text,
+                available_agents,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                thread_history,
+            )
 
         if not suggested_agent:
             response_text = (
