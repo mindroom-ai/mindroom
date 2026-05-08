@@ -4733,7 +4733,7 @@ def test_build_matrix_prompt_with_thread_history_preserves_verbatim_bodies_in_cd
     assert message.text == thread_history[0].body
 
 
-def test_build_matrix_prompt_with_thread_history_ignores_tool_trace_events() -> None:
+def test_build_matrix_prompt_with_history_uses_only_preselected_message_bodies() -> None:
     thread_history = [
         make_visible_message(
             sender="@alice:localhost",
@@ -4777,7 +4777,7 @@ def test_build_matrix_prompt_with_thread_history_ignores_tool_trace_events() -> 
     )
 
 
-def test_build_matrix_prompt_with_thread_history_without_tool_trace_is_unchanged() -> None:
+def test_build_matrix_prompt_with_history_renders_preselected_message_body() -> None:
     thread_history = [make_visible_message(sender="@alice:localhost", body="Earlier context")]
 
     prompt = _build_matrix_prompt_with_history(

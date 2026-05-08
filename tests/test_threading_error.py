@@ -4584,6 +4584,106 @@ class TestThreadingBehavior:
         assert resolved_thread_id == thread_root_id
 
     @pytest.mark.asyncio
+    async def test_thread_messages_thread_membership_access_strict_resolution_propagates_event_lookup_failure(
+        self,
+    ) -> None:
+        """Strict resolution should surface unavailable related-event lookups."""
+        room_id = "!test:localhost"
+        related_event_id = "$related:localhost"
+        plain_reply_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": related_event_id}},
+                },
+                "event_id": "$plain_reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            msg = "lookup unavailable"
+            raise RuntimeError(msg)
+
+        async def fetch_thread_messages(_room_id: str, _thread_root_id: str) -> list[object]:
+            msg = "root proof should not run when event lookup fails"
+            raise AssertionError(msg)
+
+        with pytest.raises(RuntimeError, match="lookup unavailable"):
+            await resolve_event_thread_id(
+                room_id,
+                plain_reply_event_info,
+                access=thread_messages_thread_membership_access(
+                    lookup_thread_id=lookup_thread_id,
+                    fetch_event_info=fetch_event_info,
+                    fetch_thread_messages=fetch_thread_messages,
+                ),
+            )
+
+    @pytest.mark.asyncio
+    async def test_thread_messages_thread_membership_access_strict_resolution_propagates_root_proof_failure(
+        self,
+    ) -> None:
+        """Strict resolution should surface unavailable thread-root proof."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        plain_reply_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": thread_root_id}},
+                },
+                "event_id": "$plain_reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 2,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        root_event_info = EventInfo.from_event(
+            {
+                "content": {
+                    "body": "root",
+                    "msgtype": "m.text",
+                },
+                "event_id": thread_root_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return root_event_info if event_id == thread_root_id else None
+
+        async def fetch_thread_messages(_room_id: str, _thread_root_id: str) -> list[object]:
+            msg = "snapshot unavailable"
+            raise RuntimeError(msg)
+
+        with pytest.raises(RuntimeError, match="snapshot unavailable"):
+            await resolve_event_thread_id(
+                room_id,
+                plain_reply_event_info,
+                access=thread_messages_thread_membership_access(
+                    lookup_thread_id=lookup_thread_id,
+                    fetch_event_info=fetch_event_info,
+                    fetch_thread_messages=fetch_thread_messages,
+                ),
+            )
+
+    @pytest.mark.asyncio
     async def test_best_effort_related_thread_resolution_degrades_when_event_lookup_fails(
         self,
     ) -> None:
