@@ -97,9 +97,10 @@ class _DispatchPlan:
 
 _ROUTER_ONLY_MENTION_GUIDANCE = (
     "🧭 Rules of engagement: mention a specific agent when you want that agent to answer, or mention multiple "
-    "agents when you want them to collaborate. If one human and one agent are talking in a conversation, you can "
-    "keep going without an explicit tag. As soon as multiple agents or multiple users are involved, explicitly "
-    "tag the agent or agents you want. The router is not a conversational AI agent you can tag directly."
+    "agents when you want them to collaborate. If one human and one agent are already talking in a thread, you "
+    "can keep going without an explicit tag. Once a thread has multiple human users or multiple agent "
+    "participants, explicitly tag the agent or agents you want next. In a new untagged message, automatic routing "
+    "can still choose an agent when appropriate. The router is not a conversational AI agent you can tag directly."
 )
 
 

@@ -138,3 +138,9 @@ Users can always mention agents directly with `@agent_name` to bypass routing.
 ## Note on the Router Agent
 
 The router is always present and cannot be disabled. It automatically joins any room with configured agents. If no `router` section is configured, it uses the default model.
+The router account is not a conversational AI agent to tag directly.
+If a message mentions only the router and no other users or agents, the router replies with the rules of engagement instead of answering the prompt.
+Mention a specific agent when you want that agent to answer, or mention multiple agents when you want them to collaborate.
+When one human and one agent are already talking in a thread, continuing without an explicit tag is fine.
+Once a thread has multiple human users or multiple agent participants, tag the agent or agents you want next.
+In a new untagged message, automatic routing can still choose an agent when that is appropriate.

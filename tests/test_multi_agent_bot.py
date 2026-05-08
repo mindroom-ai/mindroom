@@ -7925,8 +7925,9 @@ class TestAgentBot:
         assert content["body"].startswith("🧭")
         assert "router is not a conversational AI agent" in content["body"]
         assert "mention a specific agent" in content["body"]
-        assert "one human and one agent" in content["body"]
-        assert "multiple agents or multiple users" in content["body"]
+        assert "one human and one agent are already talking in a thread" in content["body"]
+        assert "thread has multiple human users or multiple agent participants" in content["body"]
+        assert "automatic routing can still choose an agent" in content["body"]
 
     @pytest.mark.asyncio
     async def test_agent_receives_images_from_thread_root_after_routing(
