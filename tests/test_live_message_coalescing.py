@@ -4203,11 +4203,12 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
     plan_mock = AsyncMock(return_value=_respond_dispatch_plan())
     execute_command_mock = AsyncMock()
     execute_response_mock = AsyncMock()
+    prepare_dispatch_mock = AsyncMock(return_value=prepared_dispatch_result(dispatch))
     with (
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=prepare_dispatch_mock,
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_mock),
         patch.object(bot._turn_controller, "_execute_command", new=execute_command_mock),
@@ -4215,6 +4216,8 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
     ):
         await bot._turn_controller._dispatch_text_message(room, voice_command_event, "@user:localhost")
 
+    prepare_dispatch_mock.assert_awaited_once()
+    assert prepare_dispatch_mock.await_args.kwargs["use_command_context"] is False
     execute_command_mock.assert_not_awaited()
     plan_mock.assert_awaited_once()
     execute_response_mock.assert_awaited_once()

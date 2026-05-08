@@ -53,7 +53,7 @@ from mindroom.dispatch_replay_guard import (
     has_newer_unresponded_cached_thread_event,
     has_newer_unresponded_in_thread,
 )
-from mindroom.dispatch_source import is_automation_source_kind
+from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import build_hook_matrix_admin, hook_ingress_policy, should_handle_interactive_text_response
@@ -1741,7 +1741,12 @@ class TurnController:
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_start")
             command = None
-            if not media_events and (ingress_metadata is None or ingress_metadata.source_kind != "voice"):
+            event_is_voice_dispatch = (
+                (ingress_metadata is not None and ingress_metadata.source_kind == "voice")
+                or is_audio_message_event(event)
+                or is_voice_event(event, sender_is_trusted=self._sender_is_trusted_for_ingress_metadata)
+            )
+            if not media_events and not event_is_voice_dispatch:
                 command = command_parser.parse(event.body)
             prepared_dispatch = await self._prepare_dispatch(
                 room,

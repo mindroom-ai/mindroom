@@ -97,15 +97,6 @@ def _source_with_payload_metadata(
     return {**event_source, "content": content}
 
 
-def _thread_read_result_from_membership_history(
-    thread_history: Sequence[object] | None,
-) -> ThreadReadResult | None:
-    """Return cache thread-read history only when membership proof preserved its metadata."""
-    if not isinstance(thread_history, ThreadHistoryResult):
-        return None
-    return thread_history
-
-
 def _thread_history_proves_root(
     thread_root_id: str,
     thread_history: Sequence[ResolvedVisibleMessage],
@@ -509,7 +500,9 @@ class ConversationResolver:
             event_id=event_id,
             access=access,
         )
-        thread_history = _thread_read_result_from_membership_history(resolution.thread_history)
+        thread_history = (
+            resolution.thread_history if isinstance(resolution.thread_history, ThreadHistoryResult) else None
+        )
         if not mode.dispatch_safe:
             return _ThreadIdLookup(thread_id=resolution.thread_id, thread_history=thread_history)
         if resolution.thread_id is not None:
