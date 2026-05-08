@@ -26,7 +26,6 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_system_enrich
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.identity import is_agent_id
 from mindroom.matrix.presence import should_use_streaming
-from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import (
     mark_auto_flush_dirty_session,
@@ -56,7 +55,6 @@ from mindroom.streaming import (
     clean_partial_reply_text,
 )
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
-from mindroom.thread_context_state import ThreadHistoryTrust, ThreadMembershipTrust
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
@@ -94,7 +92,6 @@ if TYPE_CHECKING:
     from mindroom.history import CompactionOutcome
     from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.event_info import EventInfo
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
@@ -323,28 +320,11 @@ class ResponseRequest:
     target: MessageTarget | None = None
     matrix_run_metadata: Mapping[str, Any] | None = None
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-    requires_full_thread_history: bool = False
-    thread_membership_trust: ThreadMembershipTrust = ThreadMembershipTrust.ROOM_LEVEL
-    thread_history_trust: ThreadHistoryTrust = ThreadHistoryTrust.NONE
-    thread_membership_event_info: EventInfo | None = None
+    requires_model_history_refresh: bool = False
     prepare_after_lock: Callable[[ResponseRequest], Awaitable[ResponseRequest]] | None = None
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
-
-    @property
-    def thread_membership_provisional(self) -> bool:
-        """Return whether the thread id is an unproven dispatch candidate."""
-        return self.thread_membership_trust is ThreadMembershipTrust.PROVISIONAL
-
-
-def response_trust_for_resolved_thread_unchecked(
-    thread_id: str | None,
-) -> tuple[ThreadMembershipTrust, ThreadHistoryTrust]:
-    """Return trust for manually-built requests whose thread id was already proven elsewhere."""
-    if thread_id is None:
-        return ThreadMembershipTrust.ROOM_LEVEL, ThreadHistoryTrust.NONE
-    return ThreadMembershipTrust.PROVEN, ThreadHistoryTrust.PLANNING_USABLE
 
 
 class PostLockRequestPreparationError(RuntimeError):
@@ -640,7 +620,6 @@ class ResponseRunner:
         locked_operation: Callable[[ResponseRequest, MessageTarget], Awaitable[str | None]],
     ) -> str | None:
         """Run one locked response operation with shared queued-message bookkeeping."""
-        request = await self._prepare_request_target_before_lock(request)
         resolved_target = self._resolve_request_target(request)
         return await self._lifecycle_coordinator.run_locked_response(
             target=resolved_target,
@@ -705,42 +684,11 @@ class ResponseRunner:
             reply_to_event_id=reply_to_event_id,
         )
 
-    async def _refresh_thread_history_after_lock(
+    async def _refresh_model_history_after_lock(
         self,
         request: ResponseRequest,
     ) -> ResponseRequest:
-        """Refresh thread history once this turn owns the lifecycle lock."""
-        if request.thread_membership_trust is ThreadMembershipTrust.PROVISIONAL:
-            if request.thread_membership_event_info is None:
-                msg = "Provisional thread membership missing source event info"
-                raise RuntimeError(msg)
-            strict_thread_id, strict_history = await self.deps.resolver.resolve_strict_thread_context(
-                request.room_id,
-                request.reply_to_event_id,
-                request.thread_membership_event_info,
-                caller_label="dispatch_post_lock_membership",
-            )
-            target = self._resolve_request_target(request).with_thread_root(strict_thread_id)
-            response_envelope = (
-                replace(request.response_envelope, target=target)
-                if request.response_envelope is not None
-                else request.response_envelope
-            )
-            return replace(
-                request,
-                thread_id=strict_thread_id,
-                thread_history=strict_history,
-                target=target,
-                response_envelope=response_envelope,
-                requires_full_thread_history=False,
-                thread_membership_trust=ThreadMembershipTrust.PROVEN
-                if strict_thread_id is not None
-                else ThreadMembershipTrust.ROOM_LEVEL,
-                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE
-                if strict_thread_id is not None
-                else ThreadHistoryTrust.NONE,
-                thread_membership_event_info=None,
-            )
+        """Refresh model-facing thread history once this turn owns the lifecycle lock."""
         if request.thread_id is None:
             return request
 
@@ -751,7 +699,7 @@ class ResponseRunner:
                 caller_label="dispatch_post_lock_refresh",
             )
         except Exception as exc:
-            if request.requires_full_thread_history:
+            if request.requires_model_history_refresh:
                 raise
             self.deps.logger.warning(
                 "Failed to refresh thread history after lock; continuing with existing history",
@@ -763,23 +711,8 @@ class ResponseRunner:
         return replace(
             request,
             thread_history=refreshed_history,
-            requires_full_thread_history=False,
-            thread_history_trust=ThreadHistoryTrust.DEGRADED
-            if not refreshed_history.is_full_history or is_thread_history_degraded(refreshed_history)
-            else ThreadHistoryTrust.PLANNING_USABLE,
+            requires_model_history_refresh=False,
         )
-
-    async def _prepare_request_target_before_lock(
-        self,
-        request: ResponseRequest,
-    ) -> ResponseRequest:
-        """Strictly re-prove provisional targets before choosing the lifecycle lock key."""
-        if request.thread_membership_trust is not ThreadMembershipTrust.PROVISIONAL:
-            return request
-        try:
-            return await self._refresh_thread_history_after_lock(request)
-        except Exception as exc:
-            raise PostLockRequestPreparationError from exc
 
     async def _prepare_request_after_lock(
         self,
@@ -787,7 +720,7 @@ class ResponseRunner:
     ) -> ResponseRequest:
         """Refresh thread history and rebuild any history-derived payload once locked."""
         try:
-            request = await self._refresh_thread_history_after_lock(request)
+            request = await self._refresh_model_history_after_lock(request)
             if request.prepare_after_lock is None:
                 return request
             return await request.prepare_after_lock(request)

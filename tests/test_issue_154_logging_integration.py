@@ -31,7 +31,6 @@ from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import response_trust_for_resolved_thread_unchecked
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
@@ -318,9 +317,6 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         body="hello",
         source={},
     )
-    thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread_unchecked(
-        target.resolved_thread_id,
-    )
     dispatch = PreparedDispatch(
         requester_user_id="@user:localhost",
         context=SimpleNamespace(
@@ -328,10 +324,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
             thread_id=target.resolved_thread_id,
             thread_history=(),
             planning_thread_history=(),
-            requires_full_thread_history=False,
-            thread_membership_trust=thread_membership_trust,
-            thread_history_trust=thread_history_trust,
-            thread_membership_event_info=None,
+            requires_model_history_refresh=False,
         ),
         target=target,
         correlation_id="$event:localhost",

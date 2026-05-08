@@ -434,7 +434,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
                     thread_history=[],
                     mentioned_agents=[],
                     has_non_agent_mentions=False,
-                    requires_full_thread_history=False,
+                    requires_model_history_refresh=False,
                 ),
             ),
         ),

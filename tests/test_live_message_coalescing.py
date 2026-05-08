@@ -57,7 +57,6 @@ from mindroom.matrix.thread_diagnostics import (
 )
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.thread_context_state import ThreadHistoryTrust
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.conftest import (
@@ -2832,7 +2831,6 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="combined")),
         ),
-        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._enqueue_for_dispatch(
@@ -3021,8 +3019,7 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
     dispatch.context.replay_guard_history = degraded_history
-    dispatch.context.thread_history_trust = ThreadHistoryTrust.DEGRADED
-    dispatch.context.requires_full_thread_history = True
+    dispatch.context.requires_model_history_refresh = True
     newer_event_source = {
         "event_id": "$m2",
         "sender": "@user:localhost",
@@ -3041,7 +3038,6 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
     with (
         patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
@@ -3055,6 +3051,55 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
     )
     action_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$m1")
+
+
+@pytest.mark.asyncio
+async def test_backlog_replay_degraded_thread_history_fails_open_without_positive_cached_proof(
+    tmp_path: Path,
+) -> None:
+    """Degraded replay guard should proceed unless raw cached events positively prove a newer same-thread turn."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="old",
+        source={"content": {"msgtype": "m.text", "body": "old"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="old", thread_id="$thread")
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=False,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+        },
+    )
+    dispatch.context.am_i_mentioned = False
+    dispatch.context.thread_history = degraded_history
+    dispatch.context.replay_guard_history = degraded_history
+    dispatch.context.requires_model_history_refresh = True
+    bot.event_cache.get_recent_room_events.return_value = []
+
+    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    with (
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+    ):
+        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+
+    history_guard.assert_not_called()
+    bot.event_cache.get_recent_room_events.assert_awaited_once_with(
+        room.room_id,
+        event_type="m.room.message",
+        since_ts_ms=1001,
+    )
+    action_mock.assert_awaited_once()
+    assert not bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
@@ -3132,7 +3177,6 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="hello")),
         ),
-        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
@@ -3433,7 +3477,6 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="What is the project structure?")),
         ),
-        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
@@ -3480,7 +3523,6 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="hello")),
         ),
-        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
@@ -3536,7 +3578,6 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="scheduled task output")),
         ),
-        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, scheduled_event, "@mindroom_test_agent:localhost")
@@ -3584,7 +3625,6 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="hook result")),
         ),
-        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, hook_event, "@mindroom_test_agent:localhost")
@@ -3634,7 +3674,6 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="scheduled fire 1")),
         ),
-        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._turn_controller, "_log_dispatch_latency"),
     ):
         await bot._turn_controller._dispatch_text_message(room, first_fire, "@mindroom_test_agent:localhost")

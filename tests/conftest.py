@@ -24,6 +24,7 @@ import mindroom.bot  # noqa: F401
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.conversation_resolver import _DispatchContextResult
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
@@ -54,6 +55,7 @@ __all__ = [
     "create_mock_room",
     "delivered_matrix_event",
     "delivered_matrix_side_effect",
+    "dispatch_context_result",
     "drain_coalescing",
     "event_cache",
     "event_cache_factory",
@@ -91,6 +93,11 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
 RuntimeBot = AgentBot | TeamBot
 TestFunction = Callable[..., object]
+
+
+def dispatch_context_result(context: object) -> _DispatchContextResult:
+    """Wrap a stable message context in the dispatch extraction result shape."""
+    return _DispatchContextResult(context=context, thread_context=None)  # type: ignore[arg-type]
 
 
 def requires_linux(

@@ -49,7 +49,11 @@ from mindroom.dispatch_handoff import (
     merge_payload_metadata,
     payload_metadata_from_source,
 )
-from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
+from mindroom.dispatch_replay_guard import (
+    has_newer_unresponded_cached_thread_event,
+    has_newer_unresponded_in_thread,
+)
+from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import build_hook_matrix_admin, hook_ingress_policy, should_handle_interactive_text_response
@@ -79,7 +83,6 @@ from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
-    response_trust_for_resolved_thread_unchecked,
 )
 from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import (
@@ -109,6 +112,7 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.dispatch_thread_context import DispatchThreadContext
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -174,6 +178,14 @@ class _PrecheckedEvent[T]:
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
 type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
+
+
+@dataclass(frozen=True)
+class _PreparedDispatchResult:
+    """Prepared dispatch plus dispatch-local thread evidence."""
+
+    dispatch: PreparedDispatch
+    thread_context: DispatchThreadContext | None
 
 
 @dataclass(frozen=True)
@@ -352,105 +364,19 @@ class TurnController:
         source_kind: str | None = None,
     ) -> bool:
         """Return True when a newer unresponded message from the same requester exists."""
-        if is_automation_source_kind(source_kind or "") or (
-            source_kind is None
-            and isinstance(event, PreparedTextEvent)
-            and is_automation_source_kind(event.source_kind_override or "")
-        ):
-            return False
-        event_ts = event.server_timestamp
-        if event_ts is None or not thread_history:
-            return False
-        for message in thread_history:
-            if (
-                self._requester_user_id(
-                    sender=message.sender,
-                    source={"content": message.content},
-                )
-                != requester_user_id
-            ):
-                continue
-            if message.timestamp is None or message.timestamp <= event_ts:
-                continue
-            if message.event_id == event.event_id:
-                continue
-            if self.deps.turn_store.is_handled(message.event_id):
-                continue
-            if (
-                message.body
-                and isinstance(message.body, str)
-                and not is_voice_event(message, sender_is_trusted=self._sender_is_trusted_for_ingress_metadata)
-                and command_parser.parse(message.body.strip()) is not None
-            ):
-                continue
-            self.deps.logger.info(
-                "Skipping older message — newer unresponded message from same sender in thread",
-                skipped_event_id=event.event_id,
-                newer_event_id=message.event_id,
-            )
-            return True
-        return False
-
-    def _should_skip_newer_cached_thread_lookup(
-        self,
-        event: TextDispatchEvent,
-        *,
-        thread_id: str | None,
-        source_kind: str | None,
-    ) -> bool:
-        if thread_id is None or event.server_timestamp is None:
-            return True
-        return is_automation_source_kind(source_kind or "") or (
-            source_kind is None
-            and isinstance(event, PreparedTextEvent)
-            and is_automation_source_kind(event.source_kind_override or "")
+        return has_newer_unresponded_in_thread(
+            event,
+            requester_user_id,
+            thread_history,
+            source_kind=source_kind,
+            requester_user_id_for_event=lambda sender, source: self._requester_user_id(
+                sender=sender,
+                source=source,
+            ),
+            sender_is_trusted_for_ingress_metadata=self._sender_is_trusted_for_ingress_metadata,
+            is_handled=self.deps.turn_store.is_handled,
+            logger=self.deps.logger,
         )
-
-    @staticmethod
-    def _cached_event_is_in_thread(event_source: dict[str, Any], thread_id: str) -> bool:
-        event_info = EventInfo.from_event(event_source)
-        return thread_id in {event_info.thread_id, event_info.thread_id_from_edit}
-
-    def _unresponded_requester_event_id(
-        self,
-        event_source: dict[str, Any],
-        *,
-        skipped_event_id: str,
-        requester_user_id: str,
-    ) -> str | None:
-        event_id = event_source.get("event_id")
-        sender = event_source.get("sender")
-        if not isinstance(event_id, str) or event_id == skipped_event_id or not isinstance(sender, str):
-            return None
-        if self._requester_user_id(sender=sender, source=event_source) != requester_user_id:
-            return None
-        if self.deps.turn_store.is_handled(event_id):
-            return None
-        content = event_source.get("content")
-        body = content.get("body") if isinstance(content, dict) else None
-        if isinstance(body, str) and command_parser.parse(body.strip()) is not None:
-            return None
-        return event_id
-
-    def _newer_unresponded_cached_thread_event_id(
-        self,
-        recent_events: Sequence[dict[str, Any]],
-        *,
-        skipped_event_id: str,
-        requester_user_id: str,
-        thread_id: str,
-    ) -> str | None:
-        for event_source in recent_events:
-            if not self._cached_event_is_in_thread(event_source, thread_id):
-                continue
-            event_id = self._unresponded_requester_event_id(
-                event_source,
-                skipped_event_id=skipped_event_id,
-                requester_user_id=requester_user_id,
-            )
-            if event_id is not None:
-                return event_id
-        return None
 
     async def _has_newer_unresponded_cached_thread_event(
         self,
@@ -462,48 +388,21 @@ class TurnController:
         source_kind: str | None = None,
     ) -> bool:
         """Return positive replay proof from raw cached room events when thread history degraded."""
-        if self._should_skip_newer_cached_thread_lookup(
-            event,
-            thread_id=thread_id,
-            source_kind=source_kind,
-        ):
-            return False
-        assert thread_id is not None
-        assert event.server_timestamp is not None
         event_cache = self.deps.runtime.event_cache
-        if event_cache is None:
-            return False
-        try:
-            recent_events = await event_cache.get_recent_room_events(
-                room_id,
-                event_type="m.room.message",
-                since_ts_ms=int(event.server_timestamp) + 1,
-            )
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Failed to read cached room events for degraded thread replay guard",
-                event_id=event.event_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-            return False
-
-        event_id = self._newer_unresponded_cached_thread_event_id(
-            recent_events,
-            skipped_event_id=event.event_id,
+        return await has_newer_unresponded_cached_thread_event(
+            room_id=room_id,
+            event=event,
             requester_user_id=requester_user_id,
             thread_id=thread_id,
+            source_kind=source_kind,
+            get_recent_room_events=event_cache.get_recent_room_events if event_cache is not None else None,
+            requester_user_id_for_event=lambda sender, source: self._requester_user_id(
+                sender=sender,
+                source=source,
+            ),
+            is_handled=self.deps.turn_store.is_handled,
+            logger=self.deps.logger,
         )
-        if event_id is not None:
-            self.deps.logger.info(
-                "Skipping older message — newer cached event from same sender in degraded thread replay guard",
-                skipped_event_id=event.event_id,
-                newer_event_id=event_id,
-                thread_id=thread_id,
-            )
-            return True
-        return False
 
     def _should_skip_deep_synthetic_full_dispatch(
         self,
@@ -925,9 +824,11 @@ class TurnController:
         handled_turn: HandledTurnState,
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
-    ) -> PreparedDispatch | None:
+        include_thread_context: bool = False,
+    ) -> PreparedDispatch | _PreparedDispatchResult | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
+        thread_context: DispatchThreadContext | None = None
         if self._should_use_trusted_router_relay_context(
             event,
             ingress_metadata=ingress_metadata,
@@ -944,22 +845,28 @@ class TurnController:
                 path="trusted_router_relay",
             )
         else:
-            context = await self.deps.resolver.extract_dispatch_context(
+            dispatch_context_result = await self.deps.resolver.extract_dispatch_context(
                 room,
                 event,
                 payload_metadata=payload_metadata,
             )
+            context = dispatch_context_result.context
+            thread_context = dispatch_context_result.thread_context
             emit_elapsed_timing(
                 "dispatch_handoff.prepare_dispatch.extract_context",
                 extract_context_start,
                 path="normal",
             )
         target_start = time.monotonic()
-        target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=context.thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
+        target = (
+            thread_context.stable_target
+            if thread_context is not None
+            else self.deps.resolver.build_message_target(
+                room_id=room.room_id,
+                thread_id=context.thread_id,
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
         )
         emit_elapsed_timing(
             "dispatch_handoff.prepare_dispatch.build_message_target",
@@ -1015,13 +922,16 @@ class TurnController:
             )
             return None
 
-        return PreparedDispatch(
+        dispatch = PreparedDispatch(
             requester_user_id=requester_user_id,
             context=context,
             target=target,
             correlation_id=correlation_id,
             envelope=envelope,
         )
+        if include_thread_context:
+            return _PreparedDispatchResult(dispatch=dispatch, thread_context=thread_context)
+        return dispatch
 
     async def _execute_command(
         self,
@@ -1140,9 +1050,6 @@ class TurnController:
             ),
         )
 
-        thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread_unchecked(
-            selection.thread_id,
-        )
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 room_id=room.room_id,
@@ -1155,8 +1062,6 @@ class TurnController:
                 user_id=user_id,
                 target=response_target,
                 matrix_run_metadata=selection_matrix_run_metadata,
-                thread_membership_trust=thread_membership_trust,
-                thread_history_trust=thread_history_trust,
             ),
         )
         if response_event_id is not None:
@@ -1447,35 +1352,20 @@ class TurnController:
 
             self.deps.logger.info(processing_log, event_id=event.event_id)
             try:
-                response_history_scope = self.deps.turn_store.response_history_scope(action)
 
                 async def prepare_request_after_lock(request: ResponseRequest) -> ResponseRequest:
                     nonlocal dispatch
-                    nonlocal handled_turn
-                    nonlocal matrix_run_metadata
                     nonlocal payload_ready_monotonic
                     if dispatch_timing is not None:
                         dispatch_timing.mark("response_payload_start")
-                    if request.target is not None and request.target != dispatch.target:
-                        dispatch = replace(
-                            dispatch,
-                            target=request.target,
-                            envelope=request.response_envelope
-                            if request.response_envelope is not None
-                            else dispatch.envelope,
-                        )
-                        handled_turn = self.deps.turn_store.attach_response_context(
-                            handled_turn,
-                            history_scope=response_history_scope,
-                            conversation_target=dispatch.target,
-                        )
-                        matrix_run_metadata = self.deps.turn_store.build_run_metadata(handled_turn)
-                    dispatch.context.thread_history = request.thread_history
-                    dispatch.context.thread_id = request.thread_id
-                    dispatch.context.requires_full_thread_history = request.requires_full_thread_history
-                    dispatch.context.thread_membership_trust = request.thread_membership_trust
-                    dispatch.context.thread_history_trust = request.thread_history_trust
-                    dispatch.context.thread_membership_event_info = request.thread_membership_event_info
+                    dispatch = replace(
+                        dispatch,
+                        context=replace(
+                            dispatch.context,
+                            thread_history=request.thread_history,
+                            requires_model_history_refresh=request.requires_model_history_refresh,
+                        ),
+                    )
                     payload_builder_started = time.monotonic()
                     payload_builder_outcome = "failed"
                     try:
@@ -1536,10 +1426,7 @@ class TurnController:
                         target=request.target,
                         matrix_run_metadata=matrix_run_metadata,
                         system_enrichment_items=prepared_payload.system_enrichment_items,
-                        requires_full_thread_history=False,
-                        thread_membership_trust=request.thread_membership_trust,
-                        thread_history_trust=request.thread_history_trust,
-                        thread_membership_event_info=request.thread_membership_event_info,
+                        requires_model_history_refresh=False,
                         on_lifecycle_lock_acquired=request.on_lifecycle_lock_acquired,
                         pipeline_timing=request.pipeline_timing,
                         queued_notice_reservation=request.queued_notice_reservation,
@@ -1560,10 +1447,7 @@ class TurnController:
                             correlation_id=dispatch.correlation_id,
                             target=dispatch.target,
                             matrix_run_metadata=matrix_run_metadata,
-                            requires_full_thread_history=dispatch.context.requires_full_thread_history,
-                            thread_membership_trust=dispatch.context.thread_membership_trust,
-                            thread_history_trust=dispatch.context.thread_history_trust,
-                            thread_membership_event_info=dispatch.context.thread_membership_event_info,
+                            requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             prepare_after_lock=prepare_request_after_lock,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
@@ -1584,10 +1468,7 @@ class TurnController:
                             correlation_id=dispatch.correlation_id,
                             target=dispatch.target,
                             matrix_run_metadata=matrix_run_metadata,
-                            requires_full_thread_history=dispatch.context.requires_full_thread_history,
-                            thread_membership_trust=dispatch.context.thread_membership_trust,
-                            thread_history_trust=dispatch.context.thread_history_trust,
-                            thread_membership_event_info=dispatch.context.thread_membership_event_info,
+                            requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                             prepare_after_lock=prepare_request_after_lock,
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
@@ -1821,7 +1702,7 @@ class TurnController:
 
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_start")
-            dispatch = await self._prepare_dispatch(
+            prepared_dispatch_result = await self._prepare_dispatch(
                 room,
                 event,
                 requester_user_id,
@@ -1829,11 +1710,18 @@ class TurnController:
                 handled_turn=handled_turn,
                 ingress_metadata=ingress_metadata,
                 payload_metadata=payload_metadata,
+                include_thread_context=True,
             )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_ready")
-            if dispatch is None:
+            if prepared_dispatch_result is None:
                 return
+            thread_context: DispatchThreadContext | None = None
+            if isinstance(prepared_dispatch_result, _PreparedDispatchResult):
+                dispatch = prepared_dispatch_result.dispatch
+                thread_context = prepared_dispatch_result.thread_context
+            else:
+                dispatch = prepared_dispatch_result
             handled_turn = handled_turn.with_request_context(
                 requester_id=dispatch.requester_user_id,
                 correlation_id=dispatch.correlation_id,
@@ -1871,37 +1759,29 @@ class TurnController:
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
-            hydrate_kwargs = {"payload_metadata": payload_metadata} if payload_metadata is not None else {}
-            had_provisional_thread_membership = dispatch.context.thread_membership_provisional
-            await self.deps.resolver.hydrate_dispatch_context(
-                room,
-                event,
-                dispatch.context,
-                **hydrate_kwargs,
+            replay_guard_history = (
+                thread_context.replay_guard_history
+                if thread_context is not None
+                else dispatch.context.replay_guard_history
             )
-            hydrated_target = (
-                dispatch.target.with_thread_root(None)
-                if had_provisional_thread_membership and dispatch.context.thread_id is None
-                else self.deps.resolver.build_message_target(
-                    room_id=room.room_id,
-                    thread_id=dispatch.context.thread_id,
-                    reply_to_event_id=event.event_id,
-                    event_source=event.source,
-                )
+            replay_guard_degraded = (
+                thread_context.replay_guard_degraded
+                if thread_context is not None
+                else dispatch.context.replay_guard_history_degraded
             )
-            if hydrated_target != dispatch.target:
-                dispatch = replace(
-                    dispatch,
-                    target=hydrated_target,
-                    envelope=replace(dispatch.envelope, target=hydrated_target),
-                )
             replay_guard_skips_turn = False
-            if dispatch.context.replay_guard_history_degraded:
+            if replay_guard_degraded:
+                if thread_context is not None:
+                    degraded_replay_thread_id = (
+                        thread_context.stable_target.resolved_thread_id or thread_context.candidate_thread_root_id
+                    )
+                else:
+                    degraded_replay_thread_id = dispatch.target.resolved_thread_id
                 replay_guard_skips_turn = await self._has_newer_unresponded_cached_thread_event(
                     room_id=room.room_id,
                     event=event,
                     requester_user_id=requester_user_id,
-                    thread_id=dispatch.context.thread_id,
+                    thread_id=degraded_replay_thread_id,
                     source_kind=dispatch.envelope.source_kind,
                 )
                 if not replay_guard_skips_turn:
@@ -1909,14 +1789,14 @@ class TurnController:
                         "Thread replay guard degraded; proceeding without negative newer-message proof",
                         event_id=event.event_id,
                         room_id=room.room_id,
-                        thread_id=dispatch.context.thread_id,
+                        thread_id=degraded_replay_thread_id,
                         thread_read_degraded=True,
                     )
             else:
                 replay_guard_skips_turn = self._has_newer_unresponded_in_thread(
                     event,
                     requester_user_id,
-                    dispatch.context.replay_guard_history,
+                    replay_guard_history,
                     source_kind=dispatch.envelope.source_kind,
                 )
             if replay_guard_skips_turn:

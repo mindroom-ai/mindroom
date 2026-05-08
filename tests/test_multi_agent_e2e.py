@@ -374,9 +374,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history_result(thread_history, is_full_history=True)
-            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
+            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_history.return_value = thread_history_result(thread_history, is_full_history=True)
-            mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
+            mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=True)
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
             with patch_response_runner_module(
@@ -442,9 +442,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history_result(thread_history, is_full_history=True)
-            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
+            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_history.return_value = thread_history_result(thread_history, is_full_history=True)
-            mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
+            mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=True)
             bot.client.room_send.side_effect = [
                 nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, test_room_id),
                 nio.RoomSendResponse.from_dict({"event_id": "$edit"}, test_room_id),
@@ -505,6 +505,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
             patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
+            patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_refresh_history,
             patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
@@ -527,6 +528,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
             mock_dispatch_history.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
+            mock_refresh_history.return_value = thread_history_result(thread_history, is_full_history=True)
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
             with patch_response_runner_module(

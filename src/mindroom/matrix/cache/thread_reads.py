@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import typing
+from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.cache.thread_cache_helpers import latest_visible_thread_event_id
@@ -19,7 +20,6 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
-from mindroom.thread_context_state import ThreadReadMode
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
@@ -36,6 +36,33 @@ _DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS = 1.0
 _DISPATCH_THREAD_READ_FETCH_TIMEOUT_SECONDS = 1.0
 _CACHE_COORDINATOR_TIMEOUT = "cache_coordinator_timeout"
 _DISPATCH_READ_TIMEOUT = "dispatch_read_timeout"
+
+
+class ThreadReadMode(Enum):
+    """Named thread-read policies for cache coordination and source freshness."""
+
+    ADVISORY_SNAPSHOT = auto()
+    ADVISORY_FULL = auto()
+    DISPATCH_SNAPSHOT = auto()
+    DISPATCH_FULL = auto()
+    STRICT_FULL = auto()
+
+    @property
+    def full_history(self) -> bool:
+        """Return whether this mode requires fully hydrated thread history."""
+        return self in {
+            ThreadReadMode.ADVISORY_FULL,
+            ThreadReadMode.DISPATCH_FULL,
+            ThreadReadMode.STRICT_FULL,
+        }
+
+    @property
+    def dispatch_safe(self) -> bool:
+        """Return whether this mode is on the live dispatch fail-open path."""
+        return self in {
+            ThreadReadMode.DISPATCH_SNAPSHOT,
+            ThreadReadMode.DISPATCH_FULL,
+        }
 
 
 class _ThreadHistoryFetcher(typing.Protocol):

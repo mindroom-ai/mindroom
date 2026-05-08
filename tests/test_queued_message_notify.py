@@ -35,13 +35,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_thread_context import room_level_target
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import (
@@ -53,7 +53,6 @@ from mindroom.post_response_effects import (
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
-from mindroom.thread_context_state import ThreadHistoryTrust, ThreadMembershipTrust
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
@@ -780,7 +779,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
 
 
 @pytest.mark.asyncio
-async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(tmp_path: Path) -> None:
+async def test_refresh_model_history_after_lock_refreshes_empty_thread_history(tmp_path: Path) -> None:
     """Threaded turns with an empty cached history should still refresh after lock handoff."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -802,7 +801,7 @@ async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(
         "fetch_thread_history",
         new=AsyncMock(return_value=fresh_history),
     ) as mock_fetch_thread_history:
-        request = await coordinator._refresh_thread_history_after_lock(
+        request = await coordinator._refresh_model_history_after_lock(
             ResponseRequest(
                 room_id="!room:localhost",
                 reply_to_event_id="$event",
@@ -822,28 +821,14 @@ async def test_refresh_thread_history_after_lock_refreshes_empty_thread_history(
 
 
 @pytest.mark.asyncio
-async def test_refresh_thread_history_after_lock_reproves_provisional_thread_membership(
+async def test_refresh_model_history_after_lock_does_not_reprove_room_target(
     tmp_path: Path,
 ) -> None:
-    """Post-lock refresh must not treat an indeterminate dispatch candidate as proven."""
+    """Post-lock model refresh must not re-prove a finalized room target."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
-    event_info = EventInfo.from_event(
-        {
-            "content": {
-                "body": "plain reply",
-                "msgtype": "m.text",
-                "m.relates_to": {"m.in_reply_to": {"event_id": "$plain_root"}},
-            },
-            "event_id": "$event",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-        },
-    )
-    target = MessageTarget.resolve("!room:localhost", "$plain_root", "$event")
+    target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
     envelope = _envelope(source_event_id="$event", target=target)
 
     with (
@@ -855,38 +840,26 @@ async def test_refresh_thread_history_after_lock_reproves_provisional_thread_mem
         patch.object(
             resolver,
             "fetch_thread_history",
-            new=AsyncMock(side_effect=AssertionError("candidate roots must be re-proved before refresh")),
+            new=AsyncMock(side_effect=AssertionError("room targets have no model thread history to refresh")),
         ),
     ):
-        request = await coordinator._refresh_thread_history_after_lock(
+        request = await coordinator._refresh_model_history_after_lock(
             ResponseRequest(
                 room_id="!room:localhost",
                 reply_to_event_id="$event",
-                thread_id="$plain_root",
+                thread_id=None,
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
                 response_envelope=envelope,
                 target=target,
-                requires_full_thread_history=True,
-                thread_membership_trust=ThreadMembershipTrust.PROVISIONAL,
-                thread_history_trust=ThreadHistoryTrust.DEGRADED,
-                thread_membership_event_info=event_info,
+                requires_model_history_refresh=True,
             ),
         )
 
-    mock_resolve_strict_context.assert_awaited_once_with(
-        "!room:localhost",
-        "$event",
-        event_info,
-        caller_label="dispatch_post_lock_membership",
-    )
+    mock_resolve_strict_context.assert_not_awaited()
     assert request.thread_id is None
     assert request.thread_history == []
-    assert request.requires_full_thread_history is False
-    assert request.thread_membership_provisional is False
-    assert request.thread_membership_trust is ThreadMembershipTrust.ROOM_LEVEL
-    assert request.thread_history_trust is ThreadHistoryTrust.NONE
     assert request.target is not None
     assert request.target.resolved_thread_id is None
     assert request.response_envelope is not None
@@ -895,25 +868,11 @@ async def test_refresh_thread_history_after_lock_reproves_provisional_thread_mem
 
 @pytest.mark.asyncio
 async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -> None:
-    """Agent delivery must use the strict post-lock target, not the provisional candidate."""
+    """Agent delivery must enter the runner with the finalized stable room target."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
-    event_info = EventInfo.from_event(
-        {
-            "content": {
-                "body": "plain reply",
-                "msgtype": "m.text",
-                "m.relates_to": {"m.in_reply_to": {"event_id": "$plain_root"}},
-            },
-            "event_id": "$event",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-        },
-    )
-    provisional_target = MessageTarget.resolve("!room:localhost", "$plain_root", "$event")
+    stable_target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget | None] = []
 
@@ -946,7 +905,7 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
             resolver,
             "resolve_strict_thread_context",
             new=AsyncMock(return_value=(None, [])),
-        ),
+        ) as mock_resolve_strict_context,
         patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=_NoopResponseLifecycle())),
         patch.object(
             coordinator,
@@ -964,20 +923,17 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
             ResponseRequest(
                 room_id="!room:localhost",
                 reply_to_event_id="$event",
-                thread_id="$plain_root",
+                thread_id=None,
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
-                response_envelope=_envelope(source_event_id="$event", target=provisional_target),
-                target=provisional_target,
-                requires_full_thread_history=True,
-                thread_membership_trust=ThreadMembershipTrust.PROVISIONAL,
-                thread_history_trust=ThreadHistoryTrust.DEGRADED,
-                thread_membership_event_info=event_info,
+                response_envelope=_envelope(source_event_id="$event", target=stable_target),
+                target=stable_target,
             ),
         )
 
     assert result == "$response"
+    mock_resolve_strict_context.assert_not_awaited()
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id if target is not None else None for target in observed_delivery_targets] == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
@@ -987,7 +943,7 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Path) -> None:
-    """Team delivery/session setup must use the strict post-lock target."""
+    """Team delivery/session setup must enter the runner with the finalized stable room target."""
     bot = _bot(tmp_path)
     bot.client = MagicMock()
     bot.client.rooms = {}
@@ -995,21 +951,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
-    event_info = EventInfo.from_event(
-        {
-            "content": {
-                "body": "plain reply",
-                "msgtype": "m.text",
-                "m.relates_to": {"m.in_reply_to": {"event_id": "$plain_root"}},
-            },
-            "event_id": "$event",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-        },
-    )
-    provisional_target = MessageTarget.resolve("!room:localhost", "$plain_root", "$event")
+    stable_target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
     lifecycle = _NoopResponseLifecycle()
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget] = []
@@ -1040,7 +982,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
             resolver,
             "resolve_strict_thread_context",
             new=AsyncMock(return_value=(None, [])),
-        ),
+        ) as mock_resolve_strict_context,
         patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=lifecycle)),
         patch.object(
             coordinator,
@@ -1055,22 +997,19 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
             ResponseRequest(
                 room_id="!room:localhost",
                 reply_to_event_id="$event",
-                thread_id="$plain_root",
+                thread_id=None,
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
-                response_envelope=_envelope(source_event_id="$event", target=provisional_target),
-                target=provisional_target,
-                requires_full_thread_history=True,
-                thread_membership_trust=ThreadMembershipTrust.PROVISIONAL,
-                thread_history_trust=ThreadHistoryTrust.DEGRADED,
-                thread_membership_event_info=event_info,
+                response_envelope=_envelope(source_event_id="$event", target=stable_target),
+                target=stable_target,
             ),
             team_agents=[],
             team_mode="coordinate",
         )
 
     assert result == "$response"
+    mock_resolve_strict_context.assert_not_awaited()
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
     assert lifecycle.session_thread_ids == [None]
@@ -1102,7 +1041,7 @@ async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path)
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
-                requires_full_thread_history=True,
+                requires_model_history_refresh=True,
             ),
         )
 
@@ -1504,7 +1443,6 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
     try:
         with (
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
-            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -1532,7 +1470,6 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
     try:
         with (
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
-            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -1562,7 +1499,6 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
     try:
         with (
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
-            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -1601,7 +1537,6 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
     try:
         with (
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
-            patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -1892,7 +1827,6 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
     with (
         patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
         patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-        patch.object(bot._conversation_resolver, "hydrate_dispatch_context", new=AsyncMock()),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
         patch.object(
             bot._turn_policy,

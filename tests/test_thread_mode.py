@@ -20,9 +20,10 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.conversation_resolver import MessageContext
+from mindroom.conversation_resolver import MessageContext, _DispatchContextResult
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.cache.event_cache import ThreadCacheState
+from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
@@ -30,7 +31,6 @@ from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTI
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import StreamingResponse, send_streaming_response
-from mindroom.thread_context_state import ThreadMembershipTrust, ThreadReadMode
 from mindroom.thread_utils import create_session_id, parse_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -673,8 +673,7 @@ class TestExtractMessageContextRoomMode:
             is_thread=True,
             thread_id="$thread123",
             thread_history=[{"event_id": "$thread123"}],
-            requires_full_thread_history=False,
-            membership_trust=ThreadMembershipTrust.PROVEN,
+            requires_model_history_refresh=False,
         )
         unwrap_extracted_collaborator(bot._conversation_resolver)._resolve_thread_context = AsyncMock(
             return_value=thread_context,
@@ -787,13 +786,16 @@ class TestExtractMessageContextRoomMode:
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            requires_full_thread_history=True,
+            requires_model_history_refresh=True,
         )
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=_DispatchContextResult(context=context, thread_context=None),
+        )
         bot._conversation_resolver.extract_message_context = AsyncMock(return_value=context)
         bot._conversation_resolver.extract_message_context_impl = AsyncMock(return_value=context)
 
-        assert await bot._conversation_resolver.extract_dispatch_context(room, event) is context
+        dispatch_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        assert dispatch_result.context is context
         assert await bot._conversation_resolver.extract_message_context(room, event, full_history=False) is context
         assert (
             await bot._conversation_resolver.extract_message_context_impl(
@@ -1026,7 +1028,7 @@ class TestExtractMessageContextRoomMode:
         assert context.is_thread is True
         assert context.thread_id == "$thread-root:localhost"
         assert context.thread_history is degraded_history
-        assert context.requires_full_thread_history is True
+        assert context.requires_model_history_refresh is True
 
     @pytest.mark.parametrize("relation_type", ["m.replace", "m.annotation", "m.reference"])
     def test_build_message_target_plain_reply_relation_does_not_infer_thread_identity(
@@ -1702,10 +1704,9 @@ class TestExtractedModuleLoggerRebinding:
         )
 
         assert thread_lookup.thread_id == "$threadroot"
-        assert thread_lookup.membership_trust is ThreadMembershipTrust.PROVEN
 
     @pytest.mark.asyncio
-    async def test_direct_thread_dispatch_preview_still_requires_full_thread_history(
+    async def test_direct_thread_dispatch_preview_still_requires_model_history_refresh(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1768,7 +1769,8 @@ class TestExtractedModuleLoggerRebinding:
             "get_thread_snapshot",
             AsyncMock(side_effect=AssertionError("dispatch preview should use strict dispatch snapshot reads")),
         ):
-            context = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread-root:localhost"
@@ -1776,7 +1778,7 @@ class TestExtractedModuleLoggerRebinding:
             "$thread-root:localhost",
             "$thread-msg:localhost",
         ]
-        assert context.requires_full_thread_history is True
+        assert context.requires_model_history_refresh is True
         bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
             room.room_id,
             "$thread-root:localhost",

@@ -58,7 +58,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.conversation_resolver import MessageContext
+from mindroom.conversation_resolver import MessageContext, _DispatchContextResult
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     FinalDeliveryRequest,
@@ -115,13 +115,11 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
     _merge_response_extra_content,
-    response_trust_for_resolved_thread_unchecked,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
-from mindroom.thread_context_state import ThreadHistoryTrust, ThreadMembershipTrust
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, _shutdown_approval_store
 from mindroom.tool_system.events import ToolTraceEntry
@@ -382,7 +380,6 @@ def _response_request(
     system_enrichment_items: tuple[EnrichmentItem, ...] = (),
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
-    thread_membership_trust, thread_history_trust = response_trust_for_resolved_thread_unchecked(thread_id)
     return ResponseRequest(
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
@@ -400,8 +397,6 @@ def _response_request(
         target=target,
         matrix_run_metadata=matrix_run_metadata,
         system_enrichment_items=system_enrichment_items,
-        thread_membership_trust=thread_membership_trust,
-        thread_history_trust=thread_history_trust,
     )
 
 
@@ -632,6 +627,11 @@ def _visible_message(
         timestamp=timestamp,
         content=content,
     )
+
+
+def _dispatch_context_result(context: MessageContext) -> _DispatchContextResult:
+    """Wrap a stable message context for tests that bypass dispatch resolution."""
+    return _DispatchContextResult(context=context, thread_context=None)
 
 
 def _room_image_event(
@@ -3671,7 +3671,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -6624,7 +6624,7 @@ class TestAgentBot:
         assert "Available attachment IDs" in generate_kwargs["model_prompt"]
         assert attachment_id in generate_kwargs["model_prompt"]
         assert generate_kwargs["reply_to_event_id"] == "$img_event"
-        assert generate_kwargs["thread_id"] is None
+        assert generate_kwargs["thread_id"] == "$img_event"
         assert generate_kwargs["thread_history"] == []
         assert generate_kwargs["user_id"] == "@user:localhost"
         media = generate_kwargs["media"]
@@ -6730,20 +6730,26 @@ class TestAgentBot:
         history_attachment_id = "att_prev_image"
         current_attachment_id = _attachment_id_for_event("$img_event_history")
 
+        routed_history = ThreadHistoryResult(
+            [
+                _visible_message(
+                    sender="@user:localhost",
+                    event_id="$routed_prev",
+                    content={ATTACHMENT_IDS_KEY: [history_attachment_id]},
+                ),
+            ],
+            is_full_history=True,
+        )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=True,
-                thread_id="$thread_root",
-                thread_history=[
-                    _visible_message(
-                        sender="@user:localhost",
-                        event_id="$routed_prev",
-                        content={ATTACHMENT_IDS_KEY: [history_attachment_id]},
-                    ),
-                ],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
+            return_value=_dispatch_context_result(
+                MessageContext(
+                    am_i_mentioned=False,
+                    is_thread=True,
+                    thread_id="$thread_root",
+                    thread_history=routed_history,
+                    mentioned_agents=[],
+                    has_non_agent_mentions=False,
+                ),
             ),
         )
         bot._generate_response = AsyncMock(return_value="$response")
@@ -6927,7 +6933,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve("!test:localhost", None, "$event"),
             correlation_id="corr-1",
@@ -7087,7 +7093,7 @@ class TestAgentBot:
         attachment_id = _attachment_id_for_event("$file_event")
         assert generate_kwargs["room_id"] == "!test:localhost"
         assert generate_kwargs["reply_to_event_id"] == "$file_event"
-        assert generate_kwargs["thread_id"] is None
+        assert generate_kwargs["thread_id"] == "$file_event"
         assert generate_kwargs["thread_history"] == []
         assert generate_kwargs["user_id"] == "@user:localhost"
         assert generate_kwargs["attachment_ids"] == [attachment_id]
@@ -7249,7 +7255,7 @@ class TestAgentBot:
             room,
             event,
             [],
-            None,
+            "$img_route",
             message="[Attached image]",
             requester_user_id="@user:localhost",
             extra_content={"com.mindroom.original_sender": "@user:localhost"},
@@ -7883,13 +7889,15 @@ class TestAgentBot:
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_calculator:localhost")
 
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=True,
-                is_thread=True,
-                thread_id="$img_root",
-                thread_history=[],
-                mentioned_agents=[mock_agent_user.matrix_id],
-                has_non_agent_mentions=False,
+            return_value=_dispatch_context_result(
+                MessageContext(
+                    am_i_mentioned=True,
+                    is_thread=True,
+                    thread_id="$img_root",
+                    thread_history=ThreadHistoryResult([], is_full_history=True),
+                    mentioned_agents=[mock_agent_user.matrix_id],
+                    has_non_agent_mentions=False,
+                ),
             ),
         )
 
@@ -8608,8 +8616,6 @@ class TestAgentBot:
             ],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            thread_membership_trust=ThreadMembershipTrust.PROVEN,
-            thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
         )
         envelope = MessageEnvelope(
             source_event_id="$followup",
@@ -8851,39 +8857,40 @@ class TestAgentBot:
             am_i_mentioned=False,
             is_thread=True,
             thread_id="$thread",
-            thread_history=[
-                ResolvedVisibleMessage(
-                    sender="@bas:localhost",
-                    body="Team, please assess this",
-                    timestamp=1,
-                    event_id="$m1",
-                    content={
-                        "body": "Team, please assess this",
-                        "m.mentions": {
-                            "user_ids": [
-                                ids["synth"].full_id,
-                                ids["reasoner"].full_id,
-                                ids["critic"].full_id,
-                            ],
+            thread_history=ThreadHistoryResult(
+                [
+                    ResolvedVisibleMessage(
+                        sender="@bas:localhost",
+                        body="Team, please assess this",
+                        timestamp=1,
+                        event_id="$m1",
+                        content={
+                            "body": "Team, please assess this",
+                            "m.mentions": {
+                                "user_ids": [
+                                    ids["synth"].full_id,
+                                    ids["reasoner"].full_id,
+                                    ids["critic"].full_id,
+                                ],
+                            },
                         },
-                    },
-                    thread_id="$thread",
-                    latest_event_id="$m1",
-                ),
-                ResolvedVisibleMessage(
-                    sender="@maciej:localhost",
-                    body="I fixed two issues",
-                    timestamp=2,
-                    event_id="$m2",
-                    content={"body": "I fixed two issues"},
-                    thread_id="$thread",
-                    latest_event_id="$m2",
-                ),
-            ],
+                        thread_id="$thread",
+                        latest_event_id="$m1",
+                    ),
+                    ResolvedVisibleMessage(
+                        sender="@maciej:localhost",
+                        body="I fixed two issues",
+                        timestamp=2,
+                        event_id="$m2",
+                        content={"body": "I fixed two issues"},
+                        thread_id="$thread",
+                        latest_event_id="$m2",
+                    ),
+                ],
+                is_full_history=True,
+            ),
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            thread_membership_trust=ThreadMembershipTrust.PROVEN,
-            thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
         )
 
         with (
@@ -9089,12 +9096,13 @@ class TestAgentBot:
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot", new=mock_snapshot),
             patch.object(bot._conversation_cache, "get_thread_history", new=mock_history),
         ):
-            context = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
         assert [message.event_id for message in context.thread_history] == ["$thread_root"]
-        assert context.requires_full_thread_history is True
+        assert context.requires_model_history_refresh is True
         mock_snapshot.assert_awaited_once_with(
             room.room_id,
             "$thread_root",
@@ -9153,12 +9161,13 @@ class TestAgentBot:
             "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
             new=AsyncMock(return_value=snapshot_history),
         ) as mock_snapshot:
-            context = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
         assert context.thread_history == snapshot_history
-        assert context.requires_full_thread_history is True
+        assert context.requires_model_history_refresh is True
         trusted_sender_ids = frozenset(
             matrix_id.full_id for matrix_id in config.get_ids(runtime_paths_for(config)).values()
         )
@@ -9174,7 +9183,7 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
-    async def test_dispatch_text_message_prepares_full_history_payload_after_lock_when_required(  # noqa: PLR0915
+    async def test_dispatch_text_message_prepares_full_history_payload_after_lock_when_required(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -9211,7 +9220,7 @@ class TestAgentBot:
                 ],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=True,
+                requires_model_history_refresh=True,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -9238,19 +9247,10 @@ class TestAgentBot:
         ]
         call_order: list[str] = []
 
-        async def fake_hydrate_dispatch_context(
-            _room: object,
-            _event: object,
-            context: MessageContext,
-            **_kwargs: object,
-        ) -> None:
-            call_order.append("hydrate")
-            context.thread_history = ThreadHistoryResult(full_history, is_full_history=True)
-            context.requires_full_thread_history = False
-
         async def fake_plan(*_args: object, **_kwargs: object) -> _DispatchPlan:
             call_order.append("action")
-            assert list(dispatch.context.thread_history) == full_history
+            assert list(dispatch.context.thread_history) == snapshot_history
+            assert dispatch.context.planning_thread_history == ()
             return _DispatchPlan(
                 kind="respond",
                 response_action=ResponseAction(kind="individual"),
@@ -9265,6 +9265,7 @@ class TestAgentBot:
             return replace(
                 request,
                 thread_history=ThreadHistoryResult(full_history, is_full_history=True),
+                requires_model_history_refresh=False,
             )
 
         async def run_cancellable_response(**kwargs: object) -> str | None:
@@ -9289,13 +9290,8 @@ class TestAgentBot:
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=fake_plan)),
             patch.object(
-                bot._conversation_resolver,
-                "hydrate_dispatch_context",
-                new=AsyncMock(side_effect=fake_hydrate_dispatch_context),
-            ) as mock_hydrate_dispatch_context,
-            patch.object(
                 ResponseRunner,
-                "_refresh_thread_history_after_lock",
+                "_refresh_model_history_after_lock",
                 new=AsyncMock(side_effect=refresh_thread_history),
             ) as mock_refresh_thread_history,
             patch.object(
@@ -9333,27 +9329,20 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
-        mock_hydrate_dispatch_context.assert_awaited_once()
-        hydrate_call = mock_hydrate_dispatch_context.await_args
-        assert hydrate_call is not None
-        assert hydrate_call.args[0] is room
-        assert hydrate_call.args[2] is dispatch.context
         mock_refresh_thread_history.assert_awaited_once()
         mock_build_payload.assert_awaited_once()
         process_request = mock_process.await_args.args[0]
         assert list(process_request.thread_history) == full_history
         assert process_request.attachment_ids == ("att_older",)
-        assert call_order == ["hydrate", "action", "payload", "generate"]
-        assert dispatch.context.thread_history == full_history
-        assert dispatch.context.requires_full_thread_history is False
+        assert call_order == ["action", "payload", "generate"]
 
     @pytest.mark.asyncio
-    async def test_dispatch_text_message_skip_path_hydrates_full_history_before_planning(
+    async def test_dispatch_text_message_skip_path_does_not_hydrate_full_history_before_planning(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Planning should see full history before deciding to ignore a turn."""
+        """Planning should use policy-grade history only and skip model refresh on ignore."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -9376,7 +9365,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=True,
+                requires_model_history_refresh=True,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -9386,39 +9375,18 @@ class TestAgentBot:
             correlation_id="corr-no-action",
             envelope=_hook_envelope(body="hello", source_event_id="$event"),
         )
-        full_history = [
-            ResolvedVisibleMessage.synthetic(
-                sender="@user:localhost",
-                body="Hydrated root",
-                event_id="$thread_root",
-                timestamp=1,
-                content={"body": "Hydrated root"},
-            ),
-        ]
-
-        async def fake_hydrate_dispatch_context(
-            _room: object,
-            _event: object,
-            context: MessageContext,
-            **_kwargs: object,
-        ) -> None:
-            context.thread_history = ThreadHistoryResult(full_history, is_full_history=True)
-            context.requires_full_thread_history = False
 
         async def fake_plan(
             *_args: object,
             **_kwargs: object,
         ) -> _DispatchPlan:
-            assert list(dispatch.context.thread_history) == full_history
+            assert list(dispatch.context.thread_history) == []
+            assert dispatch.context.planning_thread_history == ()
+            assert dispatch.context.requires_model_history_refresh is True
             return _DispatchPlan(kind="ignore")
 
         with (
             patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
-            patch.object(
-                bot._conversation_resolver,
-                "hydrate_dispatch_context",
-                new=AsyncMock(side_effect=fake_hydrate_dispatch_context),
-            ) as mock_hydrate_dispatch_context,
             patch.object(
                 bot._turn_policy,
                 "plan_turn",
@@ -9436,11 +9404,6 @@ class TestAgentBot:
                 _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
             )
 
-        mock_hydrate_dispatch_context.assert_awaited_once()
-        hydrate_call = mock_hydrate_dispatch_context.await_args
-        assert hydrate_call is not None
-        assert hydrate_call.args[0] is room
-        assert hydrate_call.args[2] is dispatch.context
         mock_build_payload.assert_not_awaited()
         mock_execute.assert_not_awaited()
 
@@ -9479,7 +9442,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=True,
+                requires_model_history_refresh=True,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -10217,9 +10180,7 @@ class TestAgentBot:
                 ],
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-                thread_membership_trust=ThreadMembershipTrust.PROVEN,
-                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -10307,9 +10268,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-                thread_membership_trust=ThreadMembershipTrust.PROVEN,
-                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -10387,9 +10346,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-                thread_membership_trust=ThreadMembershipTrust.PROVEN,
-                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
+                requires_model_history_refresh=False,
             ),
         )
         bot._edit_message = AsyncMock(return_value=True)
@@ -10568,9 +10525,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-                thread_membership_trust=ThreadMembershipTrust.PROVEN,
-                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -10642,9 +10597,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-                thread_membership_trust=ThreadMembershipTrust.PROVEN,
-                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -10706,7 +10659,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -10789,7 +10742,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -11042,7 +10995,7 @@ class TestAgentBot:
                 thread_history=[],
                 mentioned_agents=[bot.matrix_id],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -11115,7 +11068,7 @@ class TestAgentBot:
                 ),
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -11195,9 +11148,7 @@ class TestAgentBot:
                 thread_history=ThreadHistoryResult([], is_full_history=True),
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-                thread_membership_trust=ThreadMembershipTrust.PROVEN,
-                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -11274,9 +11225,7 @@ class TestAgentBot:
                 thread_history=ThreadHistoryResult([], is_full_history=True),
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-                thread_membership_trust=ThreadMembershipTrust.PROVEN,
-                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -11348,9 +11297,7 @@ class TestAgentBot:
                 thread_history=ThreadHistoryResult([], is_full_history=True),
                 mentioned_agents=[],
                 has_non_agent_mentions=False,
-                requires_full_thread_history=False,
-                thread_membership_trust=ThreadMembershipTrust.PROVEN,
-                thread_history_trust=ThreadHistoryTrust.PLANNING_USABLE,
+                requires_model_history_refresh=False,
             ),
             target=MessageTarget.resolve(
                 room_id=room.room_id,
@@ -11496,7 +11443,7 @@ class TestAgentBot:
             ),
         ]
         mock_fetch_history.return_value = thread_history_result(test1_history, is_full_history=True)
-        mock_fetch_snapshot.return_value = thread_history_result(test1_history, is_full_history=False)
+        mock_fetch_snapshot.return_value = thread_history_result(test1_history, is_full_history=True)
 
         # Mock streaming response - return an async generator
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
@@ -11588,7 +11535,7 @@ class TestAgentBot:
             ),
         ]
         mock_fetch_history.return_value = thread_history_result(test2_history, is_full_history=True)
-        mock_fetch_snapshot.return_value = thread_history_result(test2_history, is_full_history=False)
+        mock_fetch_snapshot.return_value = thread_history_result(test2_history, is_full_history=True)
 
         # Create a new event with a different ID for Test 2
         mock_event_2 = MagicMock()

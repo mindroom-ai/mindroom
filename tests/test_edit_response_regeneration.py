@@ -2109,7 +2109,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            requires_full_thread_history=False,
+            requires_model_history_refresh=False,
         )
 
         await bot._edit_regenerator.handle_message_edit(
@@ -2235,7 +2235,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            requires_full_thread_history=False,
+            requires_model_history_refresh=False,
         )
 
         await bot._edit_regenerator.handle_message_edit(
@@ -2382,7 +2382,7 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
             thread_history=[],
             mentioned_agents=[MatrixID.from_agent("test_team", "example.com", runtime_paths)],
             has_non_agent_mentions=False,
-            requires_full_thread_history=False,
+            requires_model_history_refresh=False,
         )
 
         await bot._edit_regenerator.handle_message_edit(
@@ -2506,7 +2506,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            requires_full_thread_history=False,
+            requires_model_history_refresh=False,
         )
 
         await bot._edit_regenerator.handle_message_edit(
@@ -2633,7 +2633,7 @@ async def test_edit_regenerator_backfill_preserves_interactive_selection_anchor_
             thread_history=[],
             mentioned_agents=[],
             has_non_agent_mentions=False,
-            requires_full_thread_history=False,
+            requires_model_history_refresh=False,
         )
 
         await bot._edit_regenerator.handle_message_edit(

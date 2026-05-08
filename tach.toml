@@ -872,8 +872,8 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.thread_summary",
-    "mindroom.thread_context_state",
-    "mindroom.tool_system.runtime_context", "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
@@ -1203,7 +1203,6 @@ depends_on = [
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.thread_diagnostics",
-    "mindroom.thread_context_state",
 ]
 
 [[modules]]
@@ -1300,7 +1299,6 @@ depends_on = [
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_room_scan",
     "mindroom.matrix.visible_body",
-    "mindroom.thread_context_state",
 ]
 
 [[modules]]
@@ -1537,14 +1535,15 @@ depends_on = [
 path = "mindroom.conversation_resolver"
 depends_on = [
     "mindroom.constants",
+    "mindroom.dispatch_thread_context",
     "mindroom.hooks",
+    "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.thread_membership",
     "mindroom.runtime_protocols",
-    "mindroom.thread_context_state",
 ]
 
 [[modules]]
@@ -1555,10 +1554,6 @@ depends_on = [
     "mindroom.history",
     "mindroom.runtime_protocols",
 ]
-
-[[modules]]
-path = "mindroom.thread_context_state"
-depends_on = []
 
 [[modules]]
 path = "mindroom.bot"
@@ -1956,6 +1951,9 @@ depends_on = [
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.dispatch_replay_guard",
+    "mindroom.dispatch_source",
+    "mindroom.dispatch_thread_context",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
@@ -1966,6 +1964,29 @@ depends_on = [
     "mindroom.routing",
     "mindroom.turn_store",
     "mindroom.turn_policy",
+]
+
+[[modules]]
+path = "mindroom.dispatch_replay_guard"
+depends_on = [
+    "mindroom.commands.parsing",
+    "mindroom.dispatch_source",
+    "mindroom.matrix.event_info",
+]
+visibility = [
+    "mindroom.turn_controller",
+]
+
+[[modules]]
+path = "mindroom.dispatch_thread_context"
+depends_on = [
+    "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.thread_diagnostics",
+    "mindroom.message_target",
+]
+visibility = [
+    "mindroom.conversation_resolver",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -2306,9 +2327,9 @@ visibility = ["mindroom.matrix.conversation_cache"]
 exclusive = true
 
 [[interfaces]]
-expose = ["ThreadReadPolicy"]
+expose = ["ThreadReadMode", "ThreadReadPolicy"]
 from = ["mindroom.matrix.cache.thread_reads"]
-visibility = ["mindroom.matrix.conversation_cache"]
+visibility = ["mindroom.conversation_resolver", "mindroom.matrix.conversation_cache"]
 exclusive = true
 
 [[interfaces]]

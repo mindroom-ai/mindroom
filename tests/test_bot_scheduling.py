@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -15,10 +16,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
+from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.thread_context_state import ThreadHistoryTrust, ThreadMembershipTrust
 from mindroom.thread_utils import should_agent_respond
 from mindroom.turn_controller import _PrecheckedEvent
 from tests.conftest import (
@@ -26,6 +27,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     create_mock_room,
+    dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
     install_runtime_cache_support,
@@ -39,6 +41,9 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+
+if TYPE_CHECKING:
+    from mindroom.matrix.identity import MatrixID
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -63,17 +68,27 @@ def _message(
     )
 
 
-def _set_mock_context_trust(context: MagicMock) -> None:
-    """Populate explicit thread-planning state on MagicMock message contexts."""
-    if context.is_thread and context.thread_id is not None:
-        context.thread_membership_trust = ThreadMembershipTrust.PROVEN
-        context.thread_history_trust = ThreadHistoryTrust.PLANNING_USABLE
-        context.planning_thread_history = context.thread_history
-    else:
-        context.thread_membership_trust = ThreadMembershipTrust.ROOM_LEVEL
-        context.thread_history_trust = ThreadHistoryTrust.NONE
-        context.planning_thread_history = ()
-    context.thread_membership_event_info = None
+def _message_context(
+    *,
+    am_i_mentioned: bool,
+    is_thread: bool,
+    thread_id: str | None,
+    mentioned_agents: list[MatrixID] | None = None,
+    has_non_agent_mentions: bool = False,
+    thread_history: list[ResolvedVisibleMessage] | None = None,
+    requires_model_history_refresh: bool = False,
+) -> MessageContext:
+    """Build a typed dispatch context for scheduling tests."""
+    raw_history = thread_history or []
+    return MessageContext(
+        am_i_mentioned=am_i_mentioned,
+        is_thread=is_thread,
+        thread_id=thread_id,
+        thread_history=thread_history_result(raw_history, is_full_history=True),
+        mentioned_agents=mentioned_agents or [],
+        has_non_agent_mentions=has_non_agent_mentions,
+        requires_model_history_refresh=requires_model_history_refresh,
+    )
 
 
 def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> None:
@@ -841,21 +856,19 @@ class TestCommandHandling:
         _sync_turn_policy_runtime(bot)
 
         # Mock context extraction to say agent is mentioned
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = True
-        mock_context.is_thread = True
-        mock_context.thread_id = "$thread123"
-        mock_context.thread_history = []
-        # mentioned_agents should be a list of MatrixID objects
-        mock_context.mentioned_agents = (
-            [config.get_ids(runtime_paths_for(config))["calculator"]]
-            if "calculator" in config.get_ids(runtime_paths_for(config))
-            else []
+        mock_context = _message_context(
+            am_i_mentioned=True,
+            is_thread=True,
+            thread_id="$thread123",
+            mentioned_agents=(
+                [config.get_ids(runtime_paths_for(config))["calculator"]]
+                if "calculator" in config.get_ids(runtime_paths_for(config))
+                else []
+            ),
         )
-        mock_context.has_non_agent_mentions = False
-        mock_context.requires_full_thread_history = False
-        _set_mock_context_trust(mock_context)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
         # Mock should_agent_respond to return True
         with patch("mindroom.turn_policy.should_agent_respond", return_value=True):
@@ -908,16 +921,14 @@ class TestCommandHandling:
             install_generate_response_mock(bot, bot._generate_response)
 
             # Mock context extraction
-            mock_context = MagicMock()
-            mock_context.am_i_mentioned = False
-            mock_context.is_thread = True
-            mock_context.thread_id = "$thread123"
-            mock_context.thread_history = []
-            mock_context.mentioned_agents = []
-            mock_context.has_non_agent_mentions = False
-            mock_context.requires_full_thread_history = False
-            _set_mock_context_trust(mock_context)
-            bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+            mock_context = _message_context(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$thread123",
+            )
+            bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+                return_value=dispatch_context_result(mock_context),
+            )
 
             # Create a room and event with error message from router agent
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -1043,16 +1054,14 @@ class TestCommandHandling:
         install_generate_response_mock(bot, bot._generate_response)
 
         # Mock context extraction for router's error message
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False
-        mock_context.is_thread = True
-        mock_context.thread_id = "$thread123"
-        mock_context.thread_history = []
-        mock_context.requires_full_thread_history = False
-        _set_mock_context_trust(mock_context)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+        mock_context = _message_context(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread123",
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
         # Create router's error message event
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -1152,16 +1161,15 @@ class TestCommandHandling:
         ]
 
         # Mock context for the router error message
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.is_thread = True
-        mock_context.thread_id = "$thread123"
-        mock_context.thread_history = thread_history  # History before router error
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False  # Router doesn't mention anyone
-        mock_context.requires_full_thread_history = False
-        _set_mock_context_trust(mock_context)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+        mock_context = _message_context(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread123",
+            thread_history=thread_history,
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
         # Create room and event for router error
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -1267,28 +1275,33 @@ class TestCommandHandling:
         ]
 
         # Mock context for the router error message
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.is_thread = True
-        mock_context.thread_id = "$thread123"
-        mock_context.thread_history = [
-            *thread_history,
-            _message(
-                event_id="$router_error",
-                sender="@mindroom_router:localhost",
-                body="❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
-                content={
-                    "msgtype": "m.text",
-                    "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
-                    "m.mentions": {},
-                },
-            ),
-        ]
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False
-        mock_context.requires_full_thread_history = False
-        _set_mock_context_trust(mock_context)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+        mock_context = _message_context(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread123",
+            thread_history=[
+                *thread_history,
+                _message(
+                    event_id="$router_error",
+                    sender="@mindroom_router:localhost",
+                    body=(
+                        "❌ Unable to parse the schedule request\n\n"
+                        "💡 Try something like 'in 5 minutes Check the deployment'"
+                    ),
+                    content={
+                        "msgtype": "m.text",
+                        "body": (
+                            "❌ Unable to parse the schedule request\n\n"
+                            "💡 Try something like 'in 5 minutes Check the deployment'"
+                        ),
+                        "m.mentions": {},
+                    },
+                ),
+            ],
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
         # Create room and event for router error
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -1353,16 +1366,14 @@ class TestCommandHandling:
         install_generate_response_mock(bot, bot._generate_response)
 
         # Mock context extraction - no agents mentioned
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False  # No agents mentioned
-        mock_context.is_thread = True
-        mock_context.thread_id = "$thread123"
-        mock_context.thread_history = []
-        mock_context.requires_full_thread_history = False
-        _set_mock_context_trust(mock_context)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+        mock_context = _message_context(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread123",
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
         # Create a room and event with message from router agent without mentions
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -1577,16 +1588,14 @@ class TestRouterSkipsSingleAgent:
         bot._turn_controller._execute_router_relay = AsyncMock()
 
         # Create context with no mentions and no agents in thread
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False
-        mock_context.is_thread = False
-        mock_context.thread_id = None
-        mock_context.thread_history = []
-        mock_context.requires_full_thread_history = False
-        _set_mock_context_trust(mock_context)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+        mock_context = _message_context(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
         # Create room with only general agent (router is also there but excluded from available agents)
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -1667,16 +1676,14 @@ class TestRouterSkipsSingleAgent:
         bot._turn_controller._execute_router_relay = AsyncMock()
 
         # Create context with no mentions and no agents in thread
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False
-        mock_context.is_thread = False
-        mock_context.thread_id = None
-        mock_context.thread_history = []
-        mock_context.requires_full_thread_history = False
-        _set_mock_context_trust(mock_context)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+        mock_context = _message_context(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
         # Create room with multiple agents
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -1771,19 +1778,18 @@ class TestRouterSkipsSingleAgent:
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_router_relay = AsyncMock()
 
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False
-        mock_context.is_thread = True
-        mock_context.thread_id = "$thread1"
-        mock_context.thread_history = [
-            _message(sender="@alice:localhost", body="Can someone help?"),
-            _message(sender="@bob:localhost", body="I have the same question"),
-        ]
-        mock_context.requires_full_thread_history = False
-        _set_mock_context_trust(mock_context)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+        mock_context = _message_context(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread1",
+            thread_history=[
+                _message(sender="@alice:localhost", body="Can someone help?"),
+                _message(sender="@bob:localhost", body="I have the same question"),
+            ],
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
@@ -2027,16 +2033,14 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Create context for voice message
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False
-        mock_context.is_thread = False
-        mock_context.thread_id = None
-        mock_context.thread_history = []
-        mock_context.requires_full_thread_history = False
-        _set_mock_context_trust(mock_context)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+        mock_context = _message_context(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),

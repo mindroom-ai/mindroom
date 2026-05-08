@@ -23,6 +23,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    dispatch_context_result,
     drain_coalescing,
     install_runtime_cache_support,
     install_send_response_mock,
@@ -206,8 +207,10 @@ class TestResponseTrackingRegression:
         mock_context.thread_history = []
         mock_context.mentioned_agents = []
         mock_context.has_non_agent_mentions = False
-        mock_context.requires_full_thread_history = False
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=mock_context)
+        mock_context.requires_model_history_refresh = False
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
         bot._send_response = AsyncMock(return_value="$response_456")
         install_send_response_mock(bot, bot._send_response)
