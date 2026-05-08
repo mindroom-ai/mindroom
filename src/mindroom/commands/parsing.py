@@ -206,7 +206,7 @@ def get_command_help(topic: str | None = None) -> str:  # noqa: PLR0911
     if topic == "schedule":
         return """**Schedule Command**
 
-Usage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent workflows
+Usage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent/team workflows
 
 **Simple Reminders:**
 - `!schedule in 5 minutes Check the deployment`
@@ -222,7 +222,7 @@ Usage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent workfl
 - `!schedule When someone mentions our product on Reddit, @analyst summarize it`
 - `!schedule Whenever I get email from boss, @notification_agent alert me immediately`
 
-**Agent Workflows:**
+**Agent and Team Workflows:**
 - `!schedule Daily at 9am, @finance give me a market analysis`
 - `!schedule Every Monday, @research AI news and @email_assistant send me a summary`
 - `!schedule tomorrow at 2pm, @email_assistant check my Gmail`
@@ -235,8 +235,8 @@ Usage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent workfl
 How it works:
 - **Time-based**: Executes at specific times or intervals
 - **Event-based**: Automatically converts to smart polling (e.g., "if email" → check every 1-2 min)
-- Agents receive clear instructions about conditions to check
-- Multiple agents collaborate when mentioned together
+- Agents and teams receive clear instructions about conditions to check
+- Multiple agents or teams collaborate when mentioned together
 - Automated tasks are clearly marked and agents follow up when they fire"""
 
     if topic in {"reload-plugins", "reload_plugins"}:

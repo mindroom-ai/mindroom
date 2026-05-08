@@ -90,8 +90,8 @@ These are periodic checks, not real event subscriptions.
 !schedule When Bitcoin drops below $40k, @crypto_agent notify me
 ```
 
-Include `@agent_name` in your schedule to target specific agents.
-The scheduler validates that mentioned agents are available in the room before creating the task.
+Include `@agent_name` or `@team_name` in your schedule to target specific responders.
+The scheduler validates that mentioned agents and teams are available in the room before creating the task.
 
 Schedules use the timezone from `config.yaml` (defaults to UTC). See [Scheduling](https://docs.mindroom.chat/scheduling/index.md) for full details.
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from mindroom import model_loading
 from mindroom.ai_runtime import cached_agent_run
 from mindroom.logging_config import get_logger
+from mindroom.matrix import state as matrix_state
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -25,13 +26,31 @@ class _RoomTopic(BaseModel):
     topic: str = Field(description="The room topic - concise, informative, with emoji")
 
 
+def _configured_entity_display_names_for_room(
+    room_key: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[str]:
+    """Return configured agent and team display names for one room key or ID."""
+    entity_names: list[str] = []
+    for agent_name, agent_config in config.agents.items():
+        if room_key in matrix_state.resolve_room_aliases(agent_config.rooms, runtime_paths):
+            entity_names.append(agent_config.display_name or agent_name)
+
+    for team_name, team_config in config.teams.items():
+        if room_key in matrix_state.resolve_room_aliases(team_config.rooms, runtime_paths):
+            entity_names.append(team_config.display_name or team_name)
+
+    return entity_names
+
+
 async def generate_room_topic_ai(
     room_key: str,
     room_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str | None:
-    """Generate a contextual topic for a room using AI based on its purpose and configured agents.
+    """Generate a contextual topic for a room using AI based on its purpose and configured entities.
 
     Args:
         room_key: The room key/alias (e.g., 'dev', 'analysis', 'lobby')
@@ -43,15 +62,9 @@ async def generate_room_topic_ai(
         A contextual topic string for the room
 
     """
-    # Get agents configured for this room
-    agents_in_room = []
-    for agent_name, agent_config in config.agents.items():
-        if room_key in agent_config.rooms:
-            display_name = agent_config.display_name or agent_name
-            agents_in_room.append(display_name)
-
-    # Build agent list for the prompt
-    agent_list = ", ".join(agents_in_room)
+    configured_entity_list = ", ".join(
+        _configured_entity_display_names_for_room(room_key, config, runtime_paths),
+    )
 
     prompt = f"""Generate a concise, informative room topic for a MindRoom Matrix room.
 
@@ -66,11 +79,11 @@ MindRoom is a platform that frees AI agents from being trapped in single apps. K
 Room details:
 - Room key/alias: {room_key}
 - Room name: {room_name}
-- Configured agents: {agent_list or "No specific agents configured yet"}
+- Configured agents and teams: {configured_entity_list or "No specific agents or teams configured yet"}
 
 Create a topic that:
 1. Describes the room's purpose based on its name
-2. Mentions the AI agents or capabilities available
+2. Mentions the AI agents, teams, or capabilities available
 3. Highlights MindRoom's persistent memory or cross-platform nature when relevant
 4. Is welcoming and informative
 5. Uses 1-2 relevant emojis

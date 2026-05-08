@@ -56,9 +56,10 @@ Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`,
 
 Use `!help schedule` for detailed inline help on scheduling commands.
 
-## Agent Mentions
+## Agent and Team Mentions
 
-Include `@agent_name` in your schedule to have specific agents respond. The scheduler validates that mentioned agents are available in the room before creating the task.
+Include `@agent_name` or `@team_name` in your schedule to have specific responders answer.
+The scheduler validates that mentioned agents and teams are available in the room before creating the task.
 
 ## Timezone
 

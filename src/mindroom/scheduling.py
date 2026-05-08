@@ -1234,7 +1234,7 @@ async def _validate_agent_mentions(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _AgentValidationResult:
-    """Validate that all mentioned agents are accessible.
+    """Validate that all mentioned agents or teams are accessible.
 
     Args:
         message: The message that may contain @agent mentions
@@ -1389,7 +1389,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if workflow_result.schedule_type == "cron" and not workflow_result.cron_schedule:
         return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
 
-    # Validate that all mentioned agents are accessible
+    # Validate that all mentioned agents or teams are accessible.
     validation_result = await _validate_agent_mentions(
         workflow_result.message,
         sender_visible_room_agents,

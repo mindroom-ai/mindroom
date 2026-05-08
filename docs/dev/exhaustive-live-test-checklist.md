@@ -439,8 +439,8 @@ Expected outcome: The recurring schedule persists and runs repeatedly at the int
 - [ ] `SCH-003` Create a conditional or event-driven schedule.
 Expected outcome: The runtime materializes the condition as a polling or recurring workflow rather than ignoring the condition text.
 
-- [ ] `SCH-004` Mention specific agents inside a schedule request.
-Expected outcome: Schedule creation validates that the mentioned agents are available in the room and rejects impossible targets clearly.
+- [ ] `SCH-004` Mention specific agents or teams inside a schedule request.
+Expected outcome: Schedule creation validates that the mentioned agents or teams are available in the room and rejects impossible targets clearly.
 
 - [ ] `SCH-005` Use list, edit, cancel-one, and cancel-all schedule flows.
 Expected outcome: Schedule APIs and command flows update the same underlying state and later UI or command views reflect the changes immediately.

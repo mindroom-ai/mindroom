@@ -134,7 +134,7 @@ get_upcoming_bookings(email="alex@example.com")
 
 ## [`scheduler`]
 
-`scheduler` is MindRoom's built-in task scheduler for future messages, reminders, and recurring agent work.
+`scheduler` is MindRoom's built-in task scheduler for future messages, reminders, and recurring agent or team work.
 
 ### What It Does
 
@@ -142,7 +142,7 @@ get_upcoming_bookings(email="alex@example.com")
 It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
 By default `schedule()` posts back into the current room or thread scope, while `new_thread=True` schedules a future room-level root message.
 Scheduled tasks are stored in Matrix room state and persist across restarts.
-The scheduler validates mentioned agents against the current room or thread before it saves a task.
+The scheduler validates mentioned agents and teams against the current room or thread before it saves a task.
 If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
 
 ### Configuration

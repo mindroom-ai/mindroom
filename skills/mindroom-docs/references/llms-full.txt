@@ -7162,11 +7162,11 @@ get_upcoming_bookings(email="alex@example.com")
 
 ## \[`scheduler`\]
 
-`scheduler` is MindRoom's built-in task scheduler for future messages, reminders, and recurring agent work.
+`scheduler` is MindRoom's built-in task scheduler for future messages, reminders, and recurring agent or team work.
 
 ### What It Does
 
-`scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`. It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`. By default `schedule()` posts back into the current room or thread scope, while `new_thread=True` schedules a future room-level root message. Scheduled tasks are stored in Matrix room state and persist across restarts. The scheduler validates mentioned agents against the current room or thread before it saves a task. If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
+`scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`. It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`. By default `schedule()` posts back into the current room or thread scope, while `new_thread=True` schedules a future room-level root message. Scheduled tasks are stored in Matrix room state and persist across restarts. The scheduler validates mentioned agents and teams against the current room or thread before it saves a task. If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
 
 ### Configuration
 
@@ -10698,7 +10698,7 @@ Agents inherit `learning` and `learning_mode` from `defaults` unless explicitly 
 
 # Voice Messages
 
-MindRoom can surface Matrix voice messages as attachment-aware prompts for agents. If STT is configured, MindRoom also transcribes the audio and routes it through the normal text pipeline. If STT is unavailable, disabled, or fails, the audio still remains available as an attachment and falls back to `🎤 [Attached voice message]`.
+MindRoom can surface Matrix voice messages as attachment-aware prompts for agents and teams. If STT is configured, MindRoom also transcribes the audio and routes it through the normal text pipeline. If STT is unavailable, disabled, or fails, the audio still remains available as an attachment and falls back to `🎤 [Attached voice message]`.
 
 ## Overview
 
@@ -10787,14 +10787,14 @@ If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment
 The intelligence component uses an AI model to analyze transcriptions and format them properly:
 
 1. **Agent mentions** - Converts spoken agent names to `@agent` format
-1. **Mention sanitization** - Mentions of agents not available in the current room have their `@` stripped so the agent is not falsely targeted
+1. **Mention sanitization** - Mentions of agents or teams not available in the current room have their `@` stripped so the responder is not falsely targeted
 1. **Command patterns** - Identifies and formats `!command` syntax
 1. **Speculative command rejection** - Commands the AI invents that were not in the original transcription are rejected to prevent false positives
 1. **Smart formatting** - Handles speech recognition errors and natural language variations
 
 ### Intelligence Model
 
-The intelligence model processes raw transcriptions to recognize commands and agent names:
+The intelligence model processes raw transcriptions to recognize commands, agent names, and team names:
 
 ```
 voice:
@@ -10829,32 +10829,32 @@ You can specify a different model for faster or more accurate command recognitio
                                                            └──────┬─────┘
                                                                   ▼
                                                            ┌─────────────┐
-                                                           │ Agent       │
+                                                           │ Entity      │
                                                            │ Responds    │
                                                            └─────────────┘
 ```
 
 ## Dispatch Behavior
 
-### Single-agent rooms or explicitly targeted audio
+### Single-responder rooms or explicitly targeted audio
 
-If only one eligible agent is visible, that agent responds directly to the normalized audio event. If the audio caption or transcript explicitly mentions an agent, that targeted agent responds directly as well. In these cases, the router does not post an extra visible routing handoff. The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message. If `voice.visible_router_echo` is enabled, the router still posts a display-only copy of the normalized voice text, but agents ignore that echo and continue responding to the original audio event.
+If only one eligible agent or team is visible, that responder answers the normalized audio event directly. If the audio caption or transcript explicitly mentions an agent or team, that targeted responder answers directly as well. In these cases, the router does not post an extra visible routing handoff. The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message. If `voice.visible_router_echo` is enabled, the router still posts a display-only copy of the normalized voice text, but responders ignore that echo and continue responding to the original audio event.
 
-### Multi-agent rooms where the router must choose
+### Multi-responder rooms where the router must choose
 
-If multiple agents are available and the audio does not already target one of them, the router uses the normalized text to do the usual routing step. The router then posts a normal handoff message such as `@home could you help with this?`. The selected agent responds to that router handoff, and the handoff carries the original audio attachment metadata forward. This is the case where a visible router message appears. If `voice.visible_router_echo` is also enabled, the router first posts the normalized voice text as a display-only echo and then posts the normal handoff.
+If multiple agents or teams are available and the audio does not already target one of them, the router uses the normalized text to do the usual routing step. The router then posts a normal handoff message such as `@home could you help with this?`. The selected agent or team responds to that router handoff, and the handoff carries the original audio attachment metadata forward. This is the case where a visible router message appears. If `voice.visible_router_echo` is also enabled, the router first posts the normalized voice text as a display-only echo and then posts the normal handoff.
 
 ### No router, or router cannot reply
 
-Audio still works when the router is absent. In that case, agents handle the normalized audio directly using the same mention, thread, and permission rules as normal text messages. The same direct handling also applies when the router is present but is not allowed to reply to the original sender. In these cases, there is no visible router echo because the router does not handle the event. If multiple eligible agents remain and the audio does not already target one of them, there is no automatic handoff until the user mentions an agent.
+Audio still works when the router is absent. In that case, agents and teams handle the normalized audio directly using the same mention, thread, and permission rules as normal text messages. The same direct handling also applies when the router is present but is not allowed to reply to the original sender. In these cases, there is no visible router echo because the router does not handle the event. If multiple eligible responders remain and the audio does not already target one of them, there is no automatic handoff until the user mentions an agent or team.
 
 ### Visibility rule
 
-By default, MindRoom posts a display-only router echo of normalized voice text when the router is allowed to process the event. The router handoff message still appears only when the router must disambiguate between multiple eligible responders. If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent replies directly to the original audio event. Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event agents actually answer.
+By default, MindRoom posts a display-only router echo of normalized voice text when the router is allowed to process the event. The router handoff message appears only when the router must disambiguate between multiple eligible responders. If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent or team replies directly to the original audio event. Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event agents actually answer.
 
 ### Attachment access
 
-The original audio is always registered as a context-scoped attachment before dispatch continues. That means the responding agent can inspect the file directly, use audio-capable models, or fetch it later with the `attachments` tool. This is true whether the prompt came from a transcript, a fallback message, or a router handoff.
+The original audio is always registered as a context-scoped attachment before dispatch continues. That means the responding agent or team can inspect the file directly, use audio-capable models, or fetch it later with the `attachments` tool. This is true whether the prompt came from a transcript, a fallback message, or a router handoff.
 
 ## Matrix Integration
 
@@ -10892,17 +10892,17 @@ When STT is unavailable, disabled, or transcription fails, MindRoom falls back t
 
 1. The voice message audio is downloaded and saved locally as an attachment
 1. The normalized text becomes `🎤 [Attached voice message]`
-1. The raw audio is registered as an attachment ID available to agents in the room or thread context
-1. When an agent responds, it automatically receives the raw audio as an Agno `Audio` object
+1. The raw audio is registered as an attachment ID available to agents and teams in the room or thread context
+1. When an agent or team responds, it automatically receives the raw audio as an Agno `Audio` object
 
-This means voice messages still reach agents even without STT. Agents with audio-capable models can process the raw audio directly, and tool-using agents can retrieve the file by attachment ID. Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md).
+This means voice messages still reach responders even without STT. Agents or teams with audio-capable models can process the raw audio directly, and tool-using responders can retrieve the file by attachment ID. Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md).
 
 ## Limitations
 
 - Only OpenAI-compatible STT APIs are supported
 - Audio quality and background noise affect transcription accuracy
 - Without STT, routing has less textual context, so explicit `@mentions` or existing thread context are more reliable in multi-responder rooms
-- Without STT, agents receive raw audio instead of transcription, so the model or tools must support audio inputs to process it
+- Without STT, responders receive raw audio instead of transcription, so the model or tools must support audio inputs to process it
 
 ## Tips
 
@@ -11174,7 +11174,7 @@ Conditional requests are converted to recurring cron-based polling schedules. Th
 !schedule When Bitcoin drops below $40k, @crypto_agent notify me
 ```
 
-Include `@agent_name` in your schedule to target specific agents. The scheduler validates that mentioned agents are available in the room before creating the task.
+Include `@agent_name` or `@team_name` in your schedule to target specific responders. The scheduler validates that mentioned agents and teams are available in the room before creating the task.
 
 Schedules use the timezone from `config.yaml` (defaults to UTC). See [Scheduling](https://docs.mindroom.chat/scheduling/index.md) for full details.
 
@@ -11594,9 +11594,9 @@ Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`,
 
 Use `!help schedule` for detailed inline help on scheduling commands.
 
-## Agent Mentions
+## Agent and Team Mentions
 
-Include `@agent_name` in your schedule to have specific agents respond. The scheduler validates that mentioned agents are available in the room before creating the task.
+Include `@agent_name` or `@team_name` in your schedule to have specific responders answer. The scheduler validates that mentioned agents and teams are available in the room before creating the task.
 
 ## Timezone
 

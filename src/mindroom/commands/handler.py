@@ -157,7 +157,7 @@ def generate_welcome_message(room_id: str, config: Config, runtime_paths: Runtim
         "• Mention an agent or team with @ to get their attention (e.g., @mindroom_assistant)\n"
         "• Use `!help` to see available commands\n"
         "• Agents stay in existing Matrix threads, including compatible plain replies from bridges and non-thread clients\n"
-        "• Multiple agents can collaborate when you mention them together\n"
+        "• Multiple agents or teams can collaborate when you mention them together\n"
         "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
         "⚡ **Quick commands:**\n"
         f"{quick_commands}\n\n"
@@ -220,7 +220,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]
 
-        # Get mentioned agents from the command text
+        # Get mentioned MindRoom entities from the command text.
         mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
 
         _, response_text = await schedule_task(
