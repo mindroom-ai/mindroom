@@ -47,7 +47,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.turn_controller import _PrecheckedEvent, _PreparedDispatchResult
+from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
@@ -67,10 +67,6 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def _dispatch_from_prepare_result(result: _PreparedDispatchResult | None) -> PreparedDispatch | None:
-    return None if result is None else result.dispatch
 
 
 def _config(tmp_path: Path) -> Config:
@@ -661,14 +657,12 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.record_turn = MagicMock()
 
-    dispatch = _dispatch_from_prepare_result(
-        await bot._turn_controller._prepare_dispatch(
-            room,
-            event,
-            "@mindroom_router:localhost",
-            event_label="message",
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-        ),
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@mindroom_router:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     assert dispatch is not None
@@ -722,14 +716,12 @@ async def test_prepare_dispatch_builds_target_via_conversation_resolver(tmp_path
         "build_message_target",
         return_value=expected_target,
     ) as mock_build_message_target:
-        dispatch = _dispatch_from_prepare_result(
-            await bot._turn_controller._prepare_dispatch(
-                room,
-                event,
-                "@user:localhost",
-                event_label="message",
-                handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-            ),
+        dispatch = await bot._turn_controller._prepare_dispatch(
+            room,
+            event,
+            "@user:localhost",
+            event_label="message",
+            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
         )
 
     assert dispatch is not None
@@ -778,15 +770,13 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock()
 
-    dispatch = _dispatch_from_prepare_result(
-        await bot._turn_controller._prepare_dispatch(
-            room,
-            event,
-            "@user:localhost",
-            event_label="message",
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-            ingress_metadata=DispatchIngressMetadata(source_kind="trusted_internal_relay"),
-        ),
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@user:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+        ingress_metadata=DispatchIngressMetadata(source_kind="trusted_internal_relay"),
     )
 
     assert dispatch is not None
@@ -850,15 +840,13 @@ async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_r
         return_value=dispatch_context_result(standard_context),
     )
 
-    dispatch = _dispatch_from_prepare_result(
-        await bot._turn_controller._prepare_dispatch(
-            room,
-            event,
-            "@user:localhost",
-            event_label="message",
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-            ingress_metadata=DispatchIngressMetadata(source_kind="trusted_internal_relay"),
-        ),
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@user:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+        ingress_metadata=DispatchIngressMetadata(source_kind="trusted_internal_relay"),
     )
 
     assert dispatch is not None
@@ -1145,14 +1133,12 @@ async def test_prepare_dispatch_marks_all_source_events_when_hooks_suppress_batc
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.record_turn = MagicMock()
 
-    dispatch = _dispatch_from_prepare_result(
-        await bot._turn_controller._prepare_dispatch(
-            room,
-            event,
-            "@user:localhost",
-            event_label="message",
-            handled_turn=HandledTurnState.create(["$m1", "$m2"]),
-        ),
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@user:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.create(["$m1", "$m2"]),
     )
 
     assert dispatch is None
@@ -1342,14 +1328,12 @@ async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: P
         return_value=dispatch_context_result(no_mention_context),
     )
 
-    dispatch = _dispatch_from_prepare_result(
-        await bot._turn_controller._prepare_dispatch(
-            room,
-            event,
-            "@mindroom_router:localhost",
-            event_label="message",
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-        ),
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@mindroom_router:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     # Should NOT be filtered despite sender being an agent and no mention
@@ -1397,14 +1381,12 @@ async def test_prepare_dispatch_reruns_message_received_for_hook_dispatch_from_n
         ),
     )
 
-    dispatch = _dispatch_from_prepare_result(
-        await bot._turn_controller._prepare_dispatch(
-            room,
-            event,
-            "@mindroom_router:localhost",
-            event_label="message",
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-        ),
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@mindroom_router:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     assert dispatch is not None
@@ -1459,14 +1441,12 @@ async def test_hook_dispatch_from_message_received_reenters_once_and_skips_origi
         ),
     )
 
-    dispatch = _dispatch_from_prepare_result(
-        await bot._turn_controller._prepare_dispatch(
-            room,
-            event,
-            "@mindroom_router:localhost",
-            event_label="message",
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-        ),
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@mindroom_router:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     assert dispatch is not None
@@ -1523,14 +1503,12 @@ async def test_hook_dispatch_from_message_received_stops_reentry_after_first_syn
         ),
     )
 
-    dispatch = _dispatch_from_prepare_result(
-        await bot._turn_controller._prepare_dispatch(
-            room,
-            event,
-            "@mindroom_router:localhost",
-            event_label="message",
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-        ),
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@mindroom_router:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     assert dispatch is not None
@@ -1974,14 +1952,12 @@ async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_pat
         return_value=dispatch_context_result(no_mention_context),
     )
 
-    dispatch = _dispatch_from_prepare_result(
-        await bot._turn_controller._prepare_dispatch(
-            room,
-            event,
-            "@mindroom_router:localhost",
-            event_label="message",
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-        ),
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        event,
+        "@mindroom_router:localhost",
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     # Plain hook messages without mention should still be filtered
@@ -2025,14 +2001,12 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
     assert prechecked is not None
     assert prechecked.requester_user_id == "@mindroom_router:localhost"
 
-    dispatch = _dispatch_from_prepare_result(
-        await bot._turn_controller._prepare_dispatch(
-            room,
-            prechecked.event,
-            prechecked.requester_user_id,
-            event_label="message",
-            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
-        ),
+    dispatch = await bot._turn_controller._prepare_dispatch(
+        room,
+        prechecked.event,
+        prechecked.requester_user_id,
+        event_label="message",
+        handled_turn=HandledTurnState.from_source_event_id(event.event_id),
     )
 
     assert dispatch is not None

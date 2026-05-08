@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence  # noqa: TC003
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -484,6 +485,29 @@ class ConversationResolver:
         else:
             return resolution.thread_id or resolution.candidate_thread_root_id
 
+    async def dispatch_thread_snapshot_for_router_pre_ingress_skip(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> ThreadReadResult | None:
+        """Return thread snapshot for the router's optional early-skip check."""
+        try:
+            return await self.deps.conversation_cache.get_dispatch_thread_snapshot(
+                room_id,
+                thread_id,
+                caller_label="router_pre_ingress_skip",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.deps.logger.warning(
+                "Router pre-ingress skip ignored thread snapshot failure",
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+            return None
+
     async def _explicit_thread_id_for_event(
         self,
         room_id: str,
@@ -604,24 +628,6 @@ class ConversationResolver:
             raise RuntimeError(msg)
         return EventInfo.from_event(target_event.event.source)
 
-    async def derive_conversation_context(
-        self,
-        room_id: str,
-        event_info: EventInfo,
-        *,
-        event_id: str | None = None,
-        caller_label: str = "unknown",
-    ) -> tuple[bool, str | None, Sequence[ResolvedVisibleMessage]]:
-        """Derive conversation context from canonical Matrix thread membership."""
-        context_lookup = await self._resolve_thread_context(
-            room_id,
-            event_id,
-            event_info,
-            mode=ThreadReadMode.ADVISORY_FULL,
-            caller_label=caller_label,
-        )
-        return context_lookup.is_thread, context_lookup.thread_id, context_lookup.thread_history
-
     async def _resolve_thread_context(
         self,
         room_id: str,
@@ -675,35 +681,17 @@ class ConversationResolver:
     async def extract_dispatch_context(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
-        *,
-        payload_metadata: DispatchPayloadMetadata | None = None,
-        caller_label: str = "dispatch_context",
-    ) -> _DispatchContextResult:
-        """Extract bounded full routing context for live dispatch planning."""
-        context, thread_context = await self._extract_message_context_parts(
-            room,
-            event,
-            mode=ThreadReadMode.DISPATCH_FULL,
-            include_dispatch_context=True,
-            payload_metadata=payload_metadata,
-            caller_label=caller_label,
-        )
-        return _DispatchContextResult(context=context, thread_context=thread_context)
-
-    async def extract_dispatch_command_context(
-        self,
-        room: nio.MatrixRoom,
         event: DispatchEvent | MatrixMediaEvent,
         *,
         payload_metadata: DispatchPayloadMetadata | None = None,
-        caller_label: str = "dispatch_command_context",
+        mode: ThreadReadMode = ThreadReadMode.DISPATCH_FULL,
+        caller_label: str = "dispatch_context",
     ) -> _DispatchContextResult:
-        """Extract bounded target context for command dispatch without full policy history."""
+        """Extract bounded dispatch context using the requested thread read mode."""
         context, thread_context = await self._extract_message_context_parts(
             room,
             event,
-            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+            mode=mode,
             include_dispatch_context=True,
             payload_metadata=payload_metadata,
             caller_label=caller_label,
@@ -769,9 +757,10 @@ class ConversationResolver:
         caller_label: str,
     ) -> MessageTarget:
         """Resolve a bounded stable target for non-response dispatch helpers."""
-        context_result = await self.extract_dispatch_command_context(
+        context_result = await self.extract_dispatch_context(
             room,
             event,
+            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
             caller_label=caller_label,
         )
         if context_result.thread_context is not None:

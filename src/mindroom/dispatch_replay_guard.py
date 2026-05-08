@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.commands.parsing import command_parser
@@ -20,6 +21,14 @@ type _HandledLookup = Callable[[str], bool]
 type _RecentRoomEventsLookup = Callable[..., Awaitable[Sequence[dict[str, Any]]]]
 # Implementations fail open by returning None after logging lookup failures.
 type _ThreadIdForEventLookup = Callable[[str, str], Awaitable[str | None]]
+
+
+@dataclass(frozen=True)
+class _CachedEventView:
+    """Minimal event view used for trusted source-kind checks on raw cache rows."""
+
+    sender: str
+    source: Mapping[str, object]
 
 
 def _is_automation_event(event: TextDispatchEvent, source_kind: str | None) -> bool:
@@ -100,6 +109,7 @@ def _unresponded_requester_event_id(
     skipped_event_id: str,
     requester_user_id: str,
     requester_user_id_for_event: _RequesterResolver,
+    sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
 ) -> str | None:
     """Return an unhandled requester event id from a cached event source when eligible."""
@@ -115,7 +125,12 @@ def _unresponded_requester_event_id(
         return None
     content = event_source.get("content")
     body = content.get("body") if isinstance(content, dict) else None
-    if isinstance(body, str) and command_parser.parse(body.strip()) is not None:
+    event_view = _CachedEventView(sender=sender, source=event_source)
+    if (
+        isinstance(body, str)
+        and not is_voice_event(event_view, sender_is_trusted=sender_is_trusted_for_ingress_metadata)
+        and command_parser.parse(body.strip()) is not None
+    ):
         return None
     return event_id
 
@@ -129,6 +144,7 @@ async def _newer_unresponded_cached_thread_event_id(
     thread_id: str,
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
     requester_user_id_for_event: _RequesterResolver,
+    sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
 ) -> str | None:
     """Return the first newer cached event with positive same-thread proof."""
@@ -145,6 +161,7 @@ async def _newer_unresponded_cached_thread_event_id(
             skipped_event_id=skipped_event_id,
             requester_user_id=requester_user_id,
             requester_user_id_for_event=requester_user_id_for_event,
+            sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
             is_handled=is_handled,
         )
         if event_id is not None:
@@ -162,6 +179,7 @@ async def has_newer_unresponded_cached_thread_event(
     get_recent_room_events: _RecentRoomEventsLookup | None,
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
     requester_user_id_for_event: _RequesterResolver,
+    sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
     is_handled: _HandledLookup,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
@@ -195,6 +213,7 @@ async def has_newer_unresponded_cached_thread_event(
         thread_id=thread_id,
         get_thread_id_for_event=get_thread_id_for_event,
         requester_user_id_for_event=requester_user_id_for_event,
+        sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
         is_handled=is_handled,
     )
     if event_id is not None:

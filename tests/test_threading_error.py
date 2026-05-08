@@ -9074,18 +9074,11 @@ class TestThreadingBehavior:
             patch.object(bot._conversation_cache, "get_thread_history", AsyncMock()) as mock_read,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
-            is_thread, thread_id, history = await bot._conversation_resolver.derive_conversation_context(
-                room.room_id,
-                EventInfo.from_event(event.source),
-                event_id=event.event_id,
-                caller_label="advisory_missing_related_test",
-            )
 
         assert context.is_thread is False
         assert context.thread_id is None
         assert context.thread_history == []
         assert context.requires_model_history_refresh is False
-        assert (is_thread, thread_id, history) == (False, None, [])
         mock_read.assert_not_awaited()
 
     @pytest.mark.asyncio

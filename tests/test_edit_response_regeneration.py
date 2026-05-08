@@ -565,7 +565,6 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
     )
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
     bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")

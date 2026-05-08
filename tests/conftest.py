@@ -424,6 +424,7 @@ def make_conversation_cache_mock() -> AsyncMock:
         return_value=thread_history_result([], is_full_history=False),
     )
     conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=[])
+    conversation_cache.get_strict_thread_history = AsyncMock(return_value=[])
 
     conversation_cache.get_thread_id_for_event = AsyncMock(return_value=None)
     conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)

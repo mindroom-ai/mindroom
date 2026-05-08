@@ -67,6 +67,7 @@ from mindroom.inbound_turn_normalizer import (
 )
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import extract_agent_name, is_agent_id
 from mindroom.matrix.media import (
@@ -112,7 +113,6 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.dispatch_thread_context import DispatchThreadContext
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -178,14 +178,6 @@ class _PrecheckedEvent[T]:
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
 type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
-
-
-@dataclass(frozen=True)
-class _PreparedDispatchResult:
-    """Prepared dispatch plus dispatch-local thread evidence."""
-
-    dispatch: PreparedDispatch
-    thread_context: DispatchThreadContext | None
 
 
 @dataclass(frozen=True)
@@ -401,6 +393,7 @@ class TurnController:
                 sender=sender,
                 source=source,
             ),
+            sender_is_trusted_for_ingress_metadata=self._sender_is_trusted_for_ingress_metadata,
             is_handled=self.deps.turn_store.is_handled,
             logger=self.deps.logger,
         )
@@ -587,11 +580,11 @@ class TurnController:
         thread_id: str | None,
     ) -> bool:
         """Return whether the router can safely skip shared ingress work for one text event."""
-        if self.deps.agent_name != ROUTER_AGENT_NAME:
-            return False
-        if command_parser.parse(event.body.strip()) is not None:
-            return False
-        if is_v2_sidecar_text_preview(event.source):
+        if (
+            self.deps.agent_name != ROUTER_AGENT_NAME
+            or command_parser.parse(event.body.strip()) is not None
+            or is_v2_sidecar_text_preview(event.source)
+        ):
             return False
 
         mentioned_agents, _am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
@@ -605,11 +598,12 @@ class TurnController:
         if thread_id is None:
             return False
 
-        thread_history = await self.deps.conversation_cache.get_dispatch_thread_snapshot(
+        thread_history = await self.deps.resolver.dispatch_thread_snapshot_for_router_pre_ingress_skip(
             room.room_id,
             thread_id,
-            caller_label="router_pre_ingress_skip",
         )
+        if thread_history is None:
+            return False
         return thread_requires_explicit_agent_targeting(
             thread_history,
             sender_id=requester_user_id,
@@ -826,14 +820,16 @@ class TurnController:
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
         use_command_context: bool = False,
-    ) -> _PreparedDispatchResult | None:
+    ) -> PreparedDispatch | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
         if use_command_context:
-            dispatch_context_result = await self.deps.resolver.extract_dispatch_command_context(
+            dispatch_context_result = await self.deps.resolver.extract_dispatch_context(
                 room,
                 event,
+                mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                 payload_metadata=payload_metadata,
+                caller_label="dispatch_command_context",
             )
             emit_elapsed_timing(
                 "dispatch_handoff.prepare_dispatch.extract_context",
@@ -933,14 +929,14 @@ class TurnController:
             )
             return None
 
-        dispatch = PreparedDispatch(
+        return PreparedDispatch(
             requester_user_id=requester_user_id,
             context=context,
             target=target,
             correlation_id=correlation_id,
             envelope=envelope,
+            thread_context=thread_context,
         )
-        return _PreparedDispatchResult(dispatch=dispatch, thread_context=thread_context)
 
     async def _execute_command(
         self,
@@ -1711,7 +1707,7 @@ class TurnController:
             command = None
             if not media_events and (ingress_metadata is None or ingress_metadata.source_kind != "voice"):
                 command = command_parser.parse(event.body)
-            prepared_dispatch_result = await self._prepare_dispatch(
+            dispatch = await self._prepare_dispatch(
                 room,
                 event,
                 requester_user_id,
@@ -1723,10 +1719,9 @@ class TurnController:
             )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_ready")
-            if prepared_dispatch_result is None:
+            if dispatch is None:
                 return
-            dispatch = prepared_dispatch_result.dispatch
-            thread_context = prepared_dispatch_result.thread_context
+            thread_context = dispatch.thread_context
             handled_turn = handled_turn.with_request_context(
                 requester_id=dispatch.requester_user_id,
                 correlation_id=dispatch.correlation_id,

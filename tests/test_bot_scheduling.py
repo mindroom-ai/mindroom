@@ -773,7 +773,6 @@ class TestCommandHandling:
             bot._send_response = AsyncMock(return_value="$router_reply")
             _sync_turn_policy_runtime(bot)
             install_send_response_mock(bot, bot._send_response)
-            bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
 
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             room.users = {

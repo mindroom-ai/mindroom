@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 
     from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, TextDispatchEvent
+    from mindroom.dispatch_thread_context import DispatchThreadContext
     from mindroom.message_target import MessageTarget
 
 
@@ -79,6 +80,7 @@ class PreparedDispatch:
     target: MessageTarget
     correlation_id: str
     envelope: MessageEnvelope
+    thread_context: DispatchThreadContext | None = None
 
 
 @dataclass(frozen=True)

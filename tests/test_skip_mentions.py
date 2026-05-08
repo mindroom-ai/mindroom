@@ -98,7 +98,6 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
     bot.client = AsyncMock()
     bot.client.user_id = bot.agent_user.user_id
     bot.logger = MagicMock()
-    bot._conversation_resolver.derive_conversation_context = AsyncMock(return_value=(False, None, []))
     sync_bot_runtime_state(bot)
     return bot
 
