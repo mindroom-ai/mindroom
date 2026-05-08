@@ -557,9 +557,6 @@ async def _refresh_knowledge_binding_locked(
         error = redact_credentials_in_text(str(exc))
         await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
         raise
-    if manager._git_config() is not None:
-        manager._mark_git_initial_sync_complete()
-
     return await _refresh_result_from_persisted_state(
         key,
         indexed_count=indexed_count,
@@ -592,7 +589,6 @@ async def _maybe_publish_unchanged_index(
             manager,
             key,
             published_revision=manager._git_last_successful_commit,
-            mark_git_initial_sync_complete=True,
         )
     if force_reindex:
         await mark_knowledge_source_changed_async(
@@ -686,7 +682,6 @@ async def _publish_unchanged_index(
     key: PublishedIndexKey,
     *,
     published_revision: str | None = None,
-    mark_git_initial_sync_complete: bool = False,
     mark_stale_on_source_change: bool = False,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeRefreshResult | None:
@@ -719,8 +714,6 @@ async def _publish_unchanged_index(
         return None
 
     updated_state = state
-    if mark_git_initial_sync_complete:
-        manager._mark_git_initial_sync_complete()
     if state.settings != key.indexing_settings:
         updated_state = replace(updated_state, settings=key.indexing_settings)
     if published_revision is not None:

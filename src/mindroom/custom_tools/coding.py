@@ -47,7 +47,6 @@ class _TruncateResult:
     content: str
     was_truncated: bool
     total_lines: int
-    shown_lines: int
 
 
 def _truncate_head(
@@ -71,7 +70,6 @@ def _truncate_head(
         content=result,
         was_truncated=len(kept) < total,
         total_lines=total,
-        shown_lines=len(kept),
     )
 
 
@@ -147,7 +145,6 @@ class _MatchResult:
 
     start: int
     end: int
-    matched_text: str
     was_fuzzy: bool
 
 
@@ -256,7 +253,7 @@ def _find_all_matches(content: str, old_text: str) -> list[_MatchResult]:
         idx = content.find(old_text, pos)
         if idx == -1:
             break
-        matches.append(_MatchResult(start=idx, end=idx + len(old_text), matched_text=old_text, was_fuzzy=False))
+        matches.append(_MatchResult(start=idx, end=idx + len(old_text), was_fuzzy=False))
         pos = idx + len(old_text)
     if matches:
         return matches
@@ -285,7 +282,6 @@ def _find_all_matches(content: str, old_text: str) -> list[_MatchResult]:
             _MatchResult(
                 start=orig_start,
                 end=orig_end,
-                matched_text=content[orig_start:orig_end],
                 was_fuzzy=True,
             ),
         )

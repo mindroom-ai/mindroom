@@ -112,5 +112,4 @@ def test_stream_transport_outcome_accepts_placeholder_only_visible_state() -> No
     )
 
     assert outcome.last_physical_stream_event_id == "$thinking"
-    assert outcome.has_any_physical_stream_event is True
-    assert outcome.has_rendered_visible_body is False
+    assert outcome.visible_body_state == "placeholder_only"

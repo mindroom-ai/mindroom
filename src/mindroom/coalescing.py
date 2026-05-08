@@ -166,10 +166,6 @@ class CoalescingGate:
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._retired_in_flight_drain_tasks: set[asyncio.Task[None]] = set()
 
-    def is_idle(self) -> bool:
-        """Return whether all coalescing gates are currently idle."""
-        return not self._gates and not any(not task.done() for task in self._retired_in_flight_drain_tasks)
-
     def _track_retired_in_flight_drain(self, task: asyncio.Task[None]) -> None:
         self._retired_in_flight_drain_tasks.add(task)
         task.add_done_callback(self._retired_in_flight_drain_tasks.discard)

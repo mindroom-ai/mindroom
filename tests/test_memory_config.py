@@ -480,7 +480,6 @@ class TestMemoryConfig:
         assert config.memory.backend == "none"
         assert config.get_agent_memory_backend("scratch") == "none"
         assert config.uses_file_memory() is False
-        assert config.uses_mem0_memory() is False
 
     def test_config_accepts_per_agent_disabled_memory_backend(self) -> None:
         """Per-agent memory_backend should support disabling memory for one agent."""
@@ -496,4 +495,3 @@ class TestMemoryConfig:
         assert config.get_agent_memory_backend("general") == "mem0"
         assert config.get_agent_memory_backend("scratch") == "none"
         assert config.uses_file_memory() is False
-        assert config.uses_mem0_memory() is True

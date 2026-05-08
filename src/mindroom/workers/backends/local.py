@@ -34,7 +34,6 @@ class LocalWorkerStatePaths:
     workspace: Path
     venv_dir: Path
     cache_dir: Path
-    storage_dir: Path
     metadata_dir: Path
     metadata_file: Path
 
@@ -95,7 +94,6 @@ def _local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePath
         workspace=resolved_root / "workspace",
         venv_dir=resolved_root / "venv",
         cache_dir=resolved_root / "cache",
-        storage_dir=resolved_root,
         metadata_dir=metadata_dir,
         metadata_file=metadata_dir / "worker.json",
     )

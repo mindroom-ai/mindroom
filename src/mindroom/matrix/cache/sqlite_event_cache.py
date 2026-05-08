@@ -277,11 +277,6 @@ class _SqliteEventCacheRuntime:
         return self._db
 
     @property
-    def room_locks(self) -> dict[str, _RoomLockEntry]:
-        """Return the cached room-lock table for observability and tests."""
-        return self._room_locks
-
-    @property
     def is_initialized(self) -> bool:
         """Return whether the SQLite connection is currently open."""
         return self._db is not None

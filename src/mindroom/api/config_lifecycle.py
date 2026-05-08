@@ -157,23 +157,7 @@ def _load_config_result(
         return ConfigLoadResult(success=True), validated_payload, runtime_config
 
 
-def _load_runtime_config(runtime_paths: constants.RuntimePaths) -> tuple[Config, constants.RuntimePaths]:
-    """Load the current runtime config and raise HTTPException on user-facing failures."""
-    try:
-        return (
-            load_runtime_config_model(
-                runtime_paths,
-                tolerate_plugin_load_errors=True,
-            ),
-            runtime_paths,
-        )
-    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        raise HTTPException(status_code=422, detail=_config_error_detail(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to load configuration: {exc!s}") from exc
-
-
-def raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
+def _raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
     """Raise HTTPException when the cached config state reflects a failed load."""
     if result is None or result.success:
         return
@@ -380,7 +364,7 @@ def _build_mutated_config[T](
     runtime_paths: constants.RuntimePaths,
 ) -> tuple[T, dict[str, Any], Config]:
     """Build one validated config payload from a committed snapshot off-lock."""
-    raise_for_config_load_result(snapshot.config_load_result)
+    _raise_for_config_load_result(snapshot.config_load_result)
     if not snapshot.config_data:
         _raise_missing_loaded_config()
     candidate_config = deepcopy(snapshot.config_data)
@@ -404,7 +388,7 @@ def _commit_mutated_snapshot[T](
         current_state = require_api_state(api_app)
         current = current_state.snapshot
         if current.generation != expected_generation or current.runtime_paths != runtime_paths:
-            raise_for_config_load_result(current.config_load_result)
+            _raise_for_config_load_result(current.config_load_result)
             raise _stale_snapshot_error()
         _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
         current_state.snapshot = _published_snapshot(
@@ -608,21 +592,6 @@ def _build_and_commit_raw_replacement(
         raise HTTPException(status_code=500, detail=f"{error_prefix}: {exc!s}") from exc
 
 
-def _load_config_from_file(
-    runtime_paths: constants.RuntimePaths,
-    *,
-    config_data: dict[str, Any],
-    config_lock: threading.Lock,
-) -> ConfigLoadResult:
-    """Load config from the runtime config file into the shared cache."""
-    result, validated_payload, _runtime_config = _load_config_result(runtime_paths)
-    if validated_payload is not None:
-        with config_lock:
-            config_data.clear()
-            config_data.update(validated_payload)
-    return result
-
-
 def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> bool:
     """Load config from disk into one API app's committed config cache."""
     initial_state = require_api_state(api_app)
@@ -647,34 +616,6 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
     return result.success
 
 
-def _read_app_committed_config[T](
-    api_app: FastAPI,
-    reader: Callable[[dict[str, Any]], T],
-) -> T:
-    """Read committed API config for one app only when the current file is valid."""
-    initial_state = require_api_state(api_app)
-    with initial_state.config_lock:
-        snapshot = require_api_state(api_app).snapshot
-        raise_for_config_load_result(snapshot.config_load_result)
-        if not snapshot.config_data:
-            _raise_missing_loaded_config()
-        return reader(snapshot.config_data)
-
-
-def _read_app_committed_config_and_runtime[T](
-    api_app: FastAPI,
-    reader: Callable[[dict[str, Any]], T],
-) -> tuple[T, constants.RuntimePaths]:
-    """Read committed API config and runtime from one coherent published snapshot."""
-    initial_state = require_api_state(api_app)
-    with initial_state.config_lock:
-        snapshot = require_api_state(api_app).snapshot
-        raise_for_config_load_result(snapshot.config_load_result)
-        if not snapshot.config_data:
-            _raise_missing_loaded_config()
-        return reader(snapshot.config_data), snapshot.runtime_paths
-
-
 def read_app_committed_runtime_config(
     api_app: FastAPI,
 ) -> tuple[Config, constants.RuntimePaths]:
@@ -682,7 +623,7 @@ def read_app_committed_runtime_config(
     initial_state = require_api_state(api_app)
     with initial_state.config_lock:
         snapshot = require_api_state(api_app).snapshot
-        raise_for_config_load_result(snapshot.config_load_result)
+        _raise_for_config_load_result(snapshot.config_load_result)
         if not snapshot.config_data:
             _raise_missing_loaded_config()
         runtime_paths = snapshot.runtime_paths
@@ -697,7 +638,7 @@ def read_committed_config[T](
 ) -> T:
     """Read committed API config only when the current on-disk config is valid."""
     snapshot = _request_or_current_snapshot(request)
-    raise_for_config_load_result(snapshot.config_load_result)
+    _raise_for_config_load_result(snapshot.config_load_result)
     if not snapshot.config_data:
         _raise_missing_loaded_config()
     return reader(snapshot.config_data)
@@ -709,7 +650,7 @@ def read_committed_config_and_runtime[T](
 ) -> tuple[T, constants.RuntimePaths]:
     """Read committed API config and runtime from one coherent request snapshot."""
     snapshot = _request_or_current_snapshot(request)
-    raise_for_config_load_result(snapshot.config_load_result)
+    _raise_for_config_load_result(snapshot.config_load_result)
     if not snapshot.config_data:
         _raise_missing_loaded_config()
     return reader(snapshot.config_data), snapshot.runtime_paths
@@ -720,7 +661,7 @@ def read_committed_runtime_config(
 ) -> tuple[Config, constants.RuntimePaths]:
     """Read one validated runtime config and runtime from one coherent request snapshot."""
     snapshot = _request_or_current_snapshot(request)
-    raise_for_config_load_result(snapshot.config_load_result)
+    _raise_for_config_load_result(snapshot.config_load_result)
     if not snapshot.config_data:
         _raise_missing_loaded_config()
     runtime_paths = snapshot.runtime_paths
@@ -744,16 +685,6 @@ def write_committed_config[T](
     )
 
 
-def _write_app_committed_config[T](
-    api_app: FastAPI,
-    mutate: Callable[[dict[str, Any]], T],
-    *,
-    error_prefix: str,
-) -> T:
-    """Mutate committed API config from the last valid cache snapshot."""
-    return _build_and_commit_mutation(api_app, mutate, error_prefix=error_prefix)
-
-
 def replace_committed_config(
     request: Request,
     new_config: dict[str, Any],
@@ -769,16 +700,6 @@ def replace_committed_config(
         initial_snapshot=request_snapshot(request),
         expected_generation=expected_generation,
     )
-
-
-def _replace_app_committed_config(
-    api_app: FastAPI,
-    new_config: dict[str, Any],
-    *,
-    error_prefix: str,
-) -> int:
-    """Replace the entire committed API config with one freshly validated payload."""
-    return _build_and_commit_replacement(api_app, new_config, error_prefix=error_prefix)
 
 
 def read_raw_config_source(request: Request) -> str:

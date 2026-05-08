@@ -24,14 +24,6 @@ class StreamTransportOutcome:  # noqa: D101
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None
 
-    @property
-    def has_any_physical_stream_event(self) -> bool:  # noqa: D102
-        return self.last_physical_stream_event_id is not None
-
-    @property
-    def has_rendered_visible_body(self) -> bool:  # noqa: D102
-        return self.visible_body_state == "visible_body"
-
 
 @dataclass(frozen=True)
 class FinalDeliveryOutcome:  # noqa: D101

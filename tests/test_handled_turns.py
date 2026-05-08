@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.handled_turns import HandledTurnLedger, HandledTurnRecord, HandledTurnState
+from mindroom.handled_turns import (
+    HandledTurnLedger,
+    HandledTurnRecord,
+    HandledTurnState,
+    _response_event_id_for_record,
+)
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 
@@ -57,6 +62,12 @@ def _record_handled_turn(
             conversation_target=conversation_target,
         ),
     )
+
+
+def _get_response_event_id(tracker: HandledTurnLedger, source_event_id: str) -> str | None:
+    with tracker._thread_lock, tracker._file_lock(exclusive=False):
+        tracker._responses = tracker._read_responses_file_locked(repair_corrupt_file=False)
+        return _response_event_id_for_record(tracker._responses.get(source_event_id))
 
 
 def test_handled_turn_ledger_init(temp_dir: Path) -> None:
@@ -141,7 +152,7 @@ def test_record_outcome_marks_single_source_event(temp_dir: Path) -> None:
     after_time = time.time()
 
     assert tracker.has_responded("event123")
-    assert tracker.get_response_event_id("event123") is None
+    assert _get_response_event_id(tracker, "event123") is None
     record = tracker.get_turn_record("event123")
     assert record == HandledTurnRecord(
         anchor_event_id="event123",
@@ -194,7 +205,7 @@ def test_record_outcome_tracks_response_event_id(temp_dir: Path) -> None:
     _record_handled_turn(tracker, ["event123"], response_event_id="$response")
 
     assert tracker.has_responded("event123")
-    assert tracker.get_response_event_id("event123") == "$response"
+    assert _get_response_event_id(tracker, "event123") == "$response"
     assert tracker.get_turn_record("event123") == HandledTurnRecord(
         anchor_event_id="event123",
         source_event_ids=("event123",),
@@ -231,8 +242,8 @@ def test_record_outcome_tracks_coalesced_turn(temp_dir: Path) -> None:
 
     assert tracker.has_responded("$first")
     assert tracker.has_responded("$second")
-    assert tracker.get_response_event_id("$first") == "$response"
-    assert tracker.get_response_event_id("$second") == "$response"
+    assert _get_response_event_id(tracker, "$first") == "$response"
+    assert _get_response_event_id(tracker, "$second") == "$response"
     turn_record = tracker.get_turn_record("$second")
     assert turn_record is not None
     assert turn_record.anchor_event_id == "$second"
@@ -314,7 +325,7 @@ def test_visible_echo_tracking_stays_partial_until_completed(temp_dir: Path) -> 
     tracker.record_visible_echo("event123", "$echo")
 
     assert not tracker.has_responded("event123")
-    assert tracker.get_response_event_id("event123") is None
+    assert _get_response_event_id(tracker, "event123") is None
     assert tracker.get_visible_echo_event_id("event123") == "$echo"
     turn_record = tracker.get_turn_record("event123")
     assert turn_record is not None
@@ -385,7 +396,7 @@ def test_persistence_round_trip(temp_dir: Path) -> None:
 
     assert tracker2.has_responded("$first")
     assert tracker2.has_responded("$second")
-    assert tracker2.get_response_event_id("$second") == "$response"
+    assert _get_response_event_id(tracker2, "$second") == "$response"
     assert tracker2.get_turn_record("$second").source_event_prompts == {
         "$first": "first",
         "$second": "second",
@@ -484,7 +495,7 @@ def test_loads_legacy_response_tracker_shape(temp_dir: Path) -> None:
     tracker = HandledTurnLedger("legacy", base_path=temp_dir)
 
     assert tracker.has_responded("$event")
-    assert tracker.get_response_event_id("$event") == "$response"
+    assert _get_response_event_id(tracker, "$event") == "$response"
     assert tracker.get_visible_echo_event_id("$event") == "$echo"
     turn_record = tracker.get_turn_record("$event")
     assert turn_record is not None
@@ -510,7 +521,7 @@ def test_loads_legacy_record_without_completed_flag_as_terminal(temp_dir: Path) 
     tracker = HandledTurnLedger("legacy_default", base_path=temp_dir)
 
     assert tracker.has_responded("$event")
-    assert tracker.get_response_event_id("$event") is None
+    assert _get_response_event_id(tracker, "$event") is None
     turn_record = tracker.get_turn_record("$event")
     assert turn_record is not None
     assert turn_record.completed
@@ -776,8 +787,8 @@ def test_concurrent_cross_instance_writes_wait_for_lock_and_merge(temp_dir: Path
         assert not writer_thread.is_alive()
 
     tracker_c = HandledTurnLedger("test_cross_instance_lock", base_path=temp_dir)
-    assert tracker_c.get_response_event_id("$first") == "$response-a"
-    assert tracker_c.get_response_event_id("$second") == "$response-b"
+    assert _get_response_event_id(tracker_c, "$first") == "$response-a"
+    assert _get_response_event_id(tracker_c, "$second") == "$response-b"
 
 
 def test_multiple_instances_merge_updates(temp_dir: Path) -> None:
@@ -789,8 +800,8 @@ def test_multiple_instances_merge_updates(temp_dir: Path) -> None:
     _record_handled_turn(tracker_b, ["$second"], response_event_id="$response-b")
 
     tracker_c = HandledTurnLedger("test_multi_instance", base_path=temp_dir)
-    assert tracker_c.get_response_event_id("$first") == "$response-a"
-    assert tracker_c.get_response_event_id("$second") == "$response-b"
+    assert _get_response_event_id(tracker_c, "$first") == "$response-a"
+    assert _get_response_event_id(tracker_c, "$second") == "$response-b"
 
 
 def test_multiple_instances_refresh_reads_from_disk(temp_dir: Path) -> None:
@@ -806,7 +817,7 @@ def test_multiple_instances_refresh_reads_from_disk(temp_dir: Path) -> None:
     )
 
     assert tracker_b.has_responded("$first")
-    assert tracker_b.get_response_event_id("$second") == "$response-a"
+    assert _get_response_event_id(tracker_b, "$second") == "$response-a"
     turn_record = tracker_b.get_turn_record("$first")
     assert turn_record is not None
     assert turn_record.source_event_ids == ("$first", "$second")
@@ -908,7 +919,7 @@ def test_record_outcome_overwrites_previous_response_id(temp_dir: Path) -> None:
     _record_handled_turn(tracker, ["$event"], response_event_id="$response-1")
     _record_handled_turn(tracker, ["$event"], response_event_id="$response-2")
 
-    assert tracker.get_response_event_id("$event") == "$response-2"
+    assert _get_response_event_id(tracker, "$event") == "$response-2"
 
 
 def test_get_turn_record_returns_none_for_unknown_source(temp_dir: Path) -> None:

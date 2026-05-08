@@ -3223,7 +3223,7 @@ class TestStreamingBehavior:
             extra_content=None,
         )
         streaming.event_id = "$thinking_123"
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -3551,7 +3551,7 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -3576,7 +3576,7 @@ class TestStreamingBehavior:
         assert streaming.accumulated_text == ""
 
         streaming.accumulated_text = "hello"
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -3671,7 +3671,7 @@ class TestStreamingBehavior:
             show_tool_calls=False,
         )
         for tool_name, function_name in (("shell", "run"), ("python", "execute")):
-            streaming.apply_worker_progress_event(
+            streaming._warmup_state.apply_event(
                 WorkerProgressEvent(
                     tool_name=tool_name,
                     function_name=function_name,
@@ -3709,7 +3709,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
         )
         streaming.accumulated_text = "```python\nprint('hello')"
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -3750,7 +3750,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
         )
         streaming.accumulated_text = "Ping @helper"
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4007,7 +4007,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
         )
         for tool_name, function_name in (("shell", "run"), ("python", "execute")):
-            streaming.apply_worker_progress_event(
+            streaming._warmup_state.apply_event(
                 WorkerProgressEvent(
                     tool_name=tool_name,
                     function_name=function_name,
@@ -4048,7 +4048,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
         )
         for worker_key, tool_name in (("worker-a", "shell"), ("worker-b", "python")):
-            streaming.apply_worker_progress_event(
+            streaming._warmup_state.apply_event(
                 WorkerProgressEvent(
                     tool_name=tool_name,
                     function_name="run" if tool_name == "shell" else "execute",
@@ -4083,7 +4083,7 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4096,7 +4096,7 @@ class TestStreamingBehavior:
                 ),
             ),
         )
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4132,7 +4132,7 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4453,7 +4453,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=True,
         )
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4499,7 +4499,7 @@ class TestStreamingBehavior:
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4562,7 +4562,7 @@ class TestStreamingBehavior:
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",

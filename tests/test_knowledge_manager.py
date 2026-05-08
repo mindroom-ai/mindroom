@@ -313,7 +313,6 @@ def test_cold_git_status_with_existing_non_checkout_dir_returns_empty_files(tmp_
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
     assert manager.list_files() == []
-    assert manager._git_repo_present is False
     assert not (knowledge_path / ".git").exists()
 
 
@@ -340,9 +339,7 @@ async def test_git_manager_construction_does_not_probe_checkout_on_event_loop(
     monkeypatch.setattr(knowledge_manager_module, "git_checkout_present", _unexpected_checkout_probe)
 
     await asyncio.sleep(0)
-    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
-
-    assert manager._git_repo_present is True
+    KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
 
 def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: Path) -> None:
@@ -5877,7 +5874,6 @@ async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_s
 
     assert cloned is False
     assert git_checkout_present(docs_path)
-    assert manager._git_repo_present is True
     assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
 
     main.initialize_api_app(main.app, runtime_paths)

@@ -1035,10 +1035,6 @@ class _ApprovalManager:
         with self._live_lock:
             self._cancelled_card_event_ids.discard(card_event_id)
 
-    def _resolved_card_event_ids_contains(self, card_event_id: str) -> bool:
-        with self._live_lock:
-            return card_event_id in self._resolved_card_event_ids
-
     def _cancelled_card_event_ids_contains(self, card_event_id: str) -> bool:
         with self._live_lock:
             return card_event_id in self._cancelled_card_event_ids

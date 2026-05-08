@@ -191,7 +191,6 @@ class InboundTurnNormalizer:
                         },
                     },
                     server_timestamp=request.event.server_timestamp,
-                    is_synthetic=True,
                     source_kind_override="voice",
                 ),
                 effective_thread_id=effective_thread_id,

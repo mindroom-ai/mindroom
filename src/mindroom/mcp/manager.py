@@ -72,14 +72,6 @@ class MCPServerManager:
         msg = f"MCP server '{server_id}' is not connected"
         raise MCPConnectionError(server_id, msg)
 
-    def get_catalog_for_tool(self, tool_name: str) -> MCPServerCatalog:
-        """Return the cached catalog for one dynamic MindRoom MCP tool."""
-        server_id = mcp_server_id_from_tool_name(tool_name)
-        if server_id is None:
-            msg = f"Tool '{tool_name}' is not an MCP tool"
-            raise ValueError(msg)
-        return self.get_catalog(server_id)
-
     async def sync_servers(self, config: Config) -> set[str]:
         """Reconcile live server sessions against the active config."""
         self._config = config

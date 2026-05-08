@@ -5473,7 +5473,6 @@ class TestAgentBot:
             )
 
         assert len(captured_outcomes) == 1
-        assert captured_outcomes[0].run_succeeded is False
 
     @pytest.mark.asyncio
     async def test_generate_response_marks_streaming_model_error_unsuccessful_for_post_effects(
@@ -5528,7 +5527,6 @@ class TestAgentBot:
             )
 
         assert len(captured_outcomes) == 1
-        assert captured_outcomes[0].run_succeeded is False
 
     @pytest.mark.asyncio
     async def test_generate_response_runs_post_effects_after_cancellable_wrapper(
@@ -10391,7 +10389,6 @@ class TestAgentBot:
             body="please stop",
             source={"content": {"msgtype": "m.text", "body": "please stop", "com.mindroom.source_kind": "voice"}},
             server_timestamp=1234567890,
-            is_synthetic=True,
             source_kind_override="voice",
         )
 

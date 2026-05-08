@@ -1758,7 +1758,6 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
         },
-        is_synthetic=True,
     )
     bot._inbound_turn_normalizer.prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
@@ -1833,7 +1832,6 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
             },
         },
-        is_synthetic=True,
     )
     bot._inbound_turn_normalizer.prepare_file_sidecar_text_event = AsyncMock(return_value=prepared_text_event)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
@@ -1878,7 +1876,6 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
             },
         },
-        is_synthetic=True,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
@@ -1914,7 +1911,6 @@ async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: 
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
             },
         },
-        is_synthetic=True,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),

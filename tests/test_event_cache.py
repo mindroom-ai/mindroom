@@ -1108,8 +1108,8 @@ def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
     for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
         _ = runtime.room_lock_entry(f"!room-{index}:localhost").lock
 
-    assert len(runtime.room_locks) == event_cache_module._MAX_CACHED_ROOM_LOCKS
-    assert "!room-0:localhost" not in runtime.room_locks
+    assert len(runtime._room_locks) == event_cache_module._MAX_CACHED_ROOM_LOCKS
+    assert "!room-0:localhost" not in runtime._room_locks
 
 
 @pytest.mark.asyncio
@@ -1130,7 +1130,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
             await release_holder.wait()
         for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
             _ = runtime.room_lock_entry(f"!churn-{index}:localhost").lock
-        entry = runtime.room_locks.get(room_id)
+        entry = runtime._room_locks.get(room_id)
         post_release_snapshot["room_present"] = entry is not None
         post_release_snapshot["active_users"] = entry.active_users if entry is not None else None
         post_release_snapshot["lock_locked"] = entry.lock.locked() if entry is not None else None
@@ -1146,7 +1146,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
         waiter_registered = loop.create_future()
 
         def check_waiter_registration() -> None:
-            if runtime.room_locks[room_id].active_users >= 2:
+            if runtime._room_locks[room_id].active_users >= 2:
                 waiter_registered.set_result(None)
                 return
             loop.call_soon(check_waiter_registration)

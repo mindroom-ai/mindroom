@@ -173,7 +173,6 @@ class _StaticCompactionConfigSemantics:
     """Static compaction semantics for one config scope."""
 
     scope_label: str
-    effective_enabled: bool
     authored_model: _AuthoredOptionalModel
 
 
@@ -524,7 +523,6 @@ class Config(BaseModel):
         """Return static compaction semantics for defaults, agents, and teams."""
         semantics: list[_StaticCompactionConfigSemantics] = []
         defaults_compaction = self.defaults.compaction
-        defaults_enabled = defaults_compaction.enabled if defaults_compaction is not None else False
 
         if defaults_compaction is not None:
             authored_model = _authored_optional_model(
@@ -534,7 +532,6 @@ class Config(BaseModel):
             semantics.append(
                 _StaticCompactionConfigSemantics(
                     scope_label="defaults",
-                    effective_enabled=defaults_enabled,
                     authored_model=authored_model,
                 ),
             )
@@ -550,12 +547,6 @@ class Config(BaseModel):
             semantics.append(
                 _StaticCompactionConfigSemantics(
                     scope_label=f"agents.{agent_name}",
-                    effective_enabled=_effective_static_compaction_enabled(
-                        defaults_enabled=defaults_enabled,
-                        override_enabled=override.enabled,
-                        override_fields_set=override.model_fields_set,
-                        authored_model=authored_model,
-                    ),
                     authored_model=authored_model,
                 ),
             )
@@ -571,12 +562,6 @@ class Config(BaseModel):
             semantics.append(
                 _StaticCompactionConfigSemantics(
                     scope_label=f"teams.{team_name}",
-                    effective_enabled=_effective_static_compaction_enabled(
-                        defaults_enabled=defaults_enabled,
-                        override_enabled=override.enabled,
-                        override_fields_set=override.model_fields_set,
-                        authored_model=authored_model,
-                    ),
                     authored_model=authored_model,
                 ),
             )
@@ -1136,27 +1121,6 @@ class Config(BaseModel):
             if (incompatible_tools := self.get_toolkit_scope_incompatible_tools(agent_name, toolkit_name))
         }
 
-    def get_agent_worker_tools(
-        self,
-        agent_name: str,
-        runtime_paths: RuntimePaths,
-    ) -> list[str]:
-        """Get effective worker-routed tools for an agent, including default policy resolution."""
-        agent_config = self.get_agent(agent_name)
-        configured = agent_config.worker_tools
-        if configured is None:
-            configured = self.defaults.worker_tools
-        if configured is None:
-            # Imported lazily to avoid a circular import: tool metadata also imports Config.
-            from mindroom.tool_system.catalog import (  # noqa: PLC0415
-                default_worker_routed_tools,
-                ensure_tool_registry_loaded,
-            )
-
-            ensure_tool_registry_loaded(runtime_paths, self)
-            return default_worker_routed_tools(self.get_agent_tools(agent_name))
-        return self.expand_tool_names(list(configured))
-
     def get_worker_grantable_credentials(self) -> frozenset[str]:
         """Return shared credential service names allowed inside isolated workers."""
         configured = self.defaults.worker_grantable_credentials
@@ -1411,12 +1375,6 @@ class Config(BaseModel):
 
         return authored_tool_overrides_to_runtime(tool_name, overrides)
 
-    def get_private_agent_names(self) -> frozenset[str]:
-        """Return agent names that materialize requester-private state."""
-        return frozenset(
-            agent_name for agent_name, agent_config in self.agents.items() if agent_config.private is not None
-        )
-
     def _agent_hard_dependency_tool_names(self, agent_name: str) -> set[str]:
         """Return tool names that are hard startup dependencies for one agent."""
         agent_config = self.get_agent(agent_name)
@@ -1566,12 +1524,6 @@ class Config(BaseModel):
         if not self.agents:
             return self.memory.backend == "file"
         return any(self.get_agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
-
-    def uses_mem0_memory(self) -> bool:
-        """Return whether any configured agent uses Mem0-backed memory."""
-        if not self.agents:
-            return self.memory.backend == "mem0"
-        return any(self.get_agent_memory_backend(agent_name) == "mem0" for agent_name in self.agents)
 
     def get_all_configured_rooms(self) -> set[str]:
         """Extract all room aliases configured for agents and teams.

@@ -230,34 +230,6 @@ class ToolRuntimeSupport:
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
         )
 
-    def build_required_context(
-        self,
-        target: MessageTarget,
-        *,
-        user_id: str | None,
-        session_id: str | None = None,
-        agent_name: str | None = None,
-        active_model_name: str | None = None,
-        attachment_ids: list[str] | tuple[str, ...] | None = None,
-        correlation_id: str | None = None,
-        source_envelope: MessageEnvelope | None = None,
-    ) -> ToolRuntimeContext:
-        """Build one live Matrix tool runtime context or fail fast if runtime support is unavailable."""
-        context = self.build_context(
-            target,
-            user_id=user_id,
-            session_id=session_id,
-            agent_name=agent_name,
-            active_model_name=active_model_name,
-            attachment_ids=attachment_ids,
-            correlation_id=correlation_id,
-            source_envelope=source_envelope,
-        )
-        if context is None:
-            msg = "Live Matrix tool dispatch requires initialized tool runtime support"
-            raise RuntimeError(msg)
-        return context
-
     def build_dispatch_context(
         self,
         target: MessageTarget,
@@ -289,31 +261,6 @@ class ToolRuntimeSupport:
         )
         if context is None:
             return ToolDispatchContext(execution_identity=execution_identity)
-        return LiveToolDispatchContext.from_runtime_context(context)
-
-    def build_required_live_dispatch_context(
-        self,
-        target: MessageTarget,
-        *,
-        user_id: str | None,
-        session_id: str | None = None,
-        agent_name: str | None = None,
-        active_model_name: str | None = None,
-        attachment_ids: list[str] | tuple[str, ...] | None = None,
-        correlation_id: str | None = None,
-        source_envelope: MessageEnvelope | None = None,
-    ) -> LiveToolDispatchContext:
-        """Build one live Matrix dispatch contract or fail fast if runtime support is unavailable."""
-        context = self.build_required_context(
-            target,
-            user_id=user_id,
-            session_id=session_id,
-            agent_name=agent_name,
-            active_model_name=active_model_name,
-            attachment_ids=attachment_ids,
-            correlation_id=correlation_id,
-            source_envelope=source_envelope,
-        )
         return LiveToolDispatchContext.from_runtime_context(context)
 
     def build_execution_identity(
