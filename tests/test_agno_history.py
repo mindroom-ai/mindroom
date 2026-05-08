@@ -4511,7 +4511,7 @@ def test_resolve_runtime_model_uses_room_override_for_team(
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     runtime_model = config.resolve_runtime_model(
         entity_name="team_123",
@@ -4540,7 +4540,7 @@ def test_resolve_runtime_model_uses_room_override_for_agent(
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     runtime_model = config.resolve_runtime_model(
         entity_name="test_agent",
@@ -4857,7 +4857,7 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
     live_agent = _agent()
 
     with (

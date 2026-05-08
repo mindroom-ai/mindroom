@@ -6666,7 +6666,7 @@ class TestUserIdPassthrough:
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
             patch("mindroom.ai_runtime.cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
-            patch("mindroom.matrix.rooms.get_room_alias_from_id", return_value="lobby"),
+            patch("mindroom.matrix.state.get_room_alias_from_id", return_value="lobby"),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             run_metadata: dict[str, object] = {}
@@ -6732,7 +6732,7 @@ class TestUserIdPassthrough:
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-            patch("mindroom.matrix.rooms.get_room_alias_from_id", return_value="lobby"),
+            patch("mindroom.matrix.state.get_room_alias_from_id", return_value="lobby"),
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             run_metadata: dict[str, object] = {}

@@ -38,14 +38,13 @@ from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
     ensure_user_in_rooms,
-    load_rooms,
-    resolve_room_aliases,
 )
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedThread,
     auto_resume_interrupted_threads,
     cleanup_stale_streaming_messages,
 )
+from mindroom.matrix.state import load_rooms, resolve_room_aliases
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, create_agent_user
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 from mindroom.mcp.manager import MCPServerManager

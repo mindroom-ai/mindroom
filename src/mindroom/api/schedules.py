@@ -13,7 +13,7 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases
+from mindroom.matrix.state import get_room_alias_from_id, resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user
 from mindroom.scheduling import (
     ScheduledTaskReadModel,

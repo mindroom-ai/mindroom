@@ -332,7 +332,7 @@ def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
     )
 
     assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
-    assert "\u2022 **@mindroom_ops**: Operations escalation team (Team of 1 agents)" in welcome_message
+    assert "\u2022 **@mindroom_ops**: Operations escalation team (Team of 1 agent)" in welcome_message
 
 
 def test_docs_index_chat_commands_summary_lists_all_supported_commands() -> None:

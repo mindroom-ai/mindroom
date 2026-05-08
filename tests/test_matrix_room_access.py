@@ -14,6 +14,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import client_room_admin as matrix_room_admin
 from mindroom.matrix import rooms as matrix_rooms
+from mindroom.matrix import state as matrix_state
 from mindroom.matrix.presence import is_user_online
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from tests.conftest import TEST_ACCESS_TOKEN, bind_runtime_paths, load_config_yaml, runtime_paths_for
@@ -171,7 +172,7 @@ async def test_existing_room_reconciliation_respects_flag(
         servers=["example.com"],
     )
 
-    monkeypatch.setattr(matrix_rooms, "load_rooms", dict)
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
@@ -219,7 +220,7 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(
     mock_client.homeserver = "https://example.com"
     mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasError("not found", status_code="M_NOT_FOUND")
 
-    monkeypatch.setattr(matrix_rooms, "load_rooms", dict)
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
     monkeypatch.setattr(matrix_rooms, "generate_room_topic_ai", AsyncMock(return_value="topic"))
     monkeypatch.setattr(matrix_rooms, "create_room", AsyncMock(return_value="!lobby:example.com"))
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
@@ -735,7 +736,7 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(
         servers=["example.com"],
     )
 
-    monkeypatch.setattr(matrix_rooms, "load_rooms", dict)
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=[]))
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
@@ -839,7 +840,7 @@ async def test_existing_room_reconciliation_runs_after_later_join(
         servers=["example.com"],
     )
 
-    monkeypatch.setattr(matrix_rooms, "load_rooms", dict)
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(side_effect=[[], ["!lobby:example.com"]]))
     ensure_room_has_topic = AsyncMock()

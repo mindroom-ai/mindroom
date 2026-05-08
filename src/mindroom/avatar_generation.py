@@ -22,8 +22,7 @@ from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import room_has_avatar, set_room_avatar_from_file
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.rooms import get_room_id
-from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
+from mindroom.matrix.state import MatrixState, get_room_id, matrix_state_for_runtime
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 

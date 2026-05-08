@@ -44,7 +44,8 @@ from mindroom.matrix.identity import MatrixID, extract_agent_name, is_agent_id
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
-from mindroom.matrix.rooms import leave_non_dm_rooms, resolve_room_aliases
+from mindroom.matrix.rooms import leave_non_dm_rooms
+from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
     SyncCertificationDecision,

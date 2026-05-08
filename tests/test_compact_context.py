@@ -932,7 +932,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     identity = _execution_identity()
     tool = CompactContextTools(
@@ -1011,7 +1011,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
     identity = _execution_identity()
     tool = CompactContextTools(

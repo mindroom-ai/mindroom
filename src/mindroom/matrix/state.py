@@ -119,6 +119,44 @@ def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixSta
     )
 
 
+def load_rooms(runtime_paths: constants.RuntimePaths) -> dict[str, MatrixRoom]:
+    """Load room state from YAML file.
+
+    Returns an isolated copy of the rooms map so callers may mutate the dict
+    or its ``MatrixRoom`` values without corrupting cached state used by other
+    readers.
+    """
+    return MatrixState.load(runtime_paths=runtime_paths).rooms
+
+
+def _room_aliases(runtime_paths: constants.RuntimePaths) -> dict[str, str]:
+    """Get mapping of room aliases to room IDs."""
+    return matrix_state_for_runtime(runtime_paths).get_room_aliases()
+
+
+def get_room_id(room_key: str, runtime_paths: constants.RuntimePaths) -> str | None:
+    """Get room ID for a given room key/alias."""
+    room = matrix_state_for_runtime(runtime_paths).get_room(room_key)
+    return room.room_id if room else None
+
+
+def resolve_room_aliases(
+    room_list: list[str],
+    runtime_paths: constants.RuntimePaths,
+) -> list[str]:
+    """Resolve room aliases to room IDs."""
+    aliases = _room_aliases(runtime_paths)
+    return [aliases.get(room, room) for room in room_list]
+
+
+def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) -> str | None:
+    """Get room alias from room ID."""
+    for alias, resolved_room_id in _room_aliases(runtime_paths).items():
+        if resolved_room_id == room_id:
+            return alias
+    return None
+
+
 def managed_account_usernames(runtime_paths: constants.RuntimePaths) -> dict[str, str]:
     """Return current persisted managed Matrix usernames keyed by state account key."""
     state = matrix_state_for_runtime(runtime_paths)

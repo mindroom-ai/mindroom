@@ -560,7 +560,7 @@ class TestDelegateKnowledge:
         )
         config = _bind_runtime_paths(config, tmp_path)
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-        monkeypatch.setattr("mindroom.matrix.rooms.get_room_alias_from_id", lambda *_args: "lobby")
+        monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="leader",

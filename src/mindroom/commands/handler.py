@@ -112,7 +112,9 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
 
     if agent_name in config.teams:
         team_config = config.teams[agent_name]
-        team_desc = f"Team of {len(team_config.agents)} agents"
+        agent_count = len(team_config.agents)
+        noun = "agent" if agent_count == 1 else "agents"
+        team_desc = f"Team of {agent_count} {noun}"
         if team_config.role:
             return f"{team_config.role} ({team_desc})"
         return team_desc

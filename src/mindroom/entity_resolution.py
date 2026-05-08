@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-import mindroom.matrix.rooms as matrix_rooms
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
+from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
 
@@ -43,12 +43,12 @@ def _configured_routable_entity_names_for_room(
     for agent_name, agent_config in config.agents.items():
         if agent_name == ROUTER_AGENT_NAME:
             continue
-        resolved_rooms = matrix_rooms.resolve_room_aliases(agent_config.rooms, runtime_paths)
+        resolved_rooms = matrix_state.resolve_room_aliases(agent_config.rooms, runtime_paths)
         if room_id in resolved_rooms:
             configured_names.append(agent_name)
 
     for team_name, team_config in config.teams.items():
-        resolved_rooms = matrix_rooms.resolve_room_aliases(team_config.rooms, runtime_paths)
+        resolved_rooms = matrix_state.resolve_room_aliases(team_config.rooms, runtime_paths)
         if room_id in resolved_rooms:
             configured_names.append(team_name)
 
@@ -107,7 +107,7 @@ def resolve_agent_thread_mode(
     if direct_mode is not None:
         return direct_mode
 
-    room_alias = matrix_rooms.get_room_alias_from_id(room_id, runtime_paths)
+    room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
     if room_alias:
         alias_mode = overrides.get(room_alias)
         if alias_mode is not None:
@@ -115,7 +115,7 @@ def resolve_agent_thread_mode(
 
     for override_key, resolved_room_id in zip(
         overrides,
-        matrix_rooms.resolve_room_aliases(list(overrides), runtime_paths),
+        matrix_state.resolve_room_aliases(list(overrides), runtime_paths),
         strict=False,
     ):
         if resolved_room_id == room_id:
@@ -136,10 +136,10 @@ def router_agents_for_room(
 
     router_agents: set[str] = set()
     for agent_name, agent_cfg in agents.items():
-        if room_id in set(matrix_rooms.resolve_room_aliases(agent_cfg.rooms, runtime_paths)):
+        if room_id in set(matrix_state.resolve_room_aliases(agent_cfg.rooms, runtime_paths)):
             router_agents.add(agent_name)
     for team_cfg in teams.values():
-        if room_id not in set(matrix_rooms.resolve_room_aliases(team_cfg.rooms, runtime_paths)):
+        if room_id not in set(matrix_state.resolve_room_aliases(team_cfg.rooms, runtime_paths)):
             continue
         router_agents.update(agent_name for agent_name in team_cfg.agents if agent_name in agents)
     return router_agents or set(agents)
@@ -155,7 +155,7 @@ def effective_entity_model_name(
     if entity_name not in config.agents and entity_name not in config.teams and entity_name != ROUTER_AGENT_NAME:
         return "default"
     if room_id is not None:
-        room_alias = matrix_rooms.get_room_alias_from_id(room_id, runtime_paths)
+        room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
         if room_alias and room_alias in config.room_models:
             return config.room_models[room_alias]
     return config.get_entity_model_name(entity_name)

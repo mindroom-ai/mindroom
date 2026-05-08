@@ -9,6 +9,7 @@ import nio
 
 from mindroom.constants import resolve_avatar_path
 from mindroom.logging_config import get_logger
+from mindroom.matrix import state as matrix_state
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.client_room_admin import (
     add_room_to_space,
@@ -24,7 +25,7 @@ from mindroom.matrix.client_room_admin import (
 )
 from mindroom.matrix.client_session import matrix_client
 from mindroom.matrix.identity import managed_account_user_id
-from mindroom.matrix.state import MatrixRoom, MatrixState, matrix_state_for_runtime
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
@@ -164,27 +165,6 @@ def _room_key_to_name(room_key: str) -> str:
     return room_key.replace("_", " ").title()
 
 
-def load_rooms(runtime_paths: RuntimePaths) -> dict[str, MatrixRoom]:
-    """Load room state from YAML file.
-
-    Returns an isolated copy of the rooms map so callers may mutate the dict
-    or its ``MatrixRoom`` values without corrupting cached state used by other
-    readers.
-    """
-    return MatrixState.load(runtime_paths=runtime_paths).rooms
-
-
-def _get_room_aliases(runtime_paths: RuntimePaths) -> dict[str, str]:
-    """Get mapping of room aliases to room IDs."""
-    return matrix_state_for_runtime(runtime_paths).get_room_aliases()
-
-
-def get_room_id(room_key: str, runtime_paths: RuntimePaths) -> str | None:
-    """Get room ID for a given room key/alias."""
-    room = matrix_state_for_runtime(runtime_paths).get_room(room_key)
-    return room.room_id if room else None
-
-
 def _add_room(
     room_key: str,
     room_id: str,
@@ -206,42 +186,6 @@ def _remove_room(room_key: str, runtime_paths: RuntimePaths) -> bool:
         state.save(runtime_paths=runtime_paths)
         return True
     return False
-
-
-def resolve_room_aliases(
-    room_list: list[str],
-    runtime_paths: RuntimePaths,
-) -> list[str]:
-    """Resolve room aliases to room IDs.
-
-    Args:
-        room_list: List of room aliases or IDs
-        runtime_paths: Explicit runtime context for Matrix state lookup
-
-    Returns:
-        List of room IDs (aliases resolved to IDs, IDs passed through)
-
-    """
-    room_aliases = _get_room_aliases(runtime_paths)
-    return [room_aliases.get(room, room) for room in room_list]
-
-
-def get_room_alias_from_id(room_id: str, runtime_paths: RuntimePaths) -> str | None:
-    """Get room alias from room ID (reverse lookup).
-
-    Args:
-        room_id: Matrix room ID
-        runtime_paths: Explicit runtime context for Matrix state lookup
-
-    Returns:
-        Room alias if found, None otherwise
-
-    """
-    room_aliases = _get_room_aliases(runtime_paths)
-    for alias, rid in room_aliases.items():
-        if rid == room_id:
-            return alias
-    return None
 
 
 async def _ensure_room_exists(  # noqa: C901, PLR0912
@@ -266,7 +210,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         Room ID if room exists or was created, None on failure
 
     """
-    existing_rooms = load_rooms(runtime_paths=runtime_paths)
+    existing_rooms = matrix_state.load_rooms(runtime_paths=runtime_paths)
 
     # First, try to resolve the room alias on the server
     # This handles cases where the room exists on server but not in our state
@@ -546,7 +490,7 @@ async def ensure_user_in_rooms(
         runtime_paths: Explicit runtime context for server-name resolution.
 
     """
-    state = matrix_state_for_runtime(runtime_paths)
+    state = matrix_state.matrix_state_for_runtime(runtime_paths)
     user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
     if not user_account:
         logger.warning("No user account found, skipping user room membership")

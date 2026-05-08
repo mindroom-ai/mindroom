@@ -10,7 +10,8 @@ from mindroom import constants
 from mindroom.api.config_lifecycle import read_committed_config_and_runtime
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_name, leave_room
-from mindroom.matrix.rooms import filter_non_dm_rooms, resolve_room_aliases
+from mindroom.matrix.rooms import filter_non_dm_rooms
+from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user
 
 logger = get_logger(__name__)
