@@ -421,7 +421,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
     )
 
     reload_plugins.assert_awaited_once()
-    assert "demo-plugin" in admin_context.send_response.await_args.args[2]
+    assert "demo-plugin" in admin_context.send_response.await_args.args[0]
 
     user_context = CommandHandlerContext(
         **{**admin_context.__dict__, "config": SimpleNamespace(authorization=AuthorizationConfig(global_users=[]))},
@@ -435,7 +435,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
     )
 
     reload_plugins.assert_awaited_once()
-    assert user_context.send_response.await_args.args[2] == "❌ Admin only."
+    assert user_context.send_response.await_args.args[0] == "❌ Admin only."
 
 
 @pytest.mark.asyncio
@@ -478,7 +478,7 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
     )
 
     reload_plugins.assert_awaited_once()
-    assert context.send_response.await_args.args[2] == "✅ Reloaded 1 plugin; cancelled 0 tasks; active: demo-plugin"
+    assert context.send_response.await_args.args[0] == "✅ Reloaded 1 plugin; cancelled 0 tasks; active: demo-plugin"
 
 
 @pytest.mark.asyncio
@@ -514,7 +514,7 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
     )
 
     assert (
-        context.send_response.await_args.args[2]
+        context.send_response.await_args.args[0]
         == "❌ Plugin reload failed: Plugin hooks module not found: /tmp/demo/hooks.py"
     )
 

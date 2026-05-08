@@ -1004,14 +1004,10 @@ class TurnController:
             )
 
         async def send_response(
-            room_id: str,
-            reply_to_event_id: str | None,
             response_text: str,
-            thread_id: str | None,
-            reply_to_event: nio.RoomMessageText | None = None,
+            *,
             skip_mentions: bool = False,
         ) -> str | None:
-            del room_id, reply_to_event_id, thread_id, reply_to_event
             return await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
                     target=target,

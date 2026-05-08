@@ -58,6 +58,18 @@ class _CommandEvent(Protocol):
     source: dict[str, Any]
 
 
+class _CommandResponseSender(Protocol):
+    """Send one command response to the stable command target."""
+
+    def __call__(
+        self,
+        response_text: str,
+        *,
+        skip_mentions: bool = False,
+    ) -> Awaitable[str | None]:
+        """Send a command response."""
+
+
 @dataclass(frozen=True)
 class CommandHandlerContext:
     """Dependencies required by command handling."""
@@ -70,7 +82,7 @@ class CommandHandlerContext:
     event_cache: ConversationEventCache
     stable_target: MessageTarget
     record_handled_turn: Callable[[HandledTurnState], None]
-    send_response: Callable[..., Awaitable[str | None]]
+    send_response: _CommandResponseSender
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
 
@@ -269,11 +281,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         if change_info:
             # Send the preview message
             raw_response_event_id = await context.send_response(
-                room.room_id,
-                event.event_id,
                 response_text,
-                effective_thread_id,
-                reply_to_event=event,
                 skip_mentions=True,
             )
             response_event_id = _normalized_response_event_id(raw_response_event_id)
@@ -324,11 +332,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     if response_text:
         raw_response_event_id = await context.send_response(
-            room.room_id,
-            event.event_id,
             response_text,
-            effective_thread_id,
-            reply_to_event=event,
             skip_mentions=True,
         )
         context.record_handled_turn(
