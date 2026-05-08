@@ -13,6 +13,7 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.agent_descriptions import describe_agent
+from mindroom.config.agent import AgentConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.custom_tools import subagents as subagents_module
 from mindroom.custom_tools.delegate import DelegateTools
@@ -46,19 +47,19 @@ def _make_agent_config(
     role: str = "Handle test tasks",
     tools: list[str] | None = None,
     delegate_to: list[str] | None = None,
-) -> SimpleNamespace:
-    return SimpleNamespace(
+) -> AgentConfig:
+    return AgentConfig(
+        display_name="TestAgent",
         role=role,
-        tools=list(tools or ["shell"]),
-        delegate_to=list(delegate_to or []),
-        instructions=[],
+        tools=list(tools) if tools is not None else ["shell"],
+        delegate_to=list(delegate_to) if delegate_to is not None else [],
     )
 
 
 def _make_config(
     *,
     thread_mode: str = "thread",
-    agents: dict[str, SimpleNamespace] | None = None,
+    agents: dict[str, AgentConfig] | None = None,
 ) -> MagicMock:
     config = MagicMock()
     config.agents = agents or {
@@ -69,7 +70,7 @@ def _make_config(
     config.teams = {}
     config.get_domain = MagicMock(return_value="localhost")
     config.get_entity_thread_mode = MagicMock(return_value=thread_mode)
-    config.get_agent_tools = MagicMock(side_effect=lambda agent_name: config.agents[agent_name].tools)
+    config.get_agent_tools = MagicMock(side_effect=lambda agent_name: config.agents[agent_name].tool_names)
     config.render_prompt = MagicMock(return_value="Delegate only to listed agents.")
     return config
 
