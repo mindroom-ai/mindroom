@@ -48,6 +48,21 @@ def _is_bot_or_agent(sender: str, config: Config, runtime_paths: RuntimePaths) -
     return bool(extract_agent_name(sender, config, runtime_paths)) or sender in config.bot_accounts
 
 
+def is_router_only_agent_mention(
+    mentioned_agents: Sequence[MatrixID],
+    *,
+    has_non_agent_mentions: bool,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether the message only targeted the router managed account."""
+    if has_non_agent_mentions or not mentioned_agents:
+        return False
+
+    mentioned_agent_names = {agent.agent_name(config, runtime_paths) for agent in mentioned_agents}
+    return mentioned_agent_names == {ROUTER_AGENT_NAME}
+
+
 def check_agent_mentioned(
     event_source: dict,
     agent_id: MatrixID | None,

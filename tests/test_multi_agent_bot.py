@@ -7869,6 +7869,66 @@ class TestAgentBot:
         bot._turn_controller._execute_router_relay.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_router_replies_with_guidance_when_only_router_is_mentioned(self, tmp_path: Path) -> None:
+        """Mentioning only the router should explain that users must tag real agents."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _install_runtime_cache_support(bot)
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.client.room_send.return_value = _room_send_response("$router_guidance")
+        tracker = _set_turn_store_tracker(bot, MagicMock())
+        tracker.has_responded.return_value = False
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        room.encrypted = False
+        room.users = {
+            "@mindroom_router:localhost": MagicMock(),
+            "@mindroom_calculator:localhost": MagicMock(),
+            "@mindroom_general:localhost": MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+        bot.client.rooms = {room.room_id: room}
+
+        event = self._make_handler_event("message", sender="@user:localhost", event_id="$router_only")
+        event.body = "@mindroom_router:localhost help me"
+        event.source = {
+            "content": {
+                "body": event.body,
+                "m.mentions": {"user_ids": ["@mindroom_router:localhost"]},
+            },
+        }
+
+        with (
+            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
+            patch(
+                "mindroom.turn_controller.interactive.handle_text_response",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
+
+        bot.client.room_send.assert_awaited_once()
+        content = bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"].startswith("🧭")
+        assert "router is not a conversational AI agent" in content["body"]
+        assert "mention a specific agent" in content["body"]
+        assert "one human and one agent" in content["body"]
+        assert "multiple agents or multiple users" in content["body"]
+
+    @pytest.mark.asyncio
     async def test_agent_receives_images_from_thread_root_after_routing(
         self,
         mock_agent_user: AgentMatrixUser,

@@ -45,6 +45,7 @@ from mindroom.thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     has_multiple_non_agent_users_in_thread,
+    is_router_only_agent_mention,
     should_agent_respond,
     thread_requires_explicit_agent_targeting,
 )
@@ -92,6 +93,14 @@ class _DispatchPlan:
     media_events: list[MediaDispatchEvent] | None = None
     router_event: DispatchEvent | None = None
     ignore_reason: Literal["router"] | None = None
+
+
+_ROUTER_ONLY_MENTION_GUIDANCE = (
+    "🧭 Rules of engagement: mention a specific agent when you want that agent to answer, or mention multiple "
+    "agents when you want them to collaborate. If one human and one agent are talking in a conversation, you can "
+    "keep going without an explicit tag. As soon as multiple agents or multiple users are involved, explicitly "
+    "tag the agent or agents you want. The router is not a conversational AI agent you can tag directly."
+)
 
 
 @dataclass(frozen=True)
@@ -451,6 +460,20 @@ class TurnPolicy:
         context = dispatch.context
         planning_thread_history = context.planning_thread_history
         requester_user_id = dispatch.requester_user_id
+        if is_router_only_agent_mention(
+            context.mentioned_agents,
+            has_non_agent_mentions=context.has_non_agent_mentions,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+        ):
+            return _DispatchPlan(
+                kind="respond",
+                response_action=ResponseAction(
+                    kind="reject",
+                    rejection_message=_ROUTER_ONLY_MENTION_GUIDANCE,
+                ),
+            )
+
         if not context.mentioned_agents and not context.has_non_agent_mentions:
             if context.planning_thread_history_unavailable:
                 self.deps.logger.info("Skipping routing: thread policy history unavailable")

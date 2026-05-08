@@ -89,6 +89,7 @@ from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import (
     check_agent_mentioned,
     get_configured_agents_for_room,
+    is_router_only_agent_mention,
     thread_requires_explicit_agent_targeting,
 )
 from mindroom.timing import (
@@ -611,7 +612,12 @@ class TurnController:
             self.deps.runtime_paths,
         )
         if mentioned_agents or has_non_agent_mentions:
-            return True
+            return not is_router_only_agent_mention(
+                mentioned_agents,
+                has_non_agent_mentions=has_non_agent_mentions,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+            )
         if thread_id is None:
             return False
 
