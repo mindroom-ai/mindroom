@@ -100,23 +100,27 @@ async def _existing_instance_credentials_encryption_key(instance_id: str, namesp
     """Return the existing credential encryption key from an instance Secret when present."""
     secret_name = f"mindroom-api-keys-{instance_id}"
     code, out, err = await run_kubectl(
-        ["get", "secret", secret_name, "-o=jsonpath={.data.credentials_encryption_key}"],
+        [
+            "get",
+            "secret",
+            secret_name,
+            "--ignore-not-found",
+            "-o=jsonpath={.data.credentials_encryption_key}",
+        ],
         namespace=namespace,
     )
-    if code == 0:
-        encoded_key = out.strip()
-        if not encoded_key:
-            return None
-        try:
-            key = base64.b64decode(encoded_key, validate=True).decode("utf-8").strip()
-        except (binascii.Error, UnicodeDecodeError) as exc:
-            msg = f"Instance {instance_id} has an invalid credential encryption key Secret value"
-            raise HTTPException(status_code=500, detail=msg) from exc
-        return key or None
-    if "not found" in err.lower() or "notfound" in err.lower():
+    if code != 0:
+        msg = f"Failed to inspect existing credential encryption state for instance {instance_id}: {err or out}"
+        raise HTTPException(status_code=500, detail=msg)
+    encoded_key = out.strip()
+    if not encoded_key:
         return None
-    msg = f"Failed to inspect existing credential encryption state for instance {instance_id}: {err or out}"
-    raise HTTPException(status_code=500, detail=msg)
+    try:
+        key = base64.b64decode(encoded_key, validate=True).decode("utf-8").strip()
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        msg = f"Instance {instance_id} has an invalid credential encryption key Secret value"
+        raise HTTPException(status_code=500, detail=msg) from exc
+    return key or None
 
 
 async def _provision_credentials_encryption_key(

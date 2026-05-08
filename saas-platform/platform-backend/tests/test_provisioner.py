@@ -18,10 +18,11 @@ def _helm_set_args(helm_args: list[str]) -> dict[str, str]:
 
 
 async def _kubectl_without_credentials_encryption_secret(args: list[str], namespace: str | None = None):
-    """Return a not-found response for the existing instance API key Secret."""
+    """Return an empty response for a missing existing instance API key Secret."""
     _ = namespace
     if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
-        return (1, "", "NotFound")
+        assert "--ignore-not-found" in args
+        return (0, "", "")
     return (0, "Success", "")
 
 
@@ -29,8 +30,18 @@ async def _kubectl_with_credentials_encryption_secret(args: list[str], namespace
     """Return a non-empty existing credential encryption key for the instance API key Secret."""
     _ = namespace
     if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
+        assert "--ignore-not-found" in args
         existing_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
         return (0, base64.b64encode(existing_key.encode("utf-8")).decode("ascii"), "")
+    return (0, "Success", "")
+
+
+async def _kubectl_credentials_encryption_secret_lookup_fails(args: list[str], namespace: str | None = None):
+    """Return a real kubectl failure for the existing instance API key Secret lookup."""
+    _ = namespace
+    if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
+        assert "--ignore-not-found" in args
+        return (1, "", "Forbidden")
     return (0, "Success", "")
 
 
@@ -280,6 +291,34 @@ class TestProvisionerEndpoints:
         helm_args = mock_helm.call_args.args[0]
         set_args = _helm_set_args(helm_args)
         assert set_args["credentials_encryption_key"] != ""
+
+    def test_provision_re_provision_existing_fails_when_existing_key_lookup_fails(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """A real kubectl failure while reading the existing key must not rotate it."""
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
+        mock_kubectl.side_effect = _kubectl_credentials_encryption_secret_lookup_fails
+
+        response = client.post(
+            "/system/provision",
+            json={
+                "subscription_id": "sub_test_123",
+                "account_id": "acc_test_123",
+                "tier": "professional",
+                "instance_id": "456",
+            },
+            headers=valid_auth_header,
+        )
+
+        assert response.status_code == 500
+        assert "Failed to inspect existing credential encryption state" in response.json()["detail"]
+        mock_helm.assert_not_called()
 
     def test_provision_instance_not_found_for_reprovision(
         self, client: TestClient, mock_supabase: MagicMock, valid_auth_header: dict

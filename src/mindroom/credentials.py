@@ -371,16 +371,9 @@ class CredentialsManager:
             key_name: Name of the key field (default: 'api_key')
 
         """
-        normalized_service = validate_service_name(service)
-        credentials_path = self._credentials_file(normalized_service)
-        credentials = self._load_credentials_file(normalized_service, credentials_path)
-        if credentials is None:
-            if credentials_path.exists():
-                msg = f"Stored credentials for {normalized_service} could not be loaded; refusing to overwrite"
-                raise ValueError(msg)
-            credentials = {}
+        credentials = self.load_credentials(service) or {}
         credentials[key_name] = api_key
-        self._save_credentials_file(normalized_service, credentials_path, credentials)
+        self.save_credentials(service, credentials)
 
 
 def _credentials_base_path(storage_root: Path) -> Path:
