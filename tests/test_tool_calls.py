@@ -23,7 +23,11 @@ from tests.conftest import test_runtime_paths
 @pytest.fixture(autouse=True)
 def reset_tool_call_loggers() -> None:
     """Reset cached rotating loggers so tests do not leak global handler state."""
-    tool_calls._reset_tool_call_loggers_for_tests()
+    for tool_call_logger in tool_calls._TOOL_CALL_LOGGERS.values():
+        for handler in list(tool_call_logger.handlers):
+            handler.close()
+            tool_call_logger.removeHandler(handler)
+    tool_calls._TOOL_CALL_LOGGERS.clear()
 
 
 def _execution_identity() -> ToolExecutionIdentity:

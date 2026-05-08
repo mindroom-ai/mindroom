@@ -437,39 +437,8 @@ def _runtime_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
     return Path(raw_worker_root).expanduser().resolve()
 
 
-# Global instance for convenience (lazy initialization)
 _credentials_manager: CredentialsManager | None = None
 _credentials_manager_signature: tuple[Path, Path, str | None, Path | None, str | None] | None = None
-
-
-def _get_credentials_manager(*, storage_root: Path) -> CredentialsManager:
-    """Get the global credentials manager instance.
-
-    Returns:
-        The global CredentialsManager instance
-
-    """
-    global _credentials_manager, _credentials_manager_signature
-
-    base_path = _credentials_base_path(storage_root)
-    shared_base_path = _default_shared_credentials_base_path(base_path)
-    encryption_key = _runtime_env_policy.credentials_encryption_key_from_env(os.environ)
-    current_signature = (
-        base_path,
-        shared_base_path,
-        None,
-        None,
-        encryption_key,
-    )
-
-    if _credentials_manager is None or _credentials_manager_signature != current_signature:
-        _credentials_manager = CredentialsManager(
-            base_path=base_path,
-            shared_base_path=shared_base_path,
-            encryption_key=encryption_key,
-        )
-        _credentials_manager_signature = current_signature
-    return _credentials_manager
 
 
 def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
@@ -602,18 +571,6 @@ def list_worker_grantable_shared_services(
         )
         is not None
     )
-
-
-def _merge_scoped_credentials(
-    service: str,
-    *,
-    base_manager: CredentialsManager,
-    worker_manager: CredentialsManager | None,
-) -> dict[str, Any] | None:
-    """Merge shared credentials with worker-scoped overrides."""
-    shared_credentials = base_manager.load_credentials(service)
-    worker_credentials = worker_manager.load_credentials(service) if worker_manager is not None else None
-    return _merge_credential_layers(shared_credentials, worker_credentials)
 
 
 def sync_shared_credentials_to_worker(

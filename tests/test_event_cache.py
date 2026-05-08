@@ -15,6 +15,7 @@ import pytest
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache.sqlite_event_cache as event_cache_module
+import mindroom.matrix.message_content as message_content_module
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -33,7 +34,6 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -2314,7 +2314,7 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
     """Cached full-history reads should reuse durable sidecar text after a restart."""
     cache = event_cache_factory()
     await cache.initialize()
-    _clear_mxc_cache()
+    message_content_module._mxc_cache.clear()
 
     root_event = _make_text_event(
         event_id="$thread_root",
@@ -2364,7 +2364,7 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
     finally:
         await cache.close()
 
-    _clear_mxc_cache()
+    message_content_module._mxc_cache.clear()
 
     reopened_cache = event_cache_factory()
     await reopened_cache.initialize()
@@ -2385,7 +2385,7 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
         )
     finally:
         await reopened_cache.close()
-        _clear_mxc_cache()
+        message_content_module._mxc_cache.clear()
 
     assert [message.body for message in first_history] == ["Root message", "Full reply"]
     assert [message.body for message in second_history] == ["Root message", "Full reply"]

@@ -152,11 +152,6 @@ def _is_nonterminal_stream_content(content: dict[str, Any]) -> bool:
     return content.get(STREAM_STATUS_KEY) in _NONTERMINAL_STREAM_STATUSES
 
 
-def _clear_oversized_nonterminal_streaming_edit_rate_limits() -> None:
-    """Reset oversized streaming-edit rate state for tests."""
-    _oversized_nonterminal_streaming_edit_sent_at.clear()
-
-
 def _prune_expired_oversized_nonterminal_streaming_edit_rate_limits(now: float) -> None:
     expired_keys = [
         key

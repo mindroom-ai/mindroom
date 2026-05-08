@@ -22,7 +22,6 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.compaction import (
-    _estimate_static_tokens,
     _estimate_tool_definition_tokens,
     compute_prompt_token_breakdown,
 )
@@ -486,29 +485,6 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Token estimation tests
 # ---------------------------------------------------------------------------
-
-
-class TestEstimateStaticTokens:
-    """Tests for estimate_static_tokens."""
-
-    def test_basic_estimation(self) -> None:
-        agent = _make_agent(role="x" * 40, instructions=["y" * 20])
-        tokens = _estimate_static_tokens(agent, "z" * 80)
-        # (40 + 20 + 80) / 4 = 35, no tools → + 0
-        assert tokens == 35
-
-    def test_string_instructions(self) -> None:
-        agent = _make_agent(role="x" * 40)
-        agent.instructions = "y" * 60
-        tokens = _estimate_static_tokens(agent, "z" * 100)
-        # (40 + 60 + 100) / 4 = 50, no tools → + 0
-        assert tokens == 50
-
-    def test_none_role(self) -> None:
-        agent = _make_agent()
-        agent.role = None
-        tokens = _estimate_static_tokens(agent, "hello")
-        assert tokens == len("hello") // 4
 
 
 class TestEstimateToolDefinitionTokens:

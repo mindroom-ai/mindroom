@@ -25,6 +25,7 @@ from nio.api import RelationshipType
 
 import mindroom.matrix.cache as matrix_cache
 import mindroom.matrix.cache.sqlite_event_cache_threads as sqlite_event_cache_threads_module
+import mindroom.matrix.message_content as message_content_module
 import mindroom.timing as timing_module
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -50,9 +51,8 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, PermanentMatrixStartupError, ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint
-from mindroom.matrix.sync_tokens import _load_sync_token, load_sync_token_record, save_sync_token
+from mindroom.matrix.sync_tokens import load_sync_token_record, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
@@ -102,6 +102,13 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
     from typing import Any
+
+
+def _load_sync_token_value(storage_path: Path, agent_name: str) -> str | None:
+    token_record = load_sync_token_record(storage_path, agent_name)
+    if token_record is None:
+        return None
+    return token_record.token
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
@@ -2102,9 +2109,9 @@ class TestThreadingBehavior:
             try:
                 await asyncio.wait_for(cache_started.wait(), timeout=1.0)
 
-                assert _load_sync_token(bot.storage_path, bot.agent_name) is None
+                assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
                 await bot.prepare_for_sync_shutdown()
-                assert _load_sync_token(bot.storage_path, bot.agent_name) is None
+                assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
 
                 allow_cache_finish.set()
                 await asyncio.wait_for(response_task, timeout=1.0)
@@ -2112,7 +2119,7 @@ class TestThreadingBehavior:
                 allow_cache_finish.set()
                 await asyncio.gather(response_task, return_exceptions=True)
 
-        assert _load_sync_token(bot.storage_path, bot.agent_name) == "s_after_delayed_cache"
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_after_delayed_cache"
 
     @pytest.mark.asyncio
     async def test_restored_first_sync_success_updates_checkpoint(self, bot: AgentBot) -> None:
@@ -2143,7 +2150,7 @@ class TestThreadingBehavior:
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
         assert bot.client.next_batch is None
-        assert _load_sync_token(bot.storage_path, bot.agent_name) is None
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
 
     @pytest.mark.asyncio
     async def test_cache_failure_clears_token_then_later_success_saves_checkpoint(
@@ -2165,7 +2172,7 @@ class TestThreadingBehavior:
         ):
             await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
 
-        assert _load_sync_token(bot.storage_path, bot.agent_name) is None
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
 
         bot.client.next_batch = "s_after_recovery"
         with patch.object(
@@ -4616,16 +4623,19 @@ class TestThreadingBehavior:
             msg = "root proof should not run when event lookup fails"
             raise AssertionError(msg)
 
-        with pytest.raises(RuntimeError, match="lookup unavailable"):
-            await resolve_event_thread_id(
-                room_id,
-                plain_reply_event_info,
-                access=thread_messages_thread_membership_access(
-                    lookup_thread_id=lookup_thread_id,
-                    fetch_event_info=fetch_event_info,
-                    fetch_thread_messages=fetch_thread_messages,
-                ),
-            )
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            plain_reply_event_info,
+            access=thread_messages_thread_membership_access(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                fetch_thread_messages=fetch_thread_messages,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.INDETERMINATE
+        assert isinstance(resolution.error, RuntimeError)
+        assert str(resolution.error) == "lookup unavailable"
 
     @pytest.mark.asyncio
     async def test_thread_messages_thread_membership_access_strict_resolution_propagates_root_proof_failure(
@@ -4672,16 +4682,19 @@ class TestThreadingBehavior:
             msg = "snapshot unavailable"
             raise RuntimeError(msg)
 
-        with pytest.raises(RuntimeError, match="snapshot unavailable"):
-            await resolve_event_thread_id(
-                room_id,
-                plain_reply_event_info,
-                access=thread_messages_thread_membership_access(
-                    lookup_thread_id=lookup_thread_id,
-                    fetch_event_info=fetch_event_info,
-                    fetch_thread_messages=fetch_thread_messages,
-                ),
-            )
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            plain_reply_event_info,
+            access=thread_messages_thread_membership_access(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                fetch_thread_messages=fetch_thread_messages,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.INDETERMINATE
+        assert isinstance(resolution.error, RuntimeError)
+        assert str(resolution.error) == "snapshot unavailable"
 
     @pytest.mark.asyncio
     async def test_best_effort_related_thread_resolution_degrades_when_event_lookup_fails(
@@ -8892,7 +8905,7 @@ class TestThreadingBehavior:
         bot: AgentBot,
     ) -> None:
         """Dispatch policy context should inherit an existing explicit thread across plain replies."""
-        _clear_mxc_cache()
+        message_content_module._mxc_cache.clear()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         room.name = "Test Room"

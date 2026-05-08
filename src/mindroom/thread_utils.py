@@ -147,34 +147,6 @@ def _agents_from_user_ids(
     return agents
 
 
-def _has_user_responded_after_message(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    target_event_id: str,
-    user_id: MatrixID,
-) -> bool:
-    """Check if a user has sent any messages after a specific message in the thread.
-
-    Args:
-        thread_history: Visible messages in the thread
-        target_event_id: The event ID to check after
-        user_id: The user ID to check for
-
-    Returns:
-        True if the user has responded after the target message
-
-    """
-    # Find the target message and check for user responses after it
-    found_target = False
-    for msg in thread_history:
-        event_id = msg.event_id
-        sender = msg.sender
-        if event_id == target_event_id:
-            found_target = True
-        elif found_target and sender == user_id.full_id:
-            return True
-    return False
-
-
 def has_multiple_non_agent_users_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
@@ -238,20 +210,6 @@ def get_configured_agents_for_room(
                 configured_agents.append(config_ids[agent_name])
 
     return sorted(configured_agents, key=lambda x: x.full_id)
-
-
-def _has_any_agent_mentions_in_thread(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Check if any agents are mentioned anywhere in the thread."""
-    for msg in thread_history:
-        content = msg.content
-        user_ids = _extract_mentioned_user_ids(content)
-        if _agents_from_user_ids(user_ids, config, runtime_paths):
-            return True
-    return False
 
 
 def get_all_mentioned_agents_in_thread(

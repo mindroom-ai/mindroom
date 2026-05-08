@@ -258,7 +258,7 @@ async def test_orchestrator_creates_router_with_all_rooms(
             ),
         }
 
-    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users)
+    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users, raising=False)
 
     # Mock resolve_room_aliases to return the same aliases (no resolution needed for test)
     def mock_resolve_room_aliases(
@@ -341,7 +341,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
             ),
         }
 
-    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users)
+    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users, raising=False)
 
     def mock_resolve_room_aliases(
         aliases: list[str],

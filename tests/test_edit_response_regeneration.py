@@ -19,6 +19,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+import mindroom.matrix.message_content as message_content_module
 from mindroom import interactive
 from mindroom.agent_storage import get_agent_session
 from mindroom.agents import remove_run_by_event_id
@@ -34,7 +35,6 @@ from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import create_session_id
@@ -417,7 +417,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> None:
     """Edit regeneration should use the resolved edited body from a v2 sidecar."""
-    _clear_mxc_cache()
+    message_content_module._mxc_cache.clear()
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -525,7 +525,7 @@ async def test_bot_edit_hooks_see_hydrated_sidecar_edit_body(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrated_recovery(tmp_path: Path) -> None:
     """Edit regeneration should not re-run should-respond heuristics after durable recovery."""
-    _clear_mxc_cache()
+    message_content_module._mxc_cache.clear()
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",

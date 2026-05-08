@@ -43,7 +43,7 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.large_messages import _clear_oversized_nonterminal_streaming_edit_rate_limits
+from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_sent_at
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
@@ -539,7 +539,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(self) -> None:
         """Oversized in-progress edits should not burst sidecar uploads while final still sends."""
-        _clear_oversized_nonterminal_streaming_edit_rate_limits()
+        _oversized_nonterminal_streaming_edit_sent_at.clear()
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -597,7 +597,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_rate_limited_oversized_nonterminal_edit_resolves_capture_completion(self) -> None:
         """Skipping an oversized in-progress edit should still unblock capture waiters."""
-        _clear_oversized_nonterminal_streaming_edit_rate_limits()
+        _oversized_nonterminal_streaming_edit_sent_at.clear()
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
             room_id="!test:localhost",

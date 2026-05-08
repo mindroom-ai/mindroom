@@ -192,7 +192,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
 @pytest.mark.requires_matrix  # Requires real Matrix server for streaming e2e test
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 @patch("mindroom.response_attempt.is_user_online")
-@patch("mindroom.matrix.users._ensure_all_agent_users")
+@patch("mindroom.matrix.users._ensure_all_agent_users", create=True)
 @patch("mindroom.bot.login_agent_user")
 @patch("mindroom.bot.AgentBot.ensure_user_account")
 async def test_streaming_edits_e2e(  # noqa: C901, PLR0915

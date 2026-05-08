@@ -358,11 +358,3 @@ def record_tool_success(
             correlation_id=correlation_id,
         )
     return record
-
-
-def _reset_tool_call_loggers_for_tests() -> None:
-    for tool_call_logger in _TOOL_CALL_LOGGERS.values():
-        for handler in list(tool_call_logger.handlers):
-            handler.close()
-            tool_call_logger.removeHandler(handler)
-    _TOOL_CALL_LOGGERS.clear()

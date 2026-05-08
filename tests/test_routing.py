@@ -83,7 +83,9 @@ def _message(
 
 def _has_any_agent_mentions_in_thread(thread_history: list[ResolvedVisibleMessage], config: Config) -> bool:
     """Check thread mentions with the test config's bound runtime context."""
-    return mindroom.thread_utils._has_any_agent_mentions_in_thread(thread_history, config, runtime_paths_for(config))
+    return bool(
+        mindroom.thread_utils.get_all_mentioned_agents_in_thread(thread_history, config, runtime_paths_for(config)),
+    )
 
 
 def has_multiple_non_agent_users_in_thread(thread_history: list[ResolvedVisibleMessage], config: Config) -> bool:

@@ -7,8 +7,7 @@ from functools import cached_property
 import httpx
 import nio
 
-from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_homeserver, runtime_matrix_ssl_verify
+from mindroom.constants import RuntimePaths, runtime_matrix_homeserver, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix import provisioning
 from mindroom.matrix.client_session import login, matrix_client, matrix_startup_error, restore_login
@@ -26,13 +25,6 @@ _INVALID_REGISTRATION_TOKEN_MESSAGE = (
 
 INTERNAL_USER_AGENT_NAME = "user"
 INTERNAL_USER_ACCOUNT_KEY = managed_account_key(INTERNAL_USER_AGENT_NAME)
-
-
-def _extract_domain_from_user_id(user_id: str) -> str:
-    """Extract domain from a Matrix user ID like "@user:example.com"."""
-    if not user_id.startswith("@") or ":" not in user_id:
-        return "localhost"
-    return MatrixID.parse(user_id).domain
 
 
 @dataclass
@@ -758,69 +750,3 @@ async def login_agent_user(
     agent_user.device_id = client.device_id
     agent_user.access_token = client.access_token
     return client
-
-
-# TODO: Check, this seems unused!
-async def _ensure_all_agent_users(
-    homeserver: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> dict[str, AgentMatrixUser]:
-    """Ensure all configured agents and teams have Matrix user accounts.
-
-    This includes user-configured agents, teams, and the built-in router agent.
-
-    Args:
-        homeserver: The Matrix homeserver URL
-        config: Application configuration
-        runtime_paths: Explicit runtime context for Matrix IDs and credential storage
-
-    Returns:
-        Dictionary mapping agent/team names to AgentMatrixUser objects
-
-    """
-    agent_users = {}
-    # First, create the built-in router agent
-    try:
-        router_user = await create_agent_user(
-            homeserver,
-            ROUTER_AGENT_NAME,
-            "RouterAgent",
-            runtime_paths=runtime_paths,
-        )
-        agent_users[ROUTER_AGENT_NAME] = router_user
-        logger.info("matrix_user_ensured_for_router", agent=ROUTER_AGENT_NAME, user_id=router_user.user_id)
-    except Exception:
-        logger.exception("Failed to create Matrix user for built-in router agent")
-
-    # Create user-configured agents
-    for agent_name, agent_config in config.agents.items():
-        try:
-            agent_user = await create_agent_user(
-                homeserver,
-                agent_name,
-                agent_config.display_name,
-                runtime_paths=runtime_paths,
-            )
-            agent_users[agent_name] = agent_user
-            logger.info("matrix_user_ensured_for_agent", agent=agent_name, user_id=agent_user.user_id)
-        except Exception:
-            # Continue with other agents even if one fails
-            logger.exception("Failed to create Matrix user for agent", agent_name=agent_name)
-
-    # Create team users
-    for team_name, team_config in config.teams.items():
-        try:
-            team_user = await create_agent_user(
-                homeserver,
-                team_name,
-                team_config.display_name,
-                runtime_paths=runtime_paths,
-            )
-            agent_users[team_name] = team_user
-            logger.info("matrix_user_ensured_for_team", agent=team_name, user_id=team_user.user_id)
-        except Exception:
-            # Continue with other teams even if one fails
-            logger.exception("Failed to create Matrix user for team", team_name=team_name)
-
-    return agent_users

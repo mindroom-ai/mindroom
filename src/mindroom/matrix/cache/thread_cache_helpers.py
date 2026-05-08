@@ -41,10 +41,3 @@ def thread_cache_rejection_reason(
     elif cache_state.room_invalidated_at is not None and cache_state.room_invalidated_at >= cache_state.validated_at:
         rejection_reason = "room_invalidated_after_validation"
     return rejection_reason
-
-
-def _thread_cache_state_is_usable(
-    cache_state: _ThreadCacheStateLike | None,
-) -> bool:
-    """Return whether one durable thread snapshot is safe to reuse."""
-    return thread_cache_rejection_reason(cache_state) is None
