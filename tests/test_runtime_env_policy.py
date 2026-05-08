@@ -7,7 +7,8 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
-from mindroom import runtime_env_policy
+from mindroom import constants, runtime_env_policy
+from mindroom.api import sandbox_exec
 
 _POLICY_OWNED_ENV_PREFIXES = (
     "MINDROOM_CREDENTIAL_SEEDS_",
@@ -20,6 +21,82 @@ _POLICY_OWNED_ENV_EXTRA_NAMES = frozenset(runtime_env_policy.VERTEXAI_CLAUDE_ENV
 _PYTHON_STRING_LITERAL_RE = re.compile(
     r"""(?P<prefix>[rubfRUBF]*)?(?P<quote>["'])(?P<value>[A-Z][A-Z0-9_]+)(?P=quote)""",
 )
+_PROJECTION_MATRIX_ENV_NAMES = (
+    runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV,
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_SERVICE_ACCOUNT_FILE",
+    "GOOGLE_DELEGATED_USER",
+    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"],
+    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"],
+    runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
+    runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV,
+    "OPENAI_API_KEY",
+)
+_PROJECTION_MATRIX_EXPECTATIONS = {
+    runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": True,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
+    "GOOGLE_APPLICATION_CREDENTIALS": {
+        "public_worker_startup_env": True,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    "GOOGLE_SERVICE_ACCOUNT_FILE": {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    "GOOGLE_DELEGATED_USER": {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
+    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]: {
+        "public_worker_startup_env": True,
+        "isolated_worker_runtime_env": True,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": True,
+        "shell_passthrough_env": False,
+    },
+    runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
+    runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV: {
+        "public_worker_startup_env": True,
+        "isolated_worker_runtime_env": True,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+    "OPENAI_API_KEY": {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": True,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": True,
+    },
+}
 
 
 def _policy_owned_env_values(value: object) -> set[str]:
@@ -130,6 +207,49 @@ def test_shell_passthrough_globs_do_not_expose_runtime_control_env() -> None:
     }
 
 
+def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: Path) -> None:
+    """Sensitive and credential-adjacent env names should have one documented projection policy."""
+    process_env = {name: f"process:{name}" for name in _PROJECTION_MATRIX_ENV_NAMES}
+    env_file_values = {name: f"envfile:{name}" for name in _PROJECTION_MATRIX_ENV_NAMES}
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = constants.RuntimePaths(
+        config_path=config_path,
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "storage",
+        process_env=process_env,
+        env_file_values=env_file_values,
+    )
+    trusted_tool_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
+        runtime_paths,
+        {},
+        include_base_execution_env=True,
+        include_credentials_encryption_key=True,
+    )
+    execution_tool_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
+        runtime_paths,
+        {},
+        include_base_execution_env=False,
+        include_credentials_encryption_key=False,
+    )
+    public_worker_startup_env = runtime_env_policy.public_worker_startup_env(process_env)
+    isolated_worker_runtime_env = runtime_env_policy.isolated_worker_runtime_env(process_env)
+    shell_passthrough_env = runtime_env_policy.shell_passthrough_env(process_env, patterns=("*",))
+
+    actual = {
+        name: {
+            "public_worker_startup_env": name in public_worker_startup_env,
+            "isolated_worker_runtime_env": name in isolated_worker_runtime_env,
+            "trusted_tool_runtime_paths": trusted_tool_runtime_paths.env_value(name) is not None,
+            "execution_tool_runtime_paths": execution_tool_runtime_paths.env_value(name) is not None,
+            "shell_passthrough_env": name in shell_passthrough_env,
+        }
+        for name in _PROJECTION_MATRIX_ENV_NAMES
+    }
+
+    assert actual == _PROJECTION_MATRIX_EXPECTATIONS
+
+
 def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_control() -> None:
     """Sandbox execution reconstruction uses the centralized control deny policy."""
     env = {
@@ -143,8 +263,6 @@ def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_contro
         "MINDROOM_SANDBOX_FUTURE_CONTROL": "future-control",
         "MINDROOM_SHARED_CREDENTIALS_PATH": "/app/storage/.shared_credentials",
         "MATRIX_HOMESERVER": "https://matrix.example.invalid",
-        "GOOGLE_SERVICE_ACCOUNT_FILE": "/secrets/google-service-account.json",
-        "GOOGLE_DELEGATED_USER": "workspace-user@example.com",
     }
 
     result = runtime_env_policy.isolated_worker_runtime_env(env)
@@ -157,10 +275,6 @@ def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_contro
     assert result["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-key"
     assert result["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/storage/.shared_credentials"
     assert result["MATRIX_HOMESERVER"] == "https://matrix.example.invalid"
-    assert "GOOGLE_SERVICE_ACCOUNT_FILE" not in result
-    assert "GOOGLE_DELEGATED_USER" not in result
-    assert runtime_env_policy.is_execution_runtime_process_env_name("GOOGLE_SERVICE_ACCOUNT_FILE")
-    assert runtime_env_policy.is_execution_runtime_process_env_name("GOOGLE_DELEGATED_USER")
 
 
 def test_sandbox_runner_startup_process_env_keeps_ambient_values_and_drops_control() -> None:
