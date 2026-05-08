@@ -62,6 +62,7 @@ from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    dispatch_context_result,
     install_generate_response_mock,
     install_send_response_mock,
     make_matrix_client_mock,
@@ -4368,12 +4369,12 @@ async def test_trusted_router_relay_context_uses_handoff_ingress_metadata(tmp_pa
         patch.object(
             bot._conversation_resolver,
             "extract_trusted_router_relay_context",
-            new=AsyncMock(return_value=trusted_context),
+            new=AsyncMock(return_value=dispatch_context_result(trusted_context)),
         ) as trusted_context_mock,
         patch.object(
             bot._conversation_resolver,
             "extract_dispatch_context",
-            new=AsyncMock(return_value=trusted_context),
+            new=AsyncMock(return_value=dispatch_context_result(trusted_context)),
         ) as normal_context_mock,
     ):
         envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(

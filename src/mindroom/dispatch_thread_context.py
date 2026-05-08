@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.message_target import MessageTarget
 
@@ -34,9 +33,7 @@ def planning_history_for(
     thread_history: Sequence[ResolvedVisibleMessage],
 ) -> tuple[ResolvedVisibleMessage, ...]:
     """Return history only when it is complete enough for policy decisions."""
-    if not isinstance(thread_history, ThreadHistoryResult):
-        return ()
-    if not thread_history.is_full_history or is_thread_history_degraded(thread_history):
+    if is_thread_history_degraded(thread_history):
         return ()
     return tuple(thread_history)
 

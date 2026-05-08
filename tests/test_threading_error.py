@@ -9230,11 +9230,11 @@ class TestThreadingBehavior:
         assert observed_targets[0].resolved_thread_id is None
 
     @pytest.mark.asyncio
-    async def test_partial_dispatch_snapshot_is_not_policy_grade_history(
+    async def test_partial_dispatch_snapshot_is_policy_visible_history(
         self,
         bot: AgentBot,
     ) -> None:
-        """Partial dispatch snapshots may prove targets but must not become policy history."""
+        """Healthy partial dispatch snapshots should be visible to planning before model refresh."""
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         room.name = "Test Room"
@@ -9268,7 +9268,7 @@ class TestThreadingBehavior:
             observed_policy_targets.append(dispatch.target)
             assert dispatch.context.is_thread is True
             assert dispatch.context.thread_id == "$thread_root:localhost"
-            assert dispatch.context.planning_thread_history == ()
+            assert dispatch.context.planning_thread_history == tuple(partial_history)
             return _DispatchPlan(kind="ignore")
 
         with (

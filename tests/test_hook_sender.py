@@ -773,7 +773,9 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
         replay_guard_history=[],
         requires_model_history_refresh=True,
     )
-    bot._conversation_resolver.extract_trusted_router_relay_context = AsyncMock(return_value=trusted_context)
+    bot._conversation_resolver.extract_trusted_router_relay_context = AsyncMock(
+        return_value=dispatch_context_result(trusted_context),
+    )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock()
 
     dispatch = _dispatch_from_prepare_result(
@@ -815,12 +817,14 @@ async def test_extract_trusted_router_context_does_not_invent_thread_for_room_le
         },
     )
 
-    context = await bot._conversation_resolver.extract_trusted_router_relay_context(room, event)
+    context_result = await bot._conversation_resolver.extract_trusted_router_relay_context(room, event)
+    context = context_result.context
 
     assert context.is_thread is False
     assert context.thread_id is None
     assert list(context.thread_history) == []
     assert context.requires_model_history_refresh is False
+    assert context_result.thread_context is None
 
 
 @pytest.mark.asyncio

@@ -747,12 +747,12 @@ class AgentBot:
         thread_id: str | None = None
         if normalized_target_event_id:
             try:
-                thread_id = await self._conversation_resolver.resolve_related_event_thread_id_best_effort(
-                    room_id,
-                    normalized_target_event_id,
-                    access=self._conversation_resolver.dispatch_snapshot_thread_membership_access(
+                thread_id = (
+                    await self._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort(
+                        room_id,
+                        normalized_target_event_id,
                         caller_label="reaction_hook_context",
-                    ),
+                    )
                 )
             except Exception as exc:
                 self.logger.debug(

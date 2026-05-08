@@ -2333,6 +2333,15 @@ visibility = ["mindroom.conversation_resolver", "mindroom.matrix.conversation_ca
 exclusive = true
 
 [[interfaces]]
+expose = [
+    "DispatchThreadContext",
+    "context_with_dispatch_thread_context",
+    "planning_history_for",
+    "room_level_target",
+]
+from = ["mindroom.dispatch_thread_context"]
+
+[[interfaces]]
 expose = ["ThreadMutationCacheOps"]
 from = ["mindroom.matrix.cache.thread_write_cache_ops"]
 visibility = ["mindroom.matrix.conversation_cache"]

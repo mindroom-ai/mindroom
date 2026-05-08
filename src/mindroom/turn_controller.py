@@ -828,13 +828,12 @@ class TurnController:
     ) -> _PreparedDispatchResult | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
-        thread_context: DispatchThreadContext | None = None
         if self._should_use_trusted_router_relay_context(
             event,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
         ):
-            context = await self.deps.resolver.extract_trusted_router_relay_context(
+            dispatch_context_result = await self.deps.resolver.extract_trusted_router_relay_context(
                 room,
                 event,
                 payload_metadata=payload_metadata,
@@ -850,13 +849,13 @@ class TurnController:
                 event,
                 payload_metadata=payload_metadata,
             )
-            context = dispatch_context_result.context
-            thread_context = dispatch_context_result.thread_context
             emit_elapsed_timing(
                 "dispatch_handoff.prepare_dispatch.extract_context",
                 extract_context_start,
                 path="normal",
             )
+        context = dispatch_context_result.context
+        thread_context = dispatch_context_result.thread_context
         target_start = time.monotonic()
         target = (
             thread_context.stable_target
@@ -1226,9 +1225,7 @@ class TurnController:
     async def _finalize_dispatch_failure(
         self,
         *,
-        room_id: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
+        target: MessageTarget,
         error: Exception,
     ) -> str | None:
         """Convert dispatch setup failures into a visible terminal message."""
@@ -1236,11 +1233,7 @@ class TurnController:
         terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
         return await self.deps.delivery_gateway.send_text(
             SendTextRequest(
-                target=self.deps.resolver.build_message_target(
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    reply_to_event_id=reply_to_event_id,
-                ),
+                target=target,
                 response_text=error_text,
                 extra_content=terminal_extra_content,
             ),
@@ -1332,9 +1325,7 @@ class TurnController:
                 payload_ready_monotonic = context_ready_monotonic
             except Exception as error:
                 response_event_id = await self._finalize_dispatch_failure(
-                    room_id=room.room_id,
-                    reply_to_event_id=event.event_id,
-                    thread_id=dispatch.context.thread_id,
+                    target=dispatch.target,
                     error=error,
                 )
                 if response_event_id is not None:
@@ -1475,9 +1466,7 @@ class TurnController:
             except PostLockRequestPreparationError as error:
                 failure = error.__cause__ if isinstance(error.__cause__, Exception) else error
                 response_event_id = await self._finalize_dispatch_failure(
-                    room_id=room.room_id,
-                    reply_to_event_id=event.event_id,
-                    thread_id=dispatch.context.thread_id,
+                    target=dispatch.target,
                     error=failure,
                 )
                 if response_event_id is not None:

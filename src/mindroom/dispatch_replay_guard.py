@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 type _RequesterResolver = Callable[[str, object], str]
 type _HandledLookup = Callable[[str], bool]
 type _RecentRoomEventsLookup = Callable[..., Awaitable[Sequence[dict[str, Any]]]]
+# Implementations fail open by returning None after logging lookup failures.
 type _ThreadIdForEventLookup = Callable[[str, str], Awaitable[str | None]]
 
 
@@ -81,6 +82,7 @@ async def _cached_event_is_in_thread(
     thread_id: str,
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
 ) -> bool:
+    """Return whether raw event metadata or the cache index proves thread membership."""
     event_info = EventInfo.from_event(event_source)
     if thread_id in {event_info.thread_id, event_info.thread_id_from_edit}:
         return True
@@ -89,10 +91,7 @@ async def _cached_event_is_in_thread(
     event_id = event_source.get("event_id")
     if not isinstance(event_id, str):
         return False
-    try:
-        return await get_thread_id_for_event(room_id, event_id) == thread_id
-    except Exception:
-        return False
+    return await get_thread_id_for_event(room_id, event_id) == thread_id
 
 
 def _unresponded_requester_event_id(
@@ -103,6 +102,7 @@ def _unresponded_requester_event_id(
     requester_user_id_for_event: _RequesterResolver,
     is_handled: _HandledLookup,
 ) -> str | None:
+    """Return an unhandled requester event id from a cached event source when eligible."""
     event_id = event_source.get("event_id")
     sender = event_source.get("sender")
     if not isinstance(event_id, str) or event_id == skipped_event_id or not isinstance(sender, str):
@@ -129,6 +129,7 @@ async def _newer_unresponded_cached_thread_event_id(
     requester_user_id_for_event: _RequesterResolver,
     is_handled: _HandledLookup,
 ) -> str | None:
+    """Return the first newer cached event with positive same-thread proof."""
     for event_source in recent_events:
         if not await _cached_event_is_in_thread(
             event_source,

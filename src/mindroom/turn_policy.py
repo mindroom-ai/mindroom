@@ -451,6 +451,9 @@ class TurnPolicy:
         planning_thread_history = context.planning_thread_history
         requester_user_id = dispatch.requester_user_id
         if not context.mentioned_agents and not context.has_non_agent_mentions:
+            if context.is_thread and context.planning_thread_history_unavailable:
+                self.deps.logger.info("Skipping routing: thread policy history unavailable")
+                return _DispatchPlan(kind="ignore", ignore_reason="router")
             if context.is_thread and thread_requires_explicit_agent_targeting(
                 planning_thread_history,
                 sender_id=requester_user_id,
@@ -527,6 +530,21 @@ class TurnPolicy:
     ) -> ResponseAction:
         """Decide whether to respond as a team, individually, or not at all."""
         planning_thread_history = context.planning_thread_history
+        if (
+            context.is_thread
+            and context.planning_thread_history_unavailable
+            and not context.am_i_mentioned
+            and not context.mentioned_agents
+            and not context.has_non_agent_mentions
+        ):
+            if self._should_queue_follow_up_in_active_response_thread(
+                context=context,
+                target=target,
+                source_envelope=source_envelope,
+                has_active_response_for_target=has_active_response_for_target,
+            ):
+                return ResponseAction(kind="individual")
+            return ResponseAction(kind="skip")
         agents_in_thread = get_agents_in_thread(
             planning_thread_history,
             self.deps.runtime.config,

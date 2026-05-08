@@ -90,6 +90,7 @@ from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import DeliveredMatrixEvent, PermanentMatrixStartupError, ResolvedVisibleMessage
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
@@ -4538,9 +4539,9 @@ class TestAgentBot:
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
-        access = MagicMock()
-        bot._conversation_resolver.dispatch_snapshot_thread_membership_access = MagicMock(return_value=access)
-        bot._conversation_resolver.resolve_related_event_thread_id_best_effort = AsyncMock(return_value="$thread-root")
+        bot._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort = AsyncMock(
+            return_value="$thread-root",
+        )
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -4551,13 +4552,10 @@ class TestAgentBot:
         with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)):
             await bot._on_reaction(room, event)
 
-        bot._conversation_resolver.dispatch_snapshot_thread_membership_access.assert_called_once_with(
-            caller_label="reaction_hook_context",
-        )
-        bot._conversation_resolver.resolve_related_event_thread_id_best_effort.assert_awaited_once_with(
+        bot._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort.assert_awaited_once_with(
             room.room_id,
             "$plain-reply",
-            access=access,
+            caller_label="reaction_hook_context",
         )
         assert seen == [("$plain-reply", "$thread-root")]
 
@@ -8925,6 +8923,203 @@ class TestAgentBot:
         mock_should_respond.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_resolve_response_action_uses_healthy_partial_thread_history_for_policy(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Healthy dispatch snapshots should still enforce multi-human thread targeting."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "synth": AgentConfig(display_name="Synthesis", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        ids = config.get_ids(runtime_paths)
+        bot_user = AgentMatrixUser(
+            agent_name="synth",
+            user_id=ids["synth"].full_id,
+            display_name="Synthesis",
+            password=TEST_PASSWORD,
+        )
+        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            ids["synth"].full_id: MagicMock(),
+            "@bas:localhost": MagicMock(),
+            "@maciej:localhost": MagicMock(),
+        }
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=thread_history_result(
+                [
+                    ResolvedVisibleMessage(
+                        sender="@bas:localhost",
+                        body="Initial question",
+                        timestamp=1,
+                        event_id="$m1",
+                        content={"body": "Initial question"},
+                        thread_id="$thread",
+                        latest_event_id="$m1",
+                    ),
+                    ResolvedVisibleMessage(
+                        sender="@maciej:localhost",
+                        body="Follow-up",
+                        timestamp=2,
+                        event_id="$m2",
+                        content={"body": "Follow-up"},
+                        thread_id="$thread",
+                        latest_event_id="$m2",
+                    ),
+                ],
+                is_full_history=False,
+            ),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        action = await bot._turn_policy.resolve_response_action(
+            context,
+            room,
+            "@bas:localhost",
+            "Follow-up",
+            False,
+        )
+
+        assert action.kind == "skip"
+
+    @pytest.mark.asyncio
+    async def test_resolve_response_action_skips_unmentioned_thread_when_policy_history_degraded(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Unavailable policy history should fail closed instead of behaving like an empty thread."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "synth": AgentConfig(display_name="Synthesis", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        ids = config.get_ids(runtime_paths)
+        bot_user = AgentMatrixUser(
+            agent_name="synth",
+            user_id=ids["synth"].full_id,
+            display_name="Synthesis",
+            password=TEST_PASSWORD,
+        )
+        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            ids["synth"].full_id: MagicMock(),
+            "@bas:localhost": MagicMock(),
+        }
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=thread_history_result(
+                [
+                    ResolvedVisibleMessage(
+                        sender="@bas:localhost",
+                        body="Follow-up",
+                        timestamp=1,
+                        event_id="$m1",
+                        content={"body": "Follow-up"},
+                        thread_id="$thread",
+                        latest_event_id="$m1",
+                    ),
+                ],
+                is_full_history=False,
+                diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True},
+            ),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
+            action = await bot._turn_policy.resolve_response_action(
+                context,
+                room,
+                "@bas:localhost",
+                "Follow-up",
+                False,
+            )
+
+        assert action.kind == "skip"
+        mock_should_respond.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_router_skips_unmentioned_thread_when_policy_history_degraded(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Unavailable policy history should not let the router claim a thread."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password=TEST_PASSWORD,
+        )
+        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$event"
+        event.body = "Follow-up"
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=thread_history_result(
+                [
+                    ResolvedVisibleMessage(
+                        sender="@bas:localhost",
+                        body="Follow-up",
+                        timestamp=1,
+                        event_id="$m1",
+                        content={"body": "Follow-up"},
+                        thread_id="$thread",
+                        latest_event_id="$m1",
+                    ),
+                ],
+                is_full_history=False,
+                diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True},
+            ),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        dispatch = PreparedDispatch(
+            requester_user_id="@bas:localhost",
+            context=context,
+            target=MessageTarget.resolve(room.room_id, "$thread", event.event_id),
+            correlation_id="corr-degraded-router-policy",
+            envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id),
+        )
+
+        plan = await bot._turn_policy.plan_router_dispatch(room, event, dispatch)
+
+        assert plan == _DispatchPlan(kind="ignore", ignore_reason="router")
+
+    @pytest.mark.asyncio
     async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -9200,7 +9395,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Planning and payload preparation should both see full history when snapshots are incomplete."""
+        """Planning should use the snapshot while payload preparation refreshes incomplete history."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -9262,7 +9457,7 @@ class TestAgentBot:
         async def fake_plan(*_args: object, **_kwargs: object) -> _DispatchPlan:
             call_order.append("action")
             assert list(dispatch.context.thread_history) == snapshot_history
-            assert dispatch.context.planning_thread_history == ()
+            assert dispatch.context.planning_thread_history == tuple(snapshot_history)
             return _DispatchPlan(
                 kind="respond",
                 response_action=ResponseAction(kind="individual"),
@@ -10454,9 +10649,7 @@ class TestAgentBot:
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
 
         resolution = await bot._turn_controller._finalize_dispatch_failure(
-            room_id="!test:localhost",
-            reply_to_event_id="$event",
-            thread_id="$thread_root",
+            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
             error=RuntimeError("boom"),
         )
 
@@ -10516,9 +10709,7 @@ class TestAgentBot:
         _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
 
         await bot._turn_controller._finalize_dispatch_failure(
-            room_id="!test:localhost",
-            reply_to_event_id="$event",
-            thread_id="$thread_root",
+            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
             error=RuntimeError("boom"),
         )
 
@@ -10741,6 +10932,78 @@ class TestAgentBot:
                 response_event_id="$error",
             ),
         )
+
+    @pytest.mark.asyncio
+    async def test_post_lock_failure_delivery_uses_stable_dispatch_target(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Post-lock failures should deliver to the same target as successful responses."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        delivery_gateway = SimpleNamespace(send_text=AsyncMock(return_value="$error"))
+        _replace_turn_policy_deps(bot, logger=bot.logger)
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        stable_target = MessageTarget.resolve(
+            room_id=room.room_id,
+            thread_id=None,
+            reply_to_event_id=event.event_id,
+            thread_start_root_event_id=event.event_id,
+        )
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+                requires_model_history_refresh=False,
+            ),
+            target=stable_target,
+            correlation_id="corr-post-lock-target-failure",
+            envelope=_hook_envelope(body="hello", source_event_id="$event"),
+        )
+
+        async def payload_builder(_context: MessageContext) -> DispatchPayload:
+            return DispatchPayload(prompt="hello")
+
+        async def fail_generate_response(*_args: object, **_kwargs: object) -> FinalDeliveryOutcome:
+            message = "post-lock setup failed"
+            error = RuntimeError(message)
+            raise PostLockRequestPreparationError(message) from error
+
+        replace_turn_controller_deps(
+            bot,
+            delivery_gateway=delivery_gateway,
+            response_runner=SimpleNamespace(
+                generate_response=AsyncMock(side_effect=fail_generate_response),
+                generate_team_response_helper=AsyncMock(),
+            ),
+        )
+
+        await bot._turn_controller._execute_response_action(
+            room,
+            event,
+            dispatch,
+            ResponseAction(kind="individual"),
+            payload_builder,
+            processing_log="processing",
+            dispatch_started_at=0.0,
+            handled_turn=HandledTurnState.from_source_event_id(event.event_id),
+        )
+
+        delivery_gateway.send_text.assert_awaited_once()
+        request = delivery_gateway.send_text.await_args.args[0]
+        assert request.target == stable_target
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_records_visible_linkage_when_suppressed_cleanup_fails(
