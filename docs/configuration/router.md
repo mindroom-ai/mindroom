@@ -33,18 +33,19 @@ Startup thread prewarm is a background, best-effort cache warmup for rooms alrea
 
 ## How Routing Works
 
-When a message arrives in a room without a specific agent or team mention:
+When a message arrives in a room without a specific agent or team mention, MindRoom first builds the eligible responder candidate set for that sender and room.
 
-1. The router checks whether the room has statically configured agents or teams
-2. It analyzes the message content and any recent thread context (up to 3 previous messages)
-3. Based on the candidate entities' roles, tools, and instructions, it selects the best match
-4. The router posts a message mentioning the selected entity (e.g., "@agent could you help with this?")
-5. The mentioned agent or team sees the mention and responds in the thread
+1. If the thread already requires explicit targeting, MindRoom stays silent until someone mentions an agent or team
+2. If exactly one eligible responder remains, that agent or team handles the message directly
+3. If multiple eligible responders remain, the router analyzes the message content and any recent thread context (up to 3 previous messages)
+4. Based on the candidate entities' roles, tools, and instructions, it selects the best match
+5. The router posts a message mentioning the selected entity (e.g., "@agent could you help with this?")
+6. The mentioned agent or team sees the mention and responds in the thread
 
 For configured rooms, routing candidates come only from `agents.<name>.rooms` and `teams.<name>.rooms`, then are filtered by the sender's per-entity reply permissions.
 For ad-hoc rooms accepted through invites, routing candidates come from the sender-visible MindRoom agents and teams currently joined to that room, then are filtered by the same sender permissions.
 
-The router uses a structured output schema to ensure consistent routing decisions, including the selected agent or team name and reasoning for the selection.
+When multiple responders are eligible, the router uses a structured output schema to ensure consistent routing decisions, including the selected agent or team name and reasoning for the selection.
 
 ## Router Responsibilities
 
