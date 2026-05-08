@@ -19,6 +19,7 @@ from mindroom import runtime_env_policy
 # Agent names
 ROUTER_AGENT_NAME = "router"
 MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
+_MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
@@ -620,6 +621,17 @@ def runtime_env_flag(
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def runtime_dispatch_thread_read_timeout_seconds(runtime_paths: RuntimePaths) -> float:
+    """Return the dispatch-safe thread read wall-clock budget."""
+    raw_value = runtime_paths.env_value("MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS")
+    if raw_value is None:
+        return _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS
+    try:
+        return max(0.001, float(raw_value))
+    except ValueError:
+        return _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS
 
 
 def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:

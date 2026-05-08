@@ -967,7 +967,7 @@ class TurnController:
             if thread_context is not None
             else _ReplayGuardContext(
                 history=context.replay_guard_history,
-                degraded=context.replay_guard_history_degraded,
+                degraded=False,
                 thread_id=target.resolved_thread_id,
             )
         )

@@ -17,7 +17,6 @@ from mindroom.dispatch_thread_context import (
     context_with_dispatch_thread_context,
     planning_history_for,
     planning_history_unavailable_for,
-    room_level_target,
 )
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
@@ -143,11 +142,6 @@ class MessageContext:
             requires_model_history_refresh=self.requires_model_history_refresh,
         )
 
-    @property
-    def replay_guard_history_degraded(self) -> bool:
-        """Return whether replay history cannot prove that no newer thread message exists."""
-        return is_thread_history_degraded(self.replay_guard_history)
-
 
 @dataclass(frozen=True)
 class _ThreadIdLookup:
@@ -231,7 +225,7 @@ class _ThreadContextLookup:
 
 
 @dataclass(frozen=True)
-class _DispatchContextResult:
+class DispatchContextResult:
     """Stable message context plus dispatch-local thread resolution evidence."""
 
     context: MessageContext
@@ -655,7 +649,7 @@ class ConversationResolver:
         payload_metadata: DispatchPayloadMetadata | None = None,
         mode: ThreadReadMode = ThreadReadMode.DISPATCH_FULL,
         caller_label: str = "dispatch_context",
-    ) -> _DispatchContextResult:
+    ) -> DispatchContextResult:
         """Extract bounded dispatch context using the requested thread read mode."""
         context, thread_context = await self._extract_message_context_parts(
             room,
@@ -665,7 +659,7 @@ class ConversationResolver:
             payload_metadata=payload_metadata,
             caller_label=caller_label,
         )
-        return _DispatchContextResult(context=context, thread_context=thread_context)
+        return DispatchContextResult(context=context, thread_context=thread_context)
 
     async def extract_trusted_router_relay_context(
         self,
@@ -673,7 +667,7 @@ class ConversationResolver:
         event: DispatchEvent,
         *,
         payload_metadata: DispatchPayloadMetadata | None = None,
-    ) -> _DispatchContextResult:
+    ) -> DispatchContextResult:
         """Extract minimal context for router relays and defer thread hydration until after lock."""
         resolved_event_source = await resolve_event_source_content(event.source, self._client())
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
@@ -716,7 +710,7 @@ class ConversationResolver:
             replay_guard_history=(),
             requires_model_history_refresh=resolved_thread_id is not None,
         )
-        return _DispatchContextResult(context=context, thread_context=None)
+        return DispatchContextResult(context=context, thread_context=None)
 
     async def resolve_dispatch_target(
         self,
@@ -820,13 +814,11 @@ class ConversationResolver:
             replay_guard_history = thread_lookup.replay_guard_history
             if include_dispatch_context:
                 if thread_lookup.candidate_thread_root_id is not None and thread_lookup.thread_id is None:
-                    stable_target = room_level_target(
-                        self.build_message_target(
-                            room_id=room.room_id,
-                            thread_id=thread_lookup.candidate_thread_root_id,
-                            reply_to_event_id=event.event_id,
-                            event_source=event.source,
-                        ),
+                    stable_target = MessageTarget.resolve(
+                        room_id=room.room_id,
+                        thread_id=None,
+                        reply_to_event_id=event.event_id,
+                        room_mode=True,
                     )
                 else:
                     stable_target = self.build_message_target(

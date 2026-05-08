@@ -188,7 +188,7 @@ async def has_newer_unresponded_cached_thread_event(
         recent_events = await get_recent_room_events(
             room_id,
             event_type="m.room.message",
-            since_ts_ms=int(event.server_timestamp) + 1,
+            since_ts_ms=int(event.server_timestamp),
         )
     except Exception as exc:
         logger.warning(

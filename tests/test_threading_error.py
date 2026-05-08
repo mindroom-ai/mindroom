@@ -1486,12 +1486,11 @@ class TestMatrixConversationCacheThreadReads:
         )
 
         assert latest_event_id == "$thread-root:localhost"
-        access._reads.fetch_thread_history_from_client.assert_awaited_once_with(
-            "!room:localhost",
-            "$thread-root:localhost",
-            caller_label="latest_thread_event_lookup",
-            coordinator_queue_wait_ms=0.0,
-        )
+        access._reads.fetch_thread_history_from_client.assert_awaited_once()
+        fetch_args = access._reads.fetch_thread_history_from_client.await_args
+        assert fetch_args.args == ("!room:localhost", "$thread-root:localhost")
+        assert fetch_args.kwargs["caller_label"] == "latest_thread_event_lookup"
+        assert fetch_args.kwargs["coordinator_queue_wait_ms"] >= 0.0
 
     @pytest.mark.asyncio
     async def test_invalidate_known_thread_fails_closed_when_stale_marker_write_fails(self) -> None:

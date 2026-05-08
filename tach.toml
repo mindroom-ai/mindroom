@@ -1200,6 +1200,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.cache.thread_reads"
 depends_on = [
+    "mindroom.constants",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.thread_diagnostics",
@@ -2343,6 +2344,12 @@ expose = [
     "room_level_target",
 ]
 from = ["mindroom.dispatch_thread_context"]
+
+[[interfaces]]
+expose = ["DispatchContextResult"]
+from = ["mindroom.conversation_resolver"]
+visibility = ["mindroom.turn_controller"]
+exclusive = true
 
 [[interfaces]]
 expose = ["ThreadMutationCacheOps"]

@@ -8,6 +8,7 @@ import typing
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
+from mindroom.constants import runtime_dispatch_thread_read_timeout_seconds
 from mindroom.matrix.cache.thread_cache_helpers import latest_visible_thread_event_id
 from mindroom.matrix.cache.thread_history_result import (
     ThreadHistoryResult,
@@ -32,14 +33,13 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
-_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 _CACHE_COORDINATOR_TIMEOUT = "cache_coordinator_timeout"
 _DISPATCH_READ_TIMEOUT = "dispatch_read_timeout"
 
 
-def _remaining_dispatch_thread_read_seconds(queue_wait_started: float) -> float:
+def _remaining_dispatch_thread_read_seconds(queue_wait_started: float, timeout_seconds: float) -> float:
     """Return the remaining dispatch-safe read budget."""
-    deadline = queue_wait_started + _DISPATCH_THREAD_READ_TIMEOUT_SECONDS
+    deadline = queue_wait_started + timeout_seconds
     return max(0.0, deadline - time.perf_counter())
 
 
@@ -110,6 +110,9 @@ class ThreadReadPolicy:
     def _coordinator(self) -> EventCacheWriteCoordinator | None:
         return self.runtime.event_cache_write_coordinator
 
+    def _dispatch_thread_read_timeout_seconds(self) -> float:
+        return runtime_dispatch_thread_read_timeout_seconds(self.runtime.runtime_paths)
+
     def _fetcher_for_mode(self, mode: ThreadReadMode) -> _ThreadHistoryFetcher:
         """Return the client fetcher matching one named read policy."""
         return {
@@ -156,6 +159,7 @@ class ThreadReadPolicy:
         caller_label: str,
         queue_wait_started: float,
         error_code: str,
+        dispatch_timeout_seconds: float,
         fetch_started: float | None = None,
     ) -> ThreadHistoryResult:
         coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
@@ -168,6 +172,7 @@ class ThreadReadPolicy:
             THREAD_HISTORY_ERROR_DIAGNOSTIC: error_code,
             "coordinator_queue_wait_ms": coordinator_queue_wait_ms,
             "caller_label": caller_label,
+            "dispatch_thread_read_timeout_seconds": dispatch_timeout_seconds,
         }
         if dispatch_fetch_wait_ms is not None:
             diagnostics["dispatch_fetch_wait_ms"] = dispatch_fetch_wait_ms
@@ -178,6 +183,7 @@ class ThreadReadPolicy:
             "thread_read_degraded": True,
             "thread_read_error": error_code,
             "coordinator_queue_wait_ms": coordinator_queue_wait_ms,
+            "dispatch_thread_read_timeout_seconds": dispatch_timeout_seconds,
         }
         if dispatch_fetch_wait_ms is not None:
             log_fields["dispatch_fetch_wait_ms"] = dispatch_fetch_wait_ms
@@ -221,9 +227,10 @@ class ThreadReadPolicy:
         full_history: bool,
         caller_label: str,
         queue_wait_started: float,
+        dispatch_timeout_seconds: float,
     ) -> ThreadHistoryResult:
         fetch_started = time.perf_counter()
-        remaining_timeout = _remaining_dispatch_thread_read_seconds(queue_wait_started)
+        remaining_timeout = _remaining_dispatch_thread_read_seconds(queue_wait_started, dispatch_timeout_seconds)
         if remaining_timeout <= 0:
             return self._degraded_dispatch_timeout_result(
                 room_id=room_id,
@@ -231,6 +238,7 @@ class ThreadReadPolicy:
                 caller_label=caller_label,
                 queue_wait_started=queue_wait_started,
                 error_code=_DISPATCH_READ_TIMEOUT,
+                dispatch_timeout_seconds=dispatch_timeout_seconds,
                 fetch_started=fetch_started,
             )
         try:
@@ -254,6 +262,7 @@ class ThreadReadPolicy:
                 caller_label=caller_label,
                 queue_wait_started=queue_wait_started,
                 error_code=_DISPATCH_READ_TIMEOUT,
+                dispatch_timeout_seconds=dispatch_timeout_seconds,
                 fetch_started=fetch_started,
             )
 
@@ -306,25 +315,27 @@ class ThreadReadPolicy:
     ) -> ThreadHistoryResult:
         """Resolve one thread read through the same-thread barrier and fetch selection path."""
         queue_wait_started = time.perf_counter()
-        try:
-            if mode.dispatch_safe:
-                remaining_timeout = _remaining_dispatch_thread_read_seconds(queue_wait_started)
+        fetcher = self._fetcher_for_mode(mode)
+        if mode.dispatch_safe:
+            dispatch_timeout_seconds = self._dispatch_thread_read_timeout_seconds()
+            try:
+                remaining_timeout = _remaining_dispatch_thread_read_seconds(
+                    queue_wait_started,
+                    dispatch_timeout_seconds,
+                )
                 await asyncio.wait_for(
                     self._wait_for_pending_thread_cache_updates(room_id, thread_id),
                     timeout=remaining_timeout,
                 )
-            else:
-                await self._wait_for_pending_thread_cache_updates(room_id, thread_id)
-        except TimeoutError:
-            return self._degraded_dispatch_timeout_result(
-                room_id=room_id,
-                thread_id=thread_id,
-                caller_label=caller_label,
-                queue_wait_started=queue_wait_started,
-                error_code=_CACHE_COORDINATOR_TIMEOUT,
-            )
-        fetcher = self._fetcher_for_mode(mode)
-        if mode.dispatch_safe:
+            except TimeoutError:
+                return self._degraded_dispatch_timeout_result(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    caller_label=caller_label,
+                    queue_wait_started=queue_wait_started,
+                    error_code=_CACHE_COORDINATOR_TIMEOUT,
+                    dispatch_timeout_seconds=dispatch_timeout_seconds,
+                )
             return await self._load_dispatch_thread_read(
                 room_id,
                 thread_id,
@@ -332,7 +343,9 @@ class ThreadReadPolicy:
                 full_history=mode.full_history,
                 caller_label=caller_label,
                 queue_wait_started=queue_wait_started,
+                dispatch_timeout_seconds=dispatch_timeout_seconds,
             )
+        await self._wait_for_pending_thread_cache_updates(room_id, thread_id)
         return await self._run_thread_read(
             room_id,
             thread_id,

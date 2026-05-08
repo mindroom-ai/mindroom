@@ -15,6 +15,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_STALE_CACHE,
+    is_thread_history_degraded,
 )
 from mindroom.message_target import MessageTarget
 
@@ -134,7 +135,7 @@ def test_context_with_dispatch_thread_context_propagates_replay_guard_history() 
     assert stabilized.thread_id == "$thread:localhost"
     assert stabilized.thread_history == (thread_message,)
     assert stabilized.replay_guard_history == (replay_message,)
-    assert stabilized.replay_guard_history_degraded is False
+    assert is_thread_history_degraded(stabilized.replay_guard_history) is False
     assert stabilized.requires_model_history_refresh is True
 
 

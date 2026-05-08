@@ -3131,7 +3131,7 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
     bot.event_cache.get_recent_room_events.assert_awaited_once_with(
         room.room_id,
         event_type="m.room.message",
-        since_ts_ms=1001,
+        since_ts_ms=1000,
     )
     action_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$m1")
@@ -3366,7 +3366,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     bot.event_cache.get_recent_room_events.assert_awaited_once_with(
         room.room_id,
         event_type="m.room.message",
-        since_ts_ms=1001,
+        since_ts_ms=1000,
     )
     action_mock.assert_awaited_once()
     assert not bot._turn_store.is_handled("$m1")

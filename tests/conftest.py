@@ -24,7 +24,7 @@ import mindroom.bot  # noqa: F401
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.conversation_resolver import MessageContext, _DispatchContextResult
+from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
@@ -35,6 +35,7 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
@@ -96,18 +97,18 @@ RuntimeBot = AgentBot | TeamBot
 TestFunction = Callable[..., object]
 
 
-def dispatch_context_result(context: MessageContext) -> _DispatchContextResult:
+def dispatch_context_result(context: MessageContext) -> DispatchContextResult:
     """Wrap a stable message context in the dispatch extraction result shape."""
-    return _DispatchContextResult(context=context, thread_context=None)
+    return DispatchContextResult(context=context, thread_context=None)
 
 
 def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation:
-    """Wrap a prepared dispatch in the private turn-controller result shape."""
+    """Wrap a prepared dispatch in the private turn-controller preparation result shape."""
     return _DispatchPreparation(
         dispatch=dispatch,
         replay_guard=_ReplayGuardContext(
             history=dispatch.context.replay_guard_history,
-            degraded=dispatch.context.replay_guard_history_degraded,
+            degraded=is_thread_history_degraded(dispatch.context.replay_guard_history),
             thread_id=dispatch.target.resolved_thread_id,
         ),
     )
