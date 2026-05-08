@@ -2312,79 +2312,86 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Cached full-history reads should reuse durable sidecar text after a restart."""
-    cache = event_cache_factory()
-    await cache.initialize()
     message_content_module._mxc_cache.clear()
+    try:
+        cache = event_cache_factory()
+        await cache.initialize()
 
-    root_event = _make_text_event(
-        event_id="$thread_root",
-        sender="@user:localhost",
-        body="Root message",
-        server_timestamp=1000,
-        source_content={"body": "Root message"},
-    )
-    sidecar_reply = _make_text_event(
-        event_id="$reply",
-        sender="@agent:localhost",
-        body="Preview reply",
-        server_timestamp=2000,
-        source_content={
-            "body": "Preview reply",
-            "msgtype": "m.file",
-            "io.mindroom.long_text": {
-                "version": 2,
-                "encoding": "matrix_event_content_json",
+        root_event = _make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        sidecar_reply = _make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Preview reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Preview reply",
+                "msgtype": "m.file",
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/sidecar",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
-            "url": "mxc://server/sidecar",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-        },
-    )
-    canonical_sidecar_content = {"body": "Full reply", "msgtype": "m.text"}
-
-    first_client = MagicMock()
-    first_client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(canonical_sidecar_content).encode("utf-8"),
-        ),
-    )
-    first_client.room_get_event = AsyncMock()
-    first_client.room_messages = AsyncMock()
-    first_client.room_get_event_relations = MagicMock()
-
-    try:
-        await _seed_thread_cache(
-            cache,
-            room_id="!room:localhost",
-            thread_id="$thread_root",
-            events=[_cache_source(root_event), _cache_source(sidecar_reply)],
         )
+        canonical_sidecar_content = {"body": "Full reply", "msgtype": "m.text"}
 
-        first_history = await fetch_thread_history(first_client, "!room:localhost", "$thread_root", event_cache=cache)
-    finally:
-        await cache.close()
-
-    message_content_module._mxc_cache.clear()
-
-    reopened_cache = event_cache_factory()
-    await reopened_cache.initialize()
-    second_client = MagicMock()
-    second_client.download = AsyncMock(
-        return_value=MagicMock(spec=nio.DownloadError),
-    )
-    second_client.room_get_event = AsyncMock()
-    second_client.room_messages = AsyncMock()
-    second_client.room_get_event_relations = MagicMock()
-
-    try:
-        second_history = await fetch_thread_history(
-            second_client,
-            "!room:localhost",
-            "$thread_root",
-            event_cache=reopened_cache,
+        first_client = MagicMock()
+        first_client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(canonical_sidecar_content).encode("utf-8"),
+            ),
         )
+        first_client.room_get_event = AsyncMock()
+        first_client.room_messages = AsyncMock()
+        first_client.room_get_event_relations = MagicMock()
+
+        try:
+            await _seed_thread_cache(
+                cache,
+                room_id="!room:localhost",
+                thread_id="$thread_root",
+                events=[_cache_source(root_event), _cache_source(sidecar_reply)],
+            )
+
+            first_history = await fetch_thread_history(
+                first_client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+            )
+        finally:
+            await cache.close()
+
+        message_content_module._mxc_cache.clear()
+
+        reopened_cache = event_cache_factory()
+        await reopened_cache.initialize()
+        second_client = MagicMock()
+        second_client.download = AsyncMock(
+            return_value=MagicMock(spec=nio.DownloadError),
+        )
+        second_client.room_get_event = AsyncMock()
+        second_client.room_messages = AsyncMock()
+        second_client.room_get_event_relations = MagicMock()
+
+        try:
+            second_history = await fetch_thread_history(
+                second_client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=reopened_cache,
+            )
+        finally:
+            await reopened_cache.close()
     finally:
-        await reopened_cache.close()
         message_content_module._mxc_cache.clear()
 
     assert [message.body for message in first_history] == ["Root message", "Full reply"]

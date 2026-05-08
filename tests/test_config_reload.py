@@ -1826,12 +1826,6 @@ async def test_new_agent_joins_rooms_on_config_reload(
     # Track room operations
     joined_rooms: dict[str, list[str]] = {}
 
-    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
-        # Return both existing and new agent users
-        return mock_agent_users
-
-    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users, raising=False)
-
     async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
         if user_id not in joined_rooms:
@@ -1973,7 +1967,6 @@ async def test_team_room_changes_on_config_reload(
 async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     initial_config: Config,
     updated_config: Config,
-    mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1988,11 +1981,6 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
         return result
 
     monkeypatch.setattr("mindroom.config.main.Config.from_yaml", mock_load_config)
-
-    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
-        return mock_agent_users
-
-    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users, raising=False)
 
     def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
         return list(aliases)

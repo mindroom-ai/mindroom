@@ -85,7 +85,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
 
 IN_PROGRESS_MARKER = " ⋯"
 
@@ -199,6 +199,14 @@ def mock_calculator_agent() -> AgentMatrixUser:
         display_name="CalculatorAgent",
         user_id="@mindroom_calculator:localhost",
     )
+
+
+@pytest.fixture
+def reset_oversized_nonterminal_rate_limit() -> Iterator[None]:
+    """Reset oversized nonterminal sidecar edit rate-limit state around a test."""
+    _oversized_nonterminal_streaming_edit_sent_at.clear()
+    yield
+    _oversized_nonterminal_streaming_edit_sent_at.clear()
 
 
 class TestStreamingBehavior:
@@ -537,9 +545,11 @@ class TestStreamingBehavior:
         assert content["m.relates_to"]["event_id"] == "$stream_123"
 
     @pytest.mark.asyncio
-    async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(self) -> None:
+    async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(
+        self,
+        reset_oversized_nonterminal_rate_limit: None,  # noqa: ARG002
+    ) -> None:
         """Oversized in-progress edits should not burst sidecar uploads while final still sends."""
-        _oversized_nonterminal_streaming_edit_sent_at.clear()
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -595,9 +605,11 @@ class TestStreamingBehavior:
             assert mock_edit.await_count == 3
 
     @pytest.mark.asyncio
-    async def test_rate_limited_oversized_nonterminal_edit_resolves_capture_completion(self) -> None:
+    async def test_rate_limited_oversized_nonterminal_edit_resolves_capture_completion(
+        self,
+        reset_oversized_nonterminal_rate_limit: None,  # noqa: ARG002
+    ) -> None:
         """Skipping an oversized in-progress edit should still unblock capture waiters."""
-        _oversized_nonterminal_streaming_edit_sent_at.clear()
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
             room_id="!test:localhost",

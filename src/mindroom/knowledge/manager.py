@@ -1392,9 +1392,8 @@ class KnowledgeManager:
 
         async with self._git_sync_lock:
             changed_files, removed_files, updated = await self._sync_git_source_once(git_config)
-        current_head = await self._git_rev_parse("HEAD")
-
-        self._git_last_successful_commit = current_head
+            current_head = await self._git_rev_parse("HEAD")
+            self._git_last_successful_commit = current_head
 
         if updated:
             logger.info(

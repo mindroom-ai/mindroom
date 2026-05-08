@@ -192,46 +192,17 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
 @pytest.mark.requires_matrix  # Requires real Matrix server for streaming e2e test
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 @patch("mindroom.response_attempt.is_user_online")
-@patch("mindroom.matrix.users._ensure_all_agent_users", create=True)
 @patch("mindroom.bot.login_agent_user")
 @patch("mindroom.bot.AgentBot.ensure_user_account")
 async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     mock_ensure_user: AsyncMock,
     mock_login: AsyncMock,
-    mock_ensure_all: AsyncMock,
     mock_is_user_online: AsyncMock,
     tmp_path: Path,
 ) -> None:
     """End-to-end test that agents don't respond to streaming edits from other agents."""
     # Mock user as online for stop button to show
     mock_is_user_online.return_value = True
-
-    # Mock ensure_all_agent_users to return proper user objects
-
-    mock_agents = {
-        "helper": AgentMatrixUser(
-            agent_name="helper",
-            user_id="@mindroom_helper:localhost",
-            display_name="HelperAgent",
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        ),
-        "calculator": AgentMatrixUser(
-            agent_name="calculator",
-            user_id="@mindroom_calculator:localhost",
-            display_name="CalculatorAgent",
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        ),
-        "router": AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        ),
-    }
-    mock_ensure_all.return_value = mock_agents
 
     # Mock ensure_user_account to set proper user IDs
     async def ensure_user_side_effect(bot_self: object) -> None:

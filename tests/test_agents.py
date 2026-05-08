@@ -2806,6 +2806,7 @@ def test_config_reports_mixed_memory_backend_usage() -> None:
     )
 
     assert config.uses_file_memory() is True
+    assert config.get_agent_memory_backend("general") == "file"
     assert config.get_agent_memory_backend("writer") == "mem0"
 
 

@@ -322,7 +322,6 @@ async def test_git_manager_construction_does_not_probe_checkout_on_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Git checkout detection during construction must stay filesystem-only."""
-    loop_thread_id = get_ident()
     knowledge_path = tmp_path / "knowledge"
     (knowledge_path / ".git").mkdir(parents=True)
     config = _config(
@@ -332,14 +331,12 @@ async def test_git_manager_construction_does_not_probe_checkout_on_event_loop(
         git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")},
     )
 
-    def _unexpected_checkout_probe(*_args: object, **_kwargs: object) -> bool:
-        msg = f"git checkout probe ran during manager construction on thread {loop_thread_id}"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(knowledge_manager_module, "git_checkout_present", _unexpected_checkout_probe)
+    checkout_probe = MagicMock(return_value=True)
+    monkeypatch.setattr(knowledge_manager_module, "git_checkout_present", checkout_probe)
 
     await asyncio.sleep(0)
     KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+    checkout_probe.assert_not_called()
 
 
 def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: Path) -> None:

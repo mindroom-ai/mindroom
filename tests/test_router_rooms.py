@@ -229,37 +229,6 @@ async def test_orchestrator_creates_router_with_all_rooms(
     """Test that the orchestrator properly initializes the router with all rooms."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
 
-    # Mock various async operations
-    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
-        return {
-            ROUTER_AGENT_NAME: AgentMatrixUser(
-                agent_name=ROUTER_AGENT_NAME,
-                user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-                display_name="RouterAgent",
-                password=TEST_PASSWORD,
-            ),
-            "agent1": AgentMatrixUser(
-                agent_name="agent1",
-                user_id="@mindroom_agent1:localhost",
-                display_name="Agent 1",
-                password=TEST_PASSWORD,
-            ),
-            "agent2": AgentMatrixUser(
-                agent_name="agent2",
-                user_id="@mindroom_agent2:localhost",
-                display_name="Agent 2",
-                password=TEST_PASSWORD,
-            ),
-            "team1": AgentMatrixUser(
-                agent_name="team1",
-                user_id="@mindroom_team1:localhost",
-                display_name="Team 1",
-                password=TEST_PASSWORD,
-            ),
-        }
-
-    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users, raising=False)
-
     # Mock resolve_room_aliases to return the same aliases (no resolution needed for test)
     def mock_resolve_room_aliases(
         aliases: list[str],
@@ -323,25 +292,6 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
             ),
         },
     )
-
-    # Mock various operations
-    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
-        return {
-            ROUTER_AGENT_NAME: AgentMatrixUser(
-                agent_name=ROUTER_AGENT_NAME,
-                user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-                display_name="RouterAgent",
-                password=TEST_PASSWORD,
-            ),
-            "agent1": AgentMatrixUser(
-                agent_name="agent1",
-                user_id="@mindroom_agent1:localhost",
-                display_name="Agent 1",
-                password=TEST_PASSWORD,
-            ),
-        }
-
-    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users, raising=False)
 
     def mock_resolve_room_aliases(
         aliases: list[str],

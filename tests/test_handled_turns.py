@@ -14,7 +14,6 @@ from mindroom.handled_turns import (
     HandledTurnLedger,
     HandledTurnRecord,
     HandledTurnState,
-    _response_event_id_for_record,
 )
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
@@ -65,9 +64,8 @@ def _record_handled_turn(
 
 
 def _get_response_event_id(tracker: HandledTurnLedger, source_event_id: str) -> str | None:
-    with tracker._thread_lock, tracker._file_lock(exclusive=False):
-        tracker._responses = tracker._read_responses_file_locked(repair_corrupt_file=False)
-        return _response_event_id_for_record(tracker._responses.get(source_event_id))
+    turn_record = tracker.get_turn_record(source_event_id)
+    return turn_record.response_event_id if turn_record is not None else None
 
 
 def test_handled_turn_ledger_init(temp_dir: Path) -> None:
