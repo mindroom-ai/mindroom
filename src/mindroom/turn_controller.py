@@ -825,10 +825,22 @@ class TurnController:
         handled_turn: HandledTurnState,
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
+        use_command_context: bool = False,
     ) -> _PreparedDispatchResult | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
-        if self._should_use_trusted_router_relay_context(
+        if use_command_context:
+            dispatch_context_result = await self.deps.resolver.extract_dispatch_command_context(
+                room,
+                event,
+                payload_metadata=payload_metadata,
+            )
+            emit_elapsed_timing(
+                "dispatch_handoff.prepare_dispatch.extract_context",
+                extract_context_start,
+                path="command",
+            )
+        elif self._should_use_trusted_router_relay_context(
             event,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
@@ -936,11 +948,19 @@ class TurnController:
         event: TextDispatchEvent,
         requester_user_id: str,
         command: Command,
+        *,
+        target: MessageTarget | None = None,
     ) -> None:
         """Run one explicit command executor path from the turn controller."""
         event = await self.deps.normalizer.resolve_text_event(
             TextNormalizationRequest(event=event),
         )
+        if target is None:
+            target = await self.deps.resolver.resolve_dispatch_target(
+                room,
+                event,
+                caller_label="command_context",
+            )
 
         async def send_response(
             room_id: str,
@@ -979,11 +999,10 @@ class TurnController:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             logger=self.deps.logger,
-            derive_conversation_context=self.deps.resolver.derive_conversation_context,
             conversation_cache=self.deps.resolver.deps.conversation_cache,
             event_cache=self.deps.runtime.event_cache,
             matrix_admin=matrix_admin,
-            build_message_target=self.deps.resolver.build_message_target,
+            stable_target=target,
             record_handled_turn=self.deps.turn_store.record_turn,
             send_response=send_response,
             reload_plugins=reload_plugins,
@@ -1689,6 +1708,9 @@ class TurnController:
 
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_start")
+            command = None
+            if not media_events and (ingress_metadata is None or ingress_metadata.source_kind != "voice"):
+                command = command_parser.parse(event.body)
             prepared_dispatch_result = await self._prepare_dispatch(
                 room,
                 event,
@@ -1697,6 +1719,7 @@ class TurnController:
                 handled_turn=handled_turn,
                 ingress_metadata=ingress_metadata,
                 payload_metadata=payload_metadata,
+                use_command_context=command is not None,
             )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_ready")
@@ -1709,9 +1732,8 @@ class TurnController:
                 correlation_id=dispatch.correlation_id,
             )
 
-            command = None
-            if not media_events and dispatch.envelope.source_kind != "voice":
-                command = command_parser.parse(event.body)
+            if command is not None and dispatch.envelope.source_kind == "voice":
+                command = None
             if command:
                 if self.deps.agent_name == ROUTER_AGENT_NAME:
                     await self._execute_command(
@@ -1719,6 +1741,7 @@ class TurnController:
                         event=event,
                         requester_user_id=requester_user_id,
                         command=command,
+                        target=dispatch.target,
                     )
                 return
             if self._should_skip_deep_synthetic_full_dispatch(

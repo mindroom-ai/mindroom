@@ -35,7 +35,7 @@ from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_membership import (
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
-    resolve_event_thread_id,
+    resolve_event_thread_membership,
 )
 from mindroom.matrix.thread_room_scan import room_scan_membership_access_for_client
 from mindroom.timing import elapsed_ms_since
@@ -106,7 +106,7 @@ async def resolve_thread_root_event_id_for_client(
             normalized_event_id,
         )
 
-    return await resolve_event_thread_id(
+    resolution = await resolve_event_thread_membership(
         room_id,
         event_info,
         event_id=normalized_event_id,
@@ -122,6 +122,7 @@ async def resolve_thread_root_event_id_for_client(
             ),
         ),
     )
+    return resolution.thread_id
 
 
 class ConversationCacheProtocol(Protocol):

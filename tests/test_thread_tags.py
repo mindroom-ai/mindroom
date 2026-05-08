@@ -1571,6 +1571,35 @@ async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_p
 
 
 @pytest.mark.asyncio
+async def test_resolve_thread_root_event_id_for_client_returns_none_for_missing_plain_reply_target() -> None:
+    """Plain replies to missing/redacted targets should remain best-effort room-level."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _message_event_response(
+                "$plain-reply:localhost",
+                content={
+                    "body": "Bridge reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$redacted-root:localhost"}},
+                },
+            ),
+            nio.RoomGetEventError("missing", status_code="M_NOT_FOUND"),
+        ],
+    )
+
+    normalized = await resolve_thread_root_event_id_for_client(
+        client,
+        "!room:localhost",
+        "$plain-reply:localhost",
+    )
+
+    assert normalized is None
+    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply:localhost")
+    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$redacted-root:localhost")
+
+
+@pytest.mark.asyncio
 async def test_resolve_thread_root_event_id_for_client_walks_transitively_to_threaded_ancestor() -> None:
     """Plain replies should normalize transitively when the reply chain eventually reaches a threaded ancestor."""
     client = AsyncMock()

@@ -93,6 +93,20 @@ def test_room_level_target_strips_source_and_resolved_thread_ids() -> None:
     assert target.reply_to_event_id == "$reply:localhost"
 
 
+def test_message_target_identifies_new_root_target_shape() -> None:
+    """Only thread-start delivery targets should be treated as new roots."""
+    target = MessageTarget.resolve(
+        "!room:localhost",
+        None,
+        "$event:localhost",
+        thread_start_root_event_id="$event:localhost",
+    )
+    existing_thread = MessageTarget.resolve("!room:localhost", "$event:localhost", "$event:localhost")
+
+    assert target.represents_new_thread_root is True
+    assert existing_thread.represents_new_thread_root is False
+
+
 def test_context_with_dispatch_thread_context_propagates_replay_guard_history() -> None:
     """Dispatch-local replay evidence must survive context stabilization."""
     thread_message = _message("$thread-message:localhost")
@@ -134,7 +148,12 @@ def test_context_with_dispatch_thread_context_hides_new_root_target_from_policy(
         has_non_agent_mentions=False,
     )
     dispatch_context = DispatchThreadContext(
-        stable_target=MessageTarget.resolve("!room:localhost", "$event:localhost", "$event:localhost"),
+        stable_target=MessageTarget.resolve(
+            "!room:localhost",
+            None,
+            "$event:localhost",
+            thread_start_root_event_id="$event:localhost",
+        ),
         candidate_thread_root_id=None,
         thread_history=thread_history_result([_message("$event:localhost")], is_full_history=False),
         requires_model_history_refresh=True,

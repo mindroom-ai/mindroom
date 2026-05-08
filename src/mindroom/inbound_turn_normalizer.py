@@ -19,7 +19,6 @@ from mindroom.attachments import (
 from mindroom.dispatch_handoff import MediaDispatchEvent, PreparedTextEvent
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.client_visible_messages import resolve_visible_event_source
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.image_handler import download_image
 from mindroom.matrix.media import (
     AudioMessageEvent,
@@ -159,19 +158,12 @@ class InboundTurnNormalizer:
     async def prepare_voice_event(self, request: VoiceNormalizationRequest) -> _VoiceNormalizationResult | None:
         """Normalize one audio message into a prepared text event."""
         client = self._client()
-        event_info = EventInfo.from_event(request.event.source)
-        _, thread_id, _ = await self.deps.conversation_resolver.derive_conversation_context(
-            request.room.room_id,
-            event_info,
-            event_id=request.event.event_id,
+        target = await self.deps.conversation_resolver.resolve_dispatch_target(
+            request.room,
+            request.event,
             caller_label="voice_normalization",
         )
-        effective_thread_id = self.deps.conversation_resolver.build_message_target(
-            room_id=request.room.room_id,
-            thread_id=thread_id,
-            reply_to_event_id=request.event.event_id,
-            event_source=request.event.source,
-        ).resolved_thread_id
+        effective_thread_id = target.resolved_thread_id
         with bound_log_context(room_id=request.room.room_id, thread_id=effective_thread_id):
             prepared_voice = await prepare_voice_message(
                 client,

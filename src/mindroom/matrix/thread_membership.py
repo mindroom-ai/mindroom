@@ -30,13 +30,12 @@ _MAX_THREAD_MEMBERSHIP_HOPS = 512
 
 
 class _SupportsEventId(Protocol):
-    """Minimal protocol for snapshot entries used during thread-root checks."""
+    """Minimal protocol for entries used during thread-root checks."""
 
     event_id: str
 
 
 type _ThreadMessagesLookup = Callable[[str, str], Awaitable[Sequence[_SupportsEventId]]]
-type _ThreadSnapshotLookup = Callable[[str, str], Awaitable[Sequence[_SupportsEventId]]]
 
 
 class _ThreadRootProofState(Enum):
@@ -128,10 +127,6 @@ class ThreadResolution:
         return self.state is ThreadResolutionState.THREADED
 
 
-class _ThreadMembershipProofError(RuntimeError):
-    """Raised when strict thread-membership resolution cannot prove one candidate root."""
-
-
 class ThreadMembershipLookupError(RuntimeError):
     """Raised when related-event lookup cannot determine thread membership from available data."""
 
@@ -173,18 +168,6 @@ def _resolution_from_root_proof(
         candidate_thread_root_id=thread_root_id,
         thread_history=proof.thread_history,
     )
-
-
-def _strict_thread_id_from_resolution(
-    resolution: ThreadResolution,
-) -> str | None:
-    """Return the strict thread id or raise when proof is unavailable."""
-    if resolution.state is not ThreadResolutionState.INDETERMINATE:
-        return resolution.thread_id
-    msg = "Thread membership proof unavailable"
-    if resolution.error is not None and str(resolution.error):
-        msg = str(resolution.error)
-    raise _ThreadMembershipProofError(msg) from resolution.error
 
 
 async def resolve_event_thread_membership(
@@ -270,40 +253,6 @@ async def resolve_related_event_thread_membership(
         break
 
     return resolution
-
-
-async def resolve_event_thread_id(
-    room_id: str,
-    event_info: EventInfo,
-    *,
-    access: ThreadMembershipAccess,
-    event_id: str | None = None,
-    allow_current_root: bool = False,
-) -> str | None:
-    """Return the strict canonical thread membership for one event."""
-    resolution = await resolve_event_thread_membership(
-        room_id,
-        event_info,
-        access=access,
-        event_id=event_id,
-        allow_current_root=allow_current_root,
-    )
-    return _strict_thread_id_from_resolution(resolution)
-
-
-async def _resolve_related_event_thread_id(
-    room_id: str,
-    related_event_id: str,
-    *,
-    access: ThreadMembershipAccess,
-) -> str | None:
-    """Return the strict canonical thread membership for one related target event."""
-    resolution = await resolve_related_event_thread_membership(
-        room_id,
-        related_event_id,
-        access=access,
-    )
-    return _strict_thread_id_from_resolution(resolution)
 
 
 async def resolve_related_event_thread_id_best_effort(
@@ -399,20 +348,6 @@ async def _thread_messages_root_proof(
     )
 
 
-async def _snapshot_thread_root_proof(
-    room_id: str,
-    thread_root_id: str,
-    *,
-    fetch_thread_snapshot: _ThreadSnapshotLookup,
-) -> ThreadRootProof:
-    """Return one snapshot-backed root-proof result."""
-    return await _thread_messages_root_proof(
-        room_id,
-        thread_root_id,
-        fetch_thread_messages=fetch_thread_snapshot,
-    )
-
-
 async def _room_scan_thread_root_proof(
     room_id: str,
     thread_root_id: str,
@@ -470,20 +405,6 @@ def thread_messages_thread_membership_access(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=fetch_event_info,
         prove_thread_root=prove_thread_root,
-    )
-
-
-def _snapshot_thread_membership_access(
-    *,
-    lookup_thread_id: _ThreadIdLookup,
-    fetch_event_info: _EventInfoLookup,
-    fetch_thread_snapshot: _ThreadSnapshotLookup,
-) -> ThreadMembershipAccess:
-    """Build shared membership access backed by authoritative thread snapshots."""
-    return thread_messages_thread_membership_access(
-        lookup_thread_id=lookup_thread_id,
-        fetch_event_info=fetch_event_info,
-        fetch_thread_messages=fetch_thread_snapshot,
     )
 
 

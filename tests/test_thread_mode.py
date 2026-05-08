@@ -1259,8 +1259,8 @@ class TestCommandThreadContextRoomMode:
         bot.client = AsyncMock()
         bot._send_response = AsyncMock(return_value="$reply")
         install_send_response_mock(bot, bot._send_response)
-        unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-            return_value=(False, None, []),
+        unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = AsyncMock(
+            return_value=MessageTarget.resolve("!room:localhost", None, "$event123"),
         )
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -1297,6 +1297,69 @@ class TestCommandThreadContextRoomMode:
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
         assert bot._send_response.await_args.args[3] is None
+
+    @pytest.mark.asyncio
+    async def test_router_command_uses_stable_dispatch_target_without_deriving_context(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Dispatch commands should reuse the finalized target instead of re-resolving thread context."""
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+            tmp_path,
+        )
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            password=TEST_PASSWORD,
+            display_name="Router",
+            user_id="@mindroom_router:localhost",
+        )
+        bot = _agent_bot(config=config, agent_user=router_user, storage_path=tmp_path)
+        bot.client = AsyncMock()
+        bot._send_response = AsyncMock(return_value="$reply")
+        install_send_response_mock(bot, bot._send_response)
+        resolve_target = AsyncMock(side_effect=AssertionError("command dispatch re-resolved target"))
+        unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = resolve_target
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": "!schedule in 5 minutes ping"},
+            },
+        )
+        command = Command(
+            type=CommandType.SCHEDULE,
+            args={"full_text": "in 5 minutes ping"},
+            raw_text="!schedule in 5 minutes ping",
+        )
+        stable_target = MessageTarget.resolve("!room:localhost", "$stable_thread", "$event123")
+
+        with (
+            patch("mindroom.commands.handler.check_agent_mentioned", return_value=([], False, False)),
+            patch(
+                "mindroom.commands.handler.schedule_task",
+                new_callable=AsyncMock,
+                return_value=("task123", "scheduled"),
+            ) as mock_schedule,
+        ):
+            await bot._turn_controller._execute_command(
+                room=room,
+                event=event,
+                requester_user_id="@user:localhost",
+                command=command,
+                target=stable_target,
+            )
+
+        resolve_target.assert_not_awaited()
+        assert mock_schedule.await_args.kwargs["thread_id"] == "$stable_thread"
+        assert bot._send_response.await_args.args[3] == "$stable_thread"
 
 
 class TestExtractedModuleLoggerRebinding:

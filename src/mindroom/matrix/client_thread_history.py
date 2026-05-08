@@ -820,61 +820,6 @@ async def fetch_thread_history(
     )
 
 
-async def fetch_thread_snapshot(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    *,
-    cache_write_guard_started_at: float | None = None,
-    trusted_sender_ids: Collection[str] = (),
-    caller_label: str = "unknown",
-    coordinator_queue_wait_ms: float = 0.0,
-) -> ThreadHistoryResult:
-    """Fetch lightweight thread context without hydrating sidecars when a fresh cache hit is unavailable."""
-    cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
-    try:
-        cached_history, cache_reject_diagnostics = await _load_cached_thread_history_if_usable(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=False,
-            trusted_sender_ids=trusted_sender_ids,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Durable thread cache read failed; refetching snapshot from homeserver",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-    else:
-        if cached_history is not None:
-            _log_thread_history_refresh(
-                room_id=room_id,
-                thread_id=thread_id,
-                caller_label=caller_label,
-                mode="cache_hit",
-                diagnostics=cached_history.diagnostics,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            )
-            return cached_history
-    return await refresh_thread_history_from_source(
-        client,
-        room_id,
-        thread_id,
-        event_cache,
-        hydrate_sidecars=False,
-        allow_stale_fallback=True,
-        cache_write_guard_started_at=cache_write_guard_started_at,
-        cache_reject_diagnostics=cache_reject_diagnostics,
-        trusted_sender_ids=trusted_sender_ids,
-        caller_label=caller_label,
-        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-    )
-
-
 async def fetch_dispatch_thread_history(
     client: nio.AsyncClient,
     room_id: str,
@@ -1199,7 +1144,6 @@ __all__ = [
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_event_sources_via_room_messages",
     "fetch_thread_history",
-    "fetch_thread_snapshot",
     "get_room_threads_page",
     "refresh_thread_history_from_source",
 ]

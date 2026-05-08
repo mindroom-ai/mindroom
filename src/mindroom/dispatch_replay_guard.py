@@ -103,6 +103,8 @@ def _unresponded_requester_event_id(
     is_handled: _HandledLookup,
 ) -> str | None:
     """Return an unhandled requester event id from a cached event source when eligible."""
+    if EventInfo.from_event(event_source).is_edit:
+        return None
     event_id = event_source.get("event_id")
     sender = event_source.get("sender")
     if not isinstance(event_id, str) or event_id == skipped_event_id or not isinstance(sender, str):

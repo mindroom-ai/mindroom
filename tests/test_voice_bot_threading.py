@@ -15,6 +15,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -89,13 +90,18 @@ def _make_voice_event(
     return voice_event
 
 
+def _stub_resolve_dispatch_target(bot: AgentBot, thread_id: str | None, event_id: str) -> None:
+    """Stub bounded voice target resolution for direct voice threading tests."""
+    unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = AsyncMock(
+        return_value=MessageTarget.resolve("!test:server", thread_id, event_id),
+    )
+
+
 @pytest.mark.asyncio
 async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot) -> None:
     """Audio in the main room should reply in a thread rooted at the audio event."""
     bot = mock_home_bot
-    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(False, None, []),
-    )
+    _stub_resolve_dispatch_target(bot, None, "$voice123")
     mock_context = MessageContext(
         am_i_mentioned=False,
         is_thread=True,
@@ -141,9 +147,7 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
 async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot) -> None:
     """Audio in an existing thread should keep using that thread root."""
     bot = mock_home_bot
-    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(True, "$thread_root", []),
-    )
+    _stub_resolve_dispatch_target(bot, "$thread_root", "$voice456")
     mock_context = MessageContext(
         am_i_mentioned=False,
         is_thread=True,
@@ -215,9 +219,7 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
         source={"content": {"m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg"}}}},
     )
 
-    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(True, "$thread_root", []),
-    )
+    _stub_resolve_dispatch_target(bot, "$thread_root", "$voice789")
     mock_context = MessageContext(
         am_i_mentioned=False,
         is_thread=True,

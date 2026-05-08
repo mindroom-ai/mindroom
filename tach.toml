@@ -2471,7 +2471,6 @@ expose = [
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",
-    "fetch_thread_snapshot",
     "get_room_threads_page",
     "refresh_thread_history_from_source",
 ]

@@ -124,6 +124,13 @@ def _install_voice_thread_dispatch_mocks(
     )
 
 
+def _stub_resolve_dispatch_target(bot: AgentBot, thread_id: str | None) -> None:
+    """Stub bounded voice target resolution for tests that focus on later dispatch behavior."""
+    unwrap_extracted_collaborator(bot._conversation_resolver).resolve_dispatch_target = AsyncMock(
+        return_value=MessageTarget.resolve("!test:example.com", thread_id, "$voice_event"),
+    )
+
+
 def _make_visible_router_echo_scenario(
     tmp_path: Path,
     *,
@@ -159,9 +166,7 @@ def _make_visible_router_echo_scenario(
     bot.client = AsyncMock()
     bot.client.rooms = {}
     _install_voice_thread_dispatch_mocks(bot)
-    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(False, None, []),
-    )
+    _stub_resolve_dispatch_target(bot, None)
     bot._send_response = AsyncMock()
     if send_response_side_effect is not None:
         bot._send_response.side_effect = send_response_side_effect
@@ -298,9 +303,7 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
     )
     bot._send_response = AsyncMock(return_value="$reply")
     install_send_response_mock(bot, bot._send_response)
-    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(False, None, []),
-    )
+    _stub_resolve_dispatch_target(bot, None)
 
     room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
     event = nio.Event.parse_event(
@@ -383,9 +386,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     )
     bot._send_response = AsyncMock(return_value="$reply")
     install_send_response_mock(bot, bot._send_response)
-    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(False, None, []),
-    )
+    _stub_resolve_dispatch_target(bot, None)
 
     room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
     event = nio.Event.parse_event(
@@ -474,9 +475,7 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
     )
     bot._send_response = AsyncMock(return_value="$fallback")
     install_send_response_mock(bot, bot._send_response)
-    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(False, None, []),
-    )
+    _stub_resolve_dispatch_target(bot, None)
 
     room = _make_room(
         "@mindroom_router:example.com",
@@ -804,9 +803,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     bot._generate_response = AsyncMock(return_value="$response")
     install_generate_response_mock(bot, bot._generate_response)
     _install_voice_thread_dispatch_mocks(bot)
-    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(True, "$voice_event", []),
-    )
+    _stub_resolve_dispatch_target(bot, "$voice_event")
 
     room = _make_room("@mindroom_home:localhost", "@alice:example.com")
     event = _make_voice_event(sender="@alice:example.com")
@@ -878,9 +875,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
     bot._generate_response = AsyncMock(return_value="$response")
     install_generate_response_mock(bot, bot._generate_response)
     _install_voice_thread_dispatch_mocks(bot)
-    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(True, "$voice_event", []),
-    )
+    _stub_resolve_dispatch_target(bot, "$voice_event")
 
     room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:example.com")
     event = _make_voice_event(sender="@alice:example.com")
@@ -936,9 +931,7 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         install_send_response_mock(bot, bot._send_response)
         install_generate_response_mock(bot, bot._generate_response)
         _install_voice_thread_dispatch_mocks(bot)
-        unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-            return_value=(True, "$voice_event", []),
-        )
+        _stub_resolve_dispatch_target(bot, "$voice_event")
         bots.append(bot)
 
     room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:example.com")
@@ -1200,9 +1193,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     bot._send_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, bot._send_response)
     _install_voice_thread_dispatch_mocks(bot)
-    unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-        return_value=(False, None, []),
-    )
+    _stub_resolve_dispatch_target(bot, None)
 
     room = _make_room(
         "@mindroom_router:localhost",
@@ -1291,9 +1282,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
         install_generate_response_mock(bot, bot._generate_response)
         _install_voice_thread_dispatch_mocks(bot)
-        unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-            return_value=(True, "$voice_event", []),
-        )
+        _stub_resolve_dispatch_target(bot, "$voice_event")
         bots.append(bot)
 
     with (
@@ -1368,9 +1357,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
         install_generate_response_mock(bot, bot._generate_response)
         _install_voice_thread_dispatch_mocks(bot)
-        unwrap_extracted_collaborator(bot._conversation_resolver).derive_conversation_context = AsyncMock(
-            return_value=(True, "$voice_event", []),
-        )
+        _stub_resolve_dispatch_target(bot, "$voice_event")
         bots.append(bot)
 
     with (

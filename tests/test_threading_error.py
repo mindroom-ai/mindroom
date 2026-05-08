@@ -13,7 +13,6 @@ import json
 import tempfile
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -70,12 +69,11 @@ from mindroom.matrix.thread_membership import (
     ThreadResolution,
     ThreadResolutionState,
     ThreadRootProof,
-    _resolve_related_event_thread_id,
-    _snapshot_thread_membership_access,
-    resolve_event_thread_id,
+    resolve_event_thread_membership,
     resolve_related_event_thread_id_best_effort,
     resolve_related_event_thread_membership,
     room_scan_thread_membership_access,
+    thread_messages_thread_membership_access,
 )
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from mindroom.matrix.users import AgentMatrixUser
@@ -4130,7 +4128,7 @@ class TestThreadingBehavior:
         async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
             return ThreadRootProof.not_a_thread_root()
 
-        resolved_thread_id = await resolve_event_thread_id(
+        resolution = await resolve_event_thread_membership(
             room_id,
             event_infos[last_event_id],
             access=ThreadMembershipAccess(
@@ -4140,7 +4138,8 @@ class TestThreadingBehavior:
             ),
         )
 
-        assert resolved_thread_id == thread_root_id
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
     async def test_resolve_thread_ids_for_event_infos_reaches_fixpoint_across_transitive_chain(
@@ -4217,7 +4216,7 @@ class TestThreadingBehavior:
         }
 
     @pytest.mark.asyncio
-    async def test_resolve_event_thread_id_follows_reaction_target_transitively(
+    async def test_resolve_event_thread_membership_follows_reaction_target_transitively(
         self,
     ) -> None:
         """The shared entrypoint should inherit thread membership across reaction targets too."""
@@ -4284,7 +4283,7 @@ class TestThreadingBehavior:
         async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
             return ThreadRootProof.not_a_thread_root()
 
-        resolved_thread_id = await resolve_event_thread_id(
+        resolution = await resolve_event_thread_membership(
             room_id,
             reaction_event,
             access=ThreadMembershipAccess(
@@ -4294,7 +4293,8 @@ class TestThreadingBehavior:
             ),
         )
 
-        assert resolved_thread_id == thread_root_id
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
     async def test_room_scan_thread_membership_access_treats_root_with_children_as_threaded(
@@ -4334,7 +4334,7 @@ class TestThreadingBehavior:
                 {"event_id": "$child:localhost"},
             ], True
 
-        resolved_thread_id = await _resolve_related_event_thread_id(
+        resolution = await resolve_related_event_thread_membership(
             room_id,
             thread_root_id,
             access=room_scan_thread_membership_access(
@@ -4344,7 +4344,8 @@ class TestThreadingBehavior:
             ),
         )
 
-        assert resolved_thread_id == thread_root_id
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
     async def test_room_scan_thread_membership_access_does_not_treat_root_edit_as_child_proof(
@@ -4425,7 +4426,7 @@ class TestThreadingBehavior:
                 },
             ], True
 
-        resolved_thread_id = await resolve_event_thread_id(
+        resolution = await resolve_event_thread_membership(
             room_id,
             plain_reply_event_info,
             event_id=plain_reply_id,
@@ -4436,109 +4437,14 @@ class TestThreadingBehavior:
             ),
         )
 
-        assert resolved_thread_id is None
+        assert resolution.state is ThreadResolutionState.ROOM_LEVEL
+        assert resolution.thread_id is None
 
     @pytest.mark.asyncio
-    async def test_snapshot_thread_membership_access_treats_root_with_children_as_threaded(
+    async def test_related_thread_resolution_marks_event_lookup_failure_indeterminate(
         self,
     ) -> None:
-        """Snapshot-backed access should apply the same root-children contract."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        root_event_info = EventInfo.from_event(
-            {
-                "content": {
-                    "body": "root",
-                    "msgtype": "m.text",
-                },
-                "event_id": thread_root_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-
-        @dataclass(frozen=True)
-        class SnapshotMessage:
-            event_id: str
-
-        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
-            return None
-
-        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
-            return root_event_info if event_id == thread_root_id else None
-
-        async def fetch_thread_snapshot(
-            lookup_room_id: str,
-            requested_thread_root_id: str,
-        ) -> list[SnapshotMessage]:
-            assert lookup_room_id == room_id
-            assert requested_thread_root_id == thread_root_id
-            return [
-                SnapshotMessage(event_id=thread_root_id),
-                SnapshotMessage(event_id="$child:localhost"),
-            ]
-
-        resolved_thread_id = await _resolve_related_event_thread_id(
-            room_id,
-            thread_root_id,
-            access=_snapshot_thread_membership_access(
-                lookup_thread_id=lookup_thread_id,
-                fetch_event_info=fetch_event_info,
-                fetch_thread_snapshot=fetch_thread_snapshot,
-            ),
-        )
-
-        assert resolved_thread_id == thread_root_id
-
-    @pytest.mark.asyncio
-    async def test_snapshot_thread_membership_access_propagates_root_proof_failure(
-        self,
-    ) -> None:
-        """Snapshot proof failures should surface instead of silently downgrading membership."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        root_event_info = EventInfo.from_event(
-            {
-                "content": {
-                    "body": "root",
-                    "msgtype": "m.text",
-                },
-                "event_id": thread_root_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-
-        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
-            return None
-
-        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
-            return root_event_info if event_id == thread_root_id else None
-
-        async def fetch_thread_snapshot(_room_id: str, _thread_root_id: str) -> list[object]:
-            msg = "snapshot unavailable"
-            raise RuntimeError(msg)
-
-        with pytest.raises(RuntimeError, match="snapshot unavailable"):
-            await _resolve_related_event_thread_id(
-                room_id,
-                thread_root_id,
-                access=_snapshot_thread_membership_access(
-                    lookup_thread_id=lookup_thread_id,
-                    fetch_event_info=fetch_event_info,
-                    fetch_thread_snapshot=fetch_thread_snapshot,
-                ),
-            )
-
-    @pytest.mark.asyncio
-    async def test_related_thread_resolution_propagates_event_lookup_failure(
-        self,
-    ) -> None:
-        """Strict resolution should fail closed when related-event lookup is unavailable."""
+        """Membership resolution should preserve lookup failures as indeterminate candidates."""
         room_id = "!test:localhost"
         related_event_id = "$related:localhost"
 
@@ -4552,16 +4458,20 @@ class TestThreadingBehavior:
         async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
             return ThreadRootProof.not_a_thread_root()
 
-        with pytest.raises(RuntimeError, match="lookup unavailable"):
-            await _resolve_related_event_thread_id(
-                room_id,
-                related_event_id,
-                access=ThreadMembershipAccess(
-                    lookup_thread_id=lookup_thread_id,
-                    fetch_event_info=fetch_event_info,
-                    prove_thread_root=prove_thread_root,
-                ),
-            )
+        resolution = await resolve_related_event_thread_membership(
+            room_id,
+            related_event_id,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.INDETERMINATE
+        assert resolution.candidate_thread_root_id == related_event_id
+        assert isinstance(resolution.error, RuntimeError)
+        assert str(resolution.error) == "lookup unavailable"
 
     @pytest.mark.asyncio
     async def test_best_effort_related_thread_resolution_degrades_when_event_lookup_fails(
@@ -4681,17 +4591,17 @@ class TestThreadingBehavior:
         async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
             return root_event_info if event_id == thread_root_id else None
 
-        async def fetch_thread_snapshot(_room_id: str, _thread_root_id: str) -> list[object]:
-            msg = "snapshot unavailable"
+        async def fetch_thread_messages(_room_id: str, _thread_root_id: str) -> list[object]:
+            msg = "thread history unavailable"
             raise RuntimeError(msg)
 
         resolved_thread_id = await resolve_related_event_thread_id_best_effort(
             room_id,
             thread_root_id,
-            access=_snapshot_thread_membership_access(
+            access=thread_messages_thread_membership_access(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
-                fetch_thread_snapshot=fetch_thread_snapshot,
+                fetch_thread_messages=fetch_thread_messages,
             ),
         )
 
@@ -8066,7 +7976,7 @@ class TestThreadingBehavior:
         assert context.thread_history == expected_history
         bot.event_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
-        assert mock_fetch.await_count == 2
+        mock_fetch.assert_awaited_once_with(room.room_id, "$thread_root:localhost", caller_label="message_context")
 
     @pytest.mark.asyncio
     async def test_extract_context_plain_reply_chain_stays_threaded_transitively(
@@ -8386,7 +8296,7 @@ class TestThreadingBehavior:
         assert context.thread_history == expected_history
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         bot.event_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
-        assert mock_history.await_count == 2
+        mock_history.assert_awaited_once_with(room.room_id, "$thread_root:localhost", caller_label="message_context")
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_promoted_plain_reply_refetches_thread_when_lookup_cache_is_cold(
@@ -9131,6 +9041,54 @@ class TestThreadingBehavior:
         mock_read.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_advisory_context_missing_related_reply_demotes_room_level(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Advisory context extraction should not fail closed for missing/redacted related events."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply to redacted root",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$redacted_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(
+                bot._conversation_cache,
+                "get_event",
+                AsyncMock(return_value=nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")),
+            ),
+            patch.object(bot._conversation_cache, "get_thread_history", AsyncMock()) as mock_read,
+        ):
+            context = await bot._conversation_resolver.extract_message_context(room, event)
+            is_thread, thread_id, history = await bot._conversation_resolver.derive_conversation_context(
+                room.room_id,
+                EventInfo.from_event(event.source),
+                event_id=event.event_id,
+                caller_label="advisory_missing_related_test",
+            )
+
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        assert context.requires_model_history_refresh is False
+        assert (is_thread, thread_id, history) == (False, None, [])
+        mock_read.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_dispatch_new_root_target_does_not_become_existing_thread_context(
         self,
         bot: AgentBot,
@@ -9442,16 +9400,16 @@ class TestThreadingBehavior:
                 },
             )
 
-        async def fetch_thread_snapshot(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
+        async def fetch_thread_messages(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
             return thread_history
 
         resolved_thread_id = await resolve_related_event_thread_id_best_effort(
             room_id,
             thread_root_id,
-            access=_snapshot_thread_membership_access(
+            access=thread_messages_thread_membership_access(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
-                fetch_thread_snapshot=fetch_thread_snapshot,
+                fetch_thread_messages=fetch_thread_messages,
             ),
         )
 
@@ -9616,7 +9574,7 @@ class TestThreadingBehavior:
         assert thread_context.requires_model_history_refresh is False
         mock_lookup.assert_awaited_once_with(room_id, "$thread_root:localhost")
         mock_get_event.assert_awaited_once_with(room_id, "$thread_root:localhost")
-        assert mock_history.await_count == 2
+        mock_history.assert_awaited_once_with(room_id, "$thread_root:localhost", caller_label="threading_error_test")
 
     @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:

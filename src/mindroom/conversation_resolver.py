@@ -29,7 +29,6 @@ from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded, is_thread_history_source_degraded
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
-    resolve_event_thread_id,
     resolve_event_thread_membership,
     resolve_related_event_thread_id_best_effort,
     thread_messages_thread_membership_access,
@@ -499,15 +498,6 @@ class ConversationResolver:
             mode=mode,
             caller_label=caller_label,
         )
-        if not mode.dispatch_safe:
-            thread_id = await resolve_event_thread_id(
-                room_id,
-                event_info,
-                event_id=event_id,
-                access=access,
-            )
-            return _ThreadIdLookup(thread_id=thread_id)
-
         resolution = await resolve_event_thread_membership(
             room_id,
             event_info,
@@ -517,6 +507,8 @@ class ConversationResolver:
         # Thread membership is generic over event-id-bearing snapshots, while this resolver's
         # cache accessors return ThreadReadResult entries used for model/replay diagnostics.
         thread_history = cast("ThreadReadResult | None", resolution.thread_history)
+        if not mode.dispatch_safe:
+            return _ThreadIdLookup(thread_id=resolution.thread_id, thread_history=thread_history)
         if resolution.thread_id is not None:
             return _ThreadIdLookup(thread_id=resolution.thread_id, thread_history=thread_history)
         if resolution.candidate_thread_root_id is not None:
@@ -699,6 +691,25 @@ class ConversationResolver:
         )
         return _DispatchContextResult(context=context, thread_context=thread_context)
 
+    async def extract_dispatch_command_context(
+        self,
+        room: nio.MatrixRoom,
+        event: DispatchEvent | MatrixMediaEvent,
+        *,
+        payload_metadata: DispatchPayloadMetadata | None = None,
+        caller_label: str = "dispatch_command_context",
+    ) -> _DispatchContextResult:
+        """Extract bounded target context for command dispatch without full policy history."""
+        context, thread_context = await self._extract_message_context_parts(
+            room,
+            event,
+            mode=ThreadReadMode.DISPATCH_SNAPSHOT,
+            include_dispatch_context=True,
+            payload_metadata=payload_metadata,
+            caller_label=caller_label,
+        )
+        return _DispatchContextResult(context=context, thread_context=thread_context)
+
     async def extract_trusted_router_relay_context(
         self,
         room: nio.MatrixRoom,
@@ -750,6 +761,28 @@ class ConversationResolver:
         )
         return _DispatchContextResult(context=context, thread_context=None)
 
+    async def resolve_dispatch_target(
+        self,
+        room: nio.MatrixRoom,
+        event: DispatchEvent | MatrixMediaEvent,
+        *,
+        caller_label: str,
+    ) -> MessageTarget:
+        """Resolve a bounded stable target for non-response dispatch helpers."""
+        context_result = await self.extract_dispatch_command_context(
+            room,
+            event,
+            caller_label=caller_label,
+        )
+        if context_result.thread_context is not None:
+            return context_result.thread_context.stable_target
+        return self.build_message_target(
+            room_id=room.room_id,
+            thread_id=context_result.context.thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+
     async def extract_message_context(
         self,
         room: nio.MatrixRoom,
@@ -772,7 +805,7 @@ class ConversationResolver:
     async def _extract_message_context_parts(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
+        event: DispatchEvent | MatrixMediaEvent,
         *,
         mode: ThreadReadMode,
         include_dispatch_context: bool,

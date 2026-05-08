@@ -18,7 +18,6 @@ import mindroom.matrix.client_thread_history as matrix_client_module
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import STREAM_WARMUP_SUFFIX_KEY
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
@@ -42,7 +41,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
-from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, make_event_cache_mock, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -57,12 +56,6 @@ async def fetch_thread_history(*args: object, **kwargs: object) -> ThreadHistory
     """Inject a concrete event cache for test-local calls into the real helper."""
     kwargs.setdefault("event_cache", _event_cache())
     return await matrix_client_module.fetch_thread_history(*args, **kwargs)
-
-
-async def fetch_thread_snapshot(*args: object, **kwargs: object) -> ThreadHistoryResult:
-    """Inject a concrete event cache for test-local snapshot helpers."""
-    kwargs.setdefault("event_cache", _event_cache())
-    return await matrix_client_module.fetch_thread_snapshot(*args, **kwargs)
 
 
 def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, object]:
@@ -701,99 +694,6 @@ class TestThreadHistory:
             homeserver_scan_pages=73,
             homeserver_scanned_event_count=7300,
             homeserver_thread_event_count=1,
-        )
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_miss_uses_authoritative_refresh_path(self) -> None:
-        """Snapshot misses should reuse the authoritative refresh path instead of a separate fast path."""
-        refreshed_history = ThreadHistoryResult(
-            [
-                ResolvedVisibleMessage.synthetic(
-                    sender="@user:localhost",
-                    body="refreshed",
-                    event_id="$thread_root",
-                    content={"body": "refreshed"},
-                ),
-            ],
-            is_full_history=False,
-        )
-        client = AsyncMock()
-
-        with patch(
-            "mindroom.matrix.client_thread_history.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=refreshed_history),
-        ) as mock_refresh:
-            snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
-
-        assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is False
-        assert [message.event_id for message in snapshot] == ["$thread_root"]
-        assert snapshot[0].body == "refreshed"
-        mock_refresh.assert_awaited_once_with(
-            client,
-            "!room:localhost",
-            "$thread_root",
-            ANY,
-            hydrate_sidecars=False,
-            allow_stale_fallback=True,
-            cache_write_guard_started_at=None,
-            cache_reject_diagnostics={
-                THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
-            },
-            trusted_sender_ids=(),
-            caller_label="unknown",
-            coordinator_queue_wait_ms=0.0,
-        )
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_miss_preserves_authoritative_non_text_children(self) -> None:
-        """Snapshot misses should accept authoritative histories with non-text thread children."""
-        refreshed_history = ThreadHistoryResult(
-            [
-                ResolvedVisibleMessage.synthetic(
-                    sender="@user:localhost",
-                    body="voice-note.ogg",
-                    event_id="$thread_root",
-                    timestamp=1000,
-                    content={"body": "voice-note.ogg", "msgtype": "m.audio"},
-                ),
-                ResolvedVisibleMessage.synthetic(
-                    sender="@agent:localhost",
-                    body="agent-reply.ogg",
-                    event_id="$reply_audio",
-                    timestamp=2000,
-                    content={"body": "agent-reply.ogg", "msgtype": "m.audio"},
-                    thread_id="$thread_root",
-                ),
-            ],
-            is_full_history=False,
-        )
-        client = AsyncMock()
-
-        with patch(
-            "mindroom.matrix.client_thread_history.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=refreshed_history),
-        ) as mock_refresh:
-            snapshot = await fetch_thread_snapshot(client, "!room:localhost", "$thread_root")
-
-        assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is False
-        assert [message.event_id for message in snapshot] == ["$thread_root", "$reply_audio"]
-        assert snapshot[1].content["msgtype"] == "m.audio"
-        mock_refresh.assert_awaited_once_with(
-            client,
-            "!room:localhost",
-            "$thread_root",
-            ANY,
-            hydrate_sidecars=False,
-            allow_stale_fallback=True,
-            cache_write_guard_started_at=None,
-            cache_reject_diagnostics={
-                THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "no_cache_state",
-            },
-            trusted_sender_ids=(),
-            caller_label="unknown",
-            coordinator_queue_wait_ms=0.0,
         )
 
     @pytest.mark.asyncio
@@ -2360,115 +2260,6 @@ class TestThreadHistoryCache:
         client.room_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_uses_durable_raw_snapshot_cache_when_fresh(self, tmp_path: Path) -> None:
-        """Snapshot reads should reuse fresh durable thread snapshots without sidecar hydration."""
-        cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await cache.initialize()
-
-        root_event = TestThreadHistory._make_audio_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="voice-note.ogg",
-            server_timestamp=1000,
-            source_content={"url": "mxc://localhost/voice-note"},
-        )
-        reply_event = self._make_text_event(
-            event_id="$reply",
-            sender="@agent:localhost",
-            body="Cached reply",
-            server_timestamp=2000,
-            source_content={
-                "body": "Cached reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        await self._seed_thread_cache(
-            cache,
-            room_id="!room:localhost",
-            thread_id="$thread_root",
-            events=[self._cache_source(root_event), self._cache_source(reply_event)],
-        )
-
-        client = MagicMock()
-        client.room_get_event = AsyncMock(side_effect=AssertionError("should not use relations root lookup"))
-        client.room_get_event_relations = MagicMock(side_effect=AssertionError("should not use relations fast path"))
-        page = MagicMock(spec=nio.RoomMessagesResponse)
-        page.chunk = [reply_event, root_event]
-        page.end = None
-        client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
-
-        try:
-            snapshot = await fetch_thread_snapshot(
-                client,
-                "!room:localhost",
-                "$thread_root",
-                event_cache=cache,
-            )
-        finally:
-            await cache.close()
-
-        assert isinstance(snapshot, ThreadHistoryResult)
-        assert snapshot.is_full_history is False
-        assert [message.event_id for message in snapshot] == ["$thread_root", "$reply"]
-        assert snapshot[0].body == "voice-note.ogg"
-        assert snapshot[0].to_dict()["msgtype"] == "m.audio"
-        assert snapshot.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
-        client.room_messages.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_fetch_thread_snapshot_strips_trusted_warmup_suffix_without_sidecar_hydration(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Snapshot reads should still expose canonical body for trusted streaming previews."""
-        cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await cache.initialize()
-
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@mindroom_general:localhost",
-            body="hello\n\n⏳ Preparing isolated worker...",
-            server_timestamp=1000,
-            source_content={
-                "body": "hello\n\n⏳ Preparing isolated worker...",
-                "msgtype": "m.file",
-                "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
-                STREAM_WARMUP_SUFFIX_KEY: "⏳ Preparing isolated worker...",
-            },
-        )
-        await self._seed_thread_cache(
-            cache,
-            room_id="!room:localhost",
-            thread_id="$thread_root",
-            events=[self._cache_source(root_event)],
-        )
-
-        client = MagicMock()
-        client.user_id = "@mindroom_general:localhost"
-        client.room_get_event = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
-        client.room_get_event_relations = MagicMock(side_effect=AssertionError("should not refetch fresh cache"))
-        client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
-
-        try:
-            config = bind_runtime_paths(
-                Config(agents={"general": AgentConfig(display_name="General Agent")}),
-                test_runtime_paths(tmp_path),
-            )
-            snapshot = await fetch_thread_snapshot(
-                client,
-                "!room:localhost",
-                "$thread_root",
-                event_cache=cache,
-                trusted_sender_ids={
-                    matrix_id.full_id for matrix_id in config.get_ids(runtime_paths_for(config)).values()
-                },
-            )
-        finally:
-            await cache.close()
-
-        assert snapshot[0].body == "hello"
-
-    @pytest.mark.asyncio
     async def test_fetch_dispatch_thread_history_uses_fresh_durable_cache(self, tmp_path: Path) -> None:
         """Strict dispatch history should reuse fresh durable cache instead of refetching."""
         cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -3351,7 +3142,6 @@ class TestThreadHistoryCache:
         ("fetcher_name", "is_full_history"),
         [
             ("fetch_thread_history", True),
-            ("fetch_thread_snapshot", False),
             ("fetch_dispatch_thread_history", True),
             ("fetch_dispatch_thread_snapshot", False),
         ],
