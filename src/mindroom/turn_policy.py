@@ -7,9 +7,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import (
-    get_available_agents_for_sender,
-    get_available_agents_for_sender_authoritative,
     is_sender_allowed_for_agent_reply,
+    responder_candidate_entities_for_room,
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, is_automation_source_kind
@@ -293,22 +292,14 @@ class TurnPolicy:
             in materializable_agent_names
         ]
 
-    async def available_agents_for_sender(
+    async def responder_candidates_for_sender(
         self,
         room: nio.MatrixRoom,
         requester_user_id: str,
     ) -> list[MatrixID]:
-        """Return sender-visible room agents, refreshing membership when a client is available."""
-        client = self.deps.runtime.client
-        if client is None:
-            return get_available_agents_for_sender(
-                room,
-                requester_user_id,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-            )
-        return await get_available_agents_for_sender_authoritative(
-            client,
+        """Return sender-visible responders at the configured/ad-hoc room boundary."""
+        return await responder_candidate_entities_for_room(
+            self.deps.runtime.client,
             room,
             requester_user_id,
             self.deps.runtime.config,
@@ -426,7 +417,7 @@ class TurnPolicy:
             self.deps.runtime_paths,
         )
         if available_agents_in_room is None:
-            available_agents_in_room = await self.available_agents_for_sender(room, requester_user_id)
+            available_agents_in_room = await self.responder_candidates_for_sender(room, requester_user_id)
         if materializable_agent_names is None:
             materializable_agent_names = self.materializable_agent_names()
         return await decide_team_formation(
@@ -489,9 +480,9 @@ class TurnPolicy:
             self.deps.logger.info("Skipping routing: thread already requires explicit agent targeting")
             plan = _DispatchPlan(kind="ignore", ignore_reason="router")
         else:
-            available_agents = await self.available_agents_for_sender(room, requester_user_id)
+            available_agents = await self.responder_candidates_for_sender(room, requester_user_id)
             if len(available_agents) == 1:
-                self.deps.logger.info("Skipping routing: only one agent present")
+                self.deps.logger.info("Skipping routing: only one responder candidate")
                 plan = _DispatchPlan(kind="ignore", ignore_reason="router")
             else:
                 plan = _DispatchPlan(
@@ -557,7 +548,7 @@ class TurnPolicy:
     ) -> ResponseAction:
         """Decide whether to respond as a team, individually, or not at all."""
         planning_thread_history = context.planning_thread_history
-        available_agents_in_room = await self.available_agents_for_sender(room, requester_user_id)
+        available_agents_in_room = await self.responder_candidates_for_sender(room, requester_user_id)
         if (
             context.planning_thread_history_unavailable
             and not context.am_i_mentioned

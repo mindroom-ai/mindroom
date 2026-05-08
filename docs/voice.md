@@ -17,10 +17,10 @@ When a voice message is received:
 3. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
 4. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
 5. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
-6. If routing is ambiguous in a multi-agent room, the router posts a visible handoff message.
+6. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
 7. If `voice.visible_router_echo` is enabled and the router is present and allowed to reply, the router also posts the normalized voice text as a display-only message.
-8. Otherwise, no extra router message is posted and the chosen agent replies directly.
-9. The responding agent receives the original audio attachment alongside the normalized prompt.
+8. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
+9. The responding entity receives the original audio attachment alongside the normalized prompt.
 
 ## Configuration
 
@@ -232,10 +232,10 @@ Attachment IDs in this fallback path use the same context-scoping rules describe
 
 - Only OpenAI-compatible STT APIs are supported
 - Audio quality and background noise affect transcription accuracy
-- Without STT, routing has less textual context, so explicit `@mentions` or existing thread context are more reliable in multi-agent rooms
+- Without STT, routing has less textual context, so explicit `@mentions` or existing thread context are more reliable in multi-responder rooms
 - Without STT, agents receive raw audio instead of transcription, so the model or tools must support audio inputs to process it
 
 ## Tips
 
-- **Say the agent name first** - "Hey @assistant, what's the weather?"
+- **Say the agent or team name first** - "Hey @assistant, what's the weather?"
 - **Use display names** - The AI converts spoken names like "HomeAssistant" to the correct `@home` mention

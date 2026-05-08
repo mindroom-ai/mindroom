@@ -300,7 +300,7 @@ class TestParseWorkflowSchedule:
         )
 
         prompt = mock_agent.arun.call_args.args[0]
-        assert "Available agents: @general, @research, @mindroom_finance, @mindroom_analyst" in prompt
+        assert "Available agents and teams: @general, @research, @mindroom_finance, @mindroom_analyst" in prompt
         assert "@@" not in prompt
 
     @patch("mindroom.model_loading.get_model_instance")

@@ -20,7 +20,7 @@ from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field
 
 from mindroom import model_loading
-from mindroom.authorization import get_available_agents_for_sender_authoritative
+from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
@@ -772,7 +772,7 @@ async def _parse_workflow_schedule(
     if current_time is None:
         current_time = datetime.now(UTC)
 
-    assert available_agents, "No agents available for scheduling"
+    assert available_agents, "No agents or teams available for scheduling"
     agent_list = ", ".join(f"@{a.username}" for a in available_agents)
 
     prompt = config.render_prompt(
@@ -1339,7 +1339,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
 
-    sender_visible_room_agents = await get_available_agents_for_sender_authoritative(
+    sender_visible_room_agents = await responder_candidate_entities_for_room(
         client,
         room,
         scheduled_by,
@@ -1371,7 +1371,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
             available_agents = list(sender_visible_room_agents)
 
     if not available_agents:
-        return (None, "❌ No agents in this room are allowed to reply to you.")
+        return (None, "❌ No agents or teams in this room are allowed to reply to you.")
 
     # Parse the workflow request with available agents
     workflow_result = await _parse_workflow_schedule(full_text, config, runtime_paths, available_agents)
@@ -1399,7 +1399,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     if not validation_result.all_valid:
         scope = "room" if new_thread or not thread_id else "thread"
-        error_msg = "❌ Failed to schedule: The following agents are not available in this "
+        error_msg = "❌ Failed to schedule: The following agents or teams are not available in this "
         error_msg += scope
         error_msg += f": {', '.join(agent.full_id for agent in validation_result.invalid_agents)}"
 
@@ -1408,7 +1408,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         for agent in validation_result.invalid_agents:
             agent_name = agent.agent_name(config, runtime_paths)
             if agent_name:
-                # Agent exists but not available in this room/thread
+                # Entity exists but is not available in this room/thread.
                 suggestions.append(f"{agent.full_id} is not available in this {scope}")
             else:
                 suggestions.append(f"{agent.full_id} does not exist")

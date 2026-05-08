@@ -9,14 +9,14 @@ If STT is unavailable, disabled, or fails, the audio still remains available as 
 When a voice message is received:
 
 1. The audio event is handled through the shared media pipeline.
-2. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment.
-3. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
-4. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
-5. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
-6. If routing is ambiguous in a multi-agent room, the router posts a visible handoff message.
-7. If `voice.visible_router_echo` is enabled and the router is present and allowed to reply, the router also posts the normalized voice text as a display-only message.
-8. Otherwise, no extra router message is posted and the chosen agent replies directly.
-9. The responding agent receives the original audio attachment alongside the normalized prompt.
+1. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment.
+1. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
+1. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
+1. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
+1. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
+1. If `voice.visible_router_echo` is enabled and the router is present and allowed to reply, the router also posts the normalized voice text as a display-only message.
+1. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
+1. The responding entity receives the original audio attachment alongside the normalized prompt.
 
 ## Configuration
 
@@ -93,10 +93,10 @@ If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment
 The intelligence component uses an AI model to analyze transcriptions and format them properly:
 
 1. **Agent mentions** - Converts spoken agent names to `@agent` format
-2. **Mention sanitization** - Mentions of agents not available in the current room have their `@` stripped so the agent is not falsely targeted
-3. **Command patterns** - Identifies and formats `!command` syntax
-4. **Speculative command rejection** - Commands the AI invents that were not in the original transcription are rejected to prevent false positives
-5. **Smart formatting** - Handles speech recognition errors and natural language variations
+1. **Mention sanitization** - Mentions of agents not available in the current room have their `@` stripped so the agent is not falsely targeted
+1. **Command patterns** - Identifies and formats `!command` syntax
+1. **Speculative command rejection** - Commands the AI invents that were not in the original transcription are rejected to prevent false positives
+1. **Smart formatting** - Handles speech recognition errors and natural language variations
 
 ### Intelligence Model
 
@@ -196,8 +196,8 @@ Reply-permission checks still use the original human sender, not a later router 
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
+| Variable         | Description                                                          |
+| ---------------- | -------------------------------------------------------------------- |
 | `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
 
 ## Text-to-Speech Tools
@@ -209,29 +209,28 @@ MindRoom also supports text-to-speech (TTS) through agent tools. These are separ
 - **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
 - **Groq** - Fast speech generation via `groq` tool
 
-See the [Tools documentation](https://docs.mindroom.chat/tools/) for configuration details.
+See the [Tools documentation](https://docs.mindroom.chat/tools/index.md) for configuration details.
 
 ## Voice Fallback (No STT Available)
 
 When STT is unavailable, disabled, or transcription fails, MindRoom falls back to raw audio passthrough:
 
 1. The voice message audio is downloaded and saved locally as an attachment
-2. The normalized text becomes `🎤 [Attached voice message]`
-3. The raw audio is registered as an attachment ID available to agents in the room or thread context
-4. When an agent responds, it automatically receives the raw audio as an Agno `Audio` object
+1. The normalized text becomes `🎤 [Attached voice message]`
+1. The raw audio is registered as an attachment ID available to agents in the room or thread context
+1. When an agent responds, it automatically receives the raw audio as an Agno `Audio` object
 
 This means voice messages still reach agents even without STT.
-Agents with audio-capable models can process the raw audio directly, and tool-using agents can retrieve the file by attachment ID.
-Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](https://docs.mindroom.chat/attachments/).
+Agents with audio-capable models can process the raw audio directly, and tool-using agents can retrieve the file by attachment ID. Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md).
 
 ## Limitations
 
 - Only OpenAI-compatible STT APIs are supported
 - Audio quality and background noise affect transcription accuracy
-- Without STT, routing has less textual context, so explicit `@mentions` or existing thread context are more reliable in multi-agent rooms
+- Without STT, routing has less textual context, so explicit `@mentions` or existing thread context are more reliable in multi-responder rooms
 - Without STT, agents receive raw audio instead of transcription, so the model or tools must support audio inputs to process it
 
 ## Tips
 
-- **Say the agent name first** - "Hey @assistant, what's the weather?"
+- **Say the agent or team name first** - "Hey @assistant, what's the weather?"
 - **Use display names** - The AI converts spoken names like "HomeAssistant" to the correct `@home` mention

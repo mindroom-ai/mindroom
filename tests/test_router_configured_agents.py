@@ -1,4 +1,4 @@
-"""Test router candidate selection for configured and ad-hoc rooms."""
+"""Test responder candidate selection for configured and ad-hoc rooms."""
 
 import tempfile
 from pathlib import Path
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from mindroom.authorization import get_available_agents_in_room, router_candidate_entities_for_room
+from mindroom.authorization import get_available_agents_in_room, responder_candidate_entities_for_room
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -14,8 +14,8 @@ from mindroom.entity_resolution import configured_routable_entity_ids_for_room
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
-class TestRouterAgentSelection:
-    """Test router agent selection logic."""
+class TestResponderCandidateSelection:
+    """Test responder candidate selection logic."""
 
     @staticmethod
     def _bind_runtime(config: Config) -> Config:
@@ -89,15 +89,15 @@ class TestRouterAgentSelection:
             "@user:localhost": None,  # Regular user
         }
 
-        # Should return ALL agents in the room (for individual response logic)
+        # Present-room membership still exposes every joined managed entity.
         available = get_available_agents_in_room(room, self.config, runtime_paths)
         available_names = [mid.agent_name(self.config, runtime_paths) for mid in available]
         assert "calculator" in available_names
         assert "research" in available_names
         assert "writer" in available_names  # Present but not configured
 
-    def test_router_should_use_configured_entities_only(self) -> None:
-        """Test that router should only consider configured entities."""
+    def test_responder_candidates_should_use_configured_entities_only(self) -> None:
+        """Test that responders should only consider configured entities."""
         runtime_paths = runtime_paths_for(self.config)
         room = MagicMock()
         room.room_id = "#general:localhost"
@@ -107,19 +107,18 @@ class TestRouterAgentSelection:
             "@mindroom_writer:localhost": None,  # NOT configured but present
         }
 
-        # For routing decisions, use configured entities only
+        # For responder decisions, use configured entities only.
         configured = configured_routable_entity_ids_for_room(self.config, room.room_id, runtime_paths)
         configured_names = [mid.agent_name(self.config, runtime_paths) for mid in configured]
         assert configured_names == ["calculator", "research"]
         assert "writer" not in configured_names
 
-        # But for individual response decisions, consider all agents
         available = get_available_agents_in_room(room, self.config, runtime_paths)
         assert len(available) == 3  # All agents in room
 
     @pytest.mark.asyncio
-    async def test_router_candidates_keep_configured_rooms_static(self) -> None:
-        """Router candidates should not widen statically configured rooms."""
+    async def test_responder_candidates_keep_configured_rooms_static(self) -> None:
+        """Responder candidates should not widen statically configured rooms."""
         runtime_paths = runtime_paths_for(self.config)
         room = MagicMock()
         room.room_id = "#general:localhost"
@@ -133,7 +132,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await router_candidate_entities_for_room(
+        available = await responder_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",
@@ -147,8 +146,8 @@ class TestRouterAgentSelection:
         client.joined_members.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_router_candidates_keep_team_configured_rooms_static(self) -> None:
-        """Router candidates should not widen rooms configured through teams."""
+    async def test_responder_candidates_keep_team_configured_rooms_static(self) -> None:
+        """Responder candidates should not widen rooms configured through teams."""
         config = self._bind_runtime(
             Config(
                 agents={
@@ -179,7 +178,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await router_candidate_entities_for_room(
+        available = await responder_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",
@@ -193,8 +192,8 @@ class TestRouterAgentSelection:
         client.joined_members.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_router_candidates_fall_back_to_present_agents_for_ad_hoc_room(self) -> None:
-        """Router candidates should use joined agents when no config maps to the room."""
+    async def test_responder_candidates_fall_back_to_present_agents_for_ad_hoc_room(self) -> None:
+        """Responder candidates should use joined agents when no config maps to the room."""
         runtime_paths = runtime_paths_for(self.config)
         room = MagicMock()
         room.room_id = "!adhoc:localhost"
@@ -208,7 +207,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await router_candidate_entities_for_room(
+        available = await responder_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",
@@ -222,7 +221,7 @@ class TestRouterAgentSelection:
         client.joined_members.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_router_candidates_ad_hoc_room_respects_sender_permissions(self) -> None:
+    async def test_responder_candidates_ad_hoc_room_respects_sender_permissions(self) -> None:
         """Ad-hoc room fallback should still apply per-agent sender allowlists."""
         runtime_paths = runtime_paths_for(self.config)
         self.config.authorization.agent_reply_permissions = {
@@ -240,7 +239,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await router_candidate_entities_for_room(
+        available = await responder_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",

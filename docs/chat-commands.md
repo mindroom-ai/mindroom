@@ -4,7 +4,7 @@ icon: lucide/terminal-square
 
 # Chat Commands
 
-MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents are present.
+MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents or teams are present.
 Commands start with `!` and are handled by the router agent.
 
 ## Quick Reference
@@ -23,7 +23,7 @@ Commands start with `!` and are handled by the router agent.
 ## Who Handles Commands
 
 The **router** handles all commands exclusively.
-Even in single-agent rooms, commands are always processed by the router, not the agent.
+Even in single-responder rooms, commands are always processed by the router, not the responder.
 Commands work in both main room messages and within threads.
 
 Voice messages that contain commands (e.g., spoken `!schedule`) are recognized after transcription and processed the same way.
@@ -31,7 +31,7 @@ Voice messages that contain commands (e.g., spoken `!schedule`) are recognized a
 ## Permission Behavior
 
 Commands are subject to the same authorization rules as normal messages.
-The sender must be authorized to interact with agents in the room (via `global_users`, `room_permissions`, or `default_room_access`).
+The sender must be authorized to interact with MindRoom entities in the room (via `global_users`, `room_permissions`, or `default_room_access`).
 See [Authorization](authorization.md) for details.
 
 For `!config set`, only the user who requested the change can confirm or cancel it via reactions.

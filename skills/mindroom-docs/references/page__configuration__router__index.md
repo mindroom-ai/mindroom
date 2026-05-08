@@ -1,6 +1,7 @@
 # Router Configuration
 
-The router is a built-in system component that handles intelligent message routing and room management. It decides which agent should respond when no specific agent is mentioned, sends welcome messages to new rooms, and manages various system-level tasks.
+The router is a built-in system component that handles intelligent message routing and room management.
+It decides which agent or team should respond when no specific agent or team is mentioned, sends welcome messages to new rooms, and manages various system-level tasks.
 
 ## Configuration
 
@@ -28,7 +29,7 @@ Startup thread prewarm is a background, best-effort cache warmup for rooms alrea
 
 ## How Routing Works
 
-When a message arrives in a room without a specific agent mention:
+When a message arrives in a room without a specific agent or team mention:
 
 1. The router checks whether the room has statically configured agents or teams
 1. It analyzes the message content and any recent thread context (up to 3 previous messages)
@@ -39,7 +40,7 @@ When a message arrives in a room without a specific agent mention:
 For configured rooms, routing candidates come only from `agents.<name>.rooms` and `teams.<name>.rooms`, then are filtered by the sender's per-entity reply permissions.
 For ad-hoc rooms accepted through invites, routing candidates come from the sender-visible MindRoom agents and teams currently joined to that room, then are filtered by the same sender permissions.
 
-The router uses a structured output schema to ensure consistent routing decisions, including the agent name and reasoning for the selection.
+The router uses a structured output schema to ensure consistent routing decisions, including the selected agent or team name and reasoning for the selection.
 
 ## Router Responsibilities
 
@@ -57,7 +58,7 @@ The router exclusively handles all commands:
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
 - `!config <operation>` - Manage configuration
 
-Even in single-agent rooms, commands are always processed by the router.
+Even in single-responder rooms, commands are always processed by the router.
 
 ### Welcome Messages
 
@@ -74,10 +75,10 @@ Use `!hi` in any room to see the welcome message again.
 The router creates and manages rooms:
 
 - Creates configured rooms that don't exist yet
-- Invites agents and users to their configured rooms
+- Invites configured agents, teams, and users to their rooms
 - Applies `matrix_room_access` policy for managed rooms (when enabled)
 - Reconciles managed room power levels so the custom thread-tags state event can be written at PL0
-- Generates AI-powered room topics based on configured agents
+- Generates AI-powered room topics based on configured agents and teams
 - Has admin privileges to manage room membership
 - Cleans up orphaned bots on startup
 
@@ -88,7 +89,7 @@ That same reconciliation path also updates `m.room.power_levels` for managed roo
 ### Voice Message Processing
 
 Audio events are handled through the shared media pipeline on all bots.
-The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a multi-agent room.
+The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a room.
 When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message.
 By default, `voice.visible_router_echo: true` also lets the router post the normalized voice text as a display-only message when it is allowed to reply.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
@@ -97,7 +98,8 @@ See [Voice Messages](https://docs.mindroom.chat/voice/index.md) for the detailed
 
 ### Configuration Confirmations
 
-The router handles interactive configuration changes. When a config change is requested, the router posts a confirmation message with reactions, and only the router processes the confirmation reactions.
+The router handles interactive configuration changes.
+When a config change is requested, the router posts a confirmation message with reactions, and only the router processes the confirmation reactions.
 
 ### Scheduled Task Restoration
 
@@ -105,26 +107,29 @@ When the router joins a room, it restores any previously scheduled tasks and pen
 
 ## Routing Behavior Details
 
-### Single-Agent Optimization
+### Single Responder Optimization
 
 When there is only one eligible responder for a room, the router skips AI routing entirely.
 The single responder handles messages directly, which is faster and more efficient.
 
 ### Multi-Human Thread Protection
 
-When multiple human users have posted in a thread, the router and agents require an explicit `@mention` before responding. This prevents agents from injecting themselves into human-to-human conversations.
+When multiple human users have posted in a thread, the router, agents, and teams require an explicit `@mention` before responding.
+This prevents MindRoom entities from injecting themselves into human-to-human conversations.
 
 The rules are:
 
-1. **Mentioned agents always respond** — an explicit `@agent` overrides all other rules.
-1. **Non-thread messages** — agents auto-respond if they're the only agent in the room, regardless of how many humans are present.
-1. **Threads with one human** — normal auto-response behavior applies (the agent continues the conversation).
-1. **Threads with two or more humans** — agents stay silent unless explicitly mentioned.
-1. **Mentioning a non-agent user** — if a message tags only humans (not agents), agents stay silent.
+1. **Mentioned agents or teams always respond** — an explicit `@agent` or `@team` overrides all other rules.
+1. **Non-thread messages** — a single eligible agent or team can auto-respond, regardless of how many humans are present.
+1. **Threads with one human** — normal auto-response behavior applies, so the agent or team continues the conversation.
+1. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
+1. **Mentioning a non-MindRoom user** — if a message tags only humans or unmanaged users, agents and teams stay silent.
 
 #### Bot accounts
 
-By default, any Matrix user that is not a MindRoom agent counts as a "human" for the rules above. This includes bridge bots (Telegram, Slack, etc.) and other non-MindRoom bots. If a bridge bot relays a message into a thread, it looks like a second human to MindRoom and triggers the mention requirement.
+By default, any Matrix user that is not a MindRoom agent or team counts as a "human" for the rules above.
+This includes bridge bots (Telegram, Slack, etc.) and other non-MindRoom bots.
+If a bridge bot relays a message into a thread, it looks like a second human to MindRoom and triggers the mention requirement.
 
 To prevent this, list those accounts in `bot_accounts`:
 
@@ -134,11 +139,11 @@ bot_accounts:
   - "@slackbot:example.com"
 ```
 
-Accounts in this list are treated like MindRoom agents for response logic — their messages and mentions don't count toward the multi-human detection.
+Accounts in this list are treated like MindRoom entities for response logic — their messages and mentions don't count toward the multi-human detection.
 
 ### Routing Fallback
 
-If routing fails (model error, invalid suggestion, etc.), the router sends a helpful error message: "⚠️ I couldn't determine which agent or team should help with this. Please try mentioning an agent or team directly with @ or rephrase your request."
+If routing fails (model error, invalid suggestion, etc.), the router sends a helpful error message that asks the user to mention an agent or team directly or rephrase the request.
 
 Users can always mention agents or teams directly with `@entity_name` to bypass routing.
 
@@ -150,7 +155,7 @@ If no `router` section is configured, it uses the default model.
 
 The router account is not a conversational AI agent to tag directly.
 If a message mentions only the router and no other users, agents, or teams, the router replies with the rules of engagement instead of answering the prompt.
-Mention a specific agent or team when you want that entity to answer, or mention multiple agents when you want an ad-hoc collaboration.
+Mention a specific agent or team when you want that entity to answer, or mention multiple agents or teams when you want an ad-hoc collaboration.
 When one human and one agent or team are already talking in a thread, continuing without an explicit tag is fine.
-Once a thread has multiple human users or multiple agent/team participants, tag the agent, team, or agents you want next.
+Once a thread has multiple human users or multiple agent/team participants, tag the agents or teams you want next.
 In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.

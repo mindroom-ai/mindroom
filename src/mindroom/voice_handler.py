@@ -15,7 +15,7 @@ from agno.media import Audio
 
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
-from mindroom.authorization import get_available_agents_for_sender_authoritative
+from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_PREFIX, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.logging_config import get_logger
@@ -473,7 +473,7 @@ async def _get_available_entities_for_sender(
     available_agent_names: list[str] = []
     available_team_names: list[str] = []
 
-    for matrix_id in await get_available_agents_for_sender_authoritative(
+    for matrix_id in await responder_candidate_entities_for_room(
         client,
         room,
         sender_id,

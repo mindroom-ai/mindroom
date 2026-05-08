@@ -99,14 +99,14 @@ def _isolated_config(tmp_path: Path, **kwargs: object) -> Config:
     return bound
 
 
-async def get_available_agents_for_sender_authoritative(
+async def responder_candidate_entities_for_room(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
     sender_id: str,
     config: Config,
 ) -> list[mindroom.authorization.MatrixID]:
-    """Run authoritative room-agent resolution with the test config's bound runtime context."""
-    return await mindroom.authorization.get_available_agents_for_sender_authoritative(
+    """Run responder candidate resolution with the test config's bound runtime context."""
+    return await mindroom.authorization.responder_candidate_entities_for_room(
         client,
         room,
         sender_id,
@@ -243,8 +243,8 @@ def test_teams_always_allowed(mock_config_with_restrictions: Config) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_available_agents_for_sender_authoritative_refreshes_empty_cached_room() -> None:
-    """Authoritative agent lookup should recover from empty cached room membership."""
+async def test_responder_candidates_refresh_empty_cached_ad_hoc_room() -> None:
+    """Responder candidate lookup should recover from empty cached room membership."""
     config = _config(
         agents={
             "assistant": {
@@ -269,7 +269,7 @@ async def test_get_available_agents_for_sender_authoritative_refreshes_empty_cac
         room_id="!test:server",
     )
 
-    available = await get_available_agents_for_sender_authoritative(
+    available = await responder_candidate_entities_for_room(
         client,
         room,
         "@alice:example.com",
@@ -281,8 +281,8 @@ async def test_get_available_agents_for_sender_authoritative_refreshes_empty_cac
 
 
 @pytest.mark.asyncio
-async def test_get_available_agents_for_sender_authoritative_skips_refresh_when_cache_has_hidden_agents() -> None:
-    """Authoritative lookup should not refetch when room membership is present but sender visibility is empty."""
+async def test_responder_candidates_skip_refresh_when_cache_has_hidden_agents() -> None:
+    """Responder candidate lookup should not refetch when membership is present but sender visibility is empty."""
     config = _config(
         agents={
             "assistant": {
@@ -309,7 +309,7 @@ async def test_get_available_agents_for_sender_authoritative_skips_refresh_when_
     room.add_member("@mindroom_general:example.com", "General", None)
     room.members_synced = True
 
-    available = await get_available_agents_for_sender_authoritative(
+    available = await responder_candidate_entities_for_room(
         client,
         room,
         "@bob:example.com",
@@ -321,8 +321,8 @@ async def test_get_available_agents_for_sender_authoritative_skips_refresh_when_
 
 
 @pytest.mark.asyncio
-async def test_get_available_agents_for_sender_authoritative_refreshes_partial_unsynced_cache() -> None:
-    """Authoritative lookup should refresh when cached membership is present but unsynced."""
+async def test_responder_candidates_refresh_partial_unsynced_ad_hoc_cache() -> None:
+    """Responder candidate lookup should refresh when cached membership is present but unsynced."""
     config = _config(
         agents={
             "assistant": {
@@ -353,7 +353,7 @@ async def test_get_available_agents_for_sender_authoritative_refreshes_partial_u
         room_id="!test:server",
     )
 
-    available = await get_available_agents_for_sender_authoritative(
+    available = await responder_candidate_entities_for_room(
         client,
         room,
         "@alice:example.com",
@@ -368,10 +368,8 @@ async def test_get_available_agents_for_sender_authoritative_refreshes_partial_u
 
 
 @pytest.mark.asyncio
-async def test_get_available_agents_for_sender_authoritative_falls_back_to_cached_visible_agents_on_refresh_error() -> (
-    None
-):
-    """Authoritative lookup should keep usable cached agents when joined_members fails."""
+async def test_responder_candidates_fall_back_to_cached_visible_agents_on_refresh_error() -> None:
+    """Responder candidate lookup should keep usable cached agents when joined_members fails."""
     config = _config(
         agents={
             "assistant": {
@@ -392,7 +390,7 @@ async def test_get_available_agents_for_sender_authoritative_falls_back_to_cache
         room_id="!test:server",
     )
 
-    available = await get_available_agents_for_sender_authoritative(
+    available = await responder_candidate_entities_for_room(
         client,
         room,
         "@alice:example.com",
@@ -405,7 +403,7 @@ async def test_get_available_agents_for_sender_authoritative_falls_back_to_cache
 
 
 @pytest.mark.asyncio
-async def test_get_available_agents_for_sender_authoritative_updates_room_cache_after_refresh() -> None:
+async def test_responder_candidates_update_room_cache_after_refresh() -> None:
     """Authoritative refresh should hydrate room membership so repeated calls stay local."""
     config = _config(
         agents={
@@ -429,13 +427,13 @@ async def test_get_available_agents_for_sender_authoritative_updates_room_cache_
         room_id="!test:server",
     )
 
-    first = await get_available_agents_for_sender_authoritative(
+    first = await responder_candidate_entities_for_room(
         client,
         room,
         "@alice:example.com",
         config,
     )
-    second = await get_available_agents_for_sender_authoritative(
+    second = await responder_candidate_entities_for_room(
         client,
         room,
         "@alice:example.com",
@@ -449,7 +447,7 @@ async def test_get_available_agents_for_sender_authoritative_updates_room_cache_
 
 
 @pytest.mark.asyncio
-async def test_get_available_agents_for_sender_authoritative_preserves_invited_members() -> None:
+async def test_responder_candidates_preserve_invited_members() -> None:
     """Authoritative refresh should not delete invited users from the cached room."""
     config = _config(
         agents={
@@ -475,7 +473,7 @@ async def test_get_available_agents_for_sender_authoritative_preserves_invited_m
         room_id="!test:server",
     )
 
-    available = await get_available_agents_for_sender_authoritative(
+    available = await responder_candidate_entities_for_room(
         client,
         room,
         "@alice:example.com",

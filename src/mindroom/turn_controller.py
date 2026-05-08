@@ -14,7 +14,7 @@ from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from
 from mindroom.authorization import (
     get_effective_sender_id_for_reply_permissions,
     is_authorized_sender,
-    router_candidate_entities_for_room,
+    responder_candidate_entities_for_room,
 )
 from mindroom.coalescing import (
     COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
@@ -1172,7 +1172,7 @@ class TurnController:
         assert self.deps.agent_name == ROUTER_AGENT_NAME
 
         permission_sender_id = requester_user_id
-        available_agents = await router_candidate_entities_for_room(
+        available_agents = await responder_candidate_entities_for_room(
             self._client(),
             room,
             permission_sender_id,

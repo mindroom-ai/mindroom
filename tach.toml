@@ -271,7 +271,6 @@ path = "mindroom.entity_resolution"
 depends_on = [
     "mindroom.constants",
     "mindroom.matrix.identity",
-    "mindroom.matrix.rooms",
     "mindroom.matrix_identifiers",
 ]
 
@@ -521,7 +520,6 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.logging_config",
-    "mindroom.matrix.rooms",
     "mindroom.matrix.users",
     "mindroom.scheduling",
 ]
@@ -932,7 +930,6 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.knowledge",
     "mindroom.logging_config",
-    "mindroom.matrix.rooms",
     "mindroom.media_fallback",
     "mindroom.media_inputs",
     "mindroom.metadata_merge",

@@ -143,8 +143,8 @@ Expected outcome: The targeted agent responds and no unrelated agent or team con
 - [ ] `MSG-003` Mention one agent by full Matrix ID.
 Expected outcome: Mention resolution still targets the correct agent and produces one response path.
 
-- [ ] `MSG-004` Send a non-command message in a multi-agent room without an explicit mention.
-Expected outcome: The router selects one eligible agent, produces the expected handoff behavior, and the selected agent continues the thread.
+- [ ] `MSG-004` Send a non-command message in a multi-responder room without an explicit mention.
+Expected outcome: The router selects one eligible agent or team, produces the expected handoff behavior, and the selected entity continues the thread.
 
 - [ ] `MSG-005` Send a message in a one-to-one DM room with an agent.
 Expected outcome: The agent responds naturally without requiring a mention and later turns keep the same conversation continuity.

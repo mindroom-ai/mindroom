@@ -7233,7 +7233,7 @@ class TestAgentBot:
         self,
         tmp_path: Path,
     ) -> None:
-        """Router should call _handle_ai_routing for images in multi-agent rooms."""
+        """Router should call _handle_ai_routing for images in multi-responder rooms."""
         agent_user = AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
@@ -7286,7 +7286,7 @@ class TestAgentBot:
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
-            patch("mindroom.turn_policy.get_available_agents_for_sender_authoritative") as mock_get_available,
+            patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
@@ -7428,7 +7428,7 @@ class TestAgentBot:
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
-            patch("mindroom.turn_policy.get_available_agents_for_sender_authoritative") as mock_get_available,
+            patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
@@ -7621,7 +7621,7 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     async def test_multi_agent_file_event_registers_attachment_once(self, tmp_path: Path) -> None:
-        """A file event in a multi-agent room should register exactly one attachment."""
+        """A file event in a multi-responder room should register exactly one attachment."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -7812,7 +7812,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
                 return_value=[
                     config.get_ids(runtime_paths_for(config))["calculator"],
                     config.get_ids(runtime_paths_for(config))["general"],
@@ -7892,7 +7892,7 @@ class TestAgentBot:
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
                 return_value=[config.get_ids(runtime_paths_for(config))["calculator"]],
             ),
             patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
@@ -8032,7 +8032,7 @@ class TestAgentBot:
             ),
             patch("mindroom.turn_controller.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.get_available_agents_for_sender_authoritative", return_value=[]),
+            patch("mindroom.turn_policy.responder_candidate_entities_for_room", return_value=[]),
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
                 new_callable=AsyncMock,
@@ -8404,6 +8404,56 @@ class TestAgentBot:
 
         assert action.kind == "skip"
         mock_should_respond.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_response_action_keeps_configured_room_boundary_for_direct_reply(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Unmentioned direct replies must use the same configured-room boundary as routing."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent"),
+                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                },
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "calculator": ["@bob:localhost"],
+                        "research": ["@alice:localhost"],
+                    },
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["research"].full_id: MagicMock(),
+        }
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        with patch("mindroom.turn_policy.decide_team_formation", new=AsyncMock(return_value=TeamResolution.none())):
+            action = await bot._turn_policy.resolve_response_action(
+                context,
+                room,
+                "@bob:localhost",
+                "can someone help?",
+                False,
+            )
+
+        assert action.kind == "skip"
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_ignores_non_materializable_owner_candidates(
@@ -9090,7 +9140,7 @@ class TestAgentBot:
         self,
         tmp_path: Path,
     ) -> None:
-        """Partial policy history should fail closed in multi-agent rooms."""
+        """Partial policy history should fail closed in multi-responder rooms."""
         config = _runtime_bound_config(
             Config(
                 agents={

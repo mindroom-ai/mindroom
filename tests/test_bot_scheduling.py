@@ -1644,7 +1644,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User message
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,
             ) as mock_get_available,
         ):
@@ -1659,7 +1659,7 @@ class TestRouterSkipsSingleAgent:
 
         # Verify it logged that it's skipping routing
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
-        assert "Skipping routing: only one agent present" in info_calls
+        assert "Skipping routing: only one responder candidate" in info_calls
 
     @pytest.mark.asyncio
     async def test_router_routes_with_multiple_agents(self) -> None:
@@ -1733,7 +1733,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),  # User message
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,
             ) as mock_get_available,
         ):
@@ -1764,7 +1764,7 @@ class TestRouterSkipsSingleAgent:
 
         # Verify it didn't log about skipping
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
-        assert "Skipping routing: only one agent present" not in info_calls
+        assert "Skipping routing: only one responder candidate" not in info_calls
 
     @pytest.mark.asyncio
     async def test_router_requires_mention_with_multiple_non_agent_users_in_thread(self) -> None:
@@ -1838,7 +1838,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.turn_controller.extract_agent_name", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,
             ) as mock_get_available,
         ):
@@ -1913,7 +1913,7 @@ class TestRouterSkipsSingleAgent:
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,
             ) as mock_get_available,
         ):
@@ -1922,14 +1922,14 @@ class TestRouterSkipsSingleAgent:
             await drain_coalescing(bot)
 
         # Router should handle the command even with a single agent
-        # This ensures commands work properly in single-agent rooms
+        # This ensures commands work properly in single-responder rooms.
         bot._turn_controller._execute_command.assert_called_once()
         # Router should not send a response for unknown commands (handled by _handle_command)
         bot._send_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_router_handles_schedule_command_in_single_agent_room(self) -> None:
-        """Router should handle schedule commands even in single-agent rooms."""
+        """Router should handle schedule commands even in single-responder rooms."""
         # Create router agent
         agent_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -1985,7 +1985,7 @@ class TestRouterSkipsSingleAgent:
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,
             ) as mock_get_available,
         ):
@@ -1994,14 +1994,14 @@ class TestRouterSkipsSingleAgent:
             await drain_coalescing(bot)
 
         # Router MUST handle schedule commands even with a single agent
-        # This is a regression test to ensure commands work in single-agent rooms
+        # This is a regression test to ensure commands work in single-responder rooms.
         bot._turn_controller._execute_command.assert_called_once()
         kwargs = bot._turn_controller._execute_command.call_args.kwargs
         assert kwargs["command"].type.value == "schedule", "Router should handle schedule command"
 
     @pytest.mark.asyncio
     async def test_router_handles_voice_transcription_in_single_agent_room(self) -> None:
-        """Router voice transcriptions should work in single-agent rooms."""
+        """Router voice transcriptions should work in single-responder rooms."""
         # Create router agent
         agent_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -2069,7 +2069,7 @@ class TestRouterSkipsSingleAgent:
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,
             ) as mock_get_available,
             patch("mindroom.turn_policy.get_agents_in_thread") as mock_agents_in_thread,
@@ -2080,12 +2080,12 @@ class TestRouterSkipsSingleAgent:
             await drain_coalescing(bot)
 
         # Voice transcriptions should work: router skips routing but doesn't interfere
-        # This is a regression test to ensure voice works in single-agent rooms
+        # This is a regression test to ensure voice works in single-responder rooms.
         assert not bot._turn_controller._execute_router_relay.called, (
             "Router should skip routing for voice in single-agent room"
         )
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
-        assert "Skipping routing: only one agent present" in info_calls
+        assert "Skipping routing: only one responder candidate" in info_calls
 
     @pytest.mark.asyncio
     async def test_router_handles_command_with_multiple_agents(self) -> None:
@@ -2147,7 +2147,7 @@ class TestRouterSkipsSingleAgent:
         with (
             patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
-                "mindroom.turn_policy.get_available_agents_for_sender_authoritative",
+                "mindroom.turn_policy.responder_candidate_entities_for_room",
                 new_callable=AsyncMock,
             ) as mock_get_available,
         ):

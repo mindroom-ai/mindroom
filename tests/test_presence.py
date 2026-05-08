@@ -59,7 +59,7 @@ class TestBuildAgentStatusMessage:
         status = build_agent_status_message(ROUTER_AGENT_NAME, config)
 
         assert "🤖 Model: openai/gpt-4-turbo" in status
-        assert "📍 Routes messages to appropriate agents" in status
+        assert "📍 Routes messages to appropriate agents or teams" in status
 
     def test_regular_agent_status_with_tools(self) -> None:
         """Test building status message for regular agent with tools."""

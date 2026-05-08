@@ -270,7 +270,12 @@ def should_agent_respond(  # noqa: PLR0911
 
     available_agents = available_agents_in_room
     if available_agents is None:
-        available_agents = authorization.get_available_agents_for_sender(room, sender_id, config, runtime_paths)
+        available_agents = authorization.responder_candidate_entities_from_cached_room(
+            room,
+            sender_id,
+            config,
+            runtime_paths,
+        )
     agent_matrix_id = config.get_ids(runtime_paths)[agent_name]
 
     # Non-thread messages: auto-respond if we're the only visible agent in the room.

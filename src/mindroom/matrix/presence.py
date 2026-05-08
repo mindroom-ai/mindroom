@@ -77,7 +77,7 @@ def build_agent_status_message(
 
     # Add role/purpose for teams and agents
     if agent_name == ROUTER_AGENT_NAME:
-        status_parts.append("📍 Routes messages to appropriate agents")
+        status_parts.append("📍 Routes messages to appropriate agents or teams")
     elif agent_name in config.teams:
         team_config = config.teams[agent_name]
         if team_config.role:

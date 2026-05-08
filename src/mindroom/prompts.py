@@ -308,10 +308,10 @@ Request: "{request}"
 Your task is to:
 1. Determine if this is a one-time task or recurring (cron)
 2. Extract the schedule/timing
-3. Create a message that mentions the appropriate agents
+3. Create a message that mentions the appropriate agents or teams
 4. Set is_conditional=true only when the request is event-based or conditional
 
-Available agents: {agent_list}
+Available agents and teams: {agent_list}
 
 IMPORTANT: Event-based and conditional requests:
 When the request depends on an external event or condition rather than a fixed time:
@@ -323,7 +323,7 @@ When the request depends on an external event or condition rather than a fixed t
 Important rules:
 - Set is_conditional=false for normal time-based schedules
 - For conditional/event-based requests, ALWAYS include the check condition in the message
-- Mention relevant agents with @ only when needed
+- Mention relevant agents or teams with @ only when needed
 - Convert time expressions to UTC for the schedule, but DO NOT include them in the message
 - Remove time phrases like "in 15 seconds" from the message itself
 - If schedule_type is "once", you MUST provide execute_at

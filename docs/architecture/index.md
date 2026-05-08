@@ -58,7 +58,7 @@ MindRoom's architecture consists of several key components working together.
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
 | `bot.py` | AgentBot and TeamBot runtime for Matrix event handling |
-| `routing.py` | Intelligent agent selection when no agent is mentioned |
+| `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Response streaming via progressive message edits |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
@@ -70,8 +70,8 @@ MindRoom's architecture consists of several key components working together.
 ## Data Flow
 
 1. **Message arrives** from Matrix homeserver
-2. **Router decides** which agent should handle it (if no explicit mention)
-3. **Agent processes** the message using the Agno runtime
+2. **Router decides** which agent or team should handle it (if no explicit agent or team mention)
+3. **Selected entity processes** the message using the Agno runtime
 4. **Tools execute** as needed (file operations, API calls, etc.)
 5. **Response sent** back to Matrix room
 6. **Memory updates** asynchronously in background

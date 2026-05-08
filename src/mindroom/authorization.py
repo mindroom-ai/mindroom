@@ -213,7 +213,7 @@ def get_available_agents_in_room(
     return _available_agents_from_member_ids(room.users, config, runtime_paths)
 
 
-def get_available_agents_for_sender(
+def _get_available_agents_for_sender(
     room: nio.MatrixRoom,
     sender_id: str,
     config: Config,
@@ -255,7 +255,7 @@ def _apply_authoritative_joined_members(
     room.members_synced = True
 
 
-async def get_available_agents_for_sender_authoritative(
+async def _get_available_agents_for_sender_authoritative(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
     sender_id: str,
@@ -305,15 +305,43 @@ async def get_available_agents_for_sender_authoritative(
     return refreshed_agents
 
 
-async def router_candidate_entities_for_room(
-    client: nio.AsyncClient,
+def responder_candidate_entities_from_cached_room(
     room: nio.MatrixRoom,
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
-    """Return router candidates for one room without widening configured rooms."""
+    """Return sender-visible responder candidates without refreshing Matrix membership."""
+    configured_entities = _configured_responder_candidates_for_room(room, sender_id, config, runtime_paths)
+    if configured_entities is not None:
+        return configured_entities
+    return _get_available_agents_for_sender(room, sender_id, config, runtime_paths)
+
+
+def _configured_responder_candidates_for_room(
+    room: nio.MatrixRoom,
+    sender_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID] | None:
+    """Return configured-room responder candidates, or None for ad-hoc rooms."""
     configured_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
-    if configured_entities:
-        return filter_agents_by_sender_permissions(configured_entities, sender_id, config, runtime_paths)
-    return await get_available_agents_for_sender_authoritative(client, room, sender_id, config, runtime_paths)
+    if not configured_entities:
+        return None
+    return filter_agents_by_sender_permissions(configured_entities, sender_id, config, runtime_paths)
+
+
+async def responder_candidate_entities_for_room(
+    client: nio.AsyncClient | None,
+    room: nio.MatrixRoom,
+    sender_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
+    """Return sender-visible responder candidates without widening configured rooms."""
+    configured_entities = _configured_responder_candidates_for_room(room, sender_id, config, runtime_paths)
+    if configured_entities is not None:
+        return configured_entities
+    if client is None:
+        return _get_available_agents_for_sender(room, sender_id, config, runtime_paths)
+    return await _get_available_agents_for_sender_authoritative(client, room, sender_id, config, runtime_paths)

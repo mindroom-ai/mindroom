@@ -1587,7 +1587,7 @@ async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents()
 
     with (
         patch(
-            "mindroom.scheduling.get_available_agents_for_sender_authoritative",
+            "mindroom.scheduling.responder_candidate_entities_for_room",
             return_value=[],
         ),
         patch(
@@ -1616,7 +1616,7 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
 
     with (
         patch(
-            "mindroom.scheduling.get_available_agents_for_sender_authoritative",
+            "mindroom.scheduling.responder_candidate_entities_for_room",
             return_value=[],
         ),
         patch(

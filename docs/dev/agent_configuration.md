@@ -108,7 +108,7 @@ Use `provider: "sentence_transformers"` to run embeddings locally inside MindRoo
 
 ## Router Configuration
 
-The router determines which agent should handle a user's request:
+The router determines which agent or team should handle a user's request:
 
 ```yaml
 router:
