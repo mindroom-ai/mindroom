@@ -10,10 +10,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from contextlib import AsyncExitStack
-    from datetime import datetime
 
     from mcp import ClientSession
-    from mcp.types import Implementation
 
     from mindroom.mcp.config import MCPServerConfig
     from mindroom.mcp.errors import MCPError
@@ -82,10 +80,8 @@ class MCPServerCatalog:
     tool_name: str
     tool_prefix: str
     tools: tuple[MCPDiscoveredTool, ...]
-    server_info: Implementation
     instructions: str | None
     catalog_hash: str
-    discovered_at: datetime
 
 
 @dataclass

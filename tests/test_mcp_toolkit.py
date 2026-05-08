@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
 from agno.tools.function import ToolResult
-from mcp.types import Implementation
 
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
@@ -35,10 +32,8 @@ def _catalog(*tools: MCPDiscoveredTool) -> MCPServerCatalog:
         tool_name="mcp_demo",
         tool_prefix="demo",
         tools=tools,
-        server_info=Implementation(name="demo", version="1.0"),
         instructions=None,
         catalog_hash="hash",
-        discovered_at=datetime.now(UTC),
     )
 
 

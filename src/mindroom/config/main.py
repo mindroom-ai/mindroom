@@ -100,7 +100,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_space",
     "matrix_delivery",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "avatars", "tool_approval")
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval")
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -174,12 +174,6 @@ class _StaticCompactionConfigSemantics:
 
     scope_label: str
     authored_model: _AuthoredOptionalModel
-
-
-class AvatarConfig(BaseModel):
-    """Managed avatar generation configuration."""
-
-    model_config = ConfigDict(extra="forbid")
 
 
 def _history_policy_from_limits(
@@ -326,7 +320,6 @@ class Config(BaseModel):
     )
     plugins: list[PluginEntryConfig] = Field(default_factory=list, description="Plugin entries")
     debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug and diagnostic settings")
-    avatars: AvatarConfig = Field(default_factory=AvatarConfig, description="Managed avatar generation settings")
     prompts: dict[str, str] = Field(
         default_factory=dict,
         description="Built-in prompt overrides keyed by the uppercase global name from mindroom.prompts",

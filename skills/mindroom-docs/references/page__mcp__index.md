@@ -91,24 +91,23 @@ MindRoom resolves those placeholders from the current runtime environment when i
 
 ## Per-Server Options
 
-| Option                    | Type               | Default    | Notes                                                                           |
-| ------------------------- | ------------------ | ---------- | ------------------------------------------------------------------------------- |
-| `enabled`                 | bool               | `true`     | Set to `false` to disable one server without removing its config                |
-| `transport`               | string             | *required* | One of `stdio`, `sse`, or `streamable-http`                                     |
-| `command`                 | string             | `null`     | Required for `stdio`                                                            |
-| `args`                    | list[string]       | `[]`       | Optional `stdio` arguments                                                      |
-| `cwd`                     | string             | `null`     | Optional `stdio` working directory                                              |
-| `env`                     | map[string,string] | `{}`       | Optional `stdio` environment variables; supports `${ENV_VAR}` placeholders      |
-| `url`                     | string             | `null`     | Required for `sse` and `streamable-http`                                        |
-| `headers`                 | map[string,string] | `{}`       | Optional remote transport headers; supports `${ENV_VAR}` placeholders           |
-| `tool_prefix`             | string             | server ID  | Prefix for model-visible function names                                         |
-| `include_tools`           | list[string]       | `[]`       | Optional allowlist of remote tool names to expose                               |
-| `exclude_tools`           | list[string]       | `[]`       | Optional denylist of remote tool names to hide                                  |
-| `startup_timeout_seconds` | float              | `20.0`     | Maximum time to open the transport, initialize, and discover tools              |
-| `call_timeout_seconds`    | float              | `120.0`    | Default timeout for each tool call                                              |
-| `auto_reconnect`          | bool               | `true`     | Retry once after connection or timeout failures during a call                   |
-| `max_concurrent_calls`    | int                | `1`        | Maximum concurrent tool calls for that server                                   |
-| `idle_ttl_seconds`        | int                | `900`      | Reserved for future idle cleanup; it does not currently change runtime behavior |
+| Option                    | Type               | Default    | Notes                                                                      |
+| ------------------------- | ------------------ | ---------- | -------------------------------------------------------------------------- |
+| `enabled`                 | bool               | `true`     | Set to `false` to disable one server without removing its config           |
+| `transport`               | string             | *required* | One of `stdio`, `sse`, or `streamable-http`                                |
+| `command`                 | string             | `null`     | Required for `stdio`                                                       |
+| `args`                    | list[string]       | `[]`       | Optional `stdio` arguments                                                 |
+| `cwd`                     | string             | `null`     | Optional `stdio` working directory                                         |
+| `env`                     | map[string,string] | `{}`       | Optional `stdio` environment variables; supports `${ENV_VAR}` placeholders |
+| `url`                     | string             | `null`     | Required for `sse` and `streamable-http`                                   |
+| `headers`                 | map[string,string] | `{}`       | Optional remote transport headers; supports `${ENV_VAR}` placeholders      |
+| `tool_prefix`             | string             | server ID  | Prefix for model-visible function names                                    |
+| `include_tools`           | list[string]       | `[]`       | Optional allowlist of remote tool names to expose                          |
+| `exclude_tools`           | list[string]       | `[]`       | Optional denylist of remote tool names to hide                             |
+| `startup_timeout_seconds` | float              | `20.0`     | Maximum time to open the transport, initialize, and discover tools         |
+| `call_timeout_seconds`    | float              | `120.0`    | Default timeout for each tool call                                         |
+| `max_concurrent_calls`    | int                | `1`        | Maximum concurrent tool calls for that server                              |
+| `auto_reconnect`          | bool               | `true`     | Retry once after connection or timeout failures during a call              |
 
 `tool_prefix` must use only letters, numbers, and underscores.
 `include_tools` and `exclude_tools` are matched against the remote MCP tool names, not the MindRoom-prefixed function names.
@@ -345,4 +344,3 @@ If the catalog changed, MindRoom restarts the agents and teams that reference th
 - MCP integrations are shared-only and cannot be used with `worker_scope: user` or `worker_scope: user_agent`.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.
-- `idle_ttl_seconds` is reserved for future cleanup and does not currently change runtime behavior.

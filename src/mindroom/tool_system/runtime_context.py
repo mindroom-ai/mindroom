@@ -23,7 +23,6 @@ from mindroom.hooks import (
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
-from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -426,25 +425,6 @@ def append_tool_runtime_attachment_id(attachment_id: str) -> ToolRuntimeContext 
 
     context.runtime_attachment_ids.append(normalized_attachment_id)
     return context
-
-
-def get_plugin_state_root(
-    plugin_name: str,
-    *,
-    runtime_paths: RuntimePaths | None = None,
-) -> Path:
-    """Return the canonical plugin state root used by hooks and plugin tools."""
-    normalized_plugin_name = validate_plugin_name(plugin_name)
-
-    context = get_tool_runtime_context()
-    resolved_runtime_paths = runtime_paths or (context.runtime_paths if context is not None else None)
-    if resolved_runtime_paths is None:
-        msg = "runtime_paths are required when no tool runtime context is active"
-        raise RuntimeError(msg)
-
-    plugin_root = resolved_runtime_paths.storage_root / "plugins" / normalized_plugin_name
-    plugin_root.mkdir(parents=True, exist_ok=True)
-    return plugin_root
 
 
 async def emit_custom_event(

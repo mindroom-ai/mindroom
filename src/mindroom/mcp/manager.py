@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 from contextlib import AsyncExitStack
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 import mcp.types as mcp_types
@@ -357,10 +357,8 @@ class MCPServerManager:
             tool_name=mcp_tool_name(server_id),
             tool_prefix=tool_prefix,
             tools=tuple(filtered_tools),
-            server_info=initialize_result.serverInfo,
             instructions=initialize_result.instructions,
             catalog_hash=catalog_hash,
-            discovered_at=datetime.now(UTC),
         )
 
     def _build_message_handler(self, server_id: str) -> MessageHandlerFnT:
