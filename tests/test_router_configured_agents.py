@@ -2,13 +2,16 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.thread_utils import get_configured_agents_for_room
+from mindroom.turn_controller import _router_candidate_agents_for_room
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
@@ -114,6 +117,94 @@ class TestRouterAgentSelection:
         # But for individual response decisions, consider all agents
         available = get_available_agents_in_room(room, self.config, runtime_paths)
         assert len(available) == 3  # All agents in room
+
+    @pytest.mark.asyncio
+    async def test_router_candidates_keep_configured_rooms_static(self) -> None:
+        """Router candidates should not widen statically configured rooms."""
+        runtime_paths = runtime_paths_for(self.config)
+        room = MagicMock()
+        room.room_id = "#general:localhost"
+        room.members_synced = True
+        room.users = {
+            "@mindroom_calculator:localhost": None,  # Configured
+            "@mindroom_research:localhost": None,  # Configured
+            "@mindroom_writer:localhost": None,  # Present but not configured
+            "@user:localhost": None,
+        }
+        client = AsyncMock()
+        client.joined_members = AsyncMock()
+
+        available = await _router_candidate_agents_for_room(
+            client,
+            room,
+            "@user:localhost",
+            self.config,
+            runtime_paths,
+        )
+
+        available_names = [mid.agent_name(self.config, runtime_paths) for mid in available]
+        assert available_names == ["calculator", "research"]
+        assert "writer" not in available_names
+        client.joined_members.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_router_candidates_fall_back_to_present_agents_for_ad_hoc_room(self) -> None:
+        """Router candidates should use joined agents when no config maps to the room."""
+        runtime_paths = runtime_paths_for(self.config)
+        room = MagicMock()
+        room.room_id = "!adhoc:localhost"
+        room.members_synced = True
+        room.users = {
+            "@mindroom_calculator:localhost": None,
+            "@mindroom_writer:localhost": None,
+            "@mindroom_router:localhost": None,
+            "@user:localhost": None,
+        }
+        client = AsyncMock()
+        client.joined_members = AsyncMock()
+
+        available = await _router_candidate_agents_for_room(
+            client,
+            room,
+            "@user:localhost",
+            self.config,
+            runtime_paths,
+        )
+
+        available_names = [mid.agent_name(self.config, runtime_paths) for mid in available]
+        assert available_names == ["calculator", "writer"]
+        assert "router" not in available_names
+        client.joined_members.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_router_candidates_ad_hoc_room_respects_sender_permissions(self) -> None:
+        """Ad-hoc room fallback should still apply per-agent sender allowlists."""
+        runtime_paths = runtime_paths_for(self.config)
+        self.config.authorization.agent_reply_permissions = {
+            "calculator": ["@user:localhost"],
+            "writer": ["@other:localhost"],
+        }
+        room = MagicMock()
+        room.room_id = "!adhoc:localhost"
+        room.members_synced = True
+        room.users = {
+            "@mindroom_calculator:localhost": None,
+            "@mindroom_writer:localhost": None,
+            "@user:localhost": None,
+        }
+        client = AsyncMock()
+        client.joined_members = AsyncMock()
+
+        available = await _router_candidate_agents_for_room(
+            client,
+            room,
+            "@user:localhost",
+            self.config,
+            runtime_paths,
+        )
+
+        available_names = [mid.agent_name(self.config, runtime_paths) for mid in available]
+        assert available_names == ["calculator"]
 
     def test_router_excludes_itself(self) -> None:
         """Test that router agent is excluded from available agents."""
