@@ -617,7 +617,7 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        locked_operation: Callable[[ResponseRequest, MessageTarget], Awaitable[str | None]],
+        locked_operation: Callable[[MessageTarget], Awaitable[str | None]],
     ) -> str | None:
         """Run one locked response operation with shared queued-message bookkeeping."""
         resolved_target = self._resolve_request_target(request)
@@ -626,7 +626,29 @@ class ResponseRunner:
             response_envelope=request.response_envelope,
             queued_notice_reservation=request.queued_notice_reservation,
             pipeline_timing=request.pipeline_timing,
-            locked_operation=lambda target: locked_operation(request, target),
+            locked_operation=locked_operation,
+        )
+
+    def _request_with_locked_target(
+        self,
+        request: ResponseRequest,
+        resolved_target: MessageTarget,
+    ) -> ResponseRequest:
+        """Return a prepared request constrained to the target that owns the lock."""
+        response_envelope = request.response_envelope
+        if response_envelope is not None and response_envelope.target != resolved_target:
+            response_envelope = replace(response_envelope, target=resolved_target)
+        if (
+            request.target == resolved_target
+            and request.thread_id == resolved_target.resolved_thread_id
+            and response_envelope is request.response_envelope
+        ):
+            return request
+        return replace(
+            request,
+            thread_id=resolved_target.resolved_thread_id,
+            target=resolved_target,
+            response_envelope=response_envelope,
         )
 
     def _build_persist_response_event_id_effect(
@@ -805,13 +827,14 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
+        resolved_target: MessageTarget,
         response_kind: str,
     ) -> str | None:
         """Finalize one empty prompt through the canonical response lifecycle."""
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
-        resolved_target = self._resolve_request_target(request)
+        request = self._request_with_locked_target(request, resolved_target)
         lifecycle = self._build_lifecycle(
             response_kind=response_kind,
             request=request,
@@ -848,8 +871,8 @@ class ResponseRunner:
         )
         return await self._run_locked_response_lifecycle(
             request,
-            locked_operation=lambda locked_request, resolved_target: self.generate_team_response_helper_locked(
-                replace(team_request, request=locked_request),
+            locked_operation=lambda resolved_target: self.generate_team_response_helper_locked(
+                team_request,
                 resolved_target=resolved_target,
             ),
         )
@@ -863,8 +886,9 @@ class ResponseRunner:
         """Finalize an empty prompt through the locked lifecycle before setup side effects."""
         return await self._run_locked_response_lifecycle(
             request,
-            locked_operation=lambda locked_request, _resolved_target: self._finalize_empty_prompt_locked(
-                locked_request,
+            locked_operation=lambda resolved_target: self._finalize_empty_prompt_locked(
+                request,
+                resolved_target=resolved_target,
                 response_kind=response_kind,
             ),
         )
@@ -880,12 +904,13 @@ class ResponseRunner:
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
                 request,
+                resolved_target=resolved_target,
                 response_kind="team",
             )
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
-        resolved_target = self._resolve_request_target(request)
+        request = self._request_with_locked_target(request, resolved_target)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         team_request = replace(team_request, request=request)
@@ -2079,8 +2104,8 @@ class ResponseRunner:
         """Generate and send/edit an agent response with lifecycle locking."""
         return await self._run_locked_response_lifecycle(
             request,
-            locked_operation=lambda locked_request, resolved_target: self.generate_response_locked(
-                locked_request,
+            locked_operation=lambda resolved_target: self.generate_response_locked(
+                request,
                 resolved_target=resolved_target,
             ),
         )
@@ -2095,12 +2120,13 @@ class ResponseRunner:
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
                 request,
+                resolved_target=resolved_target,
                 response_kind="ai",
             )
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = await self._prepare_request_after_lock(request)
-        resolved_target = self._resolve_request_target(request)
+        request = self._request_with_locked_target(request, resolved_target)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("thread_refresh_ready")
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (

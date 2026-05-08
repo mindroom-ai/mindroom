@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -61,6 +62,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
+    prepared_dispatch_result,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -929,6 +931,92 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_generate_response_keeps_locked_target_when_prepare_after_lock_retargets(tmp_path: Path) -> None:
+    """Post-lock request preparation may refresh context, but it must not retarget delivery."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    stable_target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
+    retarget = MessageTarget.resolve("!room:localhost", "$other_thread", "$event")
+    observed_run_targets: list[MessageTarget] = []
+    observed_delivery_targets: list[MessageTarget | None] = []
+    observed_lifecycle_targets: list[MessageTarget] = []
+
+    async def prepare_after_lock(request: ResponseRequest) -> ResponseRequest:
+        return replace(
+            request,
+            thread_id=retarget.resolved_thread_id,
+            target=retarget,
+            response_envelope=_envelope(source_event_id="$event", target=retarget),
+        )
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        target = kwargs["target"]
+        assert isinstance(target, MessageTarget)
+        observed_run_targets.append(target)
+        response_function = cast(
+            "Callable[[object | None], Awaitable[object]]",
+            kwargs["response_function"],
+        )
+        await response_function(None)
+        return "$response"
+
+    async def fake_process_and_respond(
+        request: ResponseRequest,
+        **_kwargs: object,
+    ) -> FinalDeliveryOutcome:
+        observed_delivery_targets.append(request.target)
+        return FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="ok",
+            delivery_kind="sent",
+        )
+
+    def fake_build_lifecycle(**kwargs: object) -> _NoopResponseLifecycle:
+        response_envelope = kwargs["response_envelope"]
+        assert isinstance(response_envelope, MessageEnvelope)
+        observed_lifecycle_targets.append(response_envelope.target)
+        return _NoopResponseLifecycle()
+
+    with (
+        patch.object(coordinator, "_build_lifecycle", MagicMock(side_effect=fake_build_lifecycle)),
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch.object(
+            coordinator,
+            "process_and_respond",
+            new=AsyncMock(side_effect=fake_process_and_respond),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
+    ):
+        result = await coordinator.generate_response(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                prompt="hello",
+                user_id="@user:localhost",
+                response_envelope=_envelope(source_event_id="$event", target=stable_target),
+                target=stable_target,
+                prepare_after_lock=prepare_after_lock,
+            ),
+        )
+
+    assert result == "$response"
+    assert observed_run_targets == [stable_target]
+    assert observed_delivery_targets == [stable_target]
+    assert observed_lifecycle_targets == [stable_target]
+    lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
+    assert ("!room:localhost", None) in lock_keys
+    assert ("!room:localhost", "$other_thread") not in lock_keys
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Path) -> None:
     """Team delivery/session setup must enter the runner with the finalized stable room target."""
     bot = _bot(tmp_path)
@@ -996,6 +1084,86 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
     assert ("!room:localhost", None) in lock_keys
     assert ("!room:localhost", "$plain_root") not in lock_keys
+
+
+@pytest.mark.asyncio
+async def test_generate_team_response_keeps_locked_target_when_prepare_after_lock_retargets(tmp_path: Path) -> None:
+    """Team response setup and delivery should keep the target selected before lock acquisition."""
+    bot = _bot(tmp_path)
+    bot.client = MagicMock()
+    bot.client.rooms = {}
+    bot.client.room_typing = AsyncMock()
+    bot.orchestrator = MagicMock()
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    stable_target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
+    retarget = MessageTarget.resolve("!room:localhost", "$other_thread", "$event")
+    lifecycle = _NoopResponseLifecycle()
+    observed_run_targets: list[MessageTarget] = []
+    observed_delivery_targets: list[MessageTarget] = []
+
+    async def prepare_after_lock(request: ResponseRequest) -> ResponseRequest:
+        return replace(
+            request,
+            thread_id=retarget.resolved_thread_id,
+            target=retarget,
+            response_envelope=_envelope(source_event_id="$event", target=retarget),
+        )
+
+    async def fake_run_cancellable_response(**kwargs: object) -> str:
+        target = kwargs["target"]
+        assert isinstance(target, MessageTarget)
+        observed_run_targets.append(target)
+        response_function = cast(
+            "Callable[[object | None], Awaitable[object]]",
+            kwargs["response_function"],
+        )
+        await response_function(None)
+        return "$response"
+
+    async def fake_deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
+        observed_delivery_targets.append(request.target)
+        return FinalDeliveryOutcome(
+            terminal_status="completed",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body=request.response_text,
+            delivery_kind="sent",
+        )
+
+    with (
+        patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=lifecycle)),
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=fake_run_cancellable_response),
+        ),
+        patch("mindroom.delivery_gateway.DeliveryGateway.deliver_final", new=AsyncMock(side_effect=fake_deliver_final)),
+        patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", AsyncMock(return_value="team ok")),
+    ):
+        result = await coordinator.generate_team_response_helper(
+            ResponseRequest(
+                room_id="!room:localhost",
+                reply_to_event_id="$event",
+                thread_id=None,
+                thread_history=[],
+                prompt="hello",
+                user_id="@user:localhost",
+                response_envelope=_envelope(source_event_id="$event", target=stable_target),
+                target=stable_target,
+                prepare_after_lock=prepare_after_lock,
+            ),
+            team_agents=[],
+            team_mode="coordinate",
+        )
+
+    assert result == "$response"
+    assert observed_run_targets == [stable_target]
+    assert observed_delivery_targets == [stable_target]
+    assert lifecycle.session_thread_ids == [None]
+    lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
+    assert ("!room:localhost", None) in lock_keys
+    assert ("!room:localhost", "$other_thread") not in lock_keys
 
 
 @pytest.mark.asyncio
@@ -1320,7 +1488,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
             patch.object(
                 bot._turn_controller,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=dispatch),
+                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
@@ -1380,7 +1548,7 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
             patch.object(
                 bot._turn_controller,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=dispatch),
+                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
@@ -1433,7 +1601,7 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
             patch.object(
                 bot._turn_controller,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=case.dispatch),
+                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
@@ -1464,7 +1632,7 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
             patch.object(
                 bot._turn_controller,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=case.dispatch),
+                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
@@ -1497,7 +1665,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
             patch.object(
                 bot._turn_controller,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=case.dispatch),
+                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
@@ -1539,7 +1707,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
             patch.object(
                 bot._turn_controller,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=case.dispatch),
+                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
@@ -1833,7 +2001,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=dispatch),
+            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
         patch.object(

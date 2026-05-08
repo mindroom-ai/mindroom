@@ -38,6 +38,20 @@ _CACHE_COORDINATOR_TIMEOUT = "cache_coordinator_timeout"
 _DISPATCH_READ_TIMEOUT = "dispatch_read_timeout"
 
 
+def _dispatch_thread_read_timeout_seconds() -> float:
+    """Return the single wall-clock budget for one dispatch-safe read."""
+    return min(
+        _DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS,
+        _DISPATCH_THREAD_READ_FETCH_TIMEOUT_SECONDS,
+    )
+
+
+def _remaining_dispatch_thread_read_seconds(queue_wait_started: float) -> float:
+    """Return the remaining dispatch-safe read budget."""
+    deadline = queue_wait_started + _dispatch_thread_read_timeout_seconds()
+    return max(0.0, deadline - time.perf_counter())
+
+
 class ThreadReadMode(Enum):
     """Named thread-read policies for cache coordination and source freshness."""
 
@@ -229,6 +243,16 @@ class ThreadReadPolicy:
         queue_wait_started: float,
     ) -> ThreadHistoryResult:
         fetch_started = time.perf_counter()
+        remaining_timeout = _remaining_dispatch_thread_read_seconds(queue_wait_started)
+        if remaining_timeout <= 0:
+            return self._degraded_dispatch_timeout_result(
+                room_id=room_id,
+                thread_id=thread_id,
+                caller_label=caller_label,
+                queue_wait_started=queue_wait_started,
+                error_code=_DISPATCH_READ_TIMEOUT,
+                fetch_started=fetch_started,
+            )
         try:
             # Dispatch read-through fetches are bounded live reads. Cancelling them on timeout
             # is intentional; cache mutation tasks are protected by the write coordinator.
@@ -241,7 +265,7 @@ class ThreadReadPolicy:
                     caller_label=caller_label,
                     queue_wait_started=queue_wait_started,
                 ),
-                timeout=_DISPATCH_THREAD_READ_FETCH_TIMEOUT_SECONDS,
+                timeout=remaining_timeout,
             )
         except TimeoutError:
             return self._degraded_dispatch_timeout_result(
@@ -304,9 +328,18 @@ class ThreadReadPolicy:
         queue_wait_started = time.perf_counter()
         try:
             if mode.dispatch_safe:
+                remaining_timeout = _remaining_dispatch_thread_read_seconds(queue_wait_started)
+                if remaining_timeout <= 0:
+                    return self._degraded_dispatch_timeout_result(
+                        room_id=room_id,
+                        thread_id=thread_id,
+                        caller_label=caller_label,
+                        queue_wait_started=queue_wait_started,
+                        error_code=_CACHE_COORDINATOR_TIMEOUT,
+                    )
                 await asyncio.wait_for(
                     self._wait_for_pending_thread_cache_updates(room_id, thread_id),
-                    timeout=_DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS,
+                    timeout=remaining_timeout,
                 )
             else:
                 await self._wait_for_pending_thread_cache_updates(room_id, thread_id)

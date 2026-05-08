@@ -17,9 +17,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_thread_context import room_level_target
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import should_agent_respond
 from mindroom.turn_controller import _PrecheckedEvent
 from tests.conftest import (
@@ -376,6 +378,36 @@ class TestBotScheduleCommands:
         assert target.room_id == room.room_id
         assert target.reply_to_event_id == event.event_id
         assert target.resolved_thread_id == event.event_id
+
+    @pytest.mark.asyncio
+    async def test_command_response_uses_provided_stable_target(self, mock_agent_bot: AgentBot) -> None:
+        """Command delivery should use the resolved command target instead of rebuilding from the command event."""
+        _sync_turn_policy_runtime(mock_agent_bot)
+        room = MagicMock()
+        room.room_id = "!test:server"
+
+        event = MagicMock()
+        event.event_id = "$event123"
+        event.sender = "@user:server"
+        event.body = "!help"
+        event.server_timestamp = 1234567890
+        event.source = {"content": {}}
+        stable_target = room_level_target(MessageTarget.resolve(room.room_id, "$candidate_root", event.event_id))
+
+        command = Command(type=CommandType.HELP, args={}, raw_text=event.body)
+
+        await mock_agent_bot._turn_controller._execute_command(
+            room,
+            event,
+            "@user:server",
+            command,
+            target=stable_target,
+        )
+
+        mock_agent_bot._send_response.assert_called_once()
+        delivered_target = mock_agent_bot._send_response.await_args.kwargs["target"]
+        assert delivered_target == stable_target
+        assert delivered_target.resolved_thread_id is None
 
 
 class TestBotTaskRestoration:

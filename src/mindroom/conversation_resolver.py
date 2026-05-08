@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence  # noqa: TC003
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import nio
 from nio.responses import RoomGetEventError
@@ -39,6 +38,8 @@ from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping, Sequence
+
     import structlog
 
     from mindroom.constants import RuntimePaths
@@ -48,6 +49,14 @@ if TYPE_CHECKING:
 
 
 _SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
+
+
+@runtime_checkable
+class _ThreadReadResultMetadata(Protocol):
+    """Boundary-safe metadata shape preserved only by conversation-cache thread reads."""
+
+    is_full_history: bool
+    diagnostics: Mapping[str, object]
 
 
 def _should_skip_mentions(event_source: dict[str, Any]) -> bool:
@@ -95,6 +104,15 @@ def _source_with_payload_metadata(
     if payload_metadata.skip_mentions is not None:
         content = _with_skip_mentions_metadata(content, payload_metadata.skip_mentions)
     return {**event_source, "content": content}
+
+
+def _thread_read_result_from_membership_history(
+    thread_history: Sequence[object] | None,
+) -> ThreadReadResult | None:
+    """Return cache thread-read history only when membership proof preserved its metadata."""
+    if not isinstance(thread_history, _ThreadReadResultMetadata):
+        return None
+    return cast("ThreadReadResult", thread_history)
 
 
 def _thread_history_proves_root(
@@ -528,9 +546,7 @@ class ConversationResolver:
             event_id=event_id,
             access=access,
         )
-        # Thread membership is generic over event-id-bearing snapshots, while this resolver's
-        # cache accessors return ThreadReadResult entries used for model/replay diagnostics.
-        thread_history = cast("ThreadReadResult | None", resolution.thread_history)
+        thread_history = _thread_read_result_from_membership_history(resolution.thread_history)
         if not mode.dispatch_safe:
             return _ThreadIdLookup(thread_id=resolution.thread_id, thread_history=thread_history)
         if resolution.thread_id is not None:

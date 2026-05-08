@@ -322,7 +322,7 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
             patch("mindroom.matrix.conversation_cache.time.time", side_effect=[101.0, 102.0, 103.0]),
             patch(
                 "mindroom.matrix.cache.thread_reads.time.perf_counter",
-                side_effect=[1.0, 1.05, 2.0, 2.01, 2.075, 3.0, 3.01, 3.1],
+                side_effect=[1.0, 1.05, 2.0, 2.01, 2.075, 2.075, 2.075, 3.0, 3.01, 3.1, 3.1, 3.1],
             ),
         ):
             read_methods = {
@@ -531,6 +531,55 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
     assert "dispatch_fetch_wait_ms" in result.diagnostics
     coordinator.wait_for_thread_idle.assert_awaited_once()
     coordinator.run_thread_update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_thread_read_uses_single_deadline_after_coordinator_wait(
+    tmp_path: Path,
+) -> None:
+    """Dispatch fetches should not receive a fresh timeout after the coordinator wait spends the budget."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    client = MagicMock()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+
+    coordinator = MagicMock()
+    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
+    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("dispatch reads should bypass refresh queue"))
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+
+    clock_values = iter([100.0, 100.0, 101.25, 101.25, 101.25, 101.25])
+
+    def perf_counter() -> float:
+        return next(clock_values, 101.25)
+
+    try:
+        with (
+            patch("mindroom.matrix.cache.thread_reads.time.perf_counter", side_effect=perf_counter),
+            patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS", 1.0),
+            patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_FETCH_TIMEOUT_SECONDS", 1.0),
+            patch(
+                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+                AsyncMock(side_effect=AssertionError("spent dispatch deadline must not start fetch")),
+            ) as fetch_dispatch_thread_snapshot,
+        ):
+            result = await conversation_cache.get_dispatch_thread_snapshot(
+                "!room:localhost",
+                "$thread:localhost",
+                caller_label="dispatch_context",
+            )
+    finally:
+        await event_cache.close()
+
+    assert result == []
+    assert result.is_full_history is False
+    assert result.diagnostics["thread_read_degraded"] is True
+    assert result.diagnostics["thread_read_error"] == "dispatch_read_timeout"
+    assert result.diagnostics["thread_read_source"] == "degraded"
+    assert "dispatch_fetch_wait_ms" in result.diagnostics
+    coordinator.wait_for_thread_idle.assert_awaited_once()
+    coordinator.run_thread_update.assert_not_awaited()
+    fetch_dispatch_thread_snapshot.assert_not_awaited()
 
 
 @pytest.mark.asyncio

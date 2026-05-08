@@ -58,7 +58,6 @@ if TYPE_CHECKING:
 
     from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, TextDispatchEvent
-    from mindroom.dispatch_thread_context import DispatchThreadContext
     from mindroom.message_target import MessageTarget
 
 
@@ -80,7 +79,6 @@ class PreparedDispatch:
     target: MessageTarget
     correlation_id: str
     envelope: MessageEnvelope
-    thread_context: DispatchThreadContext | None = None
 
 
 @dataclass(frozen=True)
@@ -454,7 +452,7 @@ class TurnPolicy:
         planning_thread_history = context.planning_thread_history
         requester_user_id = dispatch.requester_user_id
         if not context.mentioned_agents and not context.has_non_agent_mentions:
-            if context.is_thread and context.planning_thread_history_unavailable:
+            if context.planning_thread_history_unavailable:
                 self.deps.logger.info("Skipping routing: thread policy history unavailable")
                 return _DispatchPlan(kind="ignore", ignore_reason="router")
             if context.is_thread and thread_requires_explicit_agent_targeting(
@@ -535,8 +533,7 @@ class TurnPolicy:
         planning_thread_history = context.planning_thread_history
         available_agents_in_room = await self.available_agents_for_sender(room, requester_user_id)
         if (
-            context.is_thread
-            and context.planning_thread_history_unavailable
+            context.planning_thread_history_unavailable
             and not context.am_i_mentioned
             and not context.mentioned_agents
             and not context.has_non_agent_mentions

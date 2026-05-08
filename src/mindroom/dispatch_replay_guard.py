@@ -31,11 +31,6 @@ class _CachedEventView:
     source: Mapping[str, object]
 
 
-def _is_automation_event(event: TextDispatchEvent, source_kind: str | None) -> bool:
-    del event
-    return is_automation_source_kind(source_kind or "")
-
-
 def has_newer_unresponded_in_thread(
     event: TextDispatchEvent,
     requester_user_id: str,
@@ -48,7 +43,7 @@ def has_newer_unresponded_in_thread(
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
     """Return True when full thread history proves a newer unhandled requester turn exists."""
-    if _is_automation_event(event, source_kind):
+    if is_automation_source_kind(source_kind or ""):
         return False
     event_ts = event.server_timestamp
     if event_ts is None or not thread_history:
@@ -185,7 +180,7 @@ async def has_newer_unresponded_cached_thread_event(
 ) -> bool:
     """Return positive cached-event proof for degraded dispatch replay history."""
     # Automation backlog replay should not suppress older automation turns by scanning raw cached room events.
-    if thread_id is None or event.server_timestamp is None or _is_automation_event(event, source_kind):
+    if thread_id is None or event.server_timestamp is None or is_automation_source_kind(source_kind or ""):
         return False
     if get_recent_room_events is None:
         return False

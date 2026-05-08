@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.dispatch_thread_context import DispatchThreadContext
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -178,6 +179,14 @@ class _PrecheckedEvent[T]:
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
 type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
+
+
+@dataclass(frozen=True)
+class _PreparedDispatchResult:
+    """Turn-controller-local dispatch plus evidence needed after policy planning."""
+
+    dispatch: PreparedDispatch
+    thread_context: DispatchThreadContext | None
 
 
 @dataclass(frozen=True)
@@ -820,7 +829,7 @@ class TurnController:
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
         use_command_context: bool = False,
-    ) -> PreparedDispatch | None:
+    ) -> _PreparedDispatchResult | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
         if use_command_context:
@@ -929,12 +938,14 @@ class TurnController:
             )
             return None
 
-        return PreparedDispatch(
-            requester_user_id=requester_user_id,
-            context=context,
-            target=target,
-            correlation_id=correlation_id,
-            envelope=envelope,
+        return _PreparedDispatchResult(
+            dispatch=PreparedDispatch(
+                requester_user_id=requester_user_id,
+                context=context,
+                target=target,
+                correlation_id=correlation_id,
+                envelope=envelope,
+            ),
             thread_context=thread_context,
         )
 
@@ -966,12 +977,7 @@ class TurnController:
             reply_to_event: nio.RoomMessageText | None = None,
             skip_mentions: bool = False,
         ) -> str | None:
-            target = self.deps.resolver.build_message_target(
-                room_id=room_id,
-                thread_id=thread_id,
-                reply_to_event_id=reply_to_event_id,
-                event_source=reply_to_event.source if reply_to_event is not None else None,
-            )
+            del room_id, reply_to_event_id, thread_id, reply_to_event
             return await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
                     target=target,
@@ -1707,7 +1713,7 @@ class TurnController:
             command = None
             if not media_events and (ingress_metadata is None or ingress_metadata.source_kind != "voice"):
                 command = command_parser.parse(event.body)
-            dispatch = await self._prepare_dispatch(
+            prepared_dispatch = await self._prepare_dispatch(
                 room,
                 event,
                 requester_user_id,
@@ -1719,9 +1725,10 @@ class TurnController:
             )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_ready")
-            if dispatch is None:
+            if prepared_dispatch is None:
                 return
-            thread_context = dispatch.thread_context
+            dispatch = prepared_dispatch.dispatch
+            thread_context = prepared_dispatch.thread_context
             handled_turn = handled_turn.with_request_context(
                 requester_id=dispatch.requester_user_id,
                 correlation_id=dispatch.correlation_id,
