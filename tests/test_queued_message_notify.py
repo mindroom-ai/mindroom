@@ -36,7 +36,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
-from mindroom.dispatch_thread_context import room_level_target
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
@@ -830,7 +829,7 @@ async def test_refresh_model_history_after_lock_does_not_reprove_room_target(
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
-    target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
+    target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
     envelope = _envelope(source_event_id="$event", target=target)
 
     with (
@@ -867,7 +866,7 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
     """Agent delivery must enter the runner with the finalized stable room target."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    stable_target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
+    stable_target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget | None] = []
 
@@ -935,7 +934,7 @@ async def test_generate_response_keeps_locked_target_when_prepare_after_lock_ret
     """Post-lock request preparation may refresh context, but it must not retarget delivery."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    stable_target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
+    stable_target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
     retarget = MessageTarget.resolve("!room:localhost", "$other_thread", "$event")
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget | None] = []
@@ -1025,7 +1024,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     bot.client.room_typing = AsyncMock()
     bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    stable_target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
+    stable_target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
     lifecycle = _NoopResponseLifecycle()
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget] = []
@@ -1095,7 +1094,7 @@ async def test_generate_team_response_keeps_locked_target_when_prepare_after_loc
     bot.client.room_typing = AsyncMock()
     bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    stable_target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
+    stable_target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
     retarget = MessageTarget.resolve("!room:localhost", "$other_thread", "$event")
     lifecycle = _NoopResponseLifecycle()
     observed_run_targets: list[MessageTarget] = []

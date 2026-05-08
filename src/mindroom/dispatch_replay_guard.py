@@ -135,6 +135,7 @@ async def _newer_unresponded_cached_thread_event_id(
     *,
     room_id: str,
     skipped_event_id: str,
+    skipped_event_ts_ms: int,
     requester_user_id: str,
     thread_id: str,
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
@@ -144,6 +145,10 @@ async def _newer_unresponded_cached_thread_event_id(
 ) -> str | None:
     """Return the first newer cached event with positive same-thread proof."""
     for event_source in recent_events:
+        event_ts = event_source.get("origin_server_ts")
+        # Match the full-history replay guard: equal millisecond timestamps are not newer-turn proof.
+        if not isinstance(event_ts, int) or event_ts <= skipped_event_ts_ms:
+            continue
         if not await _cached_event_is_in_thread(
             event_source,
             room_id=room_id,
@@ -204,6 +209,7 @@ async def has_newer_unresponded_cached_thread_event(
         recent_events,
         room_id=room_id,
         skipped_event_id=event.event_id,
+        skipped_event_ts_ms=int(event.server_timestamp),
         requester_user_id=requester_user_id,
         thread_id=thread_id,
         get_thread_id_for_event=get_thread_id_for_event,

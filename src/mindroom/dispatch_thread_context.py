@@ -7,13 +7,13 @@ from typing import TYPE_CHECKING
 
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.conversation_resolver import MessageContext
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.message_target import MessageTarget
 
 
 @dataclass(frozen=True)
@@ -51,16 +51,6 @@ def planning_history_unavailable_for(
         return not thread_history.is_full_history
     # Plain sequences have no completeness signal, so visible content must not masquerade as policy-grade history.
     return requires_model_history_refresh or bool(thread_history)
-
-
-def room_level_target(target: MessageTarget) -> MessageTarget:
-    """Return a true room-level target without preserving source thread identity."""
-    return MessageTarget.resolve(
-        room_id=target.room_id,
-        thread_id=None,
-        reply_to_event_id=target.reply_to_event_id,
-        room_mode=True,
-    )
 
 
 def context_with_dispatch_thread_context(

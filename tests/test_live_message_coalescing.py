@@ -3138,6 +3138,69 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
 
 
 @pytest.mark.asyncio
+async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_cached_event(tmp_path: Path) -> None:
+    """Cached replay proof must be strictly newer, matching the full-history guard."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    older_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$m1",
+        body="old",
+        source={"content": {"msgtype": "m.text", "body": "old"}},
+        server_timestamp=1000,
+    )
+    dispatch = _prepared_dispatch(event_id="$m1", body="old", thread_id="$thread")
+    degraded_history = ThreadHistoryResult(
+        [],
+        is_full_history=False,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+        },
+    )
+    dispatch.context.am_i_mentioned = False
+    dispatch.context.thread_history = degraded_history
+    dispatch.context.replay_guard_history = degraded_history
+    dispatch.context.requires_model_history_refresh = True
+    same_timestamp_event_source = {
+        "event_id": "$m2",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000,
+        "room_id": room.room_id,
+        "type": "m.room.message",
+        "content": {
+            "msgtype": "m.text",
+            "body": "same millisecond",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    }
+    bot.event_cache.get_recent_room_events.return_value = [same_timestamp_event_source]
+
+    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+        ),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+    ):
+        await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
+
+    history_guard.assert_not_called()
+    bot.event_cache.get_recent_room_events.assert_awaited_once_with(
+        room.room_id,
+        event_type="m.room.message",
+        since_ts_ms=1000,
+    )
+    action_mock.assert_awaited_once()
+    assert not bot._turn_store.is_handled("$m1")
+
+
+@pytest.mark.asyncio
 async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_command_body(tmp_path: Path) -> None:
     """Cached voice transcripts that parse like commands should still count as requester turns."""
     bot = _make_bot(tmp_path)

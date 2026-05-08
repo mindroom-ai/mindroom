@@ -17,7 +17,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_thread_context import room_level_target
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
@@ -392,7 +391,7 @@ class TestBotScheduleCommands:
         event.body = "!help"
         event.server_timestamp = 1234567890
         event.source = {"content": {}}
-        stable_target = room_level_target(MessageTarget.resolve(room.room_id, "$candidate_root", event.event_id))
+        stable_target = MessageTarget.resolve(room.room_id, None, event.event_id, room_mode=True)
 
         command = Command(type=CommandType.HELP, args={}, raw_text=event.body)
 

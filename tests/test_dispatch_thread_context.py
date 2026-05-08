@@ -7,7 +7,6 @@ from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
     context_with_dispatch_thread_context,
     planning_history_for,
-    room_level_target,
 )
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -77,21 +76,6 @@ def test_message_context_marks_partial_planning_history_unavailable() -> None:
 
     assert context.planning_thread_history == ()
     assert context.planning_thread_history_unavailable is True
-
-
-def test_room_level_target_strips_source_and_resolved_thread_ids() -> None:
-    """Room demotion must remove both authored and resolved thread identity."""
-    threaded_target = MessageTarget.resolve(
-        "!room:localhost",
-        "$source-thread:localhost",
-        "$reply:localhost",
-    ).with_thread_root("$resolved-thread:localhost")
-
-    target = room_level_target(threaded_target)
-
-    assert target.source_thread_id is None
-    assert target.resolved_thread_id is None
-    assert target.reply_to_event_id == "$reply:localhost"
 
 
 def test_message_target_identifies_new_root_target_shape() -> None:
