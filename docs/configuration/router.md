@@ -67,8 +67,8 @@ Even in single-agent rooms, commands are always processed by the router.
 
 When the router joins a room with no messages (or only a previous welcome message), it automatically sends a welcome message listing:
 
-- All available agents in that room with their descriptions
-- How to interact with agents (mentions, commands)
+- All available agents and teams in that room with their descriptions
+- How to interact with agents and teams (mentions, commands)
 - Quick command reference
 
 Use `!hi` in any room to see the welcome message again.
