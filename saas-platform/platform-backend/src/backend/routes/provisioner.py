@@ -127,9 +127,14 @@ async def _provision_credentials_encryption_key(
     namespace: str,
 ) -> str:
     """Return the instance chart credential encryption key value for this provision run."""
+    existing_key = (
+        await _existing_instance_credentials_encryption_key(customer_id, namespace) if existing_instance_id else None
+    )
+    if existing_key is not None:
+        return existing_key
     if not existing_instance_id or data.get("enable_credentials_encryption") is True:
         return _instance_credentials_encryption_key(customer_id)
-    return await _existing_instance_credentials_encryption_key(customer_id, namespace) or ""
+    return ""
 
 
 @router.post("/system/provision", response_model=ProvisionResponse)

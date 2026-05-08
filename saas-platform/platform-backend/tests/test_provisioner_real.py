@@ -14,6 +14,8 @@ from hypothesis.stateful import RuleBasedStateMachine, rule, invariant, initiali
 os.environ["PLATFORM_DOMAIN"] = "test.mindroom.chat"
 os.environ["ENVIRONMENT"] = "test"
 
+from backend.routes import provisioner  # noqa: E402
+
 
 class TestProvisionerCommandValidation:
     """Test that we generate correct Kubernetes and Helm commands."""
@@ -122,8 +124,6 @@ class TestProvisionerCommandValidation:
 
     def test_instance_credentials_encryption_key_is_stable_and_instance_scoped(self):
         """Provisioner-derived credential keys should be stable without sharing one key across instances."""
-        import backend.routes.provisioner as provisioner
-
         with patch.multiple(
             "backend.routes.provisioner",
             INSTANCE_CREDENTIALS_ENCRYPTION_SECRET="root-secret",
