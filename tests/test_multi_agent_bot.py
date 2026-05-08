@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Literal, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 from zoneinfo import ZoneInfo
 
@@ -499,18 +499,50 @@ async def _wait_for_live_pending(
                 approval_id = sender.await_args.args[2]["approval_id"]
                 card_event_id = store._live_card_event_id_for_approval(approval_id)
                 if card_event_id is not None:
-                    pending = await store.get_pending_approval(room_id, approval_id)
+                    pending = await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
                     if pending is not None:
                         return pending
             await asyncio.sleep(0)
 
 
+async def _live_pending_approval(
+    store: _ApprovalManager,
+    *,
+    room_id: str,
+    approval_id: str,
+) -> PendingApproval | None:
+    card_event_id = store._live_card_event_id_for_approval(approval_id)
+    if card_event_id is None:
+        return None
+    return await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+
+
 async def _wait_for_pending_approval_id(store: _ApprovalManager, approval_ids: list[str]) -> str:
     async with asyncio.timeout(1):
         while True:
-            if approval_ids and await store.get_pending_approval("!room:localhost", approval_ids[0]) is not None:
+            if (
+                approval_ids
+                and await _live_pending_approval(store, room_id="!room:localhost", approval_id=approval_ids[0])
+                is not None
+            ):
                 return approval_ids[0]
             await asyncio.sleep(0)
+
+
+async def _resolve_pending_approval(
+    store: _ApprovalManager,
+    pending: PendingApproval,
+    *,
+    status: Literal["approved", "denied", "expired", "cancelled"],
+    reason: str | None = None,
+) -> ApprovalActionResult:
+    return await store.handle_card_response(
+        room_id=pending.room_id,
+        sender_id=pending.approver_user_id,
+        card_event_id=pending.card_event_id,
+        status=status,
+        reason=reason,
+    )
 
 
 async def _start_live_approval(
@@ -13656,14 +13688,13 @@ class TestMultiAgentOrchestrator:
             assert updated is True
             assert task.done() is False
             assert event_order == ["send", "cleanup"]
-            pending = await store.get_pending_approval("!room:localhost", approval_id)
+            pending = await _live_pending_approval(store, room_id="!room:localhost", approval_id=approval_id)
             assert pending is not None
 
-            await store.resolve_approval(
-                card_event_id=pending.card_event_id,
-                room_id=pending.room_id,
+            await _resolve_pending_approval(
+                store,
+                pending,
                 status="approved",
-                resolved_by="@user:localhost",
             )
             decision = await task
 
@@ -13804,16 +13835,15 @@ class TestMultiAgentOrchestrator:
                 await code_bot.leave_unconfigured_rooms()
 
             assert task.done() is False
-            pending = await store.get_pending_approval("!room:localhost", approval_id)
+            pending = await _live_pending_approval(store, room_id="!room:localhost", approval_id=approval_id)
             assert pending is not None
             assert event_order == ["send", "leave"]
             leave_non_dm_rooms.assert_awaited_once()
 
-            await store.resolve_approval(
-                card_event_id=pending.card_event_id,
-                room_id=pending.room_id,
+            await _resolve_pending_approval(
+                store,
+                pending,
                 status="approved",
-                resolved_by="@user:localhost",
             )
             decision = await task
 

@@ -991,12 +991,6 @@ export function Integrations() {
         ).length,
       },
       {
-        id: "shopping",
-        name: "Shopping",
-        count: filteredIntegrations.filter((i) => i.category === "shopping")
-          .length,
-      },
-      {
         id: "entertainment",
         name: "Entertainment",
         count: filteredIntegrations.filter(
