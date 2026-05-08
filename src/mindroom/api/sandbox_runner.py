@@ -1009,7 +1009,7 @@ async def _execute_request_inprocess(
         else trusted_overlay
     )
     runtime_overrides = _request_runtime_overrides(request, prepared)
-    effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
+    effective_runtime_paths = sandbox_exec.tool_runtime_paths_with_request_env(
         runtime_paths,
         execution_env,
         include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
@@ -1176,7 +1176,7 @@ def _execute_request_subprocess_sync(
     if workspace_home is not None and request.tool_name == "python":
         workspace_home.mkdir(parents=True, exist_ok=True)
         cwd = str(workspace_home)
-    effective_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
+    effective_runtime_paths = sandbox_exec.tool_runtime_paths_with_request_env(
         runtime_paths,
         execution_env,
         trusted_env_overlay=trusted_overlay,

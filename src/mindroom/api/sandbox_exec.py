@@ -22,7 +22,7 @@ from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     credentials_encryption_key_value,
-    is_execution_runtime_env_file_name,
+    is_trusted_tool_runtime_env_file_name,
     sandbox_runner_runtime_state_env,
     sandbox_subprocess_system_env,
 )
@@ -164,10 +164,10 @@ def request_execution_env(
         )
     if execution_env:
         return dict(execution_env)
-    return dict(constants.sandbox_execution_runtime_env_values(runtime_paths))
+    return dict(constants.execution_tool_runtime_env_values(runtime_paths))
 
 
-def runtime_paths_with_execution_env(
+def tool_runtime_paths_with_request_env(
     runtime_paths: RuntimePaths,
     execution_env: dict[str, str],
     *,
@@ -175,12 +175,16 @@ def runtime_paths_with_execution_env(
     include_credentials_encryption_key: bool = False,
     trusted_env_overlay: Mapping[str, str] | None = None,
 ) -> RuntimePaths:
-    """Return runtime paths overlaid with one execution env snapshot."""
-    process_env = dict(constants.execution_runtime_env_values(runtime_paths)) if include_base_execution_env else {}
+    """Return runtime paths overlaid with one tool-request env snapshot."""
+    process_env = dict(constants.trusted_tool_runtime_env_values(runtime_paths)) if include_base_execution_env else {}
     process_env.update(sandbox_runner_runtime_state_env(runtime_paths.process_env))
     process_env.update(execution_env)
     env_file_values = (
-        {key: value for key, value in runtime_paths.env_file_values.items() if is_execution_runtime_env_file_name(key)}
+        {
+            key: value
+            for key, value in runtime_paths.env_file_values.items()
+            if is_trusted_tool_runtime_env_file_name(key)
+        }
         if include_base_execution_env
         else {}
     )

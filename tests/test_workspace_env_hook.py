@@ -42,7 +42,7 @@ def test_trusted_workspace_env_overlay_wins_over_execution_env_path(tmp_path: Pa
         process_env={"PATH": "/usr/bin:/bin"},
     )
 
-    overlaid_paths = sandbox_exec.runtime_paths_with_execution_env(
+    overlaid_paths = sandbox_exec.tool_runtime_paths_with_request_env(
         runtime_paths,
         {"PATH": "/usr/bin:/bin"},
         trusted_env_overlay={"PATH": "/workspace/.local/bin:/usr/bin:/bin"},

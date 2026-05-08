@@ -220,13 +220,13 @@ def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: 
         process_env=process_env,
         env_file_values=env_file_values,
     )
-    trusted_tool_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
+    trusted_tool_runtime_paths = sandbox_exec.tool_runtime_paths_with_request_env(
         runtime_paths,
         {},
         include_base_execution_env=True,
         include_credentials_encryption_key=True,
     )
-    execution_tool_runtime_paths = sandbox_exec.runtime_paths_with_execution_env(
+    execution_tool_runtime_paths = sandbox_exec.tool_runtime_paths_with_request_env(
         runtime_paths,
         {},
         include_base_execution_env=False,
@@ -337,7 +337,7 @@ def test_worker_backend_config_names_are_classified_and_filter_public_startup() 
         "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "value",
     }
     assert runtime_env_policy.shell_passthrough_env(env, patterns=("*",)) == {}
-    assert not any(runtime_env_policy.is_execution_runtime_env_file_name(name) for name in backend_names)
+    assert not any(runtime_env_policy.is_trusted_tool_runtime_env_file_name(name) for name in backend_names)
 
 
 def test_sandbox_subprocess_system_env_uses_policy_allowlist() -> None:

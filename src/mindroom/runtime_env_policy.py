@@ -20,18 +20,18 @@ __all__ = [
     "VERTEXAI_CLAUDE_ENV_BY_KEY",
     "credentials_encryption_key_from_env",
     "credentials_encryption_key_value",
-    "is_execution_runtime_env_file_name",
-    "is_execution_runtime_process_env_name",
+    "execution_tool_runtime_env",
     "is_isolated_worker_runtime_env_name",
     "is_public_worker_startup_env_name",
     "is_runtime_control_env_name",
     "is_runtime_database_url_env_name",
     "is_shell_passthrough_allowed_env_name",
+    "is_trusted_tool_runtime_env_file_name",
+    "is_trusted_tool_runtime_process_env_name",
     "is_worker_backend_config_env_name",
     "is_worker_extra_env_name",
     "isolated_worker_runtime_env",
     "public_worker_startup_env",
-    "sandbox_execution_runtime_env",
     "sandbox_runner_runtime_state_env",
     "sandbox_runner_startup_process_env",
     "sandbox_shell_system_env",
@@ -332,8 +332,8 @@ def is_isolated_worker_runtime_env_name(name: str) -> bool:
     return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
 
 
-def is_execution_runtime_env_file_name(name: str) -> bool:
-    """Return whether a config-adjacent env value may be visible to local execution tools."""
+def is_trusted_tool_runtime_env_file_name(name: str) -> bool:
+    """Return whether a config-adjacent env value may be visible to trusted tool construction."""
     return (
         name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES
         and not is_runtime_database_url_env_name(name)
@@ -341,8 +341,8 @@ def is_execution_runtime_env_file_name(name: str) -> bool:
     )
 
 
-def is_execution_runtime_process_env_name(name: str) -> bool:
-    """Return whether a process env value may be visible to local execution tools."""
+def is_trusted_tool_runtime_process_env_name(name: str) -> bool:
+    """Return whether a process env value may be visible to trusted tool construction."""
     return name not in _EXECUTION_RUNTIME_EXCLUDED_NAMES and (
         is_public_worker_startup_env_name(name) or name in _KNOWN_WORKER_CREDENTIAL_ENV_NAMES
     )
@@ -372,7 +372,7 @@ def isolated_worker_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in env.items() if is_isolated_worker_runtime_env_name(key)}
 
 
-def sandbox_execution_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
+def execution_tool_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return env safe for sandboxed tool execution snapshots."""
     return {
         key: value

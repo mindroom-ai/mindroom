@@ -578,7 +578,7 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
 
     startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
     execution_env = sandbox_exec_module.request_execution_env("shell", None, startup_runtime)
-    effective_runtime = sandbox_exec_module.runtime_paths_with_execution_env(startup_runtime, execution_env)
+    effective_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(startup_runtime, execution_env)
 
     assert startup_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert startup_runtime.env_value("OPENAI_API_KEY") is None
@@ -635,7 +635,7 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
         startup_runtime,
         extra_env_passthrough="MINDROOM_*",
     )
-    subprocess_runtime = sandbox_exec_module.runtime_paths_with_execution_env(
+    subprocess_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
         startup_runtime,
         {"VIRTUAL_ENV": "/worker-venv"},
     )
@@ -1230,12 +1230,12 @@ def test_non_execution_tool_runtime_keeps_credentials_encryption_key(tmp_path: P
     credentials = {"token": "secret", "_source": "ui"}
     get_runtime_credentials_manager(runtime_paths).save_credentials("custom_tool", credentials)
 
-    effective_runtime = sandbox_exec_module.runtime_paths_with_execution_env(
+    effective_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
         runtime_paths,
         {},
         include_credentials_encryption_key=True,
     )
-    python_runtime = sandbox_exec_module.runtime_paths_with_execution_env(
+    python_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
         runtime_paths,
         {},
         include_base_execution_env=False,
@@ -1616,7 +1616,7 @@ def test_sandbox_execution_env_excludes_arbitrary_runner_env_secrets(
     )
 
     execution_env = sandbox_exec_module.request_execution_env("shell", None, runtime_paths)
-    effective_runtime_paths = sandbox_exec_module.runtime_paths_with_execution_env(
+    effective_runtime_paths = sandbox_exec_module.tool_runtime_paths_with_request_env(
         runtime_paths,
         execution_env,
         include_base_execution_env=False,
@@ -4317,7 +4317,7 @@ def test_workspace_home_contract_protects_owned_names_after_hook_overlay(tmp_pat
     )
     execution_env.update(protected_env)
     trusted_overlay = sandbox_runner_module._trusted_workspace_overlay_for_runtime_paths(overlay, protected_env)
-    effective_runtime_paths = sandbox_exec_module.runtime_paths_with_execution_env(
+    effective_runtime_paths = sandbox_exec_module.tool_runtime_paths_with_request_env(
         runtime_paths,
         execution_env,
         trusted_env_overlay=trusted_overlay,
