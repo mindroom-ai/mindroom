@@ -8980,18 +8980,54 @@ class TestThreadingBehavior:
         assert context_result.thread_context.stable_target.resolved_thread_id is None
         assert context.is_thread is False
         assert context.thread_id is None
-        assert context.thread_history is degraded_snapshot
+        assert context.thread_history == []
+        assert context_result.thread_context.thread_history == []
+        assert context_result.thread_context.replay_guard_history is degraded_snapshot
         assert context.requires_model_history_refresh is False
         assert context.planning_thread_history == ()
         mock_lookup.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         mock_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
-        assert mock_read.await_count == 2
-        assert all(
-            call.args == (room.room_id, "$thread_root:localhost")
-            and call.kwargs == {"caller_label": "dispatch_context"}
-            for call in mock_read.await_args_list
+        mock_read.assert_awaited_once_with(
+            room.room_id,
+            "$thread_root:localhost",
+            caller_label="dispatch_context",
         )
-        assert all(call.args == (room.room_id, "$thread_root:localhost") for call in mock_read.await_args_list)
+
+    @pytest.mark.asyncio
+    async def test_dispatch_new_root_target_does_not_become_existing_thread_context(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A room-level inbound message may start a delivery thread without existing thread context."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "@mindroom_general start here",
+                    "msgtype": "m.text",
+                    "m.mentions": {"user_ids": ["@mindroom_general:localhost"]},
+                },
+                "event_id": "$new_root:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        context = context_result.context
+
+        assert context_result.thread_context is not None
+        assert context_result.thread_context.stable_target.source_thread_id is None
+        assert context_result.thread_context.stable_target.resolved_thread_id == "$new_root:localhost"
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        assert context.requires_model_history_refresh is False
+        assert context.planning_thread_history == ()
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_plain_reply_to_plain_message_stays_room_level_with_empty_snapshot(
@@ -9099,7 +9135,6 @@ class TestThreadingBehavior:
                 "type": "m.room.message",
             },
         )
-        resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
         observed_targets = []
 
         async def fake_plan(_room: object, _event: object, dispatch: object, **_kwargs: object) -> _DispatchPlan:
@@ -9119,15 +9154,15 @@ class TestThreadingBehavior:
                 AsyncMock(return_value=degraded_history),
             ),
             patch.object(
-                resolver,
-                "resolve_strict_thread_context",
+                bot._conversation_cache,
+                "get_strict_thread_history",
                 AsyncMock(side_effect=AssertionError("dispatch finalization must remain bounded")),
-            ) as mock_resolve_strict_context,
+            ) as mock_strict_history,
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)) as mock_plan,
         ):
             await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
 
-        mock_resolve_strict_context.assert_not_awaited()
+        mock_strict_history.assert_not_awaited()
         mock_plan.assert_awaited_once()
         assert observed_targets
         assert observed_targets[0].source_thread_id is None

@@ -56,12 +56,14 @@ def context_with_dispatch_thread_context(
     thread_context: DispatchThreadContext,
 ) -> MessageContext:
     """Return ``context`` with finalized stable thread state from dispatch evidence."""
-    stable_thread_id = thread_context.stable_target.resolved_thread_id
+    stable_thread_id = thread_context.stable_target.source_thread_id
     return replace(
         context,
         is_thread=stable_thread_id is not None,
         thread_id=stable_thread_id,
-        thread_history=thread_context.thread_history,
+        thread_history=thread_context.thread_history if stable_thread_id is not None else [],
         replay_guard_history=thread_context.replay_guard_history,
-        requires_model_history_refresh=thread_context.requires_model_history_refresh,
+        requires_model_history_refresh=(
+            thread_context.requires_model_history_refresh if stable_thread_id is not None else False
+        ),
     )

@@ -53,21 +53,26 @@ class ThreadRootProof:
 
     state: _ThreadRootProofState
     error: Exception | None = None
+    thread_history: Sequence[_SupportsEventId] | None = None
 
     @classmethod
-    def proven(cls) -> ThreadRootProof:
+    def proven(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> ThreadRootProof:
         """Return a successful root proof."""
-        return cls(_ThreadRootProofState.PROVEN)
+        return cls(_ThreadRootProofState.PROVEN, thread_history=thread_history)
 
     @classmethod
-    def not_a_thread_root(cls) -> ThreadRootProof:
+    def not_a_thread_root(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> ThreadRootProof:
         """Return a definite non-thread-root result."""
-        return cls(_ThreadRootProofState.NOT_A_THREAD_ROOT)
+        return cls(_ThreadRootProofState.NOT_A_THREAD_ROOT, thread_history=thread_history)
 
     @classmethod
-    def proof_unavailable(cls, error: Exception) -> ThreadRootProof:
+    def proof_unavailable(
+        cls,
+        error: Exception,
+        thread_history: Sequence[_SupportsEventId] | None = None,
+    ) -> ThreadRootProof:
         """Return one failed proof attempt without weakening caller policy."""
-        return cls(_ThreadRootProofState.PROOF_UNAVAILABLE, error=error)
+        return cls(_ThreadRootProofState.PROOF_UNAVAILABLE, error=error, thread_history=thread_history)
 
 
 class ThreadResolutionState(Enum):
@@ -86,24 +91,35 @@ class ThreadResolution:
     thread_id: str | None = None
     candidate_thread_root_id: str | None = None
     error: Exception | None = None
+    thread_history: Sequence[_SupportsEventId] | None = None
 
     @classmethod
-    def threaded(cls, thread_id: str) -> ThreadResolution:
+    def threaded(
+        cls,
+        thread_id: str,
+        thread_history: Sequence[_SupportsEventId] | None = None,
+    ) -> ThreadResolution:
         """Return one positive thread-membership result."""
-        return cls(ThreadResolutionState.THREADED, thread_id=thread_id)
+        return cls(ThreadResolutionState.THREADED, thread_id=thread_id, thread_history=thread_history)
 
     @classmethod
-    def room_level(cls) -> ThreadResolution:
+    def room_level(cls, thread_history: Sequence[_SupportsEventId] | None = None) -> ThreadResolution:
         """Return one definite room-level result."""
-        return cls(ThreadResolutionState.ROOM_LEVEL)
+        return cls(ThreadResolutionState.ROOM_LEVEL, thread_history=thread_history)
 
     @classmethod
-    def indeterminate(cls, error: Exception, candidate_thread_root_id: str | None = None) -> ThreadResolution:
+    def indeterminate(
+        cls,
+        error: Exception,
+        candidate_thread_root_id: str | None = None,
+        thread_history: Sequence[_SupportsEventId] | None = None,
+    ) -> ThreadResolution:
         """Return one unresolved result caused by proof failure."""
         return cls(
             ThreadResolutionState.INDETERMINATE,
             candidate_thread_root_id=candidate_thread_root_id,
             error=error,
+            thread_history=thread_history,
         )
 
     @property
@@ -148,11 +164,15 @@ def _resolution_from_root_proof(
 ) -> ThreadResolution:
     """Convert one root proof result into canonical thread membership."""
     if proof.state is _ThreadRootProofState.PROVEN:
-        return ThreadResolution.threaded(thread_root_id)
+        return ThreadResolution.threaded(thread_root_id, thread_history=proof.thread_history)
     if proof.state is _ThreadRootProofState.NOT_A_THREAD_ROOT:
-        return ThreadResolution.room_level()
+        return ThreadResolution.room_level(thread_history=proof.thread_history)
     assert proof.error is not None
-    return ThreadResolution.indeterminate(proof.error, candidate_thread_root_id=thread_root_id)
+    return ThreadResolution.indeterminate(
+        proof.error,
+        candidate_thread_root_id=thread_root_id,
+        thread_history=proof.thread_history,
+    )
 
 
 def _strict_thread_id_from_resolution(
@@ -383,9 +403,13 @@ async def _thread_messages_root_proof(
         return ThreadRootProof.proof_unavailable(exc)
     if is_thread_history_source_degraded(thread_messages):
         msg = "Thread root proof unavailable from degraded thread history"
-        return ThreadRootProof.proof_unavailable(RuntimeError(msg))
+        return ThreadRootProof.proof_unavailable(RuntimeError(msg), thread_history=thread_messages)
     has_children = any(message.event_id != thread_root_id for message in thread_messages)
-    return ThreadRootProof.proven() if has_children else ThreadRootProof.not_a_thread_root()
+    return (
+        ThreadRootProof.proven(thread_history=thread_messages)
+        if has_children
+        else ThreadRootProof.not_a_thread_root(thread_history=thread_messages)
+    )
 
 
 async def _snapshot_thread_root_proof(

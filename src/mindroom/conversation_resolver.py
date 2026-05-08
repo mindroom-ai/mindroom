@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence  # noqa: TC003
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 from nio.responses import RoomGetEventError
@@ -148,6 +148,7 @@ class _ThreadIdLookup:
     thread_id: str | None
     candidate_thread_root_id: str | None = None
     candidate_event_info: EventInfo | None = None
+    thread_history: ThreadReadResult | None = None
 
 
 @dataclass(frozen=True)
@@ -455,15 +456,17 @@ class ConversationResolver:
             event_id=event_id,
             access=access,
         )
+        thread_history = cast("ThreadReadResult | None", resolution.thread_history)
         if resolution.thread_id is not None:
-            return _ThreadIdLookup(thread_id=resolution.thread_id)
+            return _ThreadIdLookup(thread_id=resolution.thread_id, thread_history=thread_history)
         if resolution.candidate_thread_root_id is not None:
             return _ThreadIdLookup(
                 thread_id=None,
                 candidate_thread_root_id=resolution.candidate_thread_root_id,
                 candidate_event_info=event_info,
+                thread_history=thread_history,
             )
-        return _ThreadIdLookup(thread_id=None)
+        return _ThreadIdLookup(thread_id=None, thread_history=thread_history)
 
     async def resolve_related_event_thread_id_best_effort(
         self,
@@ -538,12 +541,6 @@ class ConversationResolver:
                     thread_id,
                     caller_label=caller_label,
                 )
-            case ThreadReadMode.STRICT_FULL:
-                return await self.deps.conversation_cache.get_strict_thread_history(
-                    room_id,
-                    thread_id,
-                    caller_label=caller_label,
-                )
             case _:
                 msg = f"Unsupported thread read mode: {mode!r}"
                 raise ValueError(msg)
@@ -605,12 +602,14 @@ class ConversationResolver:
         if thread_id is None:
             if thread_lookup.candidate_thread_root_id is None:
                 return _ThreadContextLookup(False, None, [], False)
-            candidate_history = await self._read_thread_messages(
-                room_id,
-                thread_lookup.candidate_thread_root_id,
-                mode=mode,
-                caller_label=caller_label,
-            )
+            candidate_history = thread_lookup.thread_history
+            if candidate_history is None:
+                candidate_history = await self._read_thread_messages(
+                    room_id,
+                    thread_lookup.candidate_thread_root_id,
+                    mode=mode,
+                    caller_label=caller_label,
+                )
             if _thread_history_proves_root(thread_lookup.candidate_thread_root_id, candidate_history):
                 return _ThreadContextLookup(
                     is_thread=True,
@@ -624,7 +623,7 @@ class ConversationResolver:
             return _ThreadContextLookup(
                 is_thread=False,
                 thread_id=None,
-                thread_history=candidate_history,
+                thread_history=[],
                 requires_model_history_refresh=False,
                 candidate_thread_root_id=thread_lookup.candidate_thread_root_id,
                 replay_guard_history=candidate_history,
@@ -632,12 +631,14 @@ class ConversationResolver:
                 candidate_event_info=thread_lookup.candidate_event_info,
             )
 
-        thread_messages = await self._read_thread_messages(
-            room_id,
-            thread_id,
-            mode=mode,
-            caller_label=caller_label,
-        )
+        thread_messages = thread_lookup.thread_history
+        if thread_messages is None:
+            thread_messages = await self._read_thread_messages(
+                room_id,
+                thread_id,
+                mode=mode,
+                caller_label=caller_label,
+            )
         return _ThreadContextLookup(
             is_thread=True,
             thread_id=thread_id,
@@ -863,35 +864,6 @@ class ConversationResolver:
         if client is None:
             return None
         return matrix_cached_room(client, room_id)
-
-    async def resolve_strict_thread_context(
-        self,
-        room_id: str,
-        event_id: str,
-        event_info: EventInfo,
-        *,
-        caller_label: str,
-    ) -> tuple[str | None, Sequence[ResolvedVisibleMessage]]:
-        """Re-prove one event's thread membership with strict post-lock history reads."""
-        access = self.thread_membership_access(
-            mode=ThreadReadMode.STRICT_FULL,
-            caller_label=caller_label,
-        )
-        thread_id = await resolve_event_thread_id(
-            room_id,
-            event_info,
-            event_id=event_id,
-            access=access,
-        )
-        if thread_id is None:
-            return None, []
-        thread_history = await self._read_thread_messages(
-            room_id,
-            thread_id,
-            mode=ThreadReadMode.STRICT_FULL,
-            caller_label=caller_label,
-        )
-        return thread_id, thread_history
 
     @asynccontextmanager
     async def turn_thread_cache_scope(self) -> AsyncIterator[None]:

@@ -6624,8 +6624,12 @@ class TestAgentBot:
         assert "Available attachment IDs" in generate_kwargs["model_prompt"]
         assert attachment_id in generate_kwargs["model_prompt"]
         assert generate_kwargs["reply_to_event_id"] == "$img_event"
-        assert generate_kwargs["thread_id"] == "$img_event"
+        assert generate_kwargs["thread_id"] is None
         assert generate_kwargs["thread_history"] == []
+        assert generate_kwargs["target"].source_thread_id is None
+        assert generate_kwargs["target"].resolved_thread_id == "$img_event"
+        assert generate_kwargs["response_envelope"].target.source_thread_id is None
+        assert generate_kwargs["response_envelope"].target.resolved_thread_id == "$img_event"
         assert generate_kwargs["user_id"] == "@user:localhost"
         media = generate_kwargs["media"]
         assert list(media.images) == [image]
@@ -7093,8 +7097,12 @@ class TestAgentBot:
         attachment_id = _attachment_id_for_event("$file_event")
         assert generate_kwargs["room_id"] == "!test:localhost"
         assert generate_kwargs["reply_to_event_id"] == "$file_event"
-        assert generate_kwargs["thread_id"] == "$file_event"
+        assert generate_kwargs["thread_id"] is None
         assert generate_kwargs["thread_history"] == []
+        assert generate_kwargs["target"].source_thread_id is None
+        assert generate_kwargs["target"].resolved_thread_id == "$file_event"
+        assert generate_kwargs["response_envelope"].target.source_thread_id is None
+        assert generate_kwargs["response_envelope"].target.resolved_thread_id == "$file_event"
         assert generate_kwargs["user_id"] == "@user:localhost"
         assert generate_kwargs["attachment_ids"] == [attachment_id]
         assert "Available attachment IDs" not in generate_kwargs["prompt"]
@@ -7255,7 +7263,7 @@ class TestAgentBot:
             room,
             event,
             [],
-            "$img_route",
+            None,
             message="[Attached image]",
             requester_user_id="@user:localhost",
             extra_content={"com.mindroom.original_sender": "@user:localhost"},

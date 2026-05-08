@@ -834,11 +834,6 @@ async def test_refresh_model_history_after_lock_does_not_reprove_room_target(
     with (
         patch.object(
             resolver,
-            "resolve_strict_thread_context",
-            new=AsyncMock(return_value=(None, [])),
-        ) as mock_resolve_strict_context,
-        patch.object(
-            resolver,
             "fetch_thread_history",
             new=AsyncMock(side_effect=AssertionError("room targets have no model thread history to refresh")),
         ),
@@ -857,7 +852,6 @@ async def test_refresh_model_history_after_lock_does_not_reprove_room_target(
             ),
         )
 
-    mock_resolve_strict_context.assert_not_awaited()
     assert request.thread_id is None
     assert request.thread_history == []
     assert request.target is not None
@@ -871,7 +865,6 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
     """Agent delivery must enter the runner with the finalized stable room target."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
     stable_target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget | None] = []
@@ -901,11 +894,6 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
         )
 
     with (
-        patch.object(
-            resolver,
-            "resolve_strict_thread_context",
-            new=AsyncMock(return_value=(None, [])),
-        ) as mock_resolve_strict_context,
         patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=_NoopResponseLifecycle())),
         patch.object(
             coordinator,
@@ -933,7 +921,6 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
         )
 
     assert result == "$response"
-    mock_resolve_strict_context.assert_not_awaited()
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id if target is not None else None for target in observed_delivery_targets] == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
@@ -950,7 +937,6 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     bot.client.room_typing = AsyncMock()
     bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
     stable_target = room_level_target(MessageTarget.resolve("!room:localhost", "$plain_root", "$event"))
     lifecycle = _NoopResponseLifecycle()
     observed_run_targets: list[MessageTarget] = []
@@ -978,11 +964,6 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
         )
 
     with (
-        patch.object(
-            resolver,
-            "resolve_strict_thread_context",
-            new=AsyncMock(return_value=(None, [])),
-        ) as mock_resolve_strict_context,
         patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=lifecycle)),
         patch.object(
             coordinator,
@@ -1009,7 +990,6 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
         )
 
     assert result == "$response"
-    mock_resolve_strict_context.assert_not_awaited()
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
     assert lifecycle.session_thread_ids == [None]
