@@ -25,8 +25,8 @@ logger = get_logger(__name__)
 class _AgentSuggestion(BaseModel):
     """Structured output for agent routing decisions."""
 
-    agent_name: str = Field(description="The name of the agent that should respond")
-    reasoning: str = Field(description="Brief explanation of why this agent was chosen")
+    agent_name: str = Field(description="The name of the agent or team that should respond")
+    reasoning: str = Field(description="Brief explanation of why this agent or team was chosen")
 
 
 async def suggest_agent(
@@ -36,20 +36,20 @@ async def suggest_agent(
     runtime_paths: RuntimePaths,
     thread_context: Sequence[ResolvedVisibleMessage] | None = None,
 ) -> str | None:
-    """Use AI to suggest which agent should respond to a message.
+    """Use AI to suggest which configured agent or team should respond to a message.
 
     This is the core routing logic, independent of any transport layer.
 
     Args:
         message: The user message to route.
-        available_agent_names: Plain agent names (e.g. ["code", "research"]).
+        available_agent_names: Plain agent or team names (e.g. ["code", "research", "ops"]).
         config: Application configuration.
         runtime_paths: Explicit runtime context for model and Matrix identity resolution.
         thread_context: Optional recent messages for context.
             Each message should expose visible sender/body fields.
 
     Returns:
-        The suggested agent name, or None if routing fails.
+        The suggested agent or team name, or None if routing fails.
 
     """
     try:
@@ -88,7 +88,7 @@ async def suggest_agent(
 
         agent = Agent(
             name="Router",
-            role="Route messages to appropriate agents",
+            role="Route messages to appropriate agents or teams",
             model=model,
             output_schema=_AgentSuggestion,
             telemetry=False,
@@ -106,7 +106,7 @@ async def suggest_agent(
             )
             return None
 
-        # The AI should only suggest agents from the available list
+        # The AI should only suggest entities from the available list
         if suggestion.agent_name not in available_agent_names:
             logger.warning(
                 "AI suggested invalid agent",
@@ -131,10 +131,10 @@ async def suggest_agent_for_message(
     runtime_paths: RuntimePaths,
     thread_context: Sequence[ResolvedVisibleMessage] | None = None,
 ) -> str | None:
-    """Use AI to suggest which agent should respond to a message.
+    """Use AI to suggest which configured agent or team should respond to a message.
 
     Matrix-aware wrapper around suggest_agent() that converts MatrixID
-    objects to plain agent names and resolves sender identities in
+    objects to plain agent or team names and resolves sender identities in
     thread context.
     """
     agent_names = [name for mid in available_agents if (name := mid.agent_name(config, runtime_paths)) is not None]

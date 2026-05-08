@@ -189,15 +189,15 @@ INLINE_MEDIA_FALLBACK_PROMPT = (
     "Use available attachment IDs and tools to inspect files instead."
 )
 
-ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE = """Decide which agent should respond to this message.
+ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE = """Decide which agent or team should respond to this message.
 
-Available agents and their capabilities:
+Available agents and teams:
 
 {agents_info}
 
 Message: "{message}"
 
-Choose the most appropriate agent based on their role, tools, and instructions."""
+Choose the most appropriate agent or team based on their role, tools, and instructions."""
 ROUTER_THREAD_CONTEXT_HEADER = "Previous messages:"
 
 TEAM_MODE_SELECTION_PROMPT_TEMPLATE = """Determine the best team collaboration mode for this task.

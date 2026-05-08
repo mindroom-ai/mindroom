@@ -1217,8 +1217,8 @@ class TurnController:
 
         if not suggested_agent:
             response_text = (
-                "⚠️ I couldn't determine which agent should help with this. "
-                "Please try mentioning an agent directly with @ or rephrase your request."
+                "⚠️ I couldn't determine which agent or team should help with this. "
+                "Please try mentioning an agent or team directly with @ or rephrase your request."
             )
             with bound_log_context(room_id=room.room_id, thread_id=thread_id):
                 self.deps.logger.warning("Router failed to determine agent")

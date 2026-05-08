@@ -14,7 +14,7 @@ from mindroom.tool_system.events import build_tool_trace_content, ensure_visible
 if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
 
-_AGENT_MENTION_PATTERN = re.compile(r"@(mindroom_)?(\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
+_ENTITY_MENTION_PATTERN = re.compile(r"@(mindroom_)?(\w+)(?::[^\s]+)?", flags=re.IGNORECASE)
 _FULL_MATRIX_ID_CANDIDATE_PATTERN = re.compile(r"(?<![-A-Za-z0-9._=/+])@\S+")
 
 
@@ -46,10 +46,10 @@ def parse_mentions_in_text(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, list[str], str]:
-    """Parse text for agent mentions and return processed text with user IDs.
+    """Parse text for agent/team mentions and return processed text with user IDs.
 
     Args:
-        text: Text that may contain @agent_name mentions
+        text: Text that may contain @entity_name mentions
         sender_domain: Domain part of the sender's user ID (e.g., "localhost" from "@user:localhost")
         config: Application configuration
         runtime_paths: Explicit runtime context for namespace-aware mention resolution
@@ -82,7 +82,7 @@ def _scan_mention_tokens(text: str) -> list[_MentionToken]:
     """Return ordered mention tokens from one message body."""
     tokens = _scan_explicit_matrix_id_tokens(text)
     tokens.extend(
-        _scan_agent_alias_tokens(
+        _scan_entity_alias_tokens(
             text,
             occupied_ranges=[(token.start, token.end) for token in tokens],
         ),
@@ -110,14 +110,14 @@ def _scan_explicit_matrix_id_tokens(text: str) -> list[_MentionToken]:
     return tokens
 
 
-def _scan_agent_alias_tokens(
+def _scan_entity_alias_tokens(
     text: str,
     *,
     occupied_ranges: list[tuple[int, int]],
 ) -> list[_MentionToken]:
     """Return non-overlapping alias-style mention tokens from text."""
     tokens: list[_MentionToken] = []
-    for match in _AGENT_MENTION_PATTERN.finditer(text):
+    for match in _ENTITY_MENTION_PATTERN.finditer(text):
         if _range_overlaps_existing(match.start(), match.end(), occupied_ranges):
             continue
         tokens.append(
@@ -173,7 +173,7 @@ def _resolve_mention_token(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _MentionResolution | None:
-    """Resolve one scanned mention token into an agent or literal-user target."""
+    """Resolve one scanned mention token into an entity or literal-user target."""
     if token.explicit_user_id is not None:
         return _resolve_explicit_matrix_id_token(
             token,
@@ -181,7 +181,7 @@ def _resolve_mention_token(
             config=config,
             runtime_paths=runtime_paths,
         )
-    return _resolve_agent_alias_token(
+    return _resolve_entity_alias_token(
         token.localpart,
         has_server_name=token.has_server_name,
         sender_domain=sender_domain,
@@ -204,10 +204,10 @@ def _resolve_explicit_matrix_id_token(
         raise ValueError(msg)
 
     if token.localpart.lower().startswith(MatrixID.AGENT_PREFIX) and (
-        agent_name := _find_matching_agent_name_for_localpart(token.localpart, config, runtime_paths)
+        entity_name := _find_matching_entity_name_for_localpart(token.localpart, config, runtime_paths)
     ):
-        return _agent_mention_resolution(
-            agent_name,
+        return _entity_mention_resolution(
+            entity_name,
             sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
@@ -215,7 +215,7 @@ def _resolve_explicit_matrix_id_token(
     return _literal_user_resolution(explicit_user_id)
 
 
-def _resolve_agent_alias_token(
+def _resolve_entity_alias_token(
     localpart: str,
     *,
     has_server_name: bool,
@@ -223,12 +223,12 @@ def _resolve_agent_alias_token(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _MentionResolution | None:
-    """Resolve one alias-style token to a local configured agent, if any."""
+    """Resolve one alias-style token to a local configured agent or team, if any."""
     if has_server_name and not localpart.lower().startswith(MatrixID.AGENT_PREFIX):
         return None
-    if agent_name := _find_matching_agent_name_for_localpart(localpart, config, runtime_paths):
-        return _agent_mention_resolution(
-            agent_name,
+    if entity_name := _find_matching_entity_name_for_localpart(localpart, config, runtime_paths):
+        return _entity_mention_resolution(
+            entity_name,
             sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
@@ -236,19 +236,26 @@ def _resolve_agent_alias_token(
     return None
 
 
-def _agent_mention_resolution(
-    agent_name: str,
+def _entity_mention_resolution(
+    entity_name: str,
     *,
     sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _MentionResolution:
-    """Return rendering data for one resolved local agent mention."""
-    agent_config = config.agents[agent_name]
-    resolved_user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths).full_id
+    """Return rendering data for one resolved local agent or team mention."""
+    if entity_name in config.agents:
+        display_name = config.agents[entity_name].display_name
+    elif entity_name in config.teams:
+        display_name = config.teams[entity_name].display_name
+    else:
+        msg = f"Unknown configured mention target: {entity_name}"
+        raise KeyError(msg)
+
+    resolved_user_id = MatrixID.from_agent(entity_name, sender_domain, runtime_paths).full_id
     return _MentionResolution(
         plain_text=resolved_user_id,
-        markdown_text=f"[@{agent_config.display_name}](https://matrix.to/#/{resolved_user_id})",
+        markdown_text=f"[@{display_name}](https://matrix.to/#/{resolved_user_id})",
         user_id=resolved_user_id,
     )
 
@@ -280,22 +287,22 @@ def _is_valid_explicit_matrix_user_id(candidate: str) -> bool:
     return True
 
 
-def _find_matching_agent_name_for_localpart(
+def _find_matching_entity_name_for_localpart(
     localpart: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str | None:
-    """Return the configured agent name matched by one localpart string, if any."""
+    """Return the configured agent or team name matched by one localpart string, if any."""
     for candidate_name in _localpart_candidate_names(localpart, runtime_paths):
         candidate_lower = candidate_name.lower()
-        for config_agent_name in config.agents:
-            if config_agent_name.lower() == candidate_lower:
-                return config_agent_name
+        for config_entity_name in (*config.agents, *config.teams):
+            if config_entity_name.lower() == candidate_lower:
+                return config_entity_name
     return None
 
 
 def _localpart_candidate_names(localpart: str, runtime_paths: RuntimePaths) -> list[str]:
-    """Build ordered candidate agent names from one mention localpart."""
+    """Build ordered candidate entity names from one mention localpart."""
     name = localpart
     prefix: str | None = None
 
@@ -379,7 +386,7 @@ def format_message_with_mentions(
     Args:
         config: Application configuration
         runtime_paths: Explicit runtime context for mention parsing and HTML rendering
-        text: Message text that may contain @agent_name mentions
+        text: Message text that may contain @entity_name mentions
         sender_domain: Domain part of the sender's user ID
         thread_event_id: Optional thread root event ID
         reply_to_event_id: Optional event ID to reply to (for genuine replies)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom import constants as constants_mod
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
@@ -29,9 +29,11 @@ def _default_runtime_paths() -> constants_mod.RuntimePaths:
 def _bind_config(
     runtime_paths: constants_mod.RuntimePaths,
     agents: dict[str, AgentConfig],
+    teams: dict[str, TeamConfig] | None = None,
 ) -> Config:
     config = Config(
         agents=agents,
+        teams=teams or {},
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
@@ -210,6 +212,34 @@ class TestMentionParsing:
         }
         assert content["m.relates_to"]["event_id"] == "$thread123"
         assert content["m.relates_to"]["rel_type"] == "m.thread"
+
+    def test_format_message_with_team_mention(self) -> None:
+        """Team aliases should format as Matrix mentions for router handoffs."""
+        runtime_paths = _default_runtime_paths()
+        config = _bind_config(
+            runtime_paths,
+            {"calculator": AgentConfig(display_name="Calculator")},
+            {
+                "ops": TeamConfig(
+                    display_name="Ops Team",
+                    role="Operations escalation team",
+                    agents=["calculator"],
+                ),
+            },
+        )
+
+        content = _format_message_with_mentions(
+            config,
+            "@ops could you help with this?",
+            sender_domain="localhost",
+        )
+
+        assert content["body"] == "@mindroom_ops:localhost could you help with this?"
+        assert content["m.mentions"]["user_ids"] == ["@mindroom_ops:localhost"]
+        assert (
+            content["formatted_body"] == '<p><a href="https://matrix.to/#/@mindroom_ops:localhost">@Ops Team</a> '
+            "could you help with this?</p>\n"
+        )
 
     def test_tool_marker_followed_by_thematic_break_renders_as_paragraph_hr_heading_via_format_message_with_mentions(
         self,
