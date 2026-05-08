@@ -1,6 +1,7 @@
 """Instance provisioning and management routes."""
 
 import base64
+import binascii
 import hashlib
 import hmac
 import secrets
@@ -93,6 +94,42 @@ def _instance_credentials_encryption_key(instance_id: str) -> str:
         hashlib.sha256,
     )
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:
+    """Return the existing credential encryption key from an instance Secret when present."""
+    secret_name = f"mindroom-api-keys-{instance_id}"
+    code, out, err = await run_kubectl(
+        ["get", "secret", secret_name, "-o=jsonpath={.data.credentials_encryption_key}"],
+        namespace=namespace,
+    )
+    if code == 0:
+        encoded_key = out.strip()
+        if not encoded_key:
+            return None
+        try:
+            key = base64.b64decode(encoded_key, validate=True).decode("utf-8").strip()
+        except (binascii.Error, UnicodeDecodeError) as exc:
+            msg = f"Instance {instance_id} has an invalid credential encryption key Secret value"
+            raise HTTPException(status_code=500, detail=msg) from exc
+        return key or None
+    if "not found" in err.lower() or "notfound" in err.lower():
+        return None
+    msg = f"Failed to inspect existing credential encryption state for instance {instance_id}: {err or out}"
+    raise HTTPException(status_code=500, detail=msg)
+
+
+async def _provision_credentials_encryption_key(
+    *,
+    customer_id: str,
+    existing_instance_id: Any,
+    data: dict,
+    namespace: str,
+) -> str:
+    """Return the instance chart credential encryption key value for this provision run."""
+    if not existing_instance_id or data.get("enable_credentials_encryption") is True:
+        return _instance_credentials_encryption_key(customer_id)
+    return await _existing_instance_credentials_encryption_key(customer_id, namespace) or ""
 
 
 @router.post("/system/provision", response_model=ProvisionResponse)
@@ -197,11 +234,12 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 
     # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
     sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)
-    # Existing instances may have plaintext credential files; only switch them to encrypted storage explicitly.
-    credentials_encryption_key = (
-        _instance_credentials_encryption_key(customer_id)
-        if not existing_instance_id or data.get("enable_credentials_encryption") is True
-        else ""
+    # Existing instances may have plaintext credential files; preserve their current encryption state.
+    credentials_encryption_key = await _provision_credentials_encryption_key(
+        customer_id=customer_id,
+        existing_instance_id=existing_instance_id,
+        data=data,
+        namespace=namespace,
     )
 
     try:

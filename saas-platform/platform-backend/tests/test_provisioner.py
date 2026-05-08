@@ -1,5 +1,6 @@
 """Comprehensive HTTP API tests for provisioner endpoints."""
 
+import base64
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -14,6 +15,23 @@ def _helm_set_args(helm_args: list[str]) -> dict[str, str]:
             key, value = helm_args[i + 1].split("=", 1)
             set_args[key] = value
     return set_args
+
+
+async def _kubectl_without_credentials_encryption_secret(args: list[str], namespace: str | None = None):
+    """Return a not-found response for the existing instance API key Secret."""
+    _ = namespace
+    if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
+        return (1, "", "NotFound")
+    return (0, "Success", "")
+
+
+async def _kubectl_with_credentials_encryption_secret(args: list[str], namespace: str | None = None):
+    """Return a non-empty existing credential encryption key for the instance API key Secret."""
+    _ = namespace
+    if args[:3] == ["get", "secret", "mindroom-api-keys-456"]:
+        existing_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
+        return (0, base64.b64encode(existing_key.encode("utf-8")).decode("ascii"), "")
+    return (0, "Success", "")
 
 
 class TestProvisionerEndpoints:
@@ -150,6 +168,7 @@ class TestProvisionerEndpoints:
         """Test re-provisioning an existing instance."""
         # Setup
         mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
+        mock_kubectl.side_effect = _kubectl_without_credentials_encryption_secret
 
         provision_data = {
             "subscription_id": "sub_test_123",
@@ -170,6 +189,36 @@ class TestProvisionerEndpoints:
         set_args = _helm_set_args(helm_args)
         assert set_args["credentials_encryption_key"] == ""
 
+    def test_provision_re_provision_existing_preserves_credentials_encryption(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Re-provisioning an encrypted instance should keep the stable credential key."""
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
+        mock_kubectl.side_effect = _kubectl_with_credentials_encryption_secret
+
+        response = client.post(
+            "/system/provision",
+            json={
+                "subscription_id": "sub_test_123",
+                "account_id": "acc_test_123",
+                "tier": "professional",
+                "instance_id": "456",
+            },
+            headers=valid_auth_header,
+        )
+
+        assert response.status_code == 200
+        helm_args = mock_helm.call_args.args[0]
+        set_args = _helm_set_args(helm_args)
+        assert set_args["credentials_encryption_key"] == base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
+
     def test_provision_re_provision_existing_can_opt_into_credentials_encryption(
         self,
         client: TestClient,
@@ -182,6 +231,7 @@ class TestProvisionerEndpoints:
     ):
         """Existing instances should only enable credential encryption explicitly."""
         mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
+        mock_kubectl.side_effect = _kubectl_without_credentials_encryption_secret
 
         response = client.post(
             "/system/provision",
