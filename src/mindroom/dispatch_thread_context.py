@@ -58,8 +58,7 @@ def context_with_dispatch_thread_context(
     thread_context: DispatchThreadContext,
 ) -> MessageContext:
     """Return ``context`` with finalized stable thread state from dispatch evidence."""
-    source_thread_id = thread_context.stable_target.source_thread_id
-    stable_thread_id = None if thread_context.stable_target.represents_new_thread_root else source_thread_id
+    stable_thread_id = thread_context.stable_target.source_thread_id
     return replace(
         context,
         is_thread=stable_thread_id is not None,

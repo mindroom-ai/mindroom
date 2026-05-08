@@ -25,7 +25,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID, extract_agent_name
 from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
 from mindroom.matrix.message_content import resolve_event_source_content
-from mindroom.matrix.thread_diagnostics import is_thread_history_degraded, is_thread_history_source_degraded
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_membership,
@@ -95,16 +95,6 @@ def _source_with_payload_metadata(
     if payload_metadata.skip_mentions is not None:
         content = _with_skip_mentions_metadata(content, payload_metadata.skip_mentions)
     return {**event_source, "content": content}
-
-
-def _thread_history_proves_root(
-    thread_root_id: str,
-    thread_history: Sequence[ResolvedVisibleMessage],
-) -> bool:
-    """Return whether bounded thread history proves this event is a thread root."""
-    if is_thread_history_source_degraded(thread_history):
-        return False
-    return any(message.event_id != thread_root_id for message in thread_history)
 
 
 @dataclass
@@ -609,12 +599,6 @@ class ConversationResolver:
             if candidate_history is None:
                 return _ThreadContextLookup.unproven_candidate_without_history(
                     thread_lookup.candidate_thread_root_id,
-                )
-            if _thread_history_proves_root(thread_lookup.candidate_thread_root_id, candidate_history):
-                # Candidate history with children proves this candidate is an existing thread.
-                return _ThreadContextLookup.proven_thread(
-                    thread_lookup.candidate_thread_root_id,
-                    candidate_history,
                 )
             return _ThreadContextLookup.unproven_candidate_demoted(
                 thread_lookup.candidate_thread_root_id,
