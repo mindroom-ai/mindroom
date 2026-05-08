@@ -32,23 +32,14 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
-_DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS = 1.0
-_DISPATCH_THREAD_READ_FETCH_TIMEOUT_SECONDS = 1.0
+_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 _CACHE_COORDINATOR_TIMEOUT = "cache_coordinator_timeout"
 _DISPATCH_READ_TIMEOUT = "dispatch_read_timeout"
 
 
-def _dispatch_thread_read_timeout_seconds() -> float:
-    """Return the single wall-clock budget for one dispatch-safe read."""
-    return min(
-        _DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS,
-        _DISPATCH_THREAD_READ_FETCH_TIMEOUT_SECONDS,
-    )
-
-
 def _remaining_dispatch_thread_read_seconds(queue_wait_started: float) -> float:
     """Return the remaining dispatch-safe read budget."""
-    deadline = queue_wait_started + _dispatch_thread_read_timeout_seconds()
+    deadline = queue_wait_started + _DISPATCH_THREAD_READ_TIMEOUT_SECONDS
     return max(0.0, deadline - time.perf_counter())
 
 
@@ -121,30 +112,19 @@ class ThreadReadPolicy:
 
     def _fetcher_for_mode(self, mode: ThreadReadMode) -> _ThreadHistoryFetcher:
         """Return the client fetcher matching one named read policy."""
-        match mode:
-            case ThreadReadMode.ADVISORY_FULL:
-                return self.fetch_thread_history_from_client
-            case ThreadReadMode.DISPATCH_SNAPSHOT:
-                return self.fetch_dispatch_thread_snapshot_from_client
-            case ThreadReadMode.DISPATCH_FULL | ThreadReadMode.STRICT_FULL:
-                return self.fetch_dispatch_thread_history_from_client
-            case _:
-                msg = f"Unsupported thread read mode: {mode!r}"
-                raise ValueError(msg)
+        return {
+            ThreadReadMode.ADVISORY_FULL: self.fetch_thread_history_from_client,
+            ThreadReadMode.DISPATCH_SNAPSHOT: self.fetch_dispatch_thread_snapshot_from_client,
+            ThreadReadMode.DISPATCH_FULL: self.fetch_dispatch_thread_history_from_client,
+            ThreadReadMode.STRICT_FULL: self.fetch_dispatch_thread_history_from_client,
+        }[mode]
 
     def _operation_name_for_mode(self, mode: ThreadReadMode) -> str:
         """Return the cache coordinator operation name for one queued read mode."""
-        match mode:
-            case ThreadReadMode.ADVISORY_FULL:
-                return "matrix_cache_refresh_thread_history"
-            case ThreadReadMode.STRICT_FULL:
-                return "matrix_cache_refresh_strict_thread_history"
-            case ThreadReadMode.DISPATCH_SNAPSHOT | ThreadReadMode.DISPATCH_FULL:
-                msg = f"Dispatch read mode {mode.name} does not use the refresh queue"
-                raise ValueError(msg)
-            case _:
-                msg = f"Unsupported thread read mode: {mode!r}"
-                raise ValueError(msg)
+        return {
+            ThreadReadMode.ADVISORY_FULL: "matrix_cache_refresh_thread_history",
+            ThreadReadMode.STRICT_FULL: "matrix_cache_refresh_strict_thread_history",
+        }[mode]
 
     async def _wait_for_pending_thread_cache_updates(self, room_id: str, thread_id: str) -> None:
         coordinator = self._coordinator()
@@ -329,14 +309,6 @@ class ThreadReadPolicy:
         try:
             if mode.dispatch_safe:
                 remaining_timeout = _remaining_dispatch_thread_read_seconds(queue_wait_started)
-                if remaining_timeout <= 0:
-                    return self._degraded_dispatch_timeout_result(
-                        room_id=room_id,
-                        thread_id=thread_id,
-                        caller_label=caller_label,
-                        queue_wait_started=queue_wait_started,
-                        error_code=_CACHE_COORDINATOR_TIMEOUT,
-                    )
                 await asyncio.wait_for(
                     self._wait_for_pending_thread_cache_updates(room_id, thread_id),
                     timeout=remaining_timeout,

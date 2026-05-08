@@ -1537,6 +1537,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.dispatch_thread_context",
     "mindroom.hooks",
+    "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",

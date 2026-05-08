@@ -372,7 +372,7 @@ async def test_dispatch_thread_read_degrades_when_cache_coordinator_never_drains
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
 
     try:
-        with patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS", 0.01):
+        with patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_TIMEOUT_SECONDS", 0.01):
             result = await asyncio.wait_for(
                 conversation_cache.get_dispatch_thread_snapshot(
                     "!room:localhost",
@@ -420,7 +420,7 @@ async def test_dispatch_thread_read_timeout_does_not_cancel_pending_cache_write(
     try:
         await asyncio.wait_for(write_started.wait(), timeout=0.2)
         with (
-            patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS", 0.01),
+            patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_TIMEOUT_SECONDS", 0.01),
             patch(
                 "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
                 AsyncMock(side_effect=AssertionError("coordinator timeout should not fetch")),
@@ -505,7 +505,7 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
 
     try:
         with (
-            patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_FETCH_TIMEOUT_SECONDS", 0.01),
+            patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_TIMEOUT_SECONDS", 0.01),
             patch(
                 "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
                 AsyncMock(side_effect=never_returns),
@@ -556,8 +556,7 @@ async def test_dispatch_thread_read_uses_single_deadline_after_coordinator_wait(
     try:
         with (
             patch("mindroom.matrix.cache.thread_reads.time.perf_counter", side_effect=perf_counter),
-            patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_COORDINATOR_TIMEOUT_SECONDS", 1.0),
-            patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_FETCH_TIMEOUT_SECONDS", 1.0),
+            patch("mindroom.matrix.cache.thread_reads._DISPATCH_THREAD_READ_TIMEOUT_SECONDS", 1.0),
             patch(
                 "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
                 AsyncMock(side_effect=AssertionError("spent dispatch deadline must not start fetch")),

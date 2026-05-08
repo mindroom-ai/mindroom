@@ -37,8 +37,8 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
-from mindroom.turn_controller import TurnController
-from mindroom.turn_policy import TurnPolicy
+from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
+from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
 
 if TYPE_CHECKING:
@@ -72,6 +72,7 @@ __all__ = [
     "orchestrator_runtime_paths",
     "patch_response_runner_module",
     "postgres_event_cache_url",
+    "prepared_dispatch_result",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
@@ -98,6 +99,18 @@ TestFunction = Callable[..., object]
 def dispatch_context_result(context: MessageContext) -> _DispatchContextResult:
     """Wrap a stable message context in the dispatch extraction result shape."""
     return _DispatchContextResult(context=context, thread_context=None)
+
+
+def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation:
+    """Wrap a prepared dispatch in the private turn-controller result shape."""
+    return _DispatchPreparation(
+        dispatch=dispatch,
+        replay_guard=_ReplayGuardContext(
+            history=dispatch.context.replay_guard_history,
+            degraded=dispatch.context.replay_guard_history_degraded,
+            thread_id=dispatch.target.resolved_thread_id,
+        ),
+    )
 
 
 def requires_linux(

@@ -181,6 +181,23 @@ type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
 
 
 @dataclass(frozen=True)
+class _ReplayGuardContext:
+    """Dispatch-local evidence for deciding whether an older turn should still run."""
+
+    history: Sequence[ResolvedVisibleMessage]
+    degraded: bool
+    thread_id: str | None
+
+
+@dataclass(frozen=True)
+class _DispatchPreparation:
+    """Prepared dispatch plus evidence that must stay out of policy-visible context."""
+
+    dispatch: PreparedDispatch
+    replay_guard: _ReplayGuardContext
+
+
+@dataclass(frozen=True)
 class TurnControllerDeps:
     """Collaborators needed for turn control, policy, and execution."""
 
@@ -832,7 +849,7 @@ class TurnController:
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
         use_command_context: bool = False,
-    ) -> PreparedDispatch | None:
+    ) -> _DispatchPreparation | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
         if use_command_context:
@@ -941,12 +958,29 @@ class TurnController:
             )
             return None
 
-        return PreparedDispatch(
-            requester_user_id=requester_user_id,
-            context=context,
-            target=target,
-            correlation_id=correlation_id,
-            envelope=envelope,
+        replay_guard = (
+            _ReplayGuardContext(
+                history=thread_context.replay_guard_history,
+                degraded=thread_context.replay_guard_degraded,
+                thread_id=target.resolved_thread_id or thread_context.candidate_thread_root_id,
+            )
+            if thread_context is not None
+            else _ReplayGuardContext(
+                history=context.replay_guard_history,
+                degraded=context.replay_guard_history_degraded,
+                thread_id=target.resolved_thread_id,
+            )
+        )
+
+        return _DispatchPreparation(
+            dispatch=PreparedDispatch(
+                requester_user_id=requester_user_id,
+                context=context,
+                target=target,
+                correlation_id=correlation_id,
+                envelope=envelope,
+            ),
+            replay_guard=replay_guard,
         )
 
     async def _execute_command(
@@ -1713,7 +1747,7 @@ class TurnController:
             command = None
             if not media_events and (ingress_metadata is None or ingress_metadata.source_kind != "voice"):
                 command = command_parser.parse(event.body)
-            dispatch = await self._prepare_dispatch(
+            prepared_dispatch = await self._prepare_dispatch(
                 room,
                 event,
                 requester_user_id,
@@ -1725,8 +1759,10 @@ class TurnController:
             )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_ready")
-            if dispatch is None:
+            if prepared_dispatch is None:
                 return
+            dispatch = prepared_dispatch.dispatch
+            replay_guard = prepared_dispatch.replay_guard
             handled_turn = handled_turn.with_request_context(
                 requester_id=dispatch.requester_user_id,
                 correlation_id=dispatch.correlation_id,
@@ -1764,18 +1800,13 @@ class TurnController:
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
-            replay_guard_history = dispatch.context.replay_guard_history
-            replay_guard_degraded = dispatch.context.replay_guard_history_degraded
             replay_guard_skips_turn = False
-            if replay_guard_degraded:
-                degraded_replay_thread_id = (
-                    dispatch.context.replay_guard_thread_id or dispatch.target.resolved_thread_id
-                )
+            if replay_guard.degraded:
                 replay_guard_skips_turn = await self._has_newer_unresponded_cached_thread_event(
                     room_id=room.room_id,
                     event=event,
                     requester_user_id=requester_user_id,
-                    thread_id=degraded_replay_thread_id,
+                    thread_id=replay_guard.thread_id,
                     source_kind=dispatch.envelope.source_kind,
                 )
                 if not replay_guard_skips_turn:
@@ -1783,14 +1814,14 @@ class TurnController:
                         "Thread replay guard degraded; proceeding without negative newer-message proof",
                         event_id=event.event_id,
                         room_id=room.room_id,
-                        thread_id=degraded_replay_thread_id,
+                        thread_id=replay_guard.thread_id,
                         thread_read_degraded=True,
                     )
             else:
                 replay_guard_skips_turn = self._has_newer_unresponded_in_thread(
                     event,
                     requester_user_id,
-                    replay_guard_history,
+                    replay_guard.history,
                     source_kind=dispatch.envelope.source_kind,
                 )
             if replay_guard_skips_turn:

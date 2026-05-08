@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any
 
 import nio
 from nio.responses import RoomGetEventError
@@ -19,6 +19,7 @@ from mindroom.dispatch_thread_context import (
     planning_history_unavailable_for,
     room_level_target,
 )
+from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
@@ -37,7 +38,7 @@ from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     import structlog
 
@@ -48,14 +49,6 @@ if TYPE_CHECKING:
 
 
 _SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
-
-
-@runtime_checkable
-class _ThreadReadResultMetadata(Protocol):
-    """Boundary-safe metadata shape preserved only by conversation-cache thread reads."""
-
-    is_full_history: bool
-    diagnostics: Mapping[str, object]
 
 
 def _should_skip_mentions(event_source: dict[str, Any]) -> bool:
@@ -109,9 +102,9 @@ def _thread_read_result_from_membership_history(
     thread_history: Sequence[object] | None,
 ) -> ThreadReadResult | None:
     """Return cache thread-read history only when membership proof preserved its metadata."""
-    if not isinstance(thread_history, _ThreadReadResultMetadata):
+    if not isinstance(thread_history, ThreadHistoryResult):
         return None
-    return cast("ThreadReadResult", thread_history)
+    return thread_history
 
 
 def _thread_history_proves_root(
@@ -135,8 +128,6 @@ class MessageContext:
     mentioned_agents: list[MatrixID]
     has_non_agent_mentions: bool
     replay_guard_history: Sequence[ResolvedVisibleMessage] = field(default_factory=tuple)
-    replay_guard_degraded: bool = False
-    replay_guard_thread_id: str | None = None
     requires_model_history_refresh: bool = False
 
     @property
@@ -155,7 +146,7 @@ class MessageContext:
     @property
     def replay_guard_history_degraded(self) -> bool:
         """Return whether replay history cannot prove that no newer thread message exists."""
-        return self.replay_guard_degraded or is_thread_history_degraded(self.replay_guard_history)
+        return is_thread_history_degraded(self.replay_guard_history)
 
 
 @dataclass(frozen=True)
@@ -581,28 +572,12 @@ class ConversationResolver:
         caller_label: str,
     ) -> ThreadReadResult:
         """Resolve one thread read through the shared cache entrypoint."""
-        match mode:
-            case ThreadReadMode.ADVISORY_FULL:
-                return await self.deps.conversation_cache.get_thread_history(
-                    room_id,
-                    thread_id,
-                    caller_label=caller_label,
-                )
-            case ThreadReadMode.DISPATCH_SNAPSHOT:
-                return await self.deps.conversation_cache.get_dispatch_thread_snapshot(
-                    room_id,
-                    thread_id,
-                    caller_label=caller_label,
-                )
-            case ThreadReadMode.DISPATCH_FULL:
-                return await self.deps.conversation_cache.get_dispatch_thread_history(
-                    room_id,
-                    thread_id,
-                    caller_label=caller_label,
-                )
-            case _:
-                msg = f"Unsupported thread read mode: {mode!r}"
-                raise ValueError(msg)
+        read_thread = {
+            ThreadReadMode.ADVISORY_FULL: self.deps.conversation_cache.get_thread_history,
+            ThreadReadMode.DISPATCH_SNAPSHOT: self.deps.conversation_cache.get_dispatch_thread_snapshot,
+            ThreadReadMode.DISPATCH_FULL: self.deps.conversation_cache.get_dispatch_thread_history,
+        }[mode]
+        return await read_thread(room_id, thread_id, caller_label=caller_label)
 
     async def _event_info_for_event_id(
         self,
@@ -739,8 +714,6 @@ class ConversationResolver:
             mentioned_agents=mentioned_agents,
             has_non_agent_mentions=has_non_agent_mentions,
             replay_guard_history=(),
-            replay_guard_degraded=False,
-            replay_guard_thread_id=resolved_thread_id,
             requires_model_history_refresh=resolved_thread_id is not None,
         )
         return _DispatchContextResult(context=context, thread_context=None)
@@ -832,8 +805,6 @@ class ConversationResolver:
             thread_history: list[ResolvedVisibleMessage] = []
             requires_model_history_refresh = False
             replay_guard_history: Sequence[ResolvedVisibleMessage] = ()
-            replay_guard_degraded = False
-            replay_guard_thread_id = None
         else:
             thread_lookup = await self._resolve_thread_context(
                 room.room_id,
@@ -847,8 +818,6 @@ class ConversationResolver:
             thread_history = thread_lookup.thread_history
             requires_model_history_refresh = thread_lookup.requires_model_history_refresh
             replay_guard_history = thread_lookup.replay_guard_history
-            replay_guard_degraded = thread_lookup.replay_guard_degraded
-            replay_guard_thread_id = thread_lookup.thread_id
             if include_dispatch_context:
                 if thread_lookup.candidate_thread_root_id is not None and thread_lookup.thread_id is None:
                     stable_target = room_level_target(
@@ -874,7 +843,6 @@ class ConversationResolver:
                     replay_guard_history=thread_lookup.replay_guard_history,
                     replay_guard_degraded=thread_lookup.replay_guard_degraded,
                 )
-                replay_guard_thread_id = stable_target.resolved_thread_id or thread_lookup.candidate_thread_root_id
 
         context = MessageContext(
             am_i_mentioned=am_i_mentioned,
@@ -884,8 +852,6 @@ class ConversationResolver:
             mentioned_agents=mentioned_agents,
             has_non_agent_mentions=has_non_agent_mentions,
             replay_guard_history=replay_guard_history,
-            replay_guard_degraded=replay_guard_degraded,
-            replay_guard_thread_id=replay_guard_thread_id,
             requires_model_history_refresh=requires_model_history_refresh,
         )
         if dispatch_context is not None:

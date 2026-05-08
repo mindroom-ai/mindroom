@@ -76,9 +76,6 @@ def context_with_dispatch_thread_context(
         thread_id=stable_thread_id,
         thread_history=thread_context.thread_history if stable_thread_id is not None else [],
         replay_guard_history=thread_context.replay_guard_history,
-        replay_guard_degraded=thread_context.replay_guard_degraded,
-        replay_guard_thread_id=thread_context.stable_target.resolved_thread_id
-        or thread_context.candidate_thread_root_id,
         requires_model_history_refresh=(
             thread_context.requires_model_history_refresh if stable_thread_id is not None else False
         ),

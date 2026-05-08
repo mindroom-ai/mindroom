@@ -108,7 +108,7 @@ def test_message_target_identifies_new_root_target_shape() -> None:
 
 
 def test_context_with_dispatch_thread_context_propagates_replay_guard_history() -> None:
-    """Dispatch-local replay evidence must survive context stabilization."""
+    """Replay history may stabilize on MessageContext, but dispatch-only flags stay local."""
     thread_message = _message("$thread-message:localhost")
     replay_message = _message("$replay-message:localhost")
     context = MessageContext(
@@ -134,8 +134,7 @@ def test_context_with_dispatch_thread_context_propagates_replay_guard_history() 
     assert stabilized.thread_id == "$thread:localhost"
     assert stabilized.thread_history == (thread_message,)
     assert stabilized.replay_guard_history == (replay_message,)
-    assert stabilized.replay_guard_history_degraded is True
-    assert stabilized.replay_guard_thread_id == "$thread:localhost"
+    assert stabilized.replay_guard_history_degraded is False
     assert stabilized.requires_model_history_refresh is True
 
 
@@ -168,5 +167,4 @@ def test_context_with_dispatch_thread_context_hides_new_root_target_from_policy(
     assert stabilized.is_thread is False
     assert stabilized.thread_id is None
     assert stabilized.thread_history == []
-    assert stabilized.replay_guard_thread_id == "$event:localhost"
     assert stabilized.requires_model_history_refresh is False

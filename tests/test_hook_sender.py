@@ -666,6 +666,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
     )
 
     assert dispatch is not None
+    dispatch = dispatch.dispatch
     assert hook_calls == []
     assert dispatch.requester_user_id == "@mindroom_router:localhost"
     assert dispatch.envelope.source_kind == "hook"
@@ -725,6 +726,7 @@ async def test_prepare_dispatch_builds_target_via_conversation_resolver(tmp_path
         )
 
     assert dispatch is not None
+    dispatch = dispatch.dispatch
     mock_build_message_target.assert_called_once_with(
         room_id=room.room_id,
         thread_id="$thread-root",
@@ -780,6 +782,7 @@ async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tm
     )
 
     assert dispatch is not None
+    dispatch = dispatch.dispatch
     assert dispatch.context is trusted_context
     bot._conversation_resolver.extract_trusted_router_relay_context.assert_awaited_once_with(
         room,
@@ -850,6 +853,7 @@ async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_r
     )
 
     assert dispatch is not None
+    dispatch = dispatch.dispatch
     assert dispatch.context is standard_context
     bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(
         room,
@@ -1338,6 +1342,7 @@ async def test_prepare_dispatch_allows_hook_dispatch_without_mention(tmp_path: P
 
     # Should NOT be filtered despite sender being an agent and no mention
     assert dispatch is not None
+    dispatch = dispatch.dispatch
     assert dispatch.envelope.source_kind == "hook_dispatch"
 
 
@@ -1390,6 +1395,7 @@ async def test_prepare_dispatch_reruns_message_received_for_hook_dispatch_from_n
     )
 
     assert dispatch is not None
+    dispatch = dispatch.dispatch
     assert hook_calls == ["called"]
     assert dispatch.envelope.source_kind == "hook_dispatch"
 
@@ -1450,6 +1456,7 @@ async def test_hook_dispatch_from_message_received_reenters_once_and_skips_origi
     )
 
     assert dispatch is not None
+    dispatch = dispatch.dispatch
     assert hook_calls == ["other"]
     assert dispatch.envelope.source_kind == "hook_dispatch"
     assert dispatch.envelope.hook_source == "origin-plugin:message:received"
@@ -1512,6 +1519,7 @@ async def test_hook_dispatch_from_message_received_stops_reentry_after_first_syn
     )
 
     assert dispatch is not None
+    dispatch = dispatch.dispatch
     assert hook_calls == []
     assert dispatch.envelope.source_kind == "hook_dispatch"
     assert dispatch.envelope.message_received_depth == 2
@@ -2010,6 +2018,7 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
     )
 
     assert dispatch is not None
+    dispatch = dispatch.dispatch
     assert dispatch.requester_user_id == "@mindroom_router:localhost"
     assert dispatch.envelope.source_kind == "hook_dispatch"
 

@@ -638,12 +638,6 @@ class ResponseRunner:
         response_envelope = request.response_envelope
         if response_envelope is not None and response_envelope.target != resolved_target:
             response_envelope = replace(response_envelope, target=resolved_target)
-        if (
-            request.target == resolved_target
-            and request.thread_id == resolved_target.resolved_thread_id
-            and response_envelope is request.response_envelope
-        ):
-            return request
         return replace(
             request,
             thread_id=resolved_target.resolved_thread_id,
