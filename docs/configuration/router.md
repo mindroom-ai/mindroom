@@ -40,8 +40,8 @@ When a message arrives in a room without a specific agent mention:
 4. The router posts a message mentioning the selected entity (e.g., "@agent could you help with this?")
 5. The mentioned agent or team sees the mention and responds in the thread
 
-For configured rooms, routing candidates come only from `agents.<name>.rooms` and `teams.<name>.rooms`.
-For ad-hoc rooms accepted through invites, routing candidates come from the sender-visible MindRoom agents and teams currently joined to that room.
+For configured rooms, routing candidates come only from `agents.<name>.rooms` and `teams.<name>.rooms`, then are filtered by the sender's per-entity reply permissions.
+For ad-hoc rooms accepted through invites, routing candidates come from the sender-visible MindRoom agents and teams currently joined to that room, then are filtered by the same sender permissions.
 
 The router uses a structured output schema to ensure consistent routing decisions, including the agent name and reasoning for the selection.
 
