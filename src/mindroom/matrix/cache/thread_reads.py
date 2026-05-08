@@ -59,6 +59,7 @@ class ThreadReadMode(Enum):
     @property
     def dispatch_safe(self) -> bool:
         """Return whether this mode is on the live dispatch fail-open path."""
+        # STRICT_FULL intentionally stays false: it may block for authoritative post-lock model context.
         return self in {
             ThreadReadMode.DISPATCH_SNAPSHOT,
             ThreadReadMode.DISPATCH_FULL,

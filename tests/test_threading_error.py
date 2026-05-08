@@ -67,6 +67,7 @@ from mindroom.matrix.thread_diagnostics import (
 )
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
+    ThreadResolution,
     ThreadRootProof,
     _resolve_related_event_thread_id,
     _snapshot_thread_membership_access,
@@ -8994,6 +8995,66 @@ class TestThreadingBehavior:
         )
 
     @pytest.mark.asyncio
+    async def test_dispatch_candidate_without_proof_history_demotes_without_retry(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Proof-unavailable candidates without a snapshot must demote without repeating the failed read."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply to maybe-root",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$maybe_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        root_response = nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {"body": "maybe root", "msgtype": "m.text"},
+                "event_id": "$maybe_root:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567880,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot._conversation_cache, "get_event", AsyncMock(return_value=root_response)),
+            patch.object(
+                bot._conversation_cache,
+                "get_dispatch_thread_snapshot",
+                AsyncMock(side_effect=TimeoutError("dispatch read timed out")),
+            ) as mock_read,
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            context = context_result.context
+
+        assert context_result.thread_context is not None
+        assert context_result.thread_context.candidate_thread_root_id == "$maybe_root:localhost"
+        assert context_result.thread_context.replay_guard_degraded is True
+        assert context_result.thread_context.replay_guard_history == []
+        assert context.is_thread is False
+        assert context.thread_id is None
+        assert context.thread_history == []
+        assert context.requires_model_history_refresh is False
+        mock_read.assert_awaited_once_with(
+            room.room_id,
+            "$maybe_root:localhost",
+            caller_label="dispatch_context",
+        )
+
+    @pytest.mark.asyncio
     async def test_dispatch_new_root_target_does_not_become_existing_thread_context(
         self,
         bot: AgentBot,
@@ -9344,8 +9405,13 @@ class TestThreadingBehavior:
                 MagicMock(return_value=access),
             ) as mock_access,
             patch(
-                "mindroom.conversation_resolver.resolve_event_thread_id_best_effort",
-                new=AsyncMock(return_value="$thread_root:localhost"),
+                "mindroom.conversation_resolver.resolve_event_thread_membership",
+                new=AsyncMock(
+                    return_value=ThreadResolution.indeterminate(
+                        RuntimeError("proof unavailable"),
+                        candidate_thread_root_id="$thread_root:localhost",
+                    ),
+                ),
             ) as mock_resolve,
         ):
             thread_id = await resolver.coalescing_thread_id(room, event)

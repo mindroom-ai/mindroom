@@ -29,7 +29,6 @@ from mindroom.matrix.thread_diagnostics import is_thread_history_degraded, is_th
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_id,
-    resolve_event_thread_id_best_effort,
     resolve_event_thread_membership,
     resolve_related_event_thread_id_best_effort,
     thread_messages_thread_membership_access,
@@ -409,7 +408,7 @@ class ConversationResolver:
         ):
             return None
         try:
-            return await resolve_event_thread_id_best_effort(
+            resolution = await resolve_event_thread_membership(
                 room.room_id,
                 EventInfo.from_event(event.source),
                 event_id=event.event_id,
@@ -426,6 +425,8 @@ class ConversationResolver:
                 error=str(exc),
             )
             return None
+        else:
+            return resolution.thread_id or resolution.candidate_thread_root_id
 
     async def _explicit_thread_id_for_event(
         self,
@@ -456,6 +457,8 @@ class ConversationResolver:
             event_id=event_id,
             access=access,
         )
+        # Thread membership is generic over event-id-bearing snapshots, while this resolver's
+        # cache accessors return ThreadReadResult entries used for model/replay diagnostics.
         thread_history = cast("ThreadReadResult | None", resolution.thread_history)
         if resolution.thread_id is not None:
             return _ThreadIdLookup(thread_id=resolution.thread_id, thread_history=thread_history)
@@ -604,11 +607,15 @@ class ConversationResolver:
                 return _ThreadContextLookup(False, None, [], False)
             candidate_history = thread_lookup.thread_history
             if candidate_history is None:
-                candidate_history = await self._read_thread_messages(
-                    room_id,
-                    thread_lookup.candidate_thread_root_id,
-                    mode=mode,
-                    caller_label=caller_label,
+                return _ThreadContextLookup(
+                    is_thread=False,
+                    thread_id=None,
+                    thread_history=[],
+                    requires_model_history_refresh=False,
+                    candidate_thread_root_id=thread_lookup.candidate_thread_root_id,
+                    replay_guard_history=[],
+                    replay_guard_degraded=True,
+                    candidate_event_info=thread_lookup.candidate_event_info,
                 )
             if _thread_history_proves_root(thread_lookup.candidate_thread_root_id, candidate_history):
                 return _ThreadContextLookup(

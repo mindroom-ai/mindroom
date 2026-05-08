@@ -126,7 +126,7 @@ from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_state_root_path
-from mindroom.turn_controller import TurnController, _PrecheckedEvent
+from mindroom.turn_controller import TurnController, _PrecheckedEvent, _PreparedDispatchResult
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
@@ -158,6 +158,10 @@ if TYPE_CHECKING:
 
     from mindroom.post_response_effects import ResponseOutcome
     from mindroom.turn_store import TurnStore
+
+
+def _prepared_dispatch_result(dispatch: PreparedDispatch) -> _PreparedDispatchResult:
+    return _PreparedDispatchResult(dispatch=dispatch, thread_context=None)
 
 
 def _stream_outcome(
@@ -9295,7 +9299,11 @@ class TestAgentBot:
             return prompt, thread_history, model_prompt, thread_history
 
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(dispatch)),
+            ),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=fake_plan)),
             patch.object(
                 ResponseRunner,
@@ -9394,7 +9402,11 @@ class TestAgentBot:
             return _DispatchPlan(kind="ignore")
 
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(dispatch)),
+            ),
             patch.object(
                 bot._turn_policy,
                 "plan_turn",
@@ -9467,7 +9479,11 @@ class TestAgentBot:
                 "resolve_text_event",
                 new=AsyncMock(return_value=event),
             ),
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(dispatch)),
+            ),
             patch.object(bot._turn_controller, "_execute_command", new=AsyncMock()) as mock_execute_command,
         ):
             await bot._turn_controller._dispatch_text_message(
@@ -9530,7 +9546,11 @@ class TestAgentBot:
 
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(dispatch)),
+            ),
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
@@ -9632,7 +9652,11 @@ class TestAgentBot:
 
         with (
             patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(dispatch)),
+            ),
             patch.object(
                 bot._turn_policy,
                 "plan_turn",

@@ -396,6 +396,7 @@ class TurnController:
             thread_id=thread_id,
             source_kind=source_kind,
             get_recent_room_events=event_cache.get_recent_room_events if event_cache is not None else None,
+            get_thread_id_for_event=self.deps.conversation_cache.get_thread_id_for_event,
             requester_user_id_for_event=lambda sender, source: self._requester_user_id(
                 sender=sender,
                 source=source,
@@ -824,8 +825,7 @@ class TurnController:
         handled_turn: HandledTurnState,
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
-        include_thread_context: bool = False,
-    ) -> PreparedDispatch | _PreparedDispatchResult | None:
+    ) -> _PreparedDispatchResult | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
         thread_context: DispatchThreadContext | None = None
@@ -929,9 +929,7 @@ class TurnController:
             correlation_id=correlation_id,
             envelope=envelope,
         )
-        if include_thread_context:
-            return _PreparedDispatchResult(dispatch=dispatch, thread_context=thread_context)
-        return dispatch
+        return _PreparedDispatchResult(dispatch=dispatch, thread_context=thread_context)
 
     async def _execute_command(
         self,
@@ -1710,18 +1708,13 @@ class TurnController:
                 handled_turn=handled_turn,
                 ingress_metadata=ingress_metadata,
                 payload_metadata=payload_metadata,
-                include_thread_context=True,
             )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_ready")
             if prepared_dispatch_result is None:
                 return
-            thread_context: DispatchThreadContext | None = None
-            if isinstance(prepared_dispatch_result, _PreparedDispatchResult):
-                dispatch = prepared_dispatch_result.dispatch
-                thread_context = prepared_dispatch_result.thread_context
-            else:
-                dispatch = prepared_dispatch_result
+            dispatch = prepared_dispatch_result.dispatch
+            thread_context = prepared_dispatch_result.thread_context
             handled_turn = handled_turn.with_request_context(
                 requester_id=dispatch.requester_user_id,
                 correlation_id=dispatch.correlation_id,

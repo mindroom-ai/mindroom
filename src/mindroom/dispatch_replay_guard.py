@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 type _RequesterResolver = Callable[[str, object], str]
 type _HandledLookup = Callable[[str], bool]
 type _RecentRoomEventsLookup = Callable[..., Awaitable[Sequence[dict[str, Any]]]]
+type _ThreadIdForEventLookup = Callable[[str, str], Awaitable[str | None]]
 
 
 def _is_automation_event(event: TextDispatchEvent, source_kind: str | None) -> bool:
@@ -73,9 +74,25 @@ def has_newer_unresponded_in_thread(
     return False
 
 
-def _cached_event_is_in_thread(event_source: dict[str, Any], thread_id: str) -> bool:
+async def _cached_event_is_in_thread(
+    event_source: dict[str, Any],
+    *,
+    room_id: str,
+    thread_id: str,
+    get_thread_id_for_event: _ThreadIdForEventLookup | None,
+) -> bool:
     event_info = EventInfo.from_event(event_source)
-    return thread_id in {event_info.thread_id, event_info.thread_id_from_edit}
+    if thread_id in {event_info.thread_id, event_info.thread_id_from_edit}:
+        return True
+    if get_thread_id_for_event is None:
+        return False
+    event_id = event_source.get("event_id")
+    if not isinstance(event_id, str):
+        return False
+    try:
+        return await get_thread_id_for_event(room_id, event_id) == thread_id
+    except Exception:
+        return False
 
 
 def _unresponded_requester_event_id(
@@ -101,17 +118,24 @@ def _unresponded_requester_event_id(
     return event_id
 
 
-def _newer_unresponded_cached_thread_event_id(
+async def _newer_unresponded_cached_thread_event_id(
     recent_events: Sequence[dict[str, Any]],
     *,
+    room_id: str,
     skipped_event_id: str,
     requester_user_id: str,
     thread_id: str,
+    get_thread_id_for_event: _ThreadIdForEventLookup | None,
     requester_user_id_for_event: _RequesterResolver,
     is_handled: _HandledLookup,
 ) -> str | None:
     for event_source in recent_events:
-        if not _cached_event_is_in_thread(event_source, thread_id):
+        if not await _cached_event_is_in_thread(
+            event_source,
+            room_id=room_id,
+            thread_id=thread_id,
+            get_thread_id_for_event=get_thread_id_for_event,
+        ):
             continue
         event_id = _unresponded_requester_event_id(
             event_source,
@@ -133,6 +157,7 @@ async def has_newer_unresponded_cached_thread_event(
     thread_id: str | None,
     source_kind: str | None,
     get_recent_room_events: _RecentRoomEventsLookup | None,
+    get_thread_id_for_event: _ThreadIdForEventLookup | None,
     requester_user_id_for_event: _RequesterResolver,
     is_handled: _HandledLookup,
     logger: structlog.stdlib.BoundLogger,
@@ -159,11 +184,13 @@ async def has_newer_unresponded_cached_thread_event(
         )
         return False
 
-    event_id = _newer_unresponded_cached_thread_event_id(
+    event_id = await _newer_unresponded_cached_thread_event_id(
         recent_events,
+        room_id=room_id,
         skipped_event_id=event.event_id,
         requester_user_id=requester_user_id,
         thread_id=thread_id,
+        get_thread_id_for_event=get_thread_id_for_event,
         requester_user_id_for_event=requester_user_id_for_event,
         is_handled=is_handled,
     )

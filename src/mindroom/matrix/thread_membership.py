@@ -300,25 +300,6 @@ async def _resolve_related_event_thread_id(
     return _strict_thread_id_from_resolution(resolution)
 
 
-async def resolve_event_thread_id_best_effort(
-    room_id: str,
-    event_info: EventInfo,
-    *,
-    access: ThreadMembershipAccess,
-    event_id: str | None = None,
-    allow_current_root: bool = False,
-) -> str | None:
-    """Return best-effort canonical thread membership for one event."""
-    resolution = await resolve_event_thread_membership(
-        room_id,
-        event_info,
-        access=access,
-        event_id=event_id,
-        allow_current_root=allow_current_root,
-    )
-    return resolution.thread_id
-
-
 async def resolve_related_event_thread_id_best_effort(
     room_id: str,
     related_event_id: str,

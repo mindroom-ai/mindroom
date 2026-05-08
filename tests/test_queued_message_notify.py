@@ -53,7 +53,7 @@ from mindroom.post_response_effects import (
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.teams import TeamMode, _create_team_instance
-from mindroom.turn_controller import _PrecheckedEvent
+from mindroom.turn_controller import _PrecheckedEvent, _PreparedDispatchResult
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.conftest import (
     TEST_PASSWORD,
@@ -72,6 +72,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.delivery_gateway import FinalDeliveryRequest
+
+
+def _prepared_dispatch_result(dispatch: PreparedDispatch) -> _PreparedDispatchResult:
+    return _PreparedDispatchResult(dispatch=dispatch, thread_context=None)
 
 
 class _ReservationLike(Protocol):
@@ -1317,7 +1321,11 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(dispatch)),
+            ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
             await bot._turn_controller._dispatch_text_message(
@@ -1373,7 +1381,11 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
         assert reservation is not None
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(dispatch)),
+            ),
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
@@ -1422,7 +1434,11 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
     case = _reserved_follow_up_case(bot, room, event_id="$ignored")
     try:
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(case.dispatch)),
+            ),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -1449,7 +1465,11 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
     case = _reserved_follow_up_case(bot, room, event_id="$routed")
     try:
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(case.dispatch)),
+            ),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -1478,7 +1498,11 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
     case = _reserved_follow_up_case(bot, room, event_id="$raises")
     try:
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(case.dispatch)),
+            ),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -1516,7 +1540,11 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
     case = _reserved_follow_up_case(bot, room, event_id="$cancelled")
     try:
         with (
-            patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=case.dispatch)),
+            patch.object(
+                bot._turn_controller,
+                "_prepare_dispatch",
+                new=AsyncMock(return_value=_prepared_dispatch_result(case.dispatch)),
+            ),
             patch("mindroom.turn_controller.is_dm_room", new=AsyncMock(return_value=False)),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -1806,7 +1834,11 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
 
     with (
         patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
-        patch.object(bot._turn_controller, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=AsyncMock(return_value=_prepared_dispatch_result(dispatch)),
+        ),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=True),
         patch.object(
             bot._turn_policy,
