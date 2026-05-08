@@ -120,6 +120,7 @@ class TestDelegateTools:
         assert "Cannot delegate to 'unknown_agent'" in result
         assert "code" in result
         assert "research" in result
+        assert "Run agents_list to inspect can_delegate flags." in result
 
     @pytest.mark.asyncio
     async def test_delegate_empty_task(self, tools: DelegateTools) -> None:

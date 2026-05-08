@@ -12,8 +12,10 @@ import nio
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom.constants import ORIGINAL_SENDER_KEY, resolve_runtime_paths
+from mindroom.agent_descriptions import describe_agent
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.custom_tools import subagents as subagents_module
+from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.subagents import SubAgentsTools
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.thread_utils import create_session_id, parse_session_id
@@ -33,17 +35,42 @@ EXPECTED_SUBAGENT_TOOL_NAMES = {
 }
 TEST_SUMMARY = "test summary"
 TEST_TAG = "test-tag"
+EXPECTED_SUBAGENTS_DESCRIPTION = (
+    "Discover, spawn, and communicate with sub-agent sessions. "
+    "`agents_list` reports per-tool capability flags (delegate-aware)."
+)
 
 
-def _make_config(*, thread_mode: str = "thread") -> MagicMock:
+def _make_agent_config(
+    *,
+    role: str = "Handle test tasks",
+    tools: list[str] | None = None,
+    delegate_to: list[str] | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        role=role,
+        tools=list(tools or ["shell"]),
+        delegate_to=list(delegate_to or []),
+        instructions=[],
+    )
+
+
+def _make_config(
+    *,
+    thread_mode: str = "thread",
+    agents: dict[str, SimpleNamespace] | None = None,
+) -> MagicMock:
     config = MagicMock()
-    config.agents = {
-        "openclaw": SimpleNamespace(tools=["shell"]),
-        "code": SimpleNamespace(tools=["shell"]),
-        "research": SimpleNamespace(tools=["shell"]),
+    config.agents = agents or {
+        "openclaw": _make_agent_config(role="Coordinate work", delegate_to=["code"]),
+        "code": _make_agent_config(role="Write code"),
+        "research": _make_agent_config(role="Research topics"),
     }
+    config.teams = {}
     config.get_domain = MagicMock(return_value="localhost")
     config.get_entity_thread_mode = MagicMock(return_value=thread_mode)
+    config.get_agent_tools = MagicMock(side_effect=lambda agent_name: config.agents[agent_name].tools)
+    config.render_prompt = MagicMock(return_value="Delegate only to listed agents.")
     return config
 
 
@@ -51,6 +78,7 @@ def _make_context(
     tmp_path: Path,
     *,
     config: MagicMock | None = None,
+    agent_name: str = "openclaw",
     room_id: str = "!room:localhost",
     thread_id: str | None = "$ctx-thread:localhost",
     requester_id: str = "@alice:localhost",
@@ -69,7 +97,7 @@ def _make_context(
     conversation_cache.notify_outbound_message = Mock()
     conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
-        agent_name="openclaw",
+        agent_name=agent_name,
         room_id=room_id,
         thread_id=thread_id,
         resolved_thread_id=thread_id,
@@ -100,6 +128,7 @@ def _stub_spawn_followups(
 def test_subagents_tool_registered_and_instantiates() -> None:
     """Subagents should be present in metadata and constructible from the registry."""
     assert "subagents" in TOOL_METADATA
+    assert TOOL_METADATA["subagents"].description == EXPECTED_SUBAGENTS_DESCRIPTION
     assert isinstance(get_tool_by_name("subagents", resolve_runtime_paths(), worker_target=None), SubAgentsTools)
 
 
@@ -122,8 +151,8 @@ async def test_agents_list_requires_runtime_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agents_list_returns_sorted_agents(tmp_path: Path) -> None:
-    """agents_list should return deterministic sorted agent ids from config."""
+async def test_agents_list_payload_structure(tmp_path: Path) -> None:
+    """agents_list should return sorted capability rows without the caller."""
     config = _make_config()
     ctx = _make_context(tmp_path, config=config)
 
@@ -132,8 +161,115 @@ async def test_agents_list_returns_sorted_agents(tmp_path: Path) -> None:
 
     assert payload["status"] == "ok"
     assert payload["tool"] == "agents_list"
-    assert payload["agents"] == ["code", "openclaw", "research"]
     assert payload["current_agent"] == "openclaw"
+    assert [row["name"] for row in payload["agents"]] == ["code", "research"]
+    assert all(set(row) == {"name", "can_delegate", "can_spawn", "description"} for row in payload["agents"])
+    assert all(isinstance(row, dict) for row in payload["agents"])
+    assert all(row["can_spawn"] is True for row in payload["agents"])
+
+
+@pytest.mark.asyncio
+async def test_agents_list_can_delegate_reflects_delegate_to(tmp_path: Path) -> None:
+    """agents_list should flag only names present in the caller delegate_to allowlist."""
+    config = _make_config(
+        agents={
+            "A": _make_agent_config(delegate_to=["B"]),
+            "B": _make_agent_config(),
+            "C": _make_agent_config(),
+            "D": _make_agent_config(),
+        },
+    )
+    ctx = _make_context(tmp_path, config=config, agent_name="A")
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    rows_by_name = {row["name"]: row for row in payload["agents"]}
+    assert rows_by_name["B"]["can_delegate"] is True
+    assert rows_by_name["C"]["can_delegate"] is False
+    assert rows_by_name["D"]["can_delegate"] is False
+
+
+@pytest.mark.asyncio
+async def test_agents_list_empty_delegate_to(tmp_path: Path) -> None:
+    """agents_list should report no delegation capability when the caller allowlist is empty."""
+    config = _make_config(
+        agents={
+            "A": _make_agent_config(delegate_to=[]),
+            "B": _make_agent_config(),
+            "C": _make_agent_config(),
+        },
+    )
+    ctx = _make_context(tmp_path, config=config, agent_name="A")
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    assert all(row["can_delegate"] is False for row in payload["agents"])
+
+
+@pytest.mark.asyncio
+async def test_agents_list_caller_not_in_config_returns_no_delegate(tmp_path: Path) -> None:
+    """agents_list should tolerate caller identities that are not configured agents."""
+    config = _make_config(
+        agents={
+            "A": _make_agent_config(delegate_to=["B"]),
+            "B": _make_agent_config(),
+            "C": _make_agent_config(),
+        },
+    )
+    ctx = _make_context(tmp_path, config=config, agent_name=ROUTER_AGENT_NAME)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    assert [row["name"] for row in payload["agents"]] == ["A", "B", "C"]
+    assert all(row["can_delegate"] is False for row in payload["agents"])
+
+
+@pytest.mark.asyncio
+async def test_agents_list_description_matches_describe_agent(tmp_path: Path) -> None:
+    """agents_list descriptions should use the shared agent description renderer exactly."""
+    config = _make_config()
+    ctx = _make_context(tmp_path, config=config)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    for row in payload["agents"]:
+        assert row["description"] == describe_agent(row["name"], config)
+
+
+@pytest.mark.asyncio
+async def test_agents_list_can_delegate_aligns_with_delegate_tools(tmp_path: Path) -> None:
+    """agents_list can_delegate flags should match DelegateTools rejection behavior."""
+    config = _make_config(
+        agents={
+            "A": _make_agent_config(delegate_to=["B"]),
+            "B": _make_agent_config(),
+            "C": _make_agent_config(),
+        },
+    )
+    ctx = _make_context(tmp_path, config=config, agent_name="A")
+    delegate_tools = DelegateTools(
+        agent_name="A",
+        delegate_to=["B"],
+        runtime_paths=ctx.runtime_paths,
+        config=config,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    for row in payload["agents"]:
+        if row["can_delegate"]:
+            assert row["name"] in delegate_tools._delegate_to
+        else:
+            assert row["name"] not in delegate_tools._delegate_to
+
+    result = await delegate_tools.delegate_task("C", "task")
+    assert "Cannot delegate to 'C'" in result
+    assert "Run agents_list to inspect can_delegate flags." in result
 
 
 @pytest.mark.asyncio

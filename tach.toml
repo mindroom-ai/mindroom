@@ -92,6 +92,7 @@ depends_on = ["mindroom.constants"]
 visibility = [
     "mindroom.agents",
     "mindroom.custom_tools.delegate",
+    "mindroom.custom_tools.subagents",
     "mindroom.routing",
 ]
 
@@ -604,6 +605,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.subagents"
 depends_on = [
+    "mindroom.agent_descriptions",
     "mindroom.constants",
     "mindroom.matrix.client_delivery",
     "mindroom.thread_summary",

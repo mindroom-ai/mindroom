@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="subagents",
     display_name="Sub-Agents",
-    description="Spawn and communicate with sub-agent sessions",
+    description="Discover, spawn, and communicate with sub-agent sessions. `agents_list` reports per-tool capability flags (delegate-aware).",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

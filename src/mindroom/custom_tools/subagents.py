@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools import Toolkit
 
+from mindroom.agent_descriptions import describe_agent
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -500,16 +501,33 @@ class SubAgentsTools(Toolkit):
         )
 
     async def agents_list(self) -> str:
-        """List agent ids available for `sessions_spawn` targeting."""
+        """List agents this caller can interact with via delegate or sessions_spawn, with per-tool capability flags.
+
+        Each row reports `can_delegate` (per `agent_config.delegate_to` of the calling agent) and `can_spawn` (currently always true; reserved for a future per-caller spawn allowlist).
+        """
         context = _get_context()
         if context is None:
             return _context_error("agents_list")
 
+        caller_name = context.agent_name
+        # Missing callers mirror describe_agent's router special case in agent_descriptions.py:19.
+        caller_cfg = context.config.agents.get(caller_name)
+        delegate_to = set(caller_cfg.delegate_to) if caller_cfg else set()
+        rows = [
+            {
+                "name": name,
+                "can_delegate": name in delegate_to,
+                "can_spawn": True,
+                "description": describe_agent(name, context.config),
+            }
+            for name in sorted(context.config.agents)
+            if name != caller_name
+        ]
         return _payload(
             "agents_list",
             "ok",
-            agents=sorted(context.config.agents.keys()),
-            current_agent=context.agent_name,
+            agents=rows,
+            current_agent=caller_name,
         )
 
     async def sessions_send(

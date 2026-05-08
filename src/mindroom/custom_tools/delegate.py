@@ -85,7 +85,10 @@ class DelegateTools(Toolkit):
         """
         if agent_name not in self._delegate_to:
             available = ", ".join(self._delegate_to)
-            return f"Cannot delegate to '{agent_name}'. Available agents: {available}"
+            return (
+                f"Cannot delegate to '{agent_name}'. Available agents: {available}. "
+                f"Run agents_list to inspect can_delegate flags."
+            )
 
         if not task or not task.strip():
             return "Cannot delegate an empty task. Please provide a task description."
