@@ -426,6 +426,7 @@ dev = [
   "ruff>=0.12.5",
   "tach>=0.34.1",
   "ty>=0.0.17",
+  "vulture>=2.16",
   "zensical",
 ]
 
@@ -555,3 +556,8 @@ exclude_lines = [
   "if TYPE_CHECKING",
   "if __name__ == .__main__.:",
 ]
+
+[tool.vulture]
+paths = [ "src/mindroom", "vulture_whitelist.py" ]
+min_confidence = 60
+sort_by_size = true

@@ -459,22 +459,6 @@ def _event_info_from_lookup_response(
     raise RuntimeError(msg)
 
 
-async def _fetch_event_info_from_conversation_cache(
-    conversation_cache: ConversationCacheProtocol,
-    room_id: str,
-    event_id: str,
-    *,
-    strict: bool,
-) -> EventInfo | None:
-    """Fetch one event through the conversation cache and parse its relation metadata."""
-    response = await conversation_cache.get_event(room_id, event_id)
-    return _event_info_from_lookup_response(
-        response,
-        event_id=event_id,
-        strict=strict,
-    )
-
-
 async def fetch_event_info_for_client(
     client: nio.AsyncClient,
     room_id: str,

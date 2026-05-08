@@ -47,7 +47,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.execution_preparation import (
-    _build_matrix_prompt_with_thread_history,
+    _build_matrix_prompt_with_history,
     _prepare_bound_team_execution_context,
     _PreparedExecutionContext,
     prepare_agent_execution_context,
@@ -4713,9 +4713,11 @@ def test_build_matrix_prompt_with_thread_history_preserves_verbatim_bodies_in_cd
         ),
     ]
 
-    prompt = _build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_history(
         "Follow-up",
-        thread_history,
+        [(thread_history[0].sender, thread_history[0].body)],
+        header="Previous conversation in this thread:",
+        prompt_intro="Current message:\n",
         current_sender="@bob:localhost",
     )
 
@@ -4757,9 +4759,11 @@ def test_build_matrix_prompt_with_thread_history_ignores_tool_trace_events() -> 
         ),
     ]
 
-    prompt = _build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_history(
         "Follow-up",
-        thread_history,
+        [(thread_history[0].sender, thread_history[0].body)],
+        header="Previous conversation in this thread:",
+        prompt_intro="Current message:\n",
         current_sender="@bob:localhost",
     )
 
@@ -4776,9 +4780,11 @@ def test_build_matrix_prompt_with_thread_history_ignores_tool_trace_events() -> 
 def test_build_matrix_prompt_with_thread_history_without_tool_trace_is_unchanged() -> None:
     thread_history = [make_visible_message(sender="@alice:localhost", body="Earlier context")]
 
-    prompt = _build_matrix_prompt_with_thread_history(
+    prompt = _build_matrix_prompt_with_history(
         "Follow-up",
-        thread_history,
+        [(thread_history[0].sender, thread_history[0].body)],
+        header="Previous conversation in this thread:",
+        prompt_intro="Current message:\n",
         current_sender="@bob:localhost",
     )
 

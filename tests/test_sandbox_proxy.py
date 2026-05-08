@@ -2584,10 +2584,9 @@ def test_static_sandbox_runner_backend_marks_idle_workers() -> None:
 
 def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Concurrent proxy requests should not build multiple static worker managers for one config."""
-    workers_runtime_module._reset_primary_worker_manager()
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
-        proxy_url="http://sandbox-runner:8765",
+        proxy_url="http://sandbox-runner-thread-safe:8765",
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode=None,
     )
@@ -2638,7 +2637,6 @@ def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytes
     assert init_count == 1
     assert len(managers) == 2
     assert managers[0] is managers[1]
-    workers_runtime_module._reset_primary_worker_manager()
 
 
 def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot_changes(
@@ -2646,7 +2644,6 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
     tmp_path: Path,
 ) -> None:
     """Kubernetes worker-manager caching should track the authoritative validation snapshot."""
-    workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
@@ -2745,7 +2742,6 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
 
     assert first_manager is not second_manager
     assert captured_snapshots == [first_snapshot, second_snapshot]
-    workers_runtime_module._reset_primary_worker_manager()
 
 
 def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
@@ -2753,7 +2749,6 @@ def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
     tmp_path: Path,
 ) -> None:
     """Kubernetes worker-manager lookup should require the caller to provide a committed snapshot."""
-    workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
@@ -2775,15 +2770,12 @@ def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
             storage_root=tmp_path,
         )
 
-    workers_runtime_module._reset_primary_worker_manager()
-
 
 def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk_when_snapshot_is_explicit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Explicit validation snapshots should keep manager lookups independent from later disk drift."""
-    workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
@@ -2866,7 +2858,6 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
     )
 
     assert first_manager is second_manager
-    workers_runtime_module._reset_primary_worker_manager()
 
 
 def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(

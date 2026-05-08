@@ -29,6 +29,14 @@ repos:
         pass_filenames: false
         args: [src, tests]
 
+      - id: vulture
+        name: vulture
+        entry: bash -c 'env -u VIRTUAL_ENV uv run vulture'
+        language: system
+        types: [python]
+        files: ^(src/|vulture_whitelist\.py$)
+        pass_filenames: false
+
       - id: update-readme-docs
         name: Update README documentation
         entry: .venv/bin/markdown-code-runner README.md
