@@ -1,6 +1,7 @@
 """Comprehensive HTTP API tests for provisioner endpoints."""
 
 import base64
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -15,6 +16,16 @@ def _helm_set_args(helm_args: list[str]) -> dict[str, str]:
             key, value = helm_args[i + 1].split("=", 1)
             set_args[key] = value
     return set_args
+
+
+def _helm_set_file_args(helm_args: list[str]) -> dict[str, str]:
+    """Return Helm --set-file key/path pairs from a captured command."""
+    set_file_args = {}
+    for i, arg in enumerate(helm_args):
+        if arg == "--set-file":
+            key, path = helm_args[i + 1].split("=", 1)
+            set_file_args[key] = path
+    return set_file_args
 
 
 async def _kubectl_without_credentials_encryption_secret(args: list[str], namespace: str | None = None):
@@ -199,6 +210,7 @@ class TestProvisionerEndpoints:
         helm_args = mock_helm.call_args.args[0]
         set_args = _helm_set_args(helm_args)
         assert set_args["credentials_encryption_key"] == ""
+        assert "credentials_encryption_key" not in _helm_set_file_args(helm_args)
 
     def test_provision_re_provision_existing_preserves_credentials_encryption(
         self,
@@ -228,7 +240,12 @@ class TestProvisionerEndpoints:
         assert response.status_code == 200
         helm_args = mock_helm.call_args.args[0]
         set_args = _helm_set_args(helm_args)
-        assert set_args["credentials_encryption_key"] == base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
+        expected_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
+        assert "credentials_encryption_key" not in set_args
+        set_file_args = _helm_set_file_args(helm_args)
+        assert "credentials_encryption_key" in set_file_args
+        assert expected_key not in " ".join(helm_args)
+        assert not Path(set_file_args["credentials_encryption_key"]).exists()
 
     def test_provision_re_provision_existing_opt_in_preserves_existing_credentials_encryption_key(
         self,
@@ -259,7 +276,12 @@ class TestProvisionerEndpoints:
         assert response.status_code == 200
         helm_args = mock_helm.call_args.args[0]
         set_args = _helm_set_args(helm_args)
-        assert set_args["credentials_encryption_key"] == base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
+        expected_key = base64.urlsafe_b64encode(b"1" * 32).decode("ascii").rstrip("=")
+        assert "credentials_encryption_key" not in set_args
+        set_file_args = _helm_set_file_args(helm_args)
+        assert "credentials_encryption_key" in set_file_args
+        assert expected_key not in " ".join(helm_args)
+        assert not Path(set_file_args["credentials_encryption_key"]).exists()
 
     def test_provision_re_provision_existing_can_opt_into_credentials_encryption(
         self,
@@ -290,7 +312,10 @@ class TestProvisionerEndpoints:
         assert response.status_code == 200
         helm_args = mock_helm.call_args.args[0]
         set_args = _helm_set_args(helm_args)
-        assert set_args["credentials_encryption_key"] != ""
+        assert "credentials_encryption_key" not in set_args
+        set_file_args = _helm_set_file_args(helm_args)
+        assert "credentials_encryption_key" in set_file_args
+        assert not Path(set_file_args["credentials_encryption_key"]).exists()
 
     def test_provision_re_provision_existing_fails_when_existing_key_lookup_fails(
         self,

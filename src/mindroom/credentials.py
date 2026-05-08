@@ -110,9 +110,23 @@ def _ensure_private_directory(path: Path, *, harden_existing: bool = False) -> N
         current_path = current_path.parent
 
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    directories_to_chmod = reversed(missing_paths) if missing_paths else ([path] if harden_existing else [])
+
+    directories_to_chmod = list(reversed(missing_paths))
+    if harden_existing:
+        for directory_path in _credential_owned_directory_chain(path):
+            if directory_path not in directories_to_chmod:
+                directories_to_chmod.append(directory_path)
     for directory_path in directories_to_chmod:
         directory_path.chmod(0o700)
+
+
+def _credential_owned_directory_chain(path: Path) -> list[Path]:
+    """Return credential-owned directories that should be private when encryption is enabled."""
+    chain = [path, *path.parents]
+    for index, directory_path in enumerate(chain):
+        if directory_path.name == _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME:
+            return list(reversed(chain[: index + 1]))
+    return [path]
 
 
 def _atomic_write_private_file(path: Path, payload: bytes) -> None:

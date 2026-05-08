@@ -350,6 +350,28 @@ class TestCredentialsManager:
             mode = stat.S_IMODE(directory_path.stat().st_mode)
             assert mode == 0o700
 
+    def test_encrypted_scoped_credentials_harden_existing_parent_directories(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Encrypted scoped credentials should harden pre-existing credential-owned parents."""
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        requester_dir = mindroom.credentials._scoped_credentials_dir_part("@user:example.test")
+        scoped_root = tmp_path / "private_oauth"
+        scoped_requester_path = scoped_root / requester_dir
+        scoped_requester_path.mkdir(parents=True)
+        scoped_root.chmod(0o755)
+        scoped_requester_path.chmod(0o755)
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
+
+        scoped_manager = manager.for_primary_runtime_scope("@user:example.test", "agent")
+
+        for directory_path in [scoped_root, scoped_requester_path, scoped_manager.base_path]:
+            mode = stat.S_IMODE(directory_path.stat().st_mode)
+            assert mode == 0o700
+
     def test_encrypted_credentials_reject_corrupt_files(
         self,
         tmp_path: Path,

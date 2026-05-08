@@ -2,9 +2,12 @@
 
 import base64
 import binascii
+import contextlib
 import hashlib
 import hmac
+import os
 import secrets
+import tempfile
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -94,6 +97,26 @@ def _instance_credentials_encryption_key(instance_id: str) -> str:
         hashlib.sha256,
     )
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _write_helm_secret_value_file(value: str) -> str:
+    """Write one Helm --set-file secret value to a private temporary file."""
+    fd, path = tempfile.mkstemp(prefix="mindroom-credentials-encryption-key-", text=True)
+    try:
+        os.write(fd, value.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return path
+
+
+def _append_credentials_encryption_key_helm_args(helm_args: list[str], key: str) -> str | None:
+    """Append credential encryption key Helm args without putting key material in argv."""
+    if not key:
+        helm_args += ["--set", "credentials_encryption_key="]
+        return None
+    secret_file_path = _write_helm_secret_value_file(key)
+    helm_args += ["--set-file", f"credentials_encryption_key={secret_file_path}"]
+    return secret_file_path
 
 
 async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:
@@ -285,8 +308,6 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             f"deepseek_key={DEEPSEEK_API_KEY}",
             "--set",
             f"sandbox_proxy_token={sandbox_proxy_token}",
-            "--set",
-            f"credentials_encryption_key={credentials_encryption_key}",
         ]
         if INSTANCE_STORAGE_CLASS_NAME:
             helm_args += ["--set", f"storageClassName={INSTANCE_STORAGE_CLASS_NAME}"]
@@ -342,7 +363,16 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 f"trustedUpstreamAuth.jwtMatrixUserIdClaim={INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM}",
             ]
 
-        code, stdout, stderr = await run_helm(helm_args)
+        credentials_encryption_key_file_path = _append_credentials_encryption_key_helm_args(
+            helm_args,
+            credentials_encryption_key,
+        )
+        try:
+            code, stdout, stderr = await run_helm(helm_args)
+        finally:
+            if credentials_encryption_key_file_path is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(credentials_encryption_key_file_path)
         if code != 0:
             # Mark as error in DB
             try:

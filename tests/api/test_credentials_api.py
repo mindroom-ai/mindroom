@@ -154,6 +154,69 @@ class TestCredentialsAPI:
             {"api_key": "sk-test123", "_source": "ui"},
         )
 
+    def test_set_credentials_returns_400_when_store_refuses_write(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Credential store fail-closed write errors should be actionable dashboard errors."""
+        mock_credentials_manager.load_credentials.return_value = None
+        mock_credentials_manager.save_credentials.side_effect = ValueError(
+            "Stored credentials for openai could not be loaded; refusing to overwrite",
+        )
+
+        response = client.post(
+            "/api/credentials/openai",
+            json={"credentials": {"api_key": "new-key"}},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Stored credentials for openai could not be loaded; refusing to overwrite"
+
+    def test_set_api_key_returns_400_when_store_refuses_write(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """API key helper should translate credential store write refusal to HTTP 400."""
+        mock_credentials_manager.load_credentials.return_value = None
+        mock_credentials_manager.save_credentials.side_effect = ValueError(
+            "Stored credentials for openai could not be loaded; refusing to overwrite",
+        )
+
+        response = client.post(
+            "/api/credentials/openai/api-key",
+            json={
+                "service": "openai",
+                "api_key": "new-key",
+                "key_name": "api_key",
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Stored credentials for openai could not be loaded; refusing to overwrite"
+
+    def test_copy_credentials_returns_400_when_store_refuses_write(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Credential copy should use the same dashboard write error boundary."""
+        mock_credentials_manager.load_credentials.side_effect = [
+            {"api_key": "source-key", "_source": "ui"},
+            None,
+        ]
+        mock_credentials_manager.save_credentials.side_effect = ValueError(
+            "Stored credentials for destination could not be loaded; refusing to overwrite",
+        )
+
+        response = client.post("/api/credentials/destination/copy-from/source")
+
+        assert response.status_code == 400
+        assert (
+            response.json()["detail"] == "Stored credentials for destination could not be loaded; refusing to overwrite"
+        )
+
     def test_rejects_raw_worker_key_query_param(
         self,
         client: TestClient,

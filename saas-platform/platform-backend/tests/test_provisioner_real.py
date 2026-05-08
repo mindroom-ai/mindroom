@@ -2,6 +2,7 @@
 
 import base64
 import os
+import stat
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -94,11 +95,15 @@ class TestProvisionerCommandValidation:
 
         # Critical: Verify --set arguments are correct
         set_args = {}
+        set_file_args = {}
         for i, arg in enumerate(helm_args):
             if arg == "--set":
                 key_value = helm_args[i + 1]
                 key, value = key_value.split("=", 1)
                 set_args[key] = value
+            if arg == "--set-file":
+                key, value = helm_args[i + 1].split("=", 1)
+                set_file_args[key] = value
 
         # These MUST be present and correct
         assert "customer" in set_args
@@ -113,8 +118,9 @@ class TestProvisionerCommandValidation:
         assert "openai_key" in set_args or "openai" in str(set_args)
         assert "sandbox_proxy_token" in set_args
         assert set_args["sandbox_proxy_token"] != ""
-        assert "credentials_encryption_key" in set_args
-        assert len(base64.urlsafe_b64decode(f"{set_args['credentials_encryption_key']}=")) == 32
+        assert "credentials_encryption_key" not in set_args
+        assert "credentials_encryption_key" in set_file_args
+        assert not Path(set_file_args["credentials_encryption_key"]).exists()
 
         # Verify we're not passing wrong values
         # Skip check if both are empty (not set in env during tests)
@@ -136,6 +142,15 @@ class TestProvisionerCommandValidation:
         assert first == second
         assert first != other
         assert len(base64.urlsafe_b64decode(f"{first}=")) == 32
+
+    def test_credentials_encryption_key_helm_set_file_is_private(self):
+        """Provisioner should hand Helm secret values through private files, not argv."""
+        path = Path(provisioner._write_helm_secret_value_file("secret-key-value"))
+        try:
+            assert path.read_text(encoding="utf-8") == "secret-key-value"
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        finally:
+            path.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_helm_install_command_honors_instance_overrides(self):
