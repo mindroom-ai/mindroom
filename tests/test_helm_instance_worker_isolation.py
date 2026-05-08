@@ -296,14 +296,14 @@ def test_platform_chart_wires_instance_credentials_encryption_secret() -> None:
         Path("cluster/k8s/platform"),
         "provisioner.apiKey=test-api-key",
         release_name="mindroom-platform",
-        set_string_args=("provisioner.instanceCredentialsEncryptionSecret=root-secret",),
+        set_string_args=("provisioner.instanceCredentialsEncryptionSecret=abc: def",),
     )
     secret = _resource(docs, "Secret", "platform-secrets")
     deployment = _resource(docs, "Deployment", "platform-backend")
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
-    assert secret["stringData"]["instance_credentials_encryption_secret"] == "root-secret"  # noqa: S105
+    assert secret["stringData"]["instance_credentials_encryption_secret"] == "abc: def"  # noqa: S105
     assert env_values["INSTANCE_CREDENTIALS_ENCRYPTION_SECRET_FILE"] == (
         "/etc/secrets/instance_credentials_encryption_secret"  # noqa: S105
     )

@@ -1237,6 +1237,108 @@ def test_non_execution_tool_runtime_keeps_credentials_encryption_key(tmp_path: P
     assert get_runtime_credentials_manager(python_runtime).load_credentials("custom_tool") is None
 
 
+@pytest.mark.asyncio
+async def test_inprocess_execution_tool_uses_encrypted_persisted_config_after_key_wipe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Runner-side shell construction should load encrypted config without exposing the key to shell env."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    encryption_key = base64.urlsafe_b64encode(b"3" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "shell",
+        {"base_dir": str(workspace), "_source": "ui"},
+    )
+    monkeypatch.delenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, raising=False)
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[["bash", "-c", 'printf "%s|%s" "$PWD" "$MINDROOM_CREDENTIALS_ENCRYPTION_KEY"']],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+
+    assert response.ok is True, response
+    assert response.result == f"{workspace}|"
+
+
+def test_subprocess_execution_preloads_encrypted_persisted_config_without_runtime_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Subprocess shell payloads should carry resolved config, not the encryption key."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    encryption_key = base64.urlsafe_b64encode(b"4" * 32).decode("ascii")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+    )
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "shell",
+        {"base_dir": str(workspace), "_source": "ui"},
+    )
+    captured_envelope: dict[str, object] = {}
+    monkeypatch.delenv(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV, raising=False)
+
+    def fake_run(
+        cmd: list[str],
+        **run_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del cmd
+        captured_envelope.update(json.loads(str(run_kwargs["input"])))
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
+        )
+
+    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[["pwd"]],
+            kwargs={},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+    child_runtime = sandbox_runner_module.constants.deserialize_runtime_paths(captured_envelope["runtime_paths"])
+    request_payload = captured_envelope["request"]
+
+    assert response.ok is True
+    assert isinstance(request_payload, dict)
+    credential_overrides = request_payload["credential_overrides"]
+    assert isinstance(credential_overrides, dict)
+    assert credential_overrides["base_dir"] == str(workspace)
+    assert "_source" not in credential_overrides
+    assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert encryption_key not in json.dumps(captured_envelope)
+
+
 def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Path) -> None:
     """Sandbox-side tool rebuilds should use persisted tool credentials."""
     config_path = tmp_path / "config.yaml"

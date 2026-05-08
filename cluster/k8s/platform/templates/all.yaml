@@ -78,7 +78,7 @@ stringData:
   stripe_secret_key: {{ .Values.stripe.secretKey }}
   stripe_webhook_secret: {{ .Values.stripe.webhookSecret }}
   provisioner_api_key: {{ .Values.provisioner.apiKey }}
-  instance_credentials_encryption_secret: {{ .Values.provisioner.instanceCredentialsEncryptionSecret | default "" }}
+  instance_credentials_encryption_secret: {{ .Values.provisioner.instanceCredentialsEncryptionSecret | default "" | quote }}
   openai_key: {{ .Values.apiKeys.openai | default "" }}
   anthropic_key: {{ .Values.apiKeys.anthropic | default "" }}
   openrouter_key: {{ .Values.apiKeys.openrouter | default "" }}

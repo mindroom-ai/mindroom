@@ -33,7 +33,7 @@ from mindroom.api.worker_responses import (
 )
 from mindroom.attachments import normalize_attachment_id
 from mindroom.config.main import Config, load_config, normalized_config_data
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.runtime_env_policy import (
@@ -64,6 +64,7 @@ from mindroom.tool_system.output_files import (
 )
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
     ToolExecutionIdentity,
     WorkerScope,
     build_worker_target_from_runtime_env,
@@ -330,6 +331,61 @@ def _request_runtime_overrides(
     return merged_runtime_overrides
 
 
+def _request_execution_identity(request: SandboxRunnerExecuteRequest) -> ToolExecutionIdentity | None:
+    """Return the typed execution identity carried by one request."""
+    if not request.execution_identity:
+        return None
+    return ToolExecutionIdentity(**request.execution_identity)
+
+
+def _request_worker_target(
+    request: SandboxRunnerExecuteRequest,
+    *,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> ResolvedWorkerTarget:
+    """Resolve the credential scope for one runner-side tool rebuild."""
+    return build_worker_target_from_runtime_env(
+        request.worker_scope,
+        request.routing_agent_name,
+        execution_identity=execution_identity,
+        runtime_paths=runtime_paths,
+        private_agent_names=_request_private_agent_names(request),
+    )
+
+
+def _subprocess_credential_overrides(
+    request: SandboxRunnerExecuteRequest,
+    *,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> dict[str, Any]:
+    """Preload persisted execution-tool config before serializing a keyless child runtime."""
+    if request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES:
+        return request.credential_overrides
+    persisted_credentials = load_scoped_credentials(
+        request.tool_name,
+        credentials_manager=_runner_credentials_manager(runtime_paths),
+        worker_target=_request_worker_target(
+            request,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        ),
+        allowed_shared_services=(
+            config.get_worker_grantable_credentials() if request.worker_scope is not None else None
+        ),
+    )
+    if not persisted_credentials:
+        return request.credential_overrides
+    metadata = TOOL_METADATA[request.tool_name]
+    config_field_names = {field.name for field in metadata.config_fields or ()}
+    persisted_config = {name: value for name, value in persisted_credentials.items() if name in config_field_names}
+    if not persisted_config:
+        return request.credential_overrides
+    return {**persisted_config, **request.credential_overrides}
+
+
 class SandboxRunnerExecuteRequest(BaseModel):
     """Tool call payload forwarded from a primary runtime to the sandbox runtime.
 
@@ -557,6 +613,7 @@ def _resolve_entrypoint(
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     runtime_overrides: dict[str, object] | None = None,
+    credentials_manager: CredentialsManager | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     private_agent_names: frozenset[str] | None = None,
@@ -576,7 +633,7 @@ def _resolve_entrypoint(
             runtime_paths=runtime_paths,
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
-            credentials_manager=_runner_credentials_manager(runtime_paths),
+            credentials_manager=credentials_manager or _runner_credentials_manager(runtime_paths),
             tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
@@ -831,9 +888,7 @@ def _workspace_env_hook_workspace_for_request(
     absolute `base_dir` when provided.
     """
     if request.routing_agent_name is not None:
-        execution_identity: ToolExecutionIdentity | None = None
-        if request.execution_identity:
-            execution_identity = ToolExecutionIdentity(**request.execution_identity)
+        execution_identity = _request_execution_identity(request)
         agent_runtime = resolve_agent_runtime(
             request.routing_agent_name,
             config,
@@ -976,9 +1031,7 @@ async def _execute_request_inprocess(
         include_credentials_encryption_key=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
         trusted_env_overlay=trusted_env_overlay,
     )
-    execution_identity: ToolExecutionIdentity | None = None
-    if request.execution_identity:
-        execution_identity = ToolExecutionIdentity(**request.execution_identity)
+    execution_identity = _request_execution_identity(request)
     output_path = normalize_output_path_argument(request.kwargs.get(OUTPUT_PATH_ARGUMENT))
     kwargs = request.kwargs
     if output_path is None and OUTPUT_PATH_ARGUMENT in kwargs:
@@ -1009,6 +1062,7 @@ async def _execute_request_inprocess(
                 tool_config_overrides=request.tool_config_overrides or None,
                 tool_init_overrides=request.tool_init_overrides or None,
                 runtime_overrides=runtime_overrides,
+                credentials_manager=_runner_credentials_manager(runtime_paths),
                 worker_scope=request.worker_scope,
                 routing_agent_name=request.routing_agent_name,
                 private_agent_names=_request_private_agent_names(request),
@@ -1144,7 +1198,18 @@ def _execute_request_subprocess_sync(
         include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
         include_credentials_encryption_key=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
     )
-    subprocess_request = request.model_copy(update={"execution_env": execution_env})
+    execution_identity = _request_execution_identity(request)
+    subprocess_request = request.model_copy(
+        update={
+            "execution_env": execution_env,
+            "credential_overrides": _subprocess_credential_overrides(
+                request,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+            ),
+        },
+    )
     envelope = sandbox_protocol.serialize_subprocess_envelope(
         request=subprocess_request.model_dump(mode="json"),
         runtime_paths=constants.serialize_runtime_paths(effective_runtime_paths),

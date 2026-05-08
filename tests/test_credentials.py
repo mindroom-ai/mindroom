@@ -238,6 +238,52 @@ class TestCredentialsManager:
         assert "plaintext-token" not in logged_payload
         assert encryption_key not in logged_payload
 
+    def test_plaintext_mode_rejects_encrypted_file_without_traceback_logging(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keyless load failures should not log traceback locals containing ciphertext."""
+
+        class CapturingLogger:
+            def __init__(self) -> None:
+                self.warning_calls: list[tuple[str, dict[str, object]]] = []
+
+            def warning(self, event: str, **kwargs: object) -> None:
+                self.warning_calls.append((event, kwargs))
+
+            def exception(self, event: str, **kwargs: object) -> None:
+                _ = event, kwargs
+                pytest.fail("keyless credential load must not use traceback logging")
+
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        encrypted_manager = CredentialsManager(tmp_path / "credentials")
+        encrypted_manager.save_credentials("oauth_service", {"token": "secret-token"})
+        creds_path = encrypted_manager.get_credentials_path("oauth_service")
+        stored_payload = creds_path.read_text(encoding="utf-8")
+
+        captured_logger = CapturingLogger()
+        monkeypatch.delenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY")
+        monkeypatch.setattr(mindroom.credentials, "logger", captured_logger)
+        plaintext_manager = CredentialsManager(tmp_path / "credentials")
+
+        assert plaintext_manager.load_credentials("oauth_service") is None
+
+        assert captured_logger.warning_calls == [
+            (
+                "Failed to load credentials",
+                {
+                    "service": "oauth_service",
+                    "path": str(creds_path),
+                    "error_type": "JSONDecodeError",
+                },
+            ),
+        ]
+        logged_payload = repr(captured_logger.warning_calls)
+        assert stored_payload not in logged_payload
+        assert encryption_key not in logged_payload
+
     def test_encrypted_credentials_file_mode_is_private(
         self,
         tmp_path: Path,

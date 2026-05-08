@@ -279,11 +279,12 @@ class CredentialsManager:
                 with credentials_path.open(encoding="utf-8") as f:
                     data: dict[str, Any] = json.load(f)
                     return data
-            except (OSError, TypeError, ValueError):
-                logger.exception(
+            except (OSError, TypeError, ValueError) as exc:
+                logger.warning(
                     "Failed to load credentials",
                     service=normalized_service,
                     path=str(credentials_path),
+                    error_type=type(exc).__name__,
                 )
                 return None
         return None
