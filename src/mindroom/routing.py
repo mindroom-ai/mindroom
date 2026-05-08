@@ -22,16 +22,16 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class _AgentSuggestion(BaseModel):
-    """Structured output for agent routing decisions."""
+class _RoutingSuggestion(BaseModel):
+    """Structured output for routing decisions."""
 
-    agent_name: str = Field(description="The name of the agent or team that should respond")
+    entity_name: str = Field(description="The name of the agent or team that should respond")
     reasoning: str = Field(description="Brief explanation of why this agent or team was chosen")
 
 
 async def suggest_agent(
     message: str,
-    available_agent_names: list[str],
+    available_entity_names: list[str],
     config: Config,
     runtime_paths: RuntimePaths,
     thread_context: Sequence[ResolvedVisibleMessage] | None = None,
@@ -42,7 +42,7 @@ async def suggest_agent(
 
     Args:
         message: The user message to route.
-        available_agent_names: Plain agent or team names (e.g. ["code", "research", "ops"]).
+        available_entity_names: Plain agent or team names (e.g. ["code", "research", "ops"]).
         config: Application configuration.
         runtime_paths: Explicit runtime context for model and Matrix identity resolution.
         thread_context: Optional recent messages for context.
@@ -53,13 +53,12 @@ async def suggest_agent(
 
     """
     try:
-        # Build agent descriptions
-        agent_descriptions = []
-        for agent_name in available_agent_names:
-            description = describe_agent(agent_name, config)
-            agent_descriptions.append(f"{agent_name}:\n  {description}")
+        entity_descriptions = []
+        for entity_name in available_entity_names:
+            description = describe_agent(entity_name, config)
+            entity_descriptions.append(f"{entity_name}:\n  {description}")
 
-        agents_info = "\n\n".join(agent_descriptions)
+        agents_info = "\n\n".join(entity_descriptions)
 
         prompt = config.render_prompt(
             "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE",
@@ -90,7 +89,7 @@ async def suggest_agent(
             name="Router",
             role="Route messages to appropriate agents or teams",
             model=model,
-            output_schema=_AgentSuggestion,
+            output_schema=_RoutingSuggestion,
             telemetry=False,
         )
 
@@ -98,30 +97,30 @@ async def suggest_agent(
         suggestion = response.content
 
         # With output_schema, we should always get the correct type
-        if not isinstance(suggestion, _AgentSuggestion):
+        if not isinstance(suggestion, _RoutingSuggestion):
             logger.error(
                 "Unexpected response type from AI routing",
-                expected="AgentSuggestion",
+                expected="RoutingSuggestion",
                 actual=type(suggestion).__name__,
             )
             return None
 
         # The AI should only suggest entities from the available list
-        if suggestion.agent_name not in available_agent_names:
+        if suggestion.entity_name not in available_entity_names:
             logger.warning(
-                "AI suggested invalid agent",
-                suggested=suggestion.agent_name,
-                available=available_agent_names,
+                "AI suggested invalid entity",
+                suggested=suggestion.entity_name,
+                available=available_entity_names,
             )
             return None
 
-        logger.info("Routing decision", agent=suggestion.agent_name, reason=suggestion.reasoning)
+        logger.info("Routing decision", entity=suggestion.entity_name, reason=suggestion.reasoning)
     except Exception as e:
         # Log error and return None - the router will fall back to not routing
         logger.exception("Routing failed", error=str(e))
         return None
     else:
-        return suggestion.agent_name
+        return suggestion.entity_name
 
 
 async def suggest_agent_for_message(
@@ -137,7 +136,7 @@ async def suggest_agent_for_message(
     objects to plain agent or team names and resolves sender identities in
     thread context.
     """
-    agent_names = [name for mid in available_agents if (name := mid.agent_name(config, runtime_paths)) is not None]
+    entity_names = [name for mid in available_agents if (name := mid.agent_name(config, runtime_paths)) is not None]
 
     # Resolve Matrix sender IDs to readable names for thread context
     resolved_context = None
@@ -150,7 +149,7 @@ async def suggest_agent_for_message(
                 sender = sender_id.agent_name(config, runtime_paths) or sender_id.domain
             resolved_context.append(replace_visible_message(msg, sender=sender))
 
-    return await suggest_agent(message, agent_names, config, runtime_paths, resolved_context)
+    return await suggest_agent(message, entity_names, config, runtime_paths, resolved_context)
 
 
 __all__ = [

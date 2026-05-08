@@ -20,7 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.routing import _AgentSuggestion
+from mindroom.routing import _RoutingSuggestion
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -216,8 +216,8 @@ class TestAIRouting:
             # Mock the Agent and response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
-            mock_response.content = _AgentSuggestion(
-                agent_name="calculator",
+            mock_response.content = _RoutingSuggestion(
+                entity_name="calculator",
                 reasoning="User is asking about math calculation",
             )
             mock_agent.arun.return_value = mock_response
@@ -255,7 +255,7 @@ class TestAIRouting:
         with patch("mindroom.model_loading.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
-            mock_response.content = _AgentSuggestion(agent_name="general", reasoning="Custom route")
+            mock_response.content = _RoutingSuggestion(entity_name="general", reasoning="Custom route")
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
@@ -291,7 +291,10 @@ class TestAIRouting:
         with patch("mindroom.model_loading.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
-            mock_response.content = _AgentSuggestion(agent_name="finance", reasoning="Continuing financial discussion")
+            mock_response.content = _RoutingSuggestion(
+                entity_name="finance",
+                reasoning="Continuing financial discussion",
+            )
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
@@ -332,8 +335,8 @@ class TestAIRouting:
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             # AI suggests an agent not in available list
-            mock_response.content = _AgentSuggestion(
-                agent_name="code",  # Not available
+            mock_response.content = _RoutingSuggestion(
+                entity_name="code",  # Not available
                 reasoning="User asking about programming",
             )
             mock_agent.arun.return_value = mock_response

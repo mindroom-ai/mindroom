@@ -173,6 +173,7 @@ def thread_requires_explicit_agent_targeting(
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    available_agents_in_room: Sequence[MatrixID] | None = None,
 ) -> bool:
     """Return whether a thread already has visible ownership or multiple human participants."""
     sender_visible_agents = authorization.filter_agents_by_sender_permissions(
@@ -181,6 +182,9 @@ def thread_requires_explicit_agent_targeting(
         config,
         runtime_paths,
     )
+    if available_agents_in_room is not None:
+        available_agent_ids = {agent.full_id for agent in available_agents_in_room}
+        sender_visible_agents = [agent for agent in sender_visible_agents if agent.full_id in available_agent_ids]
     if sender_visible_agents:
         return True
     return has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths)

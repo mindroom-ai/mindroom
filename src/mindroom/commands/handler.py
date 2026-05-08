@@ -220,7 +220,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]
 
-        # Get mentioned MindRoom entities from the command text.
         mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
 
         _, response_text = await schedule_task(

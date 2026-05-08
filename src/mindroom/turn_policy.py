@@ -292,20 +292,6 @@ class TurnPolicy:
             in materializable_agent_names
         ]
 
-    async def responder_candidates_for_sender(
-        self,
-        room: nio.MatrixRoom,
-        requester_user_id: str,
-    ) -> list[MatrixID]:
-        """Return sender-visible responders at the configured/ad-hoc room boundary."""
-        return await responder_candidate_entities_for_room(
-            self.deps.runtime.client,
-            room,
-            requester_user_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-        )
-
     def response_owner_for_team_resolution(
         self,
         form_team: TeamResolution,
@@ -417,7 +403,13 @@ class TurnPolicy:
             self.deps.runtime_paths,
         )
         if available_agents_in_room is None:
-            available_agents_in_room = await self.responder_candidates_for_sender(room, requester_user_id)
+            available_agents_in_room = await responder_candidate_entities_for_room(
+                self.deps.runtime.client,
+                room,
+                requester_user_id,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+            )
         if materializable_agent_names is None:
             materializable_agent_names = self.materializable_agent_names()
         return await decide_team_formation(
@@ -471,17 +463,24 @@ class TurnPolicy:
         elif context.planning_thread_history_unavailable:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
             plan = _DispatchPlan(kind="ignore", ignore_reason="router")
-        elif context.is_thread and thread_requires_explicit_agent_targeting(
-            planning_thread_history,
-            sender_id=requester_user_id,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-        ):
-            self.deps.logger.info("Skipping routing: thread already requires explicit agent targeting")
-            plan = _DispatchPlan(kind="ignore", ignore_reason="router")
         else:
-            available_agents = await self.responder_candidates_for_sender(room, requester_user_id)
-            if len(available_agents) == 1:
+            available_agents = await responder_candidate_entities_for_room(
+                self.deps.runtime.client,
+                room,
+                requester_user_id,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+            )
+            if context.is_thread and thread_requires_explicit_agent_targeting(
+                planning_thread_history,
+                sender_id=requester_user_id,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                available_agents_in_room=available_agents,
+            ):
+                self.deps.logger.info("Skipping routing: thread already requires explicit agent targeting")
+                plan = _DispatchPlan(kind="ignore", ignore_reason="router")
+            elif len(available_agents) == 1:
                 self.deps.logger.info("Skipping routing: only one responder candidate")
                 plan = _DispatchPlan(kind="ignore", ignore_reason="router")
             else:
@@ -548,20 +547,30 @@ class TurnPolicy:
     ) -> ResponseAction:
         """Decide whether to respond as a team, individually, or not at all."""
         planning_thread_history = context.planning_thread_history
-        available_agents_in_room = await self.responder_candidates_for_sender(room, requester_user_id)
+        available_agents_in_room = await responder_candidate_entities_for_room(
+            self.deps.runtime.client,
+            room,
+            requester_user_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+        agent_matrix_id = self.deps.runtime.config.get_ids(self.deps.runtime_paths)[self.deps.agent_name]
+        agent_is_responder_candidate = agent_matrix_id.full_id in {agent.full_id for agent in available_agents_in_room}
         if (
             context.planning_thread_history_unavailable
             and not context.am_i_mentioned
             and not context.mentioned_agents
             and not context.has_non_agent_mentions
         ):
-            should_continue_active_thread = self._should_queue_follow_up_in_active_response_thread(
-                context=context,
-                target=target,
-                source_envelope=source_envelope,
-                has_active_response_for_target=has_active_response_for_target,
+            should_continue_active_thread = (
+                agent_is_responder_candidate
+                and self._should_queue_follow_up_in_active_response_thread(
+                    context=context,
+                    target=target,
+                    source_envelope=source_envelope,
+                    has_active_response_for_target=has_active_response_for_target,
+                )
             )
-            agent_matrix_id = self.deps.runtime.config.get_ids(self.deps.runtime_paths)[self.deps.agent_name]
             single_visible_self = (
                 not is_thread_history_degraded(context.thread_history)
                 and len(available_agents_in_room) == 1
@@ -607,7 +616,7 @@ class TurnPolicy:
             sender_id=requester_user_id,
             available_agents_in_room=available_agents_in_room,
         ):
-            if self._should_queue_follow_up_in_active_response_thread(
+            if agent_is_responder_candidate and self._should_queue_follow_up_in_active_response_thread(
                 context=context,
                 target=target,
                 source_envelope=source_envelope,

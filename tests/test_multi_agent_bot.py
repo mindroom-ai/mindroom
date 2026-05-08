@@ -8818,6 +8818,146 @@ class TestAgentBot:
         mock_has_active_response.assert_called_once_with(target)
 
     @pytest.mark.asyncio
+    async def test_resolve_response_action_keeps_active_follow_up_inside_responder_boundary(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Active response follow-ups must not widen configured rooms to unconfigured bots."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent"),
+                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                },
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        ids = config.get_ids(runtime_paths)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            ids["calculator"].full_id: MagicMock(),
+            ids["research"].full_id: MagicMock(),
+        }
+        target = MessageTarget.resolve(room.room_id, "$thread", "$event")
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=ThreadHistoryResult(
+                [
+                    ResolvedVisibleMessage(
+                        sender=ids["calculator"].full_id,
+                        body="working",
+                        timestamp=1,
+                        event_id="$calculator",
+                        content={"body": "working"},
+                        thread_id="$thread",
+                        latest_event_id="$calculator",
+                    ),
+                ],
+                is_full_history=True,
+            ),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        envelope = MessageEnvelope(
+            source_event_id="$followup",
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="continue",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="live",
+        )
+
+        with (
+            patch("mindroom.turn_policy.decide_team_formation", new=AsyncMock(return_value=TeamResolution.none())),
+            patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
+        ):
+            action = await bot._turn_policy.resolve_response_action(
+                context,
+                room,
+                "@user:localhost",
+                "continue",
+                False,
+                target=target,
+                source_envelope=envelope,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+            )
+
+        assert action.kind == "skip"
+
+    @pytest.mark.asyncio
+    async def test_resolve_response_action_keeps_degraded_active_follow_up_inside_responder_boundary(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Degraded-history active follow-ups must still respect responder candidates."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent"),
+                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                },
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        ids = config.get_ids(runtime_paths)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            ids["calculator"].full_id: MagicMock(),
+            ids["research"].full_id: MagicMock(),
+        }
+        target = MessageTarget.resolve(room.room_id, "$thread", "$event")
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=ThreadHistoryResult([], is_full_history=False),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        envelope = MessageEnvelope(
+            source_event_id="$followup",
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="continue",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=bot.agent_name,
+            source_kind="live",
+        )
+
+        with patch.object(bot._response_runner, "has_active_response_for_target", return_value=True):
+            action = await bot._turn_policy.resolve_response_action(
+                context,
+                room,
+                "@user:localhost",
+                "continue",
+                False,
+                target=target,
+                source_envelope=envelope,
+                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+            )
+
+        assert action.kind == "skip"
+
+    @pytest.mark.asyncio
     async def test_resolve_response_action_keeps_gate_owned_active_thread_follow_up(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -8969,6 +9109,154 @@ class TestAgentBot:
         assert envelope.source_kind == "voice"
         mock_should_respond.assert_called_once()
         mock_has_active_response.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_router_plan_ignores_stale_thread_owner_outside_responder_boundary(self, tmp_path: Path) -> None:
+        """Router gating must not treat unconfigured prior participants as configured-room owners."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent"),
+                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                    "writer": AgentConfig(display_name="WriterAgent", rooms=["!room:localhost"]),
+                },
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        ids = config.get_ids(runtime_paths)
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id=ids[ROUTER_AGENT_NAME].full_id,
+            display_name="Router",
+            password=TEST_PASSWORD,
+        )
+        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            ids[ROUTER_AGENT_NAME].full_id: MagicMock(),
+            ids["calculator"].full_id: MagicMock(),
+            ids["research"].full_id: MagicMock(),
+            ids["writer"].full_id: MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=ThreadHistoryResult(
+                [
+                    ResolvedVisibleMessage(
+                        sender=ids["calculator"].full_id,
+                        body="old answer",
+                        timestamp=1,
+                        event_id="$calculator",
+                        content={"body": "old answer"},
+                        thread_id="$thread",
+                        latest_event_id="$calculator",
+                    ),
+                ],
+                is_full_history=True,
+            ),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+        target = MessageTarget.resolve(room.room_id, "$thread", "$event")
+        envelope = MessageEnvelope(
+            source_event_id="$event",
+            room_id=room.room_id,
+            target=target,
+            requester_id="@user:localhost",
+            sender_id="@user:localhost",
+            body="continue",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=ROUTER_AGENT_NAME,
+            source_kind="live",
+        )
+        event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")
+        event.body = "continue"
+        dispatch = PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=context,
+            target=target,
+            correlation_id="corr",
+            envelope=envelope,
+        )
+
+        plan = await bot._turn_policy.plan_router_dispatch(room, event, dispatch)
+
+        assert plan is not None
+        assert plan.kind == "route"
+
+    @pytest.mark.asyncio
+    async def test_router_pre_ingress_skip_ignores_stale_thread_owner_outside_responder_boundary(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router pre-ingress skip must use the same configured-room responder boundary."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent"),
+                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                    "writer": AgentConfig(display_name="WriterAgent", rooms=["!room:localhost"]),
+                },
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        runtime_paths = runtime_paths_for(config)
+        ids = config.get_ids(runtime_paths)
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id=ids[ROUTER_AGENT_NAME].full_id,
+            display_name="Router",
+            password=TEST_PASSWORD,
+        )
+        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        _install_runtime_cache_support(bot)
+        bot.client = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            ids[ROUTER_AGENT_NAME].full_id: MagicMock(),
+            ids["calculator"].full_id: MagicMock(),
+            ids["research"].full_id: MagicMock(),
+            ids["writer"].full_id: MagicMock(),
+            "@user:localhost": MagicMock(),
+        }
+        event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")
+        event.body = "continue"
+        event.source = {"content": {"body": "continue"}}
+        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            return_value=ThreadHistoryResult(
+                [
+                    ResolvedVisibleMessage(
+                        sender=ids["calculator"].full_id,
+                        body="old answer",
+                        timestamp=1,
+                        event_id="$calculator",
+                        content={"body": "old answer"},
+                        thread_id="$thread",
+                        latest_event_id="$calculator",
+                    ),
+                ],
+                is_full_history=True,
+            ),
+        )
+
+        should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
+            room,
+            event,
+            requester_user_id="@user:localhost",
+            thread_id="$thread",
+        )
+
+        assert should_skip is False
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_requires_explicit_mention_in_multi_human_thread_even_after_prior_team_mentions(

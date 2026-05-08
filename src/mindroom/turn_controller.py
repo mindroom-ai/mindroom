@@ -657,11 +657,19 @@ class TurnController:
             return False
         if thread_history is None:
             return False
+        available_agents = await responder_candidate_entities_for_room(
+            self._client(),
+            room,
+            requester_user_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
         return thread_requires_explicit_agent_targeting(
             thread_history,
             sender_id=requester_user_id,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
+            available_agents_in_room=available_agents,
         )
 
     async def _coalescing_key_for_event(
@@ -1186,22 +1194,21 @@ class TurnController:
             )
             return
 
-        if len(available_agents) == 1:
-            suggested_agent = available_agents[0].agent_name(self.deps.runtime.config, self.deps.runtime_paths)
-            with bound_log_context(room_id=room.room_id, thread_id=thread_id):
+        with bound_log_context(room_id=room.room_id, thread_id=thread_id):
+            if len(available_agents) == 1:
+                suggested_agent = available_agents[0].agent_name(self.deps.runtime.config, self.deps.runtime_paths)
                 self.deps.logger.info("Handling deterministic routing", event_id=event.event_id)
-        else:
-            with bound_log_context(room_id=room.room_id, thread_id=thread_id):
+            else:
                 self.deps.logger.info("Handling AI routing", event_id=event.event_id)
 
-            routing_text = message or event.body
-            suggested_agent = await suggest_agent_for_message(
-                routing_text,
-                available_agents,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-                thread_history,
-            )
+                routing_text = message or event.body
+                suggested_agent = await suggest_agent_for_message(
+                    routing_text,
+                    available_agents,
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    thread_history,
+                )
 
         if not suggested_agent:
             response_text = (
@@ -1209,7 +1216,7 @@ class TurnController:
                 "Please try mentioning an agent or team directly with @ or rephrase your request."
             )
             with bound_log_context(room_id=room.room_id, thread_id=thread_id):
-                self.deps.logger.warning("Router failed to determine agent")
+                self.deps.logger.warning("Router failed to determine entity")
         else:
             response_text = f"@{suggested_agent} could you help with this?"
 
