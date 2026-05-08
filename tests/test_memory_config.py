@@ -74,7 +74,7 @@ class TestMemoryConfig:
     ) -> None:
         """Test memory config creation with OpenAI embedder."""
         runtime_paths = _runtime_paths(tmp_path)
-        get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "test-key")
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials("openai", {"api_key": "test-key"})
 
         # Create config with OpenAI embedder
         embedder_config = _MemoryEmbedderConfig(
@@ -193,7 +193,10 @@ class TestMemoryConfig:
             storage_path=tmp_path / "storage",
             process_env={"MINDROOM_SHARED_CREDENTIALS_PATH": str(tmp_path / ".shared_credentials")},
         )
-        get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "shared-openai-key")
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            "openai",
+            {"api_key": "shared-openai-key"},
+        )
 
         config = Config(
             memory={
@@ -212,7 +215,10 @@ class TestMemoryConfig:
     def test_get_memory_config_openai_embedder_maps_provider_settings(self, tmp_path: Path) -> None:
         """OpenAI Mem0 embedder config should keep the provider-specific field names."""
         runtime_paths = _runtime_paths(tmp_path)
-        get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "shared-openai-key")
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            "openai",
+            {"api_key": "shared-openai-key"},
+        )
         config = Config(
             memory={
                 "embedder": {

@@ -480,50 +480,6 @@ class OAuthProvider:
             client_id=client_config.client_id,
         )
 
-    async def refresh_token_data(
-        self,
-        token_data: Mapping[str, Any],
-        runtime_paths: RuntimePaths,
-    ) -> dict[str, Any] | None:
-        """Refresh stored credentials with a provider refresh token when possible."""
-        refresh_token = token_data.get("refresh_token")
-        if not isinstance(refresh_token, str) or not refresh_token:
-            return None
-        client_config = self.require_client_config(runtime_paths)
-        async with AsyncOAuth2Client(
-            client_id=client_config.client_id,
-            client_secret=client_config.client_secret,
-            scope=self.scopes,
-            redirect_uri=client_config.redirect_uri,
-            token_endpoint_auth_method=_TOKEN_ENDPOINT_AUTH_METHOD,
-            token=dict(token_data),
-            timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
-        ) as client:
-            try:
-                response_data = await client.refresh_token(self.token_url, refresh_token=refresh_token)
-            except (AuthlibBaseError, HTTPError):
-                return None
-        if not isinstance(response_data, Mapping):
-            return None
-        merged_response = dict(response_data)
-        existing_claims = token_data.get("_oauth_claims")
-        existing_claims_verified = token_data.get("_oauth_claims_verified")
-        if "refresh_token" not in merged_response:
-            merged_response["refresh_token"] = refresh_token
-        if "_oauth_claims" not in merged_response and isinstance(existing_claims, Mapping):
-            merged_response["_oauth_claims"] = dict(existing_claims)
-        if "_oauth_claims_verified" not in merged_response and existing_claims_verified is True:
-            merged_response["_oauth_claims_verified"] = True
-        parsed = _token_result_with_core_metadata(
-            self,
-            (self.token_parser or _default_token_parser)(self, merged_response, client_config, runtime_paths),
-            client_id=client_config.client_id,
-        )
-        refreshed = dict(parsed.token_data)
-        if "refresh_token" not in parsed.token_data:
-            refreshed["refresh_token"] = refresh_token
-        return refreshed
-
     def resolved_allowed_email_domains(self, runtime_paths: RuntimePaths) -> tuple[str, ...]:
         """Return email-domain restrictions from provider config and env."""
         configured = tuple(domain.strip().lower() for domain in self.allowed_email_domains if domain.strip())

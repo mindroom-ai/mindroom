@@ -611,21 +611,6 @@ class EventCacheWriteCoordinator:
             coalesce_log_context=coalesce_log_context,
         )
 
-    async def run_room_update(
-        self,
-        room_id: str,
-        update_coro_factory: _UpdateCoroFactory,
-        *,
-        name: str,
-    ) -> object:
-        """Run one room-scoped operation through the same ordered barrier and await its result."""
-        return await self.queue_room_update(
-            room_id,
-            update_coro_factory,
-            name=name,
-            log_exceptions=False,
-        )
-
     def queue_thread_update(
         self,
         room_id: str,

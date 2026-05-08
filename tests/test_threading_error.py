@@ -7753,10 +7753,11 @@ class TestThreadingBehavior:
 
         with patch("mindroom.background_tasks.logger.exception") as background_logger_exception:
             with pytest.raises(RuntimeError, match="boom"):
-                await coordinator.run_room_update(
+                await coordinator.queue_room_update(
                     "!test:localhost",
                     lambda: failing_update(),
                     name="matrix_cache_test_failure",
+                    log_exceptions=False,
                 )
             await asyncio.sleep(0)
 

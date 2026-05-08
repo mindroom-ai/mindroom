@@ -1050,7 +1050,7 @@ class TestCredentialsManager:
         manager = CredentialsManager(temp_credentials_dir)
 
         # Test getting API key from simple structure
-        manager.set_api_key("openai", "sk-test123")
+        manager.save_credentials("openai", {"api_key": "sk-test123"})
         assert manager.get_api_key("openai") == "sk-test123"
 
         # Test getting non-existent service
@@ -1060,51 +1060,6 @@ class TestCredentialsManager:
         manager.save_credentials("custom", {"token": "custom-token"})
         assert manager.get_api_key("custom", "token") == "custom-token"
         assert manager.get_api_key("custom", "api_key") is None
-
-    def test_set_api_key(self, temp_credentials_dir: Path) -> None:
-        """Test setting API keys in credentials."""
-        manager = CredentialsManager(temp_credentials_dir)
-
-        # Test setting new API key
-        manager.set_api_key("anthropic", "claude-key")
-        assert manager.get_api_key("anthropic") == "claude-key"
-
-        # Test updating existing API key
-        manager.set_api_key("anthropic", "new-claude-key")
-        assert manager.get_api_key("anthropic") == "new-claude-key"
-
-        # Test setting custom key name
-        manager.set_api_key("service", "value123", "custom_key")
-        creds = manager.load_credentials("service")
-        assert creds is not None
-        assert creds["custom_key"] == "value123"
-
-        # Test that other fields are preserved
-        manager.save_credentials("multi", {"field1": "value1", "api_key": "old"})
-        manager.set_api_key("multi", "new")
-        creds = manager.load_credentials("multi")
-        assert creds is not None
-        assert creds["api_key"] == "new"
-        assert creds["field1"] == "value1"
-
-    def test_encrypted_set_api_key_refuses_to_overwrite_unreadable_credentials(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """set_api_key should fail closed when encrypted mode cannot load an existing credential file."""
-        encryption_key = _test_encryption_key()
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
-        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
-        creds_path = manager.get_credentials_path("oauth_service")
-        original_payload = b'{"refresh_token":"plaintext-refresh-token"}'
-        creds_path.write_bytes(original_payload)
-
-        with pytest.raises(ValueError, match="refusing to overwrite"):
-            manager.set_api_key("oauth_service", "new-api-key")
-
-        assert creds_path.read_bytes() == original_payload
-
 
 class TestGlobalCredentialsManager:
     """Test the global credentials manager singleton."""

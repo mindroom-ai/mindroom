@@ -93,29 +93,6 @@ class ToolDispatchContext:
 
     execution_identity: ToolExecutionIdentity
 
-    @classmethod
-    def from_target(
-        cls,
-        *,
-        agent_name: str,
-        runtime_paths: RuntimePaths,
-        requester_user_id: str | None,
-        target: MessageTarget | None,
-    ) -> ToolDispatchContext:
-        """Build the detached dispatch contract for one explicit Matrix target."""
-        return cls(
-            execution_identity=build_tool_execution_identity(
-                channel="matrix",
-                agent_name=agent_name,
-                runtime_paths=runtime_paths,
-                requester_id=requester_user_id,
-                room_id=target.room_id if target is not None else None,
-                thread_id=target.resolved_thread_id if target is not None else None,
-                resolved_thread_id=target.resolved_thread_id if target is not None else None,
-                session_id=target.session_id if target is not None else None,
-            ),
-        )
-
 
 @dataclass(frozen=True)
 class LiveToolDispatchContext(ToolDispatchContext):
