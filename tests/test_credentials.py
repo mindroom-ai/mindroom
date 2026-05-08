@@ -129,8 +129,9 @@ class TestCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Encrypted credential storage should not leave JSON or token text on disk."""
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
-        manager = CredentialsManager(tmp_path / "credentials")
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         test_creds = {
             "token": "test_token_123",
             "refresh_token": "refresh_123",
@@ -152,8 +153,9 @@ class TestCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Encrypted mode should refuse to load plaintext credential JSON."""
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
-        manager = CredentialsManager(tmp_path / "credentials")
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         creds_path = manager.get_credentials_path("oauth_service")
         creds_path.write_text('{"token":"plaintext-token"}', encoding="utf-8")
 
@@ -165,8 +167,9 @@ class TestCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Encrypted save should fail closed when an existing credential file cannot be loaded."""
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
-        manager = CredentialsManager(tmp_path / "credentials")
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         creds_path = manager.get_credentials_path("oauth_service")
         original_payload = b'{"api_key":"old","other":"preserve-me"}'
         creds_path.write_bytes(original_payload)
@@ -182,8 +185,9 @@ class TestCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A missing encryption key should not turn an existing encrypted file into plaintext JSON."""
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
-        encrypted_manager = CredentialsManager(tmp_path / "credentials")
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        encrypted_manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         encrypted_manager.save_credentials("oauth_service", {"api_key": "old", "other": "preserve-me"})
         creds_path = encrypted_manager.get_credentials_path("oauth_service")
         original_payload = creds_path.read_bytes()
@@ -218,7 +222,7 @@ class TestCredentialsManager:
         captured_logger = CapturingLogger()
         monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
         monkeypatch.setattr(mindroom.credentials, "logger", captured_logger)
-        manager = CredentialsManager(tmp_path / "credentials")
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         creds_path = manager.get_credentials_path("oauth_service")
         creds_path.write_text('{"token":"plaintext-token"}', encoding="utf-8")
 
@@ -258,7 +262,7 @@ class TestCredentialsManager:
 
         encryption_key = _test_encryption_key()
         monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
-        encrypted_manager = CredentialsManager(tmp_path / "credentials")
+        encrypted_manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         encrypted_manager.save_credentials("oauth_service", {"token": "secret-token"})
         creds_path = encrypted_manager.get_credentials_path("oauth_service")
         stored_payload = creds_path.read_text(encoding="utf-8")
@@ -290,8 +294,9 @@ class TestCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Encrypted credential files should be written with mode 0600."""
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
-        manager = CredentialsManager(tmp_path / "credentials")
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
 
         manager.save_credentials("oauth_service", {"token": "test-token"})
 
@@ -304,9 +309,10 @@ class TestCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Encrypted credential directories should be created with mode 0700."""
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
 
-        manager = CredentialsManager(tmp_path / "credentials")
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
 
         mode = stat.S_IMODE(manager.base_path.stat().st_mode)
         assert mode == 0o700
@@ -317,8 +323,9 @@ class TestCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Credential saves should not repeatedly chmod a directory hardened during construction."""
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
-        manager = CredentialsManager(tmp_path / "credentials")
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         manager.base_path.chmod(0o755)
 
         manager.save_credentials("oauth_service", {"token": "test-token"})
@@ -332,8 +339,9 @@ class TestCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Encrypted scoped credential directories should be written with mode 0700."""
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
-        manager = CredentialsManager(tmp_path / "credentials")
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
 
         scoped_manager = manager.for_primary_runtime_scope("@user:example.test", "agent")
 
@@ -348,8 +356,9 @@ class TestCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Encrypted mode should fail closed when ciphertext cannot be authenticated."""
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
-        manager = CredentialsManager(tmp_path / "credentials")
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         creds_path = manager.get_credentials_path("oauth_service")
         creds_path.write_bytes(b"MINDROOM-CREDENTIALS-V1\nnot-valid-ciphertext")
 
@@ -1067,8 +1076,9 @@ class TestCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """set_api_key should fail closed when encrypted mode cannot load an existing credential file."""
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", _test_encryption_key())
-        manager = CredentialsManager(tmp_path / "credentials")
+        encryption_key = _test_encryption_key()
+        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
+        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         creds_path = manager.get_credentials_path("oauth_service")
         original_payload = b'{"refresh_token":"plaintext-refresh-token"}'
         creds_path.write_bytes(original_payload)
@@ -1121,6 +1131,34 @@ class TestGlobalCredentialsManager:
 
         assert manager.base_path == storage_path / "credentials"
         assert manager.shared_base_path == shared_path
+
+    def test_runtime_manager_does_not_fall_back_to_process_env_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit keyless runtime should stay keyless even if the host env has a key."""
+        encryption_key = _test_encryption_key()
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+        storage_path = tmp_path / "storage"
+        encrypted_runtime = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=storage_path,
+            process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+        )
+        encrypted_manager = get_runtime_credentials_manager(encrypted_runtime)
+        encrypted_manager.save_credentials("oauth_service", {"token": "secret-token"})
+
+        monkeypatch.setenv(CREDENTIALS_ENCRYPTION_KEY_ENV, encryption_key)
+        keyless_runtime = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=storage_path,
+            process_env={},
+        )
+        keyless_manager = get_runtime_credentials_manager(keyless_runtime)
+
+        assert keyless_manager.load_credentials("oauth_service") is None
 
     def test_global_manager_rebuilds_when_storage_root_changes(self, tmp_path: Path) -> None:
         """Changing the explicit storage root should invalidate the cached manager."""

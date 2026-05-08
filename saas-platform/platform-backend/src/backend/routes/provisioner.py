@@ -197,7 +197,12 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 
     # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
     sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)
-    credentials_encryption_key = _instance_credentials_encryption_key(customer_id)
+    # Existing instances may have plaintext credential files; only switch them to encrypted storage explicitly.
+    credentials_encryption_key = (
+        _instance_credentials_encryption_key(customer_id)
+        if not existing_instance_id or data.get("enable_credentials_encryption") is True
+        else ""
+    )
 
     try:
         # Use upgrade --install to handle both new and re-provisioning cases

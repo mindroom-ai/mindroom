@@ -167,11 +167,7 @@ class CredentialsManager:
         self.current_worker_root = (
             Path(current_worker_root).expanduser().resolve() if current_worker_root is not None else None
         )
-        self._encryption_key_config = (
-            _runtime_env_policy.credentials_encryption_key_value(encryption_key)
-            if encryption_key is not None
-            else _runtime_env_policy.credentials_encryption_key_from_env(os.environ)
-        )
+        self._encryption_key_config = _runtime_env_policy.credentials_encryption_key_value(encryption_key)
         self._encryption_key = (
             _decode_credentials_encryption_key(self._encryption_key_config)
             if self._encryption_key_config is not None

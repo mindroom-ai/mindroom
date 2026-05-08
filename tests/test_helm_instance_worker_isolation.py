@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -179,9 +180,16 @@ def test_instance_chart_static_runner_uses_shared_credentials_encryption_key_sec
     api_keys_secret = _resource(docs, "Secret", "mindroom-api-keys-demo")
     mindroom_container = _container(deployment, "mindroom")
     runner_container = _container(deployment, "sandbox-runner")
+    annotations = deployment["spec"]["template"]["metadata"]["annotations"]
 
     assert api_keys_secret["stringData"]["credentials_encryption_key"] == credentials_encryption_key
     assert credentials_encryption_key not in json.dumps(deployment)
+    assert (
+        annotations["mindroom.ai/credentials-encryption-key-hash"]
+        == hashlib.sha256(
+            credentials_encryption_key.encode("utf-8"),
+        ).hexdigest()
+    )
     assert _env_by_name(mindroom_container)["MINDROOM_CREDENTIALS_ENCRYPTION_KEY"] == {
         "name": "MINDROOM_CREDENTIALS_ENCRYPTION_KEY",
         "valueFrom": {
@@ -211,6 +219,28 @@ def test_instance_chart_omits_credentials_encryption_env_when_key_is_unset() -> 
 
     assert "MINDROOM_CREDENTIALS_ENCRYPTION_KEY" not in _env_by_name(mindroom_container)
     assert "MINDROOM_CREDENTIALS_ENCRYPTION_KEY" not in _env_by_name(runner_container)
+    assert "annotations" not in deployment["spec"]["template"]["metadata"]
+
+
+def test_instance_chart_credentials_encryption_key_rotation_changes_pod_template() -> None:
+    """Changing the Secret-backed credential key should render a new pod template hash."""
+    first_docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "credentials_encryption_key=first-key",
+    )
+    second_docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "credentials_encryption_key=second-key",
+    )
+    first_deployment = _resource(first_docs, "Deployment", "mindroom-demo")
+    second_deployment = _resource(second_docs, "Deployment", "mindroom-demo")
+
+    assert (
+        first_deployment["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/credentials-encryption-key-hash"]
+        != second_deployment["spec"]["template"]["metadata"]["annotations"][
+            "mindroom.ai/credentials-encryption-key-hash"
+        ]
+    )
 
 
 def test_instance_chart_rejects_email_template_without_email_header() -> None:

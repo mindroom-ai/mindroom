@@ -6,6 +6,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+def _helm_set_args(helm_args: list[str]) -> dict[str, str]:
+    """Return Helm --set key/value pairs from a captured command."""
+    set_args = {}
+    for i, arg in enumerate(helm_args):
+        if arg == "--set":
+            key, value = helm_args[i + 1].split("=", 1)
+            set_args[key] = value
+    return set_args
+
+
 class TestProvisionerEndpoints:
     """Test provisioner endpoints via HTTP API."""
 
@@ -156,6 +166,39 @@ class TestProvisionerEndpoints:
         data = response.json()
         assert data["success"] is True
         assert data["customer_id"] == "456"
+        helm_args = mock_helm.call_args.args[0]
+        set_args = _helm_set_args(helm_args)
+        assert set_args["credentials_encryption_key"] == ""
+
+    def test_provision_re_provision_existing_can_opt_into_credentials_encryption(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """Existing instances should only enable credential encryption explicitly."""
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
+
+        response = client.post(
+            "/system/provision",
+            json={
+                "subscription_id": "sub_test_123",
+                "account_id": "acc_test_123",
+                "tier": "professional",
+                "instance_id": "456",
+                "enable_credentials_encryption": True,
+            },
+            headers=valid_auth_header,
+        )
+
+        assert response.status_code == 200
+        helm_args = mock_helm.call_args.args[0]
+        set_args = _helm_set_args(helm_args)
+        assert set_args["credentials_encryption_key"] != ""
 
     def test_provision_instance_not_found_for_reprovision(
         self, client: TestClient, mock_supabase: MagicMock, valid_auth_header: dict
