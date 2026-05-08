@@ -18,11 +18,11 @@ router:
 
 The router has three configuration options:
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `model` | string | `"default"` | Model to use for routing decisions |
-| `accept_invites` | bool | `true` | When enabled, the router accepts authorized room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
-| `startup_thread_prewarm` | bool | `true` | When enabled, the router may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
+| Option                   | Type   | Default     | Description                                                                                                                                                                                 |
+| ------------------------ | ------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                  | string | `"default"` | Model to use for routing decisions                                                                                                                                                          |
+| `accept_invites`         | bool   | `true`      | When enabled, the router accepts authorized room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup                                    |
+| `startup_thread_prewarm` | bool   | `true`      | When enabled, the router may prewarm recent thread snapshots for rooms already joined when first sync completes, which can reduce cold-cache latency for early thread replies after startup |
 
 Startup thread prewarm is a background, best-effort cache warmup for rooms already joined when first sync completes.
 
@@ -30,11 +30,14 @@ Startup thread prewarm is a background, best-effort cache warmup for rooms alrea
 
 When a message arrives in a room without a specific agent mention:
 
-1. The router checks if there are configured agents in that room
-2. It analyzes the message content and any recent thread context (up to 3 previous messages)
-3. Based on the available agents' roles, tools, and instructions, it selects the best match
-4. The router posts a message mentioning the selected agent (e.g., "@agent could you help with this?")
-5. The mentioned agent sees the mention and responds in the thread
+1. The router checks whether the room has statically configured agents or teams
+1. It analyzes the message content and any recent thread context (up to 3 previous messages)
+1. Based on the candidate entities' roles, tools, and instructions, it selects the best match
+1. The router posts a message mentioning the selected entity (e.g., "@agent could you help with this?")
+1. The mentioned agent or team sees the mention and responds in the thread
+
+For configured rooms, routing candidates come only from `agents.<name>.rooms` and `teams.<name>.rooms`.
+For ad-hoc rooms accepted through invites, routing candidates come from the sender-visible MindRoom agents and teams currently joined to that room.
 
 The router uses a structured output schema to ensure consistent routing decisions, including the agent name and reasoning for the selection.
 
@@ -90,7 +93,7 @@ When the responder is already clear, normalized audio follows the normal direct 
 By default, `voice.visible_router_echo: true` also lets the router post the normalized voice text as a display-only message when it is allowed to reply.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
 
-See [Voice Messages](https://docs.mindroom.chat/voice/) for the detailed dispatch behavior.
+See [Voice Messages](https://docs.mindroom.chat/voice/index.md) for the detailed dispatch behavior.
 
 ### Configuration Confirmations
 
@@ -104,7 +107,8 @@ When the router joins a room, it restores any previously scheduled tasks and pen
 
 ### Single-Agent Optimization
 
-When there's only one agent configured in a room, the router skips AI routing entirely. The single agent handles messages directly, which is faster and more efficient.
+When there is only one eligible responder for a room, the router skips AI routing entirely.
+The single responder handles messages directly, which is faster and more efficient.
 
 ### Multi-Human Thread Protection
 
@@ -113,10 +117,10 @@ When multiple human users have posted in a thread, the router and agents require
 The rules are:
 
 1. **Mentioned agents always respond** — an explicit `@agent` overrides all other rules.
-2. **Non-thread messages** — agents auto-respond if they're the only agent in the room, regardless of how many humans are present.
-3. **Threads with one human** — normal auto-response behavior applies (the agent continues the conversation).
-4. **Threads with two or more humans** — agents stay silent unless explicitly mentioned.
-5. **Mentioning a non-agent user** — if a message tags only humans (not agents), agents stay silent.
+1. **Non-thread messages** — agents auto-respond if they're the only agent in the room, regardless of how many humans are present.
+1. **Threads with one human** — normal auto-response behavior applies (the agent continues the conversation).
+1. **Threads with two or more humans** — agents stay silent unless explicitly mentioned.
+1. **Mentioning a non-agent user** — if a message tags only humans (not agents), agents stay silent.
 
 #### Bot accounts
 
@@ -140,7 +144,9 @@ Users can always mention agents directly with `@agent_name` to bypass routing.
 
 ## Note on the Router Agent
 
-The router is always present and cannot be disabled. It automatically joins any room with configured agents. If no `router` section is configured, it uses the default model.
+The router is always present and cannot be disabled.
+It automatically joins any room with configured agents or teams.
+If no `router` section is configured, it uses the default model.
 
 The router account is not a conversational AI agent to tag directly.
 If a message mentions only the router and no other users or agents, the router replies with the rules of engagement instead of answering the prompt.

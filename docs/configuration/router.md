@@ -34,11 +34,14 @@ Startup thread prewarm is a background, best-effort cache warmup for rooms alrea
 
 When a message arrives in a room without a specific agent mention:
 
-1. The router checks if there are configured agents in that room
+1. The router checks whether the room has statically configured agents or teams
 2. It analyzes the message content and any recent thread context (up to 3 previous messages)
-3. Based on the available agents' roles, tools, and instructions, it selects the best match
-4. The router posts a message mentioning the selected agent (e.g., "@agent could you help with this?")
-5. The mentioned agent sees the mention and responds in the thread
+3. Based on the candidate entities' roles, tools, and instructions, it selects the best match
+4. The router posts a message mentioning the selected entity (e.g., "@agent could you help with this?")
+5. The mentioned agent or team sees the mention and responds in the thread
+
+For configured rooms, routing candidates come only from `agents.<name>.rooms` and `teams.<name>.rooms`.
+For ad-hoc rooms accepted through invites, routing candidates come from the sender-visible MindRoom agents and teams currently joined to that room.
 
 The router uses a structured output schema to ensure consistent routing decisions, including the agent name and reasoning for the selection.
 
@@ -108,7 +111,8 @@ When the router joins a room, it restores any previously scheduled tasks and pen
 
 ### Single-Agent Optimization
 
-When there's only one agent configured in a room, the router skips AI routing entirely. The single agent handles messages directly, which is faster and more efficient.
+When there is only one eligible responder for a room, the router skips AI routing entirely.
+The single responder handles messages directly, which is faster and more efficient.
 
 ### Multi-Human Thread Protection
 
@@ -144,7 +148,9 @@ Users can always mention agents directly with `@agent_name` to bypass routing.
 
 ## Note on the Router Agent
 
-The router is always present and cannot be disabled. It automatically joins any room with configured agents. If no `router` section is configured, it uses the default model.
+The router is always present and cannot be disabled.
+It automatically joins any room with configured agents or teams.
+If no `router` section is configured, it uses the default model.
 
 The router account is not a conversational AI agent to tag directly.
 If a message mentions only the router and no other users or agents, the router replies with the rules of engagement instead of answering the prompt.

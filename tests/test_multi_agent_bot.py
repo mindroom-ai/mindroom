@@ -7468,7 +7468,11 @@ class TestAgentBot:
             Config(
                 agents={
                     "router": AgentConfig(display_name="Router"),
-                    "general": AgentConfig(display_name="General", thread_mode="room"),
+                    "general": AgentConfig(
+                        display_name="General",
+                        rooms=["!test:localhost"],
+                        thread_mode="room",
+                    ),
                 },
             ),
             tmp_path,
@@ -7511,10 +7515,6 @@ class TestAgentBot:
         assert attachment_record is not None
 
         with (
-            patch(
-                "mindroom.turn_controller.filter_agents_by_sender_permissions",
-                return_value=[config.get_ids(runtime_paths_for(config))["general"]],
-            ),
             patch(
                 "mindroom.turn_controller.suggest_agent_for_message",
                 new_callable=AsyncMock,
@@ -7559,7 +7559,11 @@ class TestAgentBot:
             Config(
                 agents={
                     "router": AgentConfig(display_name="Router"),
-                    "general": AgentConfig(display_name="General", thread_mode="room"),
+                    "general": AgentConfig(
+                        display_name="General",
+                        rooms=["!test:localhost"],
+                        thread_mode="room",
+                    ),
                 },
             ),
             tmp_path,
@@ -7589,10 +7593,6 @@ class TestAgentBot:
         attachment_record.attachment_id = _attachment_id_for_event("$image_route")
 
         with (
-            patch(
-                "mindroom.turn_controller.filter_agents_by_sender_permissions",
-                return_value=[config.get_ids(runtime_paths_for(config))["general"]],
-            ),
             patch(
                 "mindroom.turn_controller.suggest_agent_for_message",
                 new_callable=AsyncMock,

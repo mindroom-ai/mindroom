@@ -55,6 +55,7 @@ from mindroom.dispatch_replay_guard import (
     has_newer_unresponded_in_thread,
 )
 from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
+from mindroom.entity_resolution import configured_routable_entity_ids_for_room
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import build_hook_matrix_admin, hook_ingress_policy, should_handle_interactive_text_response
@@ -89,7 +90,6 @@ from mindroom.response_runner import (
 from mindroom.routing import suggest_agent_for_message
 from mindroom.thread_utils import (
     check_agent_mentioned,
-    get_configured_agents_for_room,
     is_router_only_agent_mention,
     thread_requires_explicit_agent_targeting,
 )
@@ -158,7 +158,7 @@ def _queued_notice_reservation_from_metadata(
     return cast("QueuedHumanNoticeReservation", reservations[0])
 
 
-async def _router_candidate_agents_for_room(
+async def _router_candidate_entities_for_room(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
     sender_id: str,
@@ -166,9 +166,9 @@ async def _router_candidate_agents_for_room(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return router candidates for one room without widening configured rooms."""
-    configured_agents = get_configured_agents_for_room(room.room_id, config, runtime_paths)
-    if configured_agents:
-        return filter_agents_by_sender_permissions(configured_agents, sender_id, config, runtime_paths)
+    configured_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
+    if configured_entities:
+        return filter_agents_by_sender_permissions(configured_entities, sender_id, config, runtime_paths)
     return await get_available_agents_for_sender_authoritative(client, room, sender_id, config, runtime_paths)
 
 
@@ -1189,7 +1189,7 @@ class TurnController:
         assert self.deps.agent_name == ROUTER_AGENT_NAME
 
         permission_sender_id = requester_user_id
-        available_agents = await _router_candidate_agents_for_room(
+        available_agents = await _router_candidate_entities_for_room(
             self._client(),
             room,
             permission_sender_id,

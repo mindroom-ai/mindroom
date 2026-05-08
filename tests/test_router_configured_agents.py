@@ -1,4 +1,4 @@
-"""Test that router only suggests agents configured for the room."""
+"""Test router candidate selection for configured and ad-hoc rooms."""
 
 import tempfile
 from pathlib import Path
@@ -7,11 +7,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from mindroom.authorization import get_available_agents_in_room
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.thread_utils import get_configured_agents_for_room
-from mindroom.turn_controller import _router_candidate_agents_for_room
+from mindroom.turn_controller import _router_candidate_entities_for_room
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
@@ -134,7 +134,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await _router_candidate_agents_for_room(
+        available = await _router_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",
@@ -144,6 +144,52 @@ class TestRouterAgentSelection:
 
         available_names = [mid.agent_name(self.config, runtime_paths) for mid in available]
         assert available_names == ["calculator", "research"]
+        assert "writer" not in available_names
+        client.joined_members.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_router_candidates_keep_team_configured_rooms_static(self) -> None:
+        """Router candidates should not widen rooms configured through teams."""
+        config = self._bind_runtime(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator"),
+                    "writer": AgentConfig(display_name="Writer", rooms=["#writing:localhost"]),
+                },
+                teams={
+                    "ops": TeamConfig(
+                        display_name="Ops Team",
+                        role="Operations team",
+                        agents=["calculator"],
+                        rooms=["#ops:localhost"],
+                    ),
+                },
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
+        )
+        runtime_paths = runtime_paths_for(config)
+        room = MagicMock()
+        room.room_id = "#ops:localhost"
+        room.members_synced = True
+        room.users = {
+            "@mindroom_ops:localhost": None,  # Configured team
+            "@mindroom_writer:localhost": None,  # Present but not configured
+            "@user:localhost": None,
+        }
+        client = AsyncMock()
+        client.joined_members = AsyncMock()
+
+        available = await _router_candidate_entities_for_room(
+            client,
+            room,
+            "@user:localhost",
+            config,
+            runtime_paths,
+        )
+
+        available_names = [mid.agent_name(config, runtime_paths) for mid in available]
+        assert available_names == ["ops"]
         assert "writer" not in available_names
         client.joined_members.assert_not_awaited()
 
@@ -163,7 +209,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await _router_candidate_agents_for_room(
+        available = await _router_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",
@@ -195,7 +241,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await _router_candidate_agents_for_room(
+        available = await _router_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",

@@ -21,22 +21,49 @@ def configured_bot_usernames_for_room(
     runtime_paths: RuntimePaths,
 ) -> set[str]:
     """Return bot username localparts configured for one Matrix room."""
-    configured_bots: set[str] = set()
-
-    for agent_name, agent_config in config.agents.items():
-        resolved_rooms = set(matrix_rooms.resolve_room_aliases(agent_config.rooms, runtime_paths))
-        if room_id in resolved_rooms:
-            configured_bots.add(agent_username_localpart(agent_name, runtime_paths))
-
-    for team_name, team_config in config.teams.items():
-        resolved_rooms = set(matrix_rooms.resolve_room_aliases(team_config.rooms, runtime_paths))
-        if room_id in resolved_rooms:
-            configured_bots.add(agent_username_localpart(team_name, runtime_paths))
+    configured_bots = {
+        agent_username_localpart(entity_name, runtime_paths)
+        for entity_name in _configured_routable_entity_names_for_room(config, room_id, runtime_paths)
+    }
 
     if configured_bots:
         configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths))
 
     return configured_bots
+
+
+def _configured_routable_entity_names_for_room(
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+) -> list[str]:
+    """Return non-router agent and team names statically configured for one room."""
+    configured_names: list[str] = []
+
+    for agent_name, agent_config in config.agents.items():
+        if agent_name == ROUTER_AGENT_NAME:
+            continue
+        resolved_rooms = matrix_rooms.resolve_room_aliases(agent_config.rooms, runtime_paths)
+        if room_id in resolved_rooms:
+            configured_names.append(agent_name)
+
+    for team_name, team_config in config.teams.items():
+        resolved_rooms = matrix_rooms.resolve_room_aliases(team_config.rooms, runtime_paths)
+        if room_id in resolved_rooms:
+            configured_names.append(team_name)
+
+    return configured_names
+
+
+def configured_routable_entity_ids_for_room(
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
+    """Return non-router agent and team IDs statically configured for one room."""
+    configured_names = _configured_routable_entity_names_for_room(config, room_id, runtime_paths)
+    config_ids = entity_matrix_ids(config, runtime_paths)
+    return sorted((config_ids[name] for name in configured_names), key=lambda value: value.full_id)
 
 
 def matrix_domain(runtime_paths: RuntimePaths) -> str:
