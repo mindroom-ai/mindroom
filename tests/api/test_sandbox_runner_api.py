@@ -1168,7 +1168,11 @@ def test_subprocess_python_runtime_payload_omits_credentials_encryption_key(
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+        process_env={
+            runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": "/secrets/google-service-account.json",
+            "GOOGLE_DELEGATED_USER": "workspace-user@example.com",
+        },
     )
     captured_payload: dict[str, object] = {}
 
@@ -1204,6 +1208,8 @@ def test_subprocess_python_runtime_payload_omits_credentials_encryption_key(
 
     assert response.ok is True
     assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert child_runtime.env_value("GOOGLE_SERVICE_ACCOUNT_FILE") is None
+    assert child_runtime.env_value("GOOGLE_DELEGATED_USER") is None
     assert encryption_key not in json.dumps(captured_payload)
 
 
@@ -1215,7 +1221,11 @@ def test_non_execution_tool_runtime_keeps_credentials_encryption_key(tmp_path: P
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key},
+        process_env={
+            runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": "/secrets/google-service-account.json",
+            "GOOGLE_DELEGATED_USER": "workspace-user@example.com",
+        },
     )
     credentials = {"token": "secret", "_source": "ui"}
     get_runtime_credentials_manager(runtime_paths).save_credentials("custom_tool", credentials)
@@ -1232,8 +1242,12 @@ def test_non_execution_tool_runtime_keeps_credentials_encryption_key(tmp_path: P
     )
 
     assert effective_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert effective_runtime.env_value("GOOGLE_SERVICE_ACCOUNT_FILE") == "/secrets/google-service-account.json"
+    assert effective_runtime.env_value("GOOGLE_DELEGATED_USER") == "workspace-user@example.com"
     assert get_runtime_credentials_manager(effective_runtime).load_credentials("custom_tool") == credentials
     assert python_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert python_runtime.env_value("GOOGLE_SERVICE_ACCOUNT_FILE") is None
+    assert python_runtime.env_value("GOOGLE_DELEGATED_USER") is None
     assert get_runtime_credentials_manager(python_runtime).load_credentials("custom_tool") is None
 
 

@@ -64,7 +64,6 @@ from mindroom.tool_system.output_files import (
 )
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.worker_routing import (
-    ResolvedWorkerTarget,
     ToolExecutionIdentity,
     WorkerScope,
     build_worker_target_from_runtime_env,
@@ -338,22 +337,6 @@ def _request_execution_identity(request: SandboxRunnerExecuteRequest) -> ToolExe
     return ToolExecutionIdentity(**request.execution_identity)
 
 
-def _request_worker_target(
-    request: SandboxRunnerExecuteRequest,
-    *,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> ResolvedWorkerTarget:
-    """Resolve the credential scope for one runner-side tool rebuild."""
-    return build_worker_target_from_runtime_env(
-        request.worker_scope,
-        request.routing_agent_name,
-        execution_identity=execution_identity,
-        runtime_paths=runtime_paths,
-        private_agent_names=_request_private_agent_names(request),
-    )
-
-
 def _subprocess_credential_overrides(
     request: SandboxRunnerExecuteRequest,
     *,
@@ -367,10 +350,12 @@ def _subprocess_credential_overrides(
     persisted_credentials = load_scoped_credentials(
         request.tool_name,
         credentials_manager=_runner_credentials_manager(runtime_paths),
-        worker_target=_request_worker_target(
-            request,
+        worker_target=build_worker_target_from_runtime_env(
+            request.worker_scope,
+            request.routing_agent_name,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
+            private_agent_names=_request_private_agent_names(request),
         ),
         allowed_shared_services=(
             config.get_worker_grantable_credentials() if request.worker_scope is not None else None

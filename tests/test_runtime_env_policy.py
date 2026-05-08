@@ -143,6 +143,8 @@ def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_contro
         "MINDROOM_SANDBOX_FUTURE_CONTROL": "future-control",
         "MINDROOM_SHARED_CREDENTIALS_PATH": "/app/storage/.shared_credentials",
         "MATRIX_HOMESERVER": "https://matrix.example.invalid",
+        "GOOGLE_SERVICE_ACCOUNT_FILE": "/secrets/google-service-account.json",
+        "GOOGLE_DELEGATED_USER": "workspace-user@example.com",
     }
 
     result = runtime_env_policy.isolated_worker_runtime_env(env)
@@ -155,6 +157,10 @@ def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_contro
     assert result["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-key"
     assert result["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/storage/.shared_credentials"
     assert result["MATRIX_HOMESERVER"] == "https://matrix.example.invalid"
+    assert "GOOGLE_SERVICE_ACCOUNT_FILE" not in result
+    assert "GOOGLE_DELEGATED_USER" not in result
+    assert runtime_env_policy.is_execution_runtime_process_env_name("GOOGLE_SERVICE_ACCOUNT_FILE")
+    assert runtime_env_policy.is_execution_runtime_process_env_name("GOOGLE_DELEGATED_USER")
 
 
 def test_sandbox_runner_startup_process_env_keeps_ambient_values_and_drops_control() -> None:
