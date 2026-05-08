@@ -47,6 +47,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
+    from mindroom.matrix.cache import ConversationEventCache
+
 
 def _event_cache() -> AsyncMock:
     return make_event_cache_mock()
@@ -61,6 +63,25 @@ async def fetch_thread_history(*args: object, **kwargs: object) -> ThreadHistory
 def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, object]:
     """Call the real threaded edit-content helper directly."""
     return _build_threaded_edit_content_impl(*args, **kwargs)
+
+
+async def _replace_thread(
+    cache: ConversationEventCache,
+    room_id: str,
+    thread_id: str,
+    events: list[dict[str, object]],
+    *,
+    validated_at: float | None = None,
+) -> None:
+    timestamp = time.time() if validated_at is None else validated_at
+    replaced = await cache.replace_thread_if_not_newer(
+        room_id,
+        thread_id,
+        events,
+        fetch_started_at=float("inf"),
+        validated_at=timestamp,
+    )
+    assert replaced
 
 
 class TestThreadHistory:
@@ -2156,7 +2177,7 @@ class TestThreadHistoryCache:
         thread_id: str,
         events: list[dict[str, object]],
     ) -> None:
-        await cache.replace_thread(room_id, thread_id, events)
+        await _replace_thread(cache, room_id, thread_id, events)
 
     @staticmethod
     def _conversation_cache_for_runtime(
@@ -2534,7 +2555,8 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
@@ -2591,7 +2613,8 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
@@ -2648,7 +2671,8 @@ class TestThreadHistoryCache:
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         )
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
@@ -2792,7 +2816,8 @@ class TestThreadHistoryCache:
         client.room_messages = AsyncMock(side_effect=[first_page, second_page])
 
         try:
-            await cache.replace_thread(
+            await _replace_thread(
+                cache,
                 "!room:localhost",
                 "$thread_root",
                 [self._cache_source(root_event), self._cache_source(stale_reply)],
@@ -2871,7 +2896,8 @@ class TestThreadHistoryCache:
         )
 
         try:
-            await cache.replace_thread(
+            await _replace_thread(
+                cache,
                 "!room:localhost",
                 "$thread_root",
                 [self._cache_source(root_event), self._cache_source(stale_reply)],
@@ -3003,7 +3029,8 @@ class TestThreadHistoryCache:
         )
         runtime_started_at = time.time() - 1
 
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(cached_reply)],
@@ -3020,7 +3047,8 @@ class TestThreadHistoryCache:
             "$thread_root",
         )
 
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(cached_reply)],

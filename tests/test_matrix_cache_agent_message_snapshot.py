@@ -64,6 +64,25 @@ async def _read_snapshot(
         await cache.close()
 
 
+async def _replace_thread(
+    cache: ConversationEventCache,
+    room_id: str,
+    thread_id: str,
+    events: list[dict[str, Any]],
+    *,
+    validated_at: float | None = None,
+) -> None:
+    timestamp = time.time() if validated_at is None else validated_at
+    replaced = await cache.replace_thread_if_not_newer(
+        room_id,
+        thread_id,
+        events,
+        fetch_started_at=float("inf"),
+        validated_at=timestamp,
+    )
+    assert replaced
+
+
 @pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message(
     event_cache_factory: Callable[[], ConversationEventCache],
@@ -72,7 +91,8 @@ async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message
     cache = event_cache_factory()
     await cache.initialize()
     try:
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [
@@ -120,7 +140,8 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
     cache = event_cache_factory()
     await cache.initialize()
     try:
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [
@@ -439,7 +460,8 @@ async def test_accessor_accepts_old_thread_cache_without_stale_marker(
     cache = event_cache_factory()
     await cache.initialize()
     try:
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [
@@ -488,7 +510,8 @@ async def test_accessor_reuses_thread_cache_from_prior_bot_run(
     cache = event_cache_factory()
     await cache.initialize()
     try:
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [
@@ -537,7 +560,8 @@ async def test_accessor_rejects_invalidated_thread_cache(
     cache = event_cache_factory()
     await cache.initialize()
     try:
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [
@@ -597,7 +621,8 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
                 ),
             ],
         )
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [

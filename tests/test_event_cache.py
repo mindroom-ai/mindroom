@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -79,6 +80,25 @@ def _set_dispatch_thread_read_timeout(conversation_cache: MatrixConversationCach
             "MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS": str(seconds),
         },
     )
+
+
+async def _replace_thread(
+    cache: ConversationEventCache,
+    room_id: str,
+    thread_id: str,
+    events: list[dict[str, Any]],
+    *,
+    validated_at: float | None = None,
+) -> None:
+    timestamp = time.time() if validated_at is None else validated_at
+    replaced = await cache.replace_thread_if_not_newer(
+        room_id,
+        thread_id,
+        events,
+        fetch_started_at=float("inf"),
+        validated_at=timestamp,
+    )
+    assert replaced
 
 
 def _pending_thread_cache_update_wait_tasks() -> set[asyncio.Task[object]]:
@@ -210,7 +230,7 @@ async def _seed_thread_cache(
     events: list[dict[str, object]],
 ) -> None:
     """Seed one authoritative cached thread snapshot for tests."""
-    await cache.replace_thread(room_id, thread_id, events)
+    await _replace_thread(cache, room_id, thread_id, events)
 
 
 def test_event_cache_normalization_is_backend_neutral() -> None:
@@ -716,7 +736,7 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
     db = await event_cache_module._initialize_event_cache_db(tmp_path / "event_cache.db")
 
     try:
-        await sqlite_event_cache_threads.replace_thread_locked(
+        await sqlite_event_cache_threads._replace_thread_locked(
             db,
             room_id="!room:localhost",
             thread_id="$thread_root",

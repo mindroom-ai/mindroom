@@ -104,6 +104,25 @@ if TYPE_CHECKING:
     from typing import Any
 
 
+async def _replace_thread(
+    cache: matrix_cache.ConversationEventCache,
+    room_id: str,
+    thread_id: str,
+    events: list[dict[str, object]],
+    *,
+    validated_at: float | None = None,
+) -> None:
+    timestamp = time.time() if validated_at is None else validated_at
+    replaced = await cache.replace_thread_if_not_newer(
+        room_id,
+        thread_id,
+        events,
+        fetch_started_at=float("inf"),
+        validated_at=timestamp,
+    )
+    assert replaced
+
+
 def _load_sync_token_value(storage_path: Path, agent_name: str) -> str | None:
     token_record = load_sync_token_record(storage_path, agent_name)
     if token_record is None:
@@ -435,7 +454,8 @@ async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_rac
         next_batch="s_initial",
     )
     cached_validated_at = time.time()
-    await event_cache.replace_thread(
+    await _replace_thread(
+        event_cache,
         room_id,
         thread_id,
         [root_event.source, old_reply.source],
@@ -1730,7 +1750,8 @@ class TestMatrixConversationCacheThreadReads:
         )
 
         try:
-            await event_cache.replace_thread(
+            await _replace_thread(
+                event_cache,
                 "!test:localhost",
                 "$thread:localhost",
                 [root_event, stale_reply_event],
@@ -2471,7 +2492,8 @@ class TestThreadingBehavior:
         assert bot.event_cache
 
         try:
-            await bot.event_cache.replace_thread(
+            await _replace_thread(
+                bot.event_cache,
                 "!test:localhost",
                 "$thread_root:localhost",
                 [
@@ -3102,7 +3124,8 @@ class TestThreadingBehavior:
         assert bot.event_cache
 
         try:
-            await bot.event_cache.replace_thread(
+            await _replace_thread(
+                bot.event_cache,
                 "!test:localhost",
                 "$thread_root:localhost",
                 [
@@ -6002,7 +6025,8 @@ class TestThreadingBehavior:
 
         try:
             prewarm_fetch_started_at = time.time()
-            await event_cache.replace_thread(
+            await _replace_thread(
+                event_cache,
                 room_id,
                 thread_id,
                 [new_root_event.source, new_reply_event.source],
@@ -6550,7 +6574,8 @@ class TestThreadingBehavior:
                 coordinator=coordinator,
             ),
         )
-        await event_cache.replace_thread(
+        await _replace_thread(
+            event_cache,
             room_id,
             thread_id,
             [root_event.source, old_reply.source],
@@ -6687,7 +6712,8 @@ class TestThreadingBehavior:
             next_batch="s_initial",
         )
         cached_validated_at = time.time()
-        await event_cache.replace_thread(
+        await _replace_thread(
+            event_cache,
             room_id,
             thread_id,
             [root_event.source, old_reply.source],

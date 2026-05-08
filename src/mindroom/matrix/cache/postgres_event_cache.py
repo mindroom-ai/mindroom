@@ -1006,29 +1006,6 @@ class PostgresEventCache:
             ),
         )
 
-    async def replace_thread(
-        self,
-        room_id: str,
-        thread_id: str,
-        events: list[dict[str, Any]],
-        *,
-        validated_at: float | None = None,
-    ) -> None:
-        """Atomically replace one cached thread snapshot."""
-        await self._write_operation(
-            room_id,
-            operation="replace_thread",
-            disabled_result=None,
-            writer=lambda db: postgres_event_cache_threads.replace_thread_locked(
-                db,
-                namespace=self._runtime.namespace,
-                room_id=room_id,
-                thread_id=thread_id,
-                events=events,
-                validated_at=time.time() if validated_at is None else validated_at,
-            ),
-        )
-
     async def replace_thread_if_not_newer(
         self,
         room_id: str,
