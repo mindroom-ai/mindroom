@@ -5151,7 +5151,9 @@ async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) 
             },
         ),
     )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=[])
+    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        return_value=ThreadHistoryResult([], is_full_history=False),
+    )
 
     should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
         room,

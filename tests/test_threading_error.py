@@ -1427,6 +1427,42 @@ class TestMatrixConversationCacheThreadReads:
         assert [message.event_id for message in second_history] == ["$thread_root"]
         assert mock_read_thread.await_count == 2
 
+    @pytest.mark.asyncio
+    async def test_turn_scope_does_not_memoize_degraded_snapshot_thread_reads(self) -> None:
+        """A degraded dispatch snapshot should not block a later retry in the same turn."""
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=_make_client_mock(), event_cache=_runtime_event_cache()),
+        )
+        degraded_snapshot = thread_history_result(
+            [],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
+            },
+        )
+        recovered_snapshot = thread_history_result(
+            [_message(event_id="$thread_root", body="Root")],
+            is_full_history=False,
+            diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE},
+        )
+
+        with patch.object(
+            access._reads,
+            "read_thread",
+            new=AsyncMock(side_effect=[degraded_snapshot, recovered_snapshot]),
+        ) as mock_read_thread:
+            async with access.turn_scope():
+                first_history = await access.get_dispatch_thread_snapshot("!test:localhost", "$thread_root")
+                second_history = await access.get_dispatch_thread_snapshot("!test:localhost", "$thread_root")
+
+        assert first_history.diagnostics[THREAD_HISTORY_DEGRADED_DIAGNOSTIC] is True
+        assert second_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        assert [message.event_id for message in second_history] == ["$thread_root"]
+        assert mock_read_thread.await_count == 2
+
     def test_collect_sync_timeline_cache_updates_treats_reference_as_thread_candidate(self) -> None:
         """Sync bookkeeping should classify references alongside other thread-affecting relations."""
         room_threaded_events: dict[str, list[dict[str, object]]] = {}

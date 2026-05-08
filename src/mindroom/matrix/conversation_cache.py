@@ -32,6 +32,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import (
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
@@ -438,6 +439,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         mode: ThreadReadMode,
     ) -> bool:
         """Return whether one read is complete enough to reuse later in this turn."""
+        if is_thread_history_degraded(result):
+            return False
         return not mode.full_history or result.is_full_history
 
     async def _read_thread_memoized(
