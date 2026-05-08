@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.message_target import MessageTarget
 
@@ -13,7 +14,6 @@ if TYPE_CHECKING:
 
     from mindroom.conversation_resolver import MessageContext
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.event_info import EventInfo
 
 
 @dataclass(frozen=True)
@@ -26,16 +26,30 @@ class DispatchThreadContext:
     requires_model_history_refresh: bool
     replay_guard_history: Sequence[ResolvedVisibleMessage]
     replay_guard_degraded: bool
-    candidate_event_info: EventInfo | None = None
 
 
 def planning_history_for(
     thread_history: Sequence[ResolvedVisibleMessage],
 ) -> tuple[ResolvedVisibleMessage, ...]:
     """Return history only when it is complete enough for policy decisions."""
-    if is_thread_history_degraded(thread_history):
+    if not isinstance(thread_history, ThreadHistoryResult):
+        return ()
+    if not thread_history.is_full_history or is_thread_history_degraded(thread_history):
         return ()
     return tuple(thread_history)
+
+
+def planning_history_unavailable_for(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    requires_model_history_refresh: bool,
+) -> bool:
+    """Return whether hidden planning history is unavailable rather than known empty."""
+    if is_thread_history_degraded(thread_history):
+        return True
+    if isinstance(thread_history, ThreadHistoryResult):
+        return not thread_history.is_full_history
+    return requires_model_history_refresh or bool(thread_history)
 
 
 def room_level_target(target: MessageTarget) -> MessageTarget:
@@ -53,7 +67,8 @@ def context_with_dispatch_thread_context(
     thread_context: DispatchThreadContext,
 ) -> MessageContext:
     """Return ``context`` with finalized stable thread state from dispatch evidence."""
-    stable_thread_id = thread_context.stable_target.source_thread_id
+    source_thread_id = thread_context.stable_target.source_thread_id
+    stable_thread_id = None if source_thread_id == thread_context.stable_target.reply_to_event_id else source_thread_id
     return replace(
         context,
         is_thread=stable_thread_id is not None,

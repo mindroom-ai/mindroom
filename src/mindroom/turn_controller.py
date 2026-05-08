@@ -1557,8 +1557,8 @@ class TurnController:
         event: nio.RoomMessageText,
     ) -> None:
         """Handle one text message inside the per-turn conversation lookup scope."""
-        ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
         event_info = EventInfo.from_event(event.source)
+        ingress_thread_id = None if event_info.is_edit else await self.deps.resolver.coalescing_thread_id(room, event)
         if not isinstance(event.body, str):
             return
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
@@ -1840,7 +1840,7 @@ class TurnController:
                     room,
                     route_event,
                     dispatch.context.thread_history,
-                    dispatch.context.thread_id,
+                    dispatch.target.resolved_thread_id,
                     **routing_kwargs,
                 )
                 return
@@ -1853,12 +1853,7 @@ class TurnController:
             matrix_run_metadata = self.deps.turn_store.build_run_metadata(handled_turn)
 
             async def build_payload(context: MessageContext) -> DispatchPayload:
-                effective_thread_id = self.deps.resolver.build_message_target(
-                    room_id=room.room_id,
-                    thread_id=context.thread_id,
-                    reply_to_event_id=event.event_id,
-                    event_source=event.source,
-                ).resolved_thread_id
+                effective_thread_id = dispatch.target.resolved_thread_id
                 media_attachment_ids: list[str] = []
                 fallback_images: list[Image] | None = None
                 if media_events:

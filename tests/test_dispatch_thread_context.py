@@ -45,12 +45,12 @@ def test_planning_history_for_hides_degraded_history() -> None:
     assert planning_history_for(history) == ()
 
 
-def test_planning_history_for_keeps_healthy_partial_history() -> None:
-    """Healthy dispatch snapshots are policy-visible even when they are not full history."""
+def test_planning_history_for_hides_healthy_partial_history() -> None:
+    """Healthy dispatch snapshots can prove targets but are not policy-grade history."""
     message = _message("$event:localhost")
     history = thread_history_result([message], is_full_history=False)
 
-    assert planning_history_for(history) == (message,)
+    assert planning_history_for(history) == ()
 
 
 def test_planning_history_for_keeps_complete_history() -> None:
@@ -59,6 +59,23 @@ def test_planning_history_for_keeps_complete_history() -> None:
     history = thread_history_result([message], is_full_history=True)
 
     assert planning_history_for(history) == (message,)
+
+
+def test_message_context_marks_partial_planning_history_unavailable() -> None:
+    """Partial thread context must fail closed instead of behaving like an empty thread."""
+    message = _message("$event:localhost")
+    context = MessageContext(
+        am_i_mentioned=False,
+        is_thread=True,
+        thread_id="$thread:localhost",
+        thread_history=thread_history_result([message], is_full_history=False),
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+        requires_model_history_refresh=True,
+    )
+
+    assert context.planning_thread_history == ()
+    assert context.planning_thread_history_unavailable is True
 
 
 def test_room_level_target_strips_source_and_resolved_thread_ids() -> None:
@@ -104,3 +121,30 @@ def test_context_with_dispatch_thread_context_propagates_replay_guard_history() 
     assert stabilized.thread_history == (thread_message,)
     assert stabilized.replay_guard_history == (replay_message,)
     assert stabilized.requires_model_history_refresh is True
+
+
+def test_context_with_dispatch_thread_context_hides_new_root_target_from_policy() -> None:
+    """A new root delivery target is not existing thread context for policy."""
+    context = MessageContext(
+        am_i_mentioned=False,
+        is_thread=False,
+        thread_id=None,
+        thread_history=(),
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+    )
+    dispatch_context = DispatchThreadContext(
+        stable_target=MessageTarget.resolve("!room:localhost", "$event:localhost", "$event:localhost"),
+        candidate_thread_root_id=None,
+        thread_history=thread_history_result([_message("$event:localhost")], is_full_history=False),
+        requires_model_history_refresh=True,
+        replay_guard_history=(),
+        replay_guard_degraded=False,
+    )
+
+    stabilized = context_with_dispatch_thread_context(context, dispatch_context)
+
+    assert stabilized.is_thread is False
+    assert stabilized.thread_id is None
+    assert stabilized.thread_history == []
+    assert stabilized.requires_model_history_refresh is False

@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping, MutableMapping
 from contextlib import ExitStack, contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,8 +24,9 @@ import mindroom.bot  # noqa: F401
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.conversation_resolver import _DispatchContextResult
+from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
+from mindroom.dispatch_thread_context import DispatchThreadContext
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.interactive import InteractiveMetadata
@@ -95,9 +96,17 @@ RuntimeBot = AgentBot | TeamBot
 TestFunction = Callable[..., object]
 
 
-def dispatch_context_result(context: object) -> _DispatchContextResult:
+@dataclass(frozen=True)
+class DispatchContextResultForTest:
+    """Stable dispatch extraction result shape for tests that mock the resolver."""
+
+    context: MessageContext
+    thread_context: DispatchThreadContext | None = None
+
+
+def dispatch_context_result(context: MessageContext) -> DispatchContextResultForTest:
     """Wrap a stable message context in the dispatch extraction result shape."""
-    return _DispatchContextResult(context=context, thread_context=None)  # type: ignore[arg-type]
+    return DispatchContextResultForTest(context=context)
 
 
 def requires_linux(

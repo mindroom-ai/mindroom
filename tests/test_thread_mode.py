@@ -20,7 +20,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.conversation_resolver import MessageContext, _DispatchContextResult
+from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
@@ -41,6 +41,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_event,
+    dispatch_context_result,
     install_runtime_cache_support,
     install_send_response_mock,
     make_conversation_cache_mock,
@@ -789,7 +790,7 @@ class TestExtractMessageContextRoomMode:
             requires_model_history_refresh=True,
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=_DispatchContextResult(context=context, thread_context=None),
+            return_value=dispatch_context_result(context),
         )
         bot._conversation_resolver.extract_message_context = AsyncMock(return_value=context)
         bot._conversation_resolver.extract_message_context_impl = AsyncMock(return_value=context)

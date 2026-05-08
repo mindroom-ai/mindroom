@@ -58,7 +58,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.conversation_resolver import MessageContext, _DispatchContextResult
+from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     FinalDeliveryRequest,
@@ -134,6 +134,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    dispatch_context_result,
     drain_coalescing,
     install_edit_message_mock,
     install_generate_response_mock,
@@ -632,11 +633,6 @@ def _visible_message(
         timestamp=timestamp,
         content=content,
     )
-
-
-def _dispatch_context_result(context: MessageContext) -> _DispatchContextResult:
-    """Wrap a stable message context for tests that bypass dispatch resolution."""
-    return _DispatchContextResult(context=context, thread_context=None)
 
 
 def _room_image_event(
@@ -6747,7 +6743,7 @@ class TestAgentBot:
             is_full_history=True,
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=_dispatch_context_result(
+            return_value=dispatch_context_result(
                 MessageContext(
                     am_i_mentioned=False,
                     is_thread=True,
@@ -7265,7 +7261,7 @@ class TestAgentBot:
             room,
             event,
             [],
-            None,
+            "$img_route",
             message="[Attached image]",
             requester_user_id="@user:localhost",
             extra_content={"com.mindroom.original_sender": "@user:localhost"},
@@ -7899,7 +7895,7 @@ class TestAgentBot:
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_calculator:localhost")
 
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=_dispatch_context_result(
+            return_value=dispatch_context_result(
                 MessageContext(
                     am_i_mentioned=True,
                     is_thread=True,
@@ -8604,26 +8600,29 @@ class TestAgentBot:
             am_i_mentioned=False,
             is_thread=True,
             thread_id="$thread",
-            thread_history=[
-                ResolvedVisibleMessage(
-                    sender=ids[ROUTER_AGENT_NAME].full_id,
-                    body="routing",
-                    timestamp=1,
-                    event_id="$router",
-                    content={"body": "routing"},
-                    thread_id="$thread",
-                    latest_event_id="$router",
-                ),
-                ResolvedVisibleMessage(
-                    sender=bot.matrix_id.full_id,
-                    body="working",
-                    timestamp=2,
-                    event_id="$agent",
-                    content={"body": "working"},
-                    thread_id="$thread",
-                    latest_event_id="$agent",
-                ),
-            ],
+            thread_history=ThreadHistoryResult(
+                [
+                    ResolvedVisibleMessage(
+                        sender=ids[ROUTER_AGENT_NAME].full_id,
+                        body="routing",
+                        timestamp=1,
+                        event_id="$router",
+                        content={"body": "routing"},
+                        thread_id="$thread",
+                        latest_event_id="$router",
+                    ),
+                    ResolvedVisibleMessage(
+                        sender=bot.matrix_id.full_id,
+                        body="working",
+                        timestamp=2,
+                        event_id="$agent",
+                        content={"body": "working"},
+                        thread_id="$thread",
+                        latest_event_id="$agent",
+                    ),
+                ],
+                is_full_history=True,
+            ),
             mentioned_agents=[],
             has_non_agent_mentions=False,
         )
@@ -8923,11 +8922,11 @@ class TestAgentBot:
         mock_should_respond.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_resolve_response_action_uses_healthy_partial_thread_history_for_policy(
+    async def test_resolve_response_action_skips_unmentioned_thread_when_policy_history_partial(
         self,
         tmp_path: Path,
     ) -> None:
-        """Healthy dispatch snapshots should still enforce multi-human thread targeting."""
+        """Partial policy history should fail closed instead of behaving like complete context."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -8967,31 +8966,25 @@ class TestAgentBot:
                         thread_id="$thread",
                         latest_event_id="$m1",
                     ),
-                    ResolvedVisibleMessage(
-                        sender="@maciej:localhost",
-                        body="Follow-up",
-                        timestamp=2,
-                        event_id="$m2",
-                        content={"body": "Follow-up"},
-                        thread_id="$thread",
-                        latest_event_id="$m2",
-                    ),
                 ],
                 is_full_history=False,
             ),
             mentioned_agents=[],
             has_non_agent_mentions=False,
+            requires_model_history_refresh=True,
         )
 
-        action = await bot._turn_policy.resolve_response_action(
-            context,
-            room,
-            "@bas:localhost",
-            "Follow-up",
-            False,
-        )
+        with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
+            action = await bot._turn_policy.resolve_response_action(
+                context,
+                room,
+                "@bas:localhost",
+                "Follow-up",
+                False,
+            )
 
         assert action.kind == "skip"
+        mock_should_respond.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_skips_unmentioned_thread_when_policy_history_degraded(
@@ -9080,8 +9073,15 @@ class TestAgentBot:
             password=TEST_PASSWORD,
         )
         bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        ids = config.get_ids(runtime_paths_for(config))
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.users = {
+            ids["calculator"].full_id: MagicMock(),
+            ids["general"].full_id: MagicMock(),
+            ids[ROUTER_AGENT_NAME].full_id: MagicMock(),
+            "@bas:localhost": MagicMock(),
+        }
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$event"
         event.body = "Follow-up"
@@ -9112,6 +9112,68 @@ class TestAgentBot:
             context=context,
             target=MessageTarget.resolve(room.room_id, "$thread", event.event_id),
             correlation_id="corr-degraded-router-policy",
+            envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id),
+        )
+
+        plan = await bot._turn_policy.plan_router_dispatch(room, event, dispatch)
+
+        assert plan == _DispatchPlan(kind="ignore", ignore_reason="router")
+
+    @pytest.mark.asyncio
+    async def test_router_skips_unmentioned_thread_when_policy_history_partial(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Partial policy history should not let the router claim a thread."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password=TEST_PASSWORD,
+        )
+        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$event"
+        event.body = "Follow-up"
+        context = MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread",
+            thread_history=thread_history_result(
+                [
+                    ResolvedVisibleMessage(
+                        sender="@bas:localhost",
+                        body="Follow-up",
+                        timestamp=1,
+                        event_id="$m1",
+                        content={"body": "Follow-up"},
+                        thread_id="$thread",
+                        latest_event_id="$m1",
+                    ),
+                ],
+                is_full_history=False,
+            ),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+            requires_model_history_refresh=True,
+        )
+        dispatch = PreparedDispatch(
+            requester_user_id="@bas:localhost",
+            context=context,
+            target=MessageTarget.resolve(room.room_id, "$thread", event.event_id),
+            correlation_id="corr-partial-router-policy",
             envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id),
         )
 
@@ -9395,7 +9457,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Planning should use the snapshot while payload preparation refreshes incomplete history."""
+        """Planning should hide partial history while payload preparation refreshes it."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -9457,7 +9519,8 @@ class TestAgentBot:
         async def fake_plan(*_args: object, **_kwargs: object) -> _DispatchPlan:
             call_order.append("action")
             assert list(dispatch.context.thread_history) == snapshot_history
-            assert dispatch.context.planning_thread_history == tuple(snapshot_history)
+            assert dispatch.context.planning_thread_history == ()
+            assert dispatch.context.planning_thread_history_unavailable is True
             return _DispatchPlan(
                 kind="respond",
                 response_action=ResponseAction(kind="individual"),

@@ -238,7 +238,7 @@ async def resolve_related_event_thread_membership(
         try:
             related_event_info = await access.fetch_event_info(room_id, current_event_id)
         except Exception as exc:
-            resolution = ThreadResolution.indeterminate(exc)
+            resolution = ThreadResolution.indeterminate(exc, candidate_thread_root_id=current_event_id)
             break
         if related_event_info is None:
             break

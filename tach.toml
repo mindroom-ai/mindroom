@@ -2337,6 +2337,7 @@ expose = [
     "DispatchThreadContext",
     "context_with_dispatch_thread_context",
     "planning_history_for",
+    "planning_history_unavailable_for",
     "room_level_target",
 ]
 from = ["mindroom.dispatch_thread_context"]

@@ -1731,7 +1731,7 @@ class TestRouterSkipsSingleAgent:
         assert routed_event.body == event.body
         assert routed_event.source == event.source
         assert routed_call.args[2] == []
-        assert routed_call.args[3] is None
+        assert routed_call.args[3] == "$event123"
         assert routed_call.kwargs == {
             "message": None,
             "requester_user_id": "@user:localhost",

@@ -68,11 +68,13 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadResolution,
+    ThreadResolutionState,
     ThreadRootProof,
     _resolve_related_event_thread_id,
     _snapshot_thread_membership_access,
     resolve_event_thread_id,
     resolve_related_event_thread_id_best_effort,
+    resolve_related_event_thread_membership,
     room_scan_thread_membership_access,
 )
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
@@ -4592,6 +4594,37 @@ class TestThreadingBehavior:
         assert resolved_thread_id is None
 
     @pytest.mark.asyncio
+    async def test_related_thread_resolution_preserves_candidate_when_event_lookup_fails(
+        self,
+    ) -> None:
+        """Lookup failures should preserve the related event as an indeterminate candidate."""
+        room_id = "!test:localhost"
+        related_event_id = "$related:localhost"
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, _event_id: str) -> EventInfo | None:
+            msg = "lookup unavailable"
+            raise RuntimeError(msg)
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
+            return ThreadRootProof.not_a_thread_root()
+
+        resolution = await resolve_related_event_thread_membership(
+            room_id,
+            related_event_id,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.INDETERMINATE
+        assert resolution.candidate_thread_root_id == related_event_id
+
+    @pytest.mark.asyncio
     async def test_best_effort_related_thread_resolution_degrades_when_root_proof_fails(
         self,
     ) -> None:
@@ -9055,6 +9088,46 @@ class TestThreadingBehavior:
         )
 
     @pytest.mark.asyncio
+    async def test_dispatch_related_lookup_failure_keeps_candidate_root(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """Related-event lookup failures should demote while keeping the candidate root for dispatch."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        room.name = "Test Room"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply to maybe-root",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$maybe_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot._conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot", AsyncMock()) as mock_read,
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+
+        assert context_result.thread_context is not None
+        assert context_result.thread_context.candidate_thread_root_id == "$maybe_root:localhost"
+        assert context_result.thread_context.stable_target.source_thread_id is None
+        assert context_result.thread_context.stable_target.resolved_thread_id is None
+        assert context_result.thread_context.replay_guard_degraded is True
+        assert context_result.context.is_thread is False
+        assert context_result.context.thread_id is None
+        mock_read.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_dispatch_new_root_target_does_not_become_existing_thread_context(
         self,
         bot: AgentBot,
@@ -9230,11 +9303,11 @@ class TestThreadingBehavior:
         assert observed_targets[0].resolved_thread_id is None
 
     @pytest.mark.asyncio
-    async def test_partial_dispatch_snapshot_is_policy_visible_history(
+    async def test_partial_dispatch_snapshot_is_not_policy_grade_history(
         self,
         bot: AgentBot,
     ) -> None:
-        """Healthy partial dispatch snapshots should be visible to planning before model refresh."""
+        """Healthy partial dispatch snapshots can prove targets but not planning context."""
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
         room.name = "Test Room"
@@ -9268,7 +9341,8 @@ class TestThreadingBehavior:
             observed_policy_targets.append(dispatch.target)
             assert dispatch.context.is_thread is True
             assert dispatch.context.thread_id == "$thread_root:localhost"
-            assert dispatch.context.planning_thread_history == tuple(partial_history)
+            assert dispatch.context.planning_thread_history == ()
+            assert dispatch.context.planning_thread_history_unavailable is True
             return _DispatchPlan(kind="ignore")
 
         with (
@@ -9427,6 +9501,35 @@ class TestThreadingBehavior:
             event_id=event.event_id,
             access=access,
         )
+
+    @pytest.mark.asyncio
+    async def test_coalescing_thread_id_keeps_lookup_failure_candidate(self, bot: AgentBot) -> None:
+        """Lookup-failed plain replies should still coalesce by candidate root."""
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$maybe_root:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot._conversation_cache, "get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
+        ):
+            thread_id = await resolver.coalescing_thread_id(room, event)
+
+        assert thread_id == "$maybe_root:localhost"
 
     @pytest.mark.asyncio
     async def test_full_history_thread_resolution_uses_full_history_to_prove_root(

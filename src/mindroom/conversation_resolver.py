@@ -17,6 +17,7 @@ from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
     context_with_dispatch_thread_context,
     planning_history_for,
+    planning_history_unavailable_for,
     room_level_target,
 )
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
@@ -137,7 +138,10 @@ class MessageContext:
     @property
     def planning_thread_history_unavailable(self) -> bool:
         """Return whether thread policy history degraded and must not be treated as empty."""
-        return self.is_thread and is_thread_history_degraded(self.thread_history)
+        return self.is_thread and planning_history_unavailable_for(
+            self.thread_history,
+            requires_model_history_refresh=self.requires_model_history_refresh,
+        )
 
     @property
     def replay_guard_history_degraded(self) -> bool:
@@ -151,7 +155,6 @@ class _ThreadIdLookup:
 
     thread_id: str | None
     candidate_thread_root_id: str | None = None
-    candidate_event_info: EventInfo | None = None
     thread_history: ThreadReadResult | None = None
 
 
@@ -166,7 +169,6 @@ class _ThreadContextLookup:
     candidate_thread_root_id: str | None = None
     replay_guard_history: Sequence[ResolvedVisibleMessage] = field(default_factory=tuple)
     replay_guard_degraded: bool = False
-    candidate_event_info: EventInfo | None = None
 
     @classmethod
     def room_level(cls) -> _ThreadContextLookup:
@@ -182,7 +184,6 @@ class _ThreadContextLookup:
     def unproven_candidate_without_history(
         cls,
         candidate_thread_root_id: str,
-        candidate_event_info: EventInfo | None,
     ) -> _ThreadContextLookup:
         """Return a room-level demotion when candidate proof produced no reusable history."""
         return cls(
@@ -193,7 +194,6 @@ class _ThreadContextLookup:
             candidate_thread_root_id=candidate_thread_root_id,
             replay_guard_history=[],
             replay_guard_degraded=True,
-            candidate_event_info=candidate_event_info,
         )
 
     @classmethod
@@ -201,7 +201,6 @@ class _ThreadContextLookup:
         cls,
         candidate_thread_root_id: str,
         candidate_history: Sequence[ResolvedVisibleMessage],
-        candidate_event_info: EventInfo | None,
     ) -> _ThreadContextLookup:
         """Return a room-level demotion that keeps candidate history only for replay safety."""
         return cls(
@@ -212,25 +211,13 @@ class _ThreadContextLookup:
             candidate_thread_root_id=candidate_thread_root_id,
             replay_guard_history=candidate_history,
             replay_guard_degraded=is_thread_history_degraded(candidate_history),
-            candidate_event_info=candidate_event_info,
         )
-
-    @classmethod
-    def candidate_proven_as_thread(
-        cls,
-        thread_id: str,
-        history: ThreadReadResult,
-        candidate_event_info: EventInfo | None,
-    ) -> _ThreadContextLookup:
-        """Return a candidate root that was proven to be an existing thread."""
-        return cls.proven_thread(thread_id, history, candidate_event_info)
 
     @classmethod
     def proven_thread(
         cls,
         thread_id: str,
         history: ThreadReadResult,
-        candidate_event_info: EventInfo | None,
     ) -> _ThreadContextLookup:
         """Return a proven thread context with model and replay history."""
         return cls(
@@ -240,7 +227,6 @@ class _ThreadContextLookup:
             requires_model_history_refresh=not history.is_full_history,
             replay_guard_history=history,
             replay_guard_degraded=is_thread_history_degraded(history),
-            candidate_event_info=candidate_event_info,
         )
 
 
@@ -498,6 +484,7 @@ class ConversationResolver:
                 ),
             )
         except Exception as exc:
+            # Coalescing is only a batching optimization; any membership failure must fail open.
             self.deps.logger.debug(
                 "Failed to resolve coalescing thread id; continuing room-level",
                 room_id=room.room_id,
@@ -546,7 +533,6 @@ class ConversationResolver:
             return _ThreadIdLookup(
                 thread_id=None,
                 candidate_thread_root_id=resolution.candidate_thread_root_id,
-                candidate_event_info=event_info,
                 thread_history=thread_history,
             )
         return _ThreadIdLookup(thread_id=None, thread_history=thread_history)
@@ -699,18 +685,16 @@ class ConversationResolver:
             if candidate_history is None:
                 return _ThreadContextLookup.unproven_candidate_without_history(
                     thread_lookup.candidate_thread_root_id,
-                    thread_lookup.candidate_event_info,
                 )
             if _thread_history_proves_root(thread_lookup.candidate_thread_root_id, candidate_history):
-                return _ThreadContextLookup.candidate_proven_as_thread(
+                # Candidate history with children proves this candidate is an existing thread.
+                return _ThreadContextLookup.proven_thread(
                     thread_lookup.candidate_thread_root_id,
                     candidate_history,
-                    thread_lookup.candidate_event_info,
                 )
             return _ThreadContextLookup.unproven_candidate_demoted(
                 thread_lookup.candidate_thread_root_id,
                 candidate_history,
-                thread_lookup.candidate_event_info,
             )
 
         thread_messages = thread_lookup.thread_history
@@ -724,7 +708,6 @@ class ConversationResolver:
         return _ThreadContextLookup.proven_thread(
             thread_id,
             thread_messages,
-            thread_lookup.candidate_event_info,
         )
 
     async def extract_dispatch_context(
@@ -922,7 +905,6 @@ class ConversationResolver:
                     requires_model_history_refresh=thread_lookup.requires_model_history_refresh,
                     replay_guard_history=thread_lookup.replay_guard_history,
                     replay_guard_degraded=thread_lookup.replay_guard_degraded,
-                    candidate_event_info=thread_lookup.candidate_event_info,
                 )
 
         context = MessageContext(
