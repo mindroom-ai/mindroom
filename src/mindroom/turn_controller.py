@@ -113,7 +113,6 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.dispatch_thread_context import DispatchThreadContext
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -179,14 +178,6 @@ class _PrecheckedEvent[T]:
 
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
 type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
-
-
-@dataclass(frozen=True)
-class _PreparedDispatchResult:
-    """Turn-controller-local dispatch plus evidence needed after policy planning."""
-
-    dispatch: PreparedDispatch
-    thread_context: DispatchThreadContext | None
 
 
 @dataclass(frozen=True)
@@ -607,10 +598,22 @@ class TurnController:
         if thread_id is None:
             return False
 
-        thread_history = await self.deps.resolver.dispatch_thread_snapshot_for_router_pre_ingress_skip(
-            room.room_id,
-            thread_id,
-        )
+        try:
+            thread_history = await self.deps.conversation_cache.get_dispatch_thread_snapshot(
+                room.room_id,
+                thread_id,
+                caller_label="router_pre_ingress_skip",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.deps.logger.warning(
+                "Router pre-ingress skip ignored thread snapshot failure",
+                room_id=room.room_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+            return False
         if thread_history is None:
             return False
         return thread_requires_explicit_agent_targeting(
@@ -829,7 +832,7 @@ class TurnController:
         ingress_metadata: DispatchIngressMetadata | None = None,
         payload_metadata: DispatchPayloadMetadata | None = None,
         use_command_context: bool = False,
-    ) -> _PreparedDispatchResult | None:
+    ) -> PreparedDispatch | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         extract_context_start = time.monotonic()
         if use_command_context:
@@ -938,15 +941,12 @@ class TurnController:
             )
             return None
 
-        return _PreparedDispatchResult(
-            dispatch=PreparedDispatch(
-                requester_user_id=requester_user_id,
-                context=context,
-                target=target,
-                correlation_id=correlation_id,
-                envelope=envelope,
-            ),
-            thread_context=thread_context,
+        return PreparedDispatch(
+            requester_user_id=requester_user_id,
+            context=context,
+            target=target,
+            correlation_id=correlation_id,
+            envelope=envelope,
         )
 
     async def _execute_command(
@@ -1713,7 +1713,7 @@ class TurnController:
             command = None
             if not media_events and (ingress_metadata is None or ingress_metadata.source_kind != "voice"):
                 command = command_parser.parse(event.body)
-            prepared_dispatch = await self._prepare_dispatch(
+            dispatch = await self._prepare_dispatch(
                 room,
                 event,
                 requester_user_id,
@@ -1725,10 +1725,8 @@ class TurnController:
             )
             if dispatch_timing is not None:
                 dispatch_timing.mark("dispatch_prepare_ready")
-            if prepared_dispatch is None:
+            if dispatch is None:
                 return
-            dispatch = prepared_dispatch.dispatch
-            thread_context = prepared_dispatch.thread_context
             handled_turn = handled_turn.with_request_context(
                 requester_id=dispatch.requester_user_id,
                 correlation_id=dispatch.correlation_id,
@@ -1766,24 +1764,13 @@ class TurnController:
             router_extra_content = dict(message_extra_content)
             if media_events and ORIGINAL_SENDER_KEY not in router_extra_content:
                 router_extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
-            replay_guard_history = (
-                thread_context.replay_guard_history
-                if thread_context is not None
-                else dispatch.context.replay_guard_history
-            )
-            replay_guard_degraded = (
-                thread_context.replay_guard_degraded
-                if thread_context is not None
-                else dispatch.context.replay_guard_history_degraded
-            )
+            replay_guard_history = dispatch.context.replay_guard_history
+            replay_guard_degraded = dispatch.context.replay_guard_history_degraded
             replay_guard_skips_turn = False
             if replay_guard_degraded:
-                if thread_context is not None:
-                    degraded_replay_thread_id = (
-                        thread_context.stable_target.resolved_thread_id or thread_context.candidate_thread_root_id
-                    )
-                else:
-                    degraded_replay_thread_id = dispatch.target.resolved_thread_id
+                degraded_replay_thread_id = (
+                    dispatch.context.replay_guard_thread_id or dispatch.target.resolved_thread_id
+                )
                 replay_guard_skips_turn = await self._has_newer_unresponded_cached_thread_event(
                     room_id=room.room_id,
                     event=event,

@@ -66,7 +66,6 @@ from tests.conftest import (
     install_generate_response_mock,
     install_send_response_mock,
     make_matrix_client_mock,
-    prepared_dispatch_result,
     replace_turn_controller_deps,
     runtime_paths_for,
     test_runtime_paths,
@@ -2899,7 +2898,7 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(
@@ -3063,7 +3062,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
@@ -3120,7 +3119,7 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -3184,7 +3183,7 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
@@ -3243,7 +3242,7 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -3307,7 +3306,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -3355,7 +3354,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -3405,7 +3404,7 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", new=newer_mock),
@@ -3447,7 +3446,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(
@@ -3751,7 +3750,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
@@ -3801,7 +3800,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
@@ -3860,7 +3859,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
@@ -3911,7 +3910,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
@@ -3964,7 +3963,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
@@ -4017,7 +4016,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
@@ -4061,7 +4060,7 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
@@ -4101,7 +4100,7 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_controller, "_execute_command", new=handle_cmd_mock),
     ):
@@ -4144,7 +4143,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_mock),
         patch.object(bot._turn_controller, "_execute_command", new=execute_command_mock),
@@ -4192,7 +4191,7 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_controller, "_execute_command", new=handle_cmd_mock),
     ):

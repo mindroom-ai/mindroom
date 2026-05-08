@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
@@ -136,6 +135,8 @@ class MessageContext:
     mentioned_agents: list[MatrixID]
     has_non_agent_mentions: bool
     replay_guard_history: Sequence[ResolvedVisibleMessage] = field(default_factory=tuple)
+    replay_guard_degraded: bool = False
+    replay_guard_thread_id: str | None = None
     requires_model_history_refresh: bool = False
 
     @property
@@ -154,7 +155,7 @@ class MessageContext:
     @property
     def replay_guard_history_degraded(self) -> bool:
         """Return whether replay history cannot prove that no newer thread message exists."""
-        return is_thread_history_degraded(self.replay_guard_history)
+        return self.replay_guard_degraded or is_thread_history_degraded(self.replay_guard_history)
 
 
 @dataclass(frozen=True)
@@ -503,29 +504,6 @@ class ConversationResolver:
         else:
             return resolution.thread_id or resolution.candidate_thread_root_id
 
-    async def dispatch_thread_snapshot_for_router_pre_ingress_skip(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> ThreadReadResult | None:
-        """Return thread snapshot for the router's optional early-skip check."""
-        try:
-            return await self.deps.conversation_cache.get_dispatch_thread_snapshot(
-                room_id,
-                thread_id,
-                caller_label="router_pre_ingress_skip",
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Router pre-ingress skip ignored thread snapshot failure",
-                room_id=room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-            return None
-
     async def _explicit_thread_id_for_event(
         self,
         room_id: str,
@@ -761,6 +739,8 @@ class ConversationResolver:
             mentioned_agents=mentioned_agents,
             has_non_agent_mentions=has_non_agent_mentions,
             replay_guard_history=(),
+            replay_guard_degraded=False,
+            replay_guard_thread_id=resolved_thread_id,
             requires_model_history_refresh=resolved_thread_id is not None,
         )
         return _DispatchContextResult(context=context, thread_context=None)
@@ -852,6 +832,8 @@ class ConversationResolver:
             thread_history: list[ResolvedVisibleMessage] = []
             requires_model_history_refresh = False
             replay_guard_history: Sequence[ResolvedVisibleMessage] = ()
+            replay_guard_degraded = False
+            replay_guard_thread_id = None
         else:
             thread_lookup = await self._resolve_thread_context(
                 room.room_id,
@@ -865,6 +847,8 @@ class ConversationResolver:
             thread_history = thread_lookup.thread_history
             requires_model_history_refresh = thread_lookup.requires_model_history_refresh
             replay_guard_history = thread_lookup.replay_guard_history
+            replay_guard_degraded = thread_lookup.replay_guard_degraded
+            replay_guard_thread_id = thread_lookup.thread_id
             if include_dispatch_context:
                 if thread_lookup.candidate_thread_root_id is not None and thread_lookup.thread_id is None:
                     stable_target = room_level_target(
@@ -890,6 +874,7 @@ class ConversationResolver:
                     replay_guard_history=thread_lookup.replay_guard_history,
                     replay_guard_degraded=thread_lookup.replay_guard_degraded,
                 )
+                replay_guard_thread_id = stable_target.resolved_thread_id or thread_lookup.candidate_thread_root_id
 
         context = MessageContext(
             am_i_mentioned=am_i_mentioned,
@@ -899,6 +884,8 @@ class ConversationResolver:
             mentioned_agents=mentioned_agents,
             has_non_agent_mentions=has_non_agent_mentions,
             replay_guard_history=replay_guard_history,
+            replay_guard_degraded=replay_guard_degraded,
+            replay_guard_thread_id=replay_guard_thread_id,
             requires_model_history_refresh=requires_model_history_refresh,
         )
         if dispatch_context is not None:

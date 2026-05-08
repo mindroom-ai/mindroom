@@ -8949,6 +8949,8 @@ class TestThreadingBehavior:
         assert context.is_thread is False
         assert context.thread_id is None
         assert context.thread_history == []
+        assert context.replay_guard_history_degraded is True
+        assert context.replay_guard_thread_id == "$maybe_root:localhost"
         assert context.requires_model_history_refresh is False
         mock_read.assert_awaited_once_with(
             room.room_id,
@@ -8994,6 +8996,8 @@ class TestThreadingBehavior:
         assert context_result.thread_context.replay_guard_degraded is True
         assert context_result.context.is_thread is False
         assert context_result.context.thread_id is None
+        assert context_result.context.replay_guard_history_degraded is True
+        assert context_result.context.replay_guard_thread_id == "$maybe_root:localhost"
         mock_read.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -9038,6 +9042,8 @@ class TestThreadingBehavior:
         assert context_result.thread_context.replay_guard_degraded is True
         assert context_result.context.is_thread is False
         assert context_result.context.thread_id is None
+        assert context_result.context.replay_guard_history_degraded is True
+        assert context_result.context.replay_guard_thread_id == "$missing_root:localhost"
         mock_read.assert_not_awaited()
 
     @pytest.mark.asyncio
