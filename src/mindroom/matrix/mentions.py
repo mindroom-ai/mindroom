@@ -244,18 +244,11 @@ def _entity_mention_resolution(
     runtime_paths: RuntimePaths,
 ) -> _MentionResolution:
     """Return rendering data for one resolved local agent or team mention."""
-    if entity_name in config.agents:
-        display_name = config.agents[entity_name].display_name
-    elif entity_name in config.teams:
-        display_name = config.teams[entity_name].display_name
-    else:
-        msg = f"Unknown configured mention target: {entity_name}"
-        raise KeyError(msg)
-
+    entity_config = config.agents.get(entity_name) or config.teams[entity_name]
     resolved_user_id = MatrixID.from_agent(entity_name, sender_domain, runtime_paths).full_id
     return _MentionResolution(
         plain_text=resolved_user_id,
-        markdown_text=f"[@{display_name}](https://matrix.to/#/{resolved_user_id})",
+        markdown_text=f"[@{entity_config.display_name}](https://matrix.to/#/{resolved_user_id})",
         user_id=resolved_user_id,
     )
 

@@ -9,6 +9,7 @@ from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.entity_resolution import configured_routable_entity_ids_for_room
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
 from mindroom.scheduling import (
@@ -19,7 +20,7 @@ from mindroom.scheduling import (
     list_scheduled_tasks,
     schedule_task,
 )
-from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
+from mindroom.thread_utils import check_agent_mentioned
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -121,23 +122,21 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
 
 def generate_welcome_message(room_id: str, config: Config, runtime_paths: RuntimePaths) -> str:
     """Generate the welcome message text for a room."""
-    # Get list of configured agents for this room
-    configured_agents = get_configured_agents_for_room(room_id, config, runtime_paths)
+    configured_entities = configured_routable_entity_ids_for_room(config, room_id, runtime_paths)
 
-    # Build agent list for the welcome message
-    agent_list = []
-    for agent_id in configured_agents:
-        agent_name = agent_id.agent_name(config, runtime_paths)
-        if not agent_name or agent_name == ROUTER_AGENT_NAME:
+    entity_list = []
+    for entity_id in configured_entities:
+        entity_name = entity_id.agent_name(config, runtime_paths)
+        if not entity_name or entity_name == ROUTER_AGENT_NAME:
             continue
 
-        description = _format_agent_description(agent_name, config)
-        # Always show the agent, with or without description
+        description = _format_agent_description(entity_name, config)
+        # Always show the entity, with or without description
         # Use the username with mindroom_ prefix (but without domain) for proper mention parsing
-        agent_entry = f"• **@{agent_id.username}**"
+        entity_entry = f"• **@{entity_id.username}**"
         if description:
-            agent_entry += f": {description}"
-        agent_list.append(agent_entry)
+            entity_entry += f": {description}"
+        entity_list.append(entity_entry)
 
     # Create welcome message
     welcome_msg = (
@@ -145,22 +144,22 @@ def generate_welcome_message(room_id: str, config: Config, runtime_paths: Runtim
         "I'm your routing assistant, here to help coordinate our team of specialized AI agents. 🤖\n\n"
     )
 
-    if agent_list:
-        welcome_msg += "🧠 **Available agents in this room:**\n"
-        welcome_msg += "\n".join(agent_list)
+    if entity_list:
+        welcome_msg += "🧠 **Available agents and teams in this room:**\n"
+        welcome_msg += "\n".join(entity_list)
         welcome_msg += "\n\n"
 
     quick_commands = "\n".join(get_compact_command_entries(format_code=True))
     welcome_msg += (
         "💬 **How to interact:**\n"
-        "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
+        "• Mention an agent or team with @ to get their attention (e.g., @mindroom_assistant)\n"
         "• Use `!help` to see available commands\n"
         "• Agents stay in existing Matrix threads, including compatible plain replies from bridges and non-thread clients\n"
         "• Multiple agents can collaborate when you mention them together\n"
         "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
         "⚡ **Quick commands:**\n"
         f"{quick_commands}\n\n"
-        "✨ Feel free to ask any agent for help or start a conversation!"
+        "✨ Feel free to ask any agent or team for help or start a conversation!"
     )
 
     return welcome_msg

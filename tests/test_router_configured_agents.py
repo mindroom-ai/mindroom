@@ -6,12 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from mindroom.authorization import get_available_agents_in_room
+from mindroom.authorization import get_available_agents_in_room, router_candidate_entities_for_room
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.thread_utils import get_configured_agents_for_room
-from mindroom.turn_controller import _router_candidate_entities_for_room
+from mindroom.entity_resolution import configured_routable_entity_ids_for_room
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
@@ -50,31 +49,31 @@ class TestRouterAgentSelection:
             ),
         )
 
-    def test_get_configured_agents_returns_only_configured(self) -> None:
-        """Test that get_configured_agents_for_room only returns configured agents."""
+    def test_configured_routable_entities_returns_only_configured_entities(self) -> None:
+        """Configured room candidates should include only configured agents and teams."""
         runtime_paths = runtime_paths_for(self.config)
         # Test general room - should have calculator and research
-        configured = get_configured_agents_for_room("#general:localhost", self.config, runtime_paths)
+        configured = configured_routable_entity_ids_for_room(self.config, "#general:localhost", runtime_paths)
         configured_names = [mid.agent_name(self.config, runtime_paths) for mid in configured]
         assert configured_names == ["calculator", "research"]
         assert "writer" not in configured_names
 
         # Test math room - should only have calculator
-        configured = get_configured_agents_for_room("#math:localhost", self.config, runtime_paths)
+        configured = configured_routable_entity_ids_for_room(self.config, "#math:localhost", runtime_paths)
         configured_names = [mid.agent_name(self.config, runtime_paths) for mid in configured]
         assert configured_names == ["calculator"]
         assert "research" not in configured_names
         assert "writer" not in configured_names
 
         # Test writing room - should only have writer
-        configured = get_configured_agents_for_room("#writing:localhost", self.config, runtime_paths)
+        configured = configured_routable_entity_ids_for_room(self.config, "#writing:localhost", runtime_paths)
         configured_names = [mid.agent_name(self.config, runtime_paths) for mid in configured]
         assert configured_names == ["writer"]
         assert "calculator" not in configured_names
         assert "research" not in configured_names
 
         # Test non-existent room - should have no agents
-        configured = get_configured_agents_for_room("#unknown:localhost", self.config, runtime_paths)
+        configured = configured_routable_entity_ids_for_room(self.config, "#unknown:localhost", runtime_paths)
         assert configured == []
 
     def test_get_available_agents_returns_all_in_room(self) -> None:
@@ -97,8 +96,8 @@ class TestRouterAgentSelection:
         assert "research" in available_names
         assert "writer" in available_names  # Present but not configured
 
-    def test_router_should_use_configured_agents_only(self) -> None:
-        """Test that router should only consider configured agents."""
+    def test_router_should_use_configured_entities_only(self) -> None:
+        """Test that router should only consider configured entities."""
         runtime_paths = runtime_paths_for(self.config)
         room = MagicMock()
         room.room_id = "#general:localhost"
@@ -108,8 +107,8 @@ class TestRouterAgentSelection:
             "@mindroom_writer:localhost": None,  # NOT configured but present
         }
 
-        # For routing decisions, use configured agents only
-        configured = get_configured_agents_for_room(room.room_id, self.config, runtime_paths)
+        # For routing decisions, use configured entities only
+        configured = configured_routable_entity_ids_for_room(self.config, room.room_id, runtime_paths)
         configured_names = [mid.agent_name(self.config, runtime_paths) for mid in configured]
         assert configured_names == ["calculator", "research"]
         assert "writer" not in configured_names
@@ -134,7 +133,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await _router_candidate_entities_for_room(
+        available = await router_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",
@@ -180,7 +179,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await _router_candidate_entities_for_room(
+        available = await router_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",
@@ -209,7 +208,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await _router_candidate_entities_for_room(
+        available = await router_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",
@@ -241,7 +240,7 @@ class TestRouterAgentSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await _router_candidate_entities_for_room(
+        available = await router_candidate_entities_for_room(
             client,
             room,
             "@user:localhost",
@@ -275,9 +274,9 @@ class TestRouterAgentSelection:
             "@mindroom_router:localhost": None,  # Router is present in the room
         }
 
-        # Router should be excluded from configured agents (it's not in config.agents)
+        # Router should be excluded from configured entities
         runtime_paths = runtime_paths_for(config_with_router)
-        configured = get_configured_agents_for_room(room.room_id, config_with_router, runtime_paths)
+        configured = configured_routable_entity_ids_for_room(config_with_router, room.room_id, runtime_paths)
         configured_names = [mid.agent_name(config_with_router, runtime_paths) for mid in configured]
         assert configured_names == ["calculator"]
         assert "router" not in configured_names

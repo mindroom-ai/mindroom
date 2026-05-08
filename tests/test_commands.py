@@ -12,6 +12,7 @@ from mindroom.commands.parsing import (
     get_command_help,
     get_compact_command_entries,
 )
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 
@@ -310,6 +311,28 @@ def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None:
 
     quick_command_block = "\u26a1 **Quick commands:**\n" + "\n".join(WELCOME_QUICK_COMMAND_LINES)
     assert quick_command_block in welcome_message
+
+
+def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
+    """Rooms configured through teams should advertise those team mention targets."""
+    welcome_message = generate_welcome_message(
+        "!room:localhost",
+        Config(
+            agents={"calculator": AgentConfig(display_name="Calculator")},
+            teams={
+                "ops": TeamConfig(
+                    display_name="Ops Team",
+                    role="Operations escalation team",
+                    agents=["calculator"],
+                    rooms=["!room:localhost"],
+                ),
+            },
+        ),
+        _test_runtime_paths(tmp_path),
+    )
+
+    assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
+    assert "\u2022 **@mindroom_ops**: Operations escalation team (Team of 1 agents)" in welcome_message
 
 
 def test_docs_index_chat_commands_summary_lists_all_supported_commands() -> None:

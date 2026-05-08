@@ -186,30 +186,18 @@ def thread_requires_explicit_agent_targeting(
     return has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths)
 
 
-def get_configured_agents_for_room(
-    room_id: str,
+def _has_any_agent_mentions_in_thread(
+    thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
     runtime_paths: RuntimePaths,
-) -> list[MatrixID]:
-    """Get list of agent MatrixIDs configured for a specific room.
-
-    This returns only agents that have the room in their configuration,
-    not just agents that happen to be present in the room.
-
-    Note: Router agent is excluded as it's not a regular conversation participant.
-    """
-    configured_agents: list[MatrixID] = []
-    config_ids = config.get_ids(runtime_paths)
-    from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
-
-    # Check which agents should be in this room
-    for agent_name, agent_config in config.agents.items():
-        if agent_name != ROUTER_AGENT_NAME:
-            resolved_rooms = resolve_room_aliases(agent_config.rooms, runtime_paths)
-            if room_id in resolved_rooms:
-                configured_agents.append(config_ids[agent_name])
-
-    return sorted(configured_agents, key=lambda x: x.full_id)
+) -> bool:
+    """Check if any agents are mentioned anywhere in the thread."""
+    for msg in thread_history:
+        content = msg.content
+        user_ids = _extract_mentioned_user_ids(content)
+        if _agents_from_user_ids(user_ids, config, runtime_paths):
+            return True
+    return False
 
 
 def get_all_mentioned_agents_in_thread(

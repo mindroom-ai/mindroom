@@ -12,10 +12,9 @@ import nio
 from mindroom import interactive
 from mindroom.attachments import merge_attachment_ids, parse_attachment_ids_from_event_source
 from mindroom.authorization import (
-    filter_agents_by_sender_permissions,
-    get_available_agents_for_sender_authoritative,
     get_effective_sender_id_for_reply_permissions,
     is_authorized_sender,
+    router_candidate_entities_for_room,
 )
 from mindroom.coalescing import (
     COALESCING_BYPASS_ACTIVE_THREAD_FOLLOW_UP,
@@ -55,7 +54,6 @@ from mindroom.dispatch_replay_guard import (
     has_newer_unresponded_in_thread,
 )
 from mindroom.dispatch_source import is_automation_source_kind, is_voice_event
-from mindroom.entity_resolution import configured_routable_entity_ids_for_room
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import build_hook_matrix_admin, hook_ingress_policy, should_handle_interactive_text_response
@@ -113,7 +111,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.commands.parsing import Command
-    from mindroom.config.main import Config
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.hooks import MessageEnvelope
@@ -156,20 +153,6 @@ def _queued_notice_reservation_from_metadata(
         msg = "Coalesced batch carried multiple queued-human notice reservations"
         raise ValueError(msg)
     return cast("QueuedHumanNoticeReservation", reservations[0])
-
-
-async def _router_candidate_entities_for_room(
-    client: nio.AsyncClient,
-    room: nio.MatrixRoom,
-    sender_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> list[MatrixID]:
-    """Return router candidates for one room without widening configured rooms."""
-    configured_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
-    if configured_entities:
-        return filter_agents_by_sender_permissions(configured_entities, sender_id, config, runtime_paths)
-    return await get_available_agents_for_sender_authoritative(client, room, sender_id, config, runtime_paths)
 
 
 class _EditRegenerator(Protocol):
@@ -1189,7 +1172,7 @@ class TurnController:
         assert self.deps.agent_name == ROUTER_AGENT_NAME
 
         permission_sender_id = requester_user_id
-        available_agents = await _router_candidate_entities_for_room(
+        available_agents = await router_candidate_entities_for_room(
             self._client(),
             room,
             permission_sender_id,

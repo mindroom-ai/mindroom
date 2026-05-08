@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.entity_resolution import configured_routable_entity_ids_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID, active_internal_sender_ids
 from mindroom.matrix.state import matrix_state_for_runtime
@@ -302,3 +303,17 @@ async def get_available_agents_for_sender_authoritative(
         refreshed_agent_count=len(refreshed_agents),
     )
     return refreshed_agents
+
+
+async def router_candidate_entities_for_room(
+    client: nio.AsyncClient,
+    room: nio.MatrixRoom,
+    sender_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
+    """Return router candidates for one room without widening configured rooms."""
+    configured_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
+    if configured_entities:
+        return filter_agents_by_sender_permissions(configured_entities, sender_id, config, runtime_paths)
+    return await get_available_agents_for_sender_authoritative(client, room, sender_id, config, runtime_paths)
