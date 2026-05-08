@@ -28,6 +28,11 @@ class MessageTarget:
         return self.resolved_thread_id is None
 
     @property
+    def represents_new_thread_root(self) -> bool:
+        """Return whether this target creates a new thread rooted at its reply event."""
+        return self.source_thread_id is not None and self.source_thread_id == self.reply_to_event_id
+
+    @property
     def log_context(self) -> dict[str, str | None]:
         """Return the canonical room/thread log fields for this target."""
         return {"room_id": self.room_id, "thread_id": self.resolved_thread_id}

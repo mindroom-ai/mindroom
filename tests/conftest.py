@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping, MutableMapping
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,9 +24,8 @@ import mindroom.bot  # noqa: F401
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.conversation_resolver import MessageContext
+from mindroom.conversation_resolver import MessageContext, _DispatchContextResult
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
-from mindroom.dispatch_thread_context import DispatchThreadContext
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.interactive import InteractiveMetadata
@@ -96,17 +95,9 @@ RuntimeBot = AgentBot | TeamBot
 TestFunction = Callable[..., object]
 
 
-@dataclass(frozen=True)
-class DispatchContextResultForTest:
-    """Stable dispatch extraction result shape for tests that mock the resolver."""
-
-    context: MessageContext
-    thread_context: DispatchThreadContext | None = None
-
-
-def dispatch_context_result(context: MessageContext) -> DispatchContextResultForTest:
+def dispatch_context_result(context: MessageContext) -> _DispatchContextResult:
     """Wrap a stable message context in the dispatch extraction result shape."""
-    return DispatchContextResultForTest(context=context)
+    return _DispatchContextResult(context=context, thread_context=None)
 
 
 def requires_linux(
@@ -427,9 +418,6 @@ def make_conversation_cache_mock() -> AsyncMock:
     conversation_cache = AsyncMock(spec=ConversationCacheProtocol)
     conversation_cache.get_event = AsyncMock(
         side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id),
-    )
-    conversation_cache.get_thread_snapshot = AsyncMock(
-        return_value=thread_history_result([], is_full_history=False),
     )
     conversation_cache.get_thread_history = AsyncMock(return_value=[])
     conversation_cache.get_dispatch_thread_snapshot = AsyncMock(

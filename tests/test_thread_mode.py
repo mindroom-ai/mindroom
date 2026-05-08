@@ -793,34 +793,15 @@ class TestExtractMessageContextRoomMode:
             return_value=dispatch_context_result(context),
         )
         bot._conversation_resolver.extract_message_context = AsyncMock(return_value=context)
-        bot._conversation_resolver.extract_message_context_impl = AsyncMock(return_value=context)
 
         dispatch_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
         assert dispatch_result.context is context
-        assert await bot._conversation_resolver.extract_message_context(room, event, full_history=False) is context
-        assert (
-            await bot._conversation_resolver.extract_message_context_impl(
-                room,
-                event,
-                full_history=True,
-                dispatch_safe=False,
-                caller_label="thread_mode_test",
-            )
-            is context
-        )
+        assert await bot._conversation_resolver.extract_message_context(room, event) is context
 
         bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(room, event)
         bot._conversation_resolver.extract_message_context.assert_awaited_once_with(
             room,
             event,
-            full_history=False,
-        )
-        bot._conversation_resolver.extract_message_context_impl.assert_awaited_once_with(
-            room,
-            event,
-            full_history=True,
-            dispatch_safe=False,
-            caller_label="thread_mode_test",
         )
 
     def test_hot_reloaded_bot_uses_updated_thread_mode_without_restart(
@@ -947,9 +928,6 @@ class TestExtractMessageContextRoomMode:
         bot._conversation_cache.get_thread_history = AsyncMock(
             side_effect=AssertionError("new thread root targeting must not fetch thread history"),
         )
-        bot._conversation_cache.get_thread_snapshot = AsyncMock(
-            side_effect=AssertionError("new thread root targeting must not fetch thread history"),
-        )
 
         target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",
@@ -970,7 +948,6 @@ class TestExtractMessageContextRoomMode:
         assert target.resolved_thread_id == "$new-root:localhost"
         assert target.session_id == create_session_id("!room:localhost", "$new-root:localhost")
         bot._conversation_cache.get_thread_history.assert_not_called()
-        bot._conversation_cache.get_thread_snapshot.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_message_context_keeps_full_hydration_required_for_degraded_history(
@@ -1018,13 +995,12 @@ class TestExtractMessageContextRoomMode:
             "get_dispatch_thread_history",
             AsyncMock(return_value=degraded_history),
         ):
-            context = await bot._conversation_resolver.extract_message_context_impl(
+            context_result = await bot._conversation_resolver.extract_dispatch_context(
                 room,
                 event,
-                full_history=True,
-                dispatch_safe=True,
                 caller_label="dispatch_hydration",
             )
+            context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread-root:localhost"
@@ -1640,17 +1616,11 @@ class TestExtractedModuleLoggerRebinding:
 
         bot.client = AsyncMock()
         async with bot._conversation_cache.turn_scope():
-            snapshot_history = await bot._conversation_cache.get_thread_snapshot(
-                "!room:localhost",
-                "$threadroot",
-            )
             full_history = await bot._conversation_cache.get_thread_history(
                 "!room:localhost",
                 "$threadroot",
             )
 
-        assert snapshot_history.is_full_history is False
-        assert [message.event_id for message in snapshot_history] == ["$threadroot", "$reply"]
         assert full_history.is_full_history is True
         assert [message.event_id for message in full_history] == ["$threadroot", "$reply"]
 
@@ -1707,12 +1677,12 @@ class TestExtractedModuleLoggerRebinding:
         assert thread_lookup.thread_id == "$threadroot"
 
     @pytest.mark.asyncio
-    async def test_direct_thread_dispatch_preview_still_requires_model_history_refresh(
+    async def test_direct_thread_dispatch_uses_bounded_full_history(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Only explicit thread events should defer full history after snapshot preview."""
+        """Dispatch policy context should use the bounded full read instead of a partial snapshot."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -1747,7 +1717,7 @@ class TestExtractedModuleLoggerRebinding:
                 },
             },
         )
-        preview_snapshot = ThreadHistoryResult(
+        dispatch_history = ThreadHistoryResult(
             [
                 ResolvedVisibleMessage.synthetic(
                     sender="@user:localhost",
@@ -1760,18 +1730,16 @@ class TestExtractedModuleLoggerRebinding:
                     event_id="$thread-msg:localhost",
                 ),
             ],
-            is_full_history=False,
+            is_full_history=True,
         )
 
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=preview_snapshot)
+        bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=dispatch_history)
+        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            side_effect=AssertionError("dispatch planning should use bounded full history"),
+        )
 
-        with patch.object(
-            bot._conversation_cache,
-            "get_thread_snapshot",
-            AsyncMock(side_effect=AssertionError("dispatch preview should use strict dispatch snapshot reads")),
-        ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-            context = context_result.context
+        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+        context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread-root:localhost"
@@ -1779,12 +1747,13 @@ class TestExtractedModuleLoggerRebinding:
             "$thread-root:localhost",
             "$thread-msg:localhost",
         ]
-        assert context.requires_model_history_refresh is True
-        bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+        assert context.requires_model_history_refresh is False
+        bot._conversation_cache.get_dispatch_thread_history.assert_awaited_once_with(
             room.room_id,
             "$thread-root:localhost",
             caller_label="dispatch_context",
         )
+        bot._conversation_cache.get_dispatch_thread_snapshot.assert_not_awaited()
 
 
 class TestConversationCacheArchitecture:

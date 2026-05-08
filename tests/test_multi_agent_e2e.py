@@ -124,9 +124,6 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         bot._conversation_cache.get_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
         )
-        bot._conversation_cache.get_thread_snapshot = AsyncMock(
-            return_value=thread_history_result([], is_full_history=False),
-        )
         bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
         )
@@ -356,7 +353,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         room.members_synced = True
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_snapshot") as mock_fetch_snapshot,
             patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
             patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
@@ -374,7 +370,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history_result(thread_history, is_full_history=True)
-            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_history.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=True)
 
@@ -418,7 +413,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event_2.sender = test_user_id
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_snapshot") as mock_fetch_snapshot,
             patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
             patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
@@ -442,7 +436,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history_result(thread_history, is_full_history=True)
-            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_history.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=True)
             bot.client.room_send.side_effect = [
@@ -501,7 +494,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event_with_mention.sender = test_user_id
 
         with (
-            patch.object(bot._conversation_cache, "get_thread_snapshot") as mock_fetch_snapshot,
             patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
             patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
@@ -525,7 +517,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 ),
             ]
             mock_fetch.return_value = thread_history_result(thread_history, is_full_history=True)
-            mock_fetch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
             mock_dispatch_history.return_value = thread_history_result(thread_history, is_full_history=True)
             mock_dispatch_snapshot.return_value = thread_history_result(thread_history, is_full_history=False)
             mock_refresh_history.return_value = thread_history_result(thread_history, is_full_history=True)

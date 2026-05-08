@@ -8922,11 +8922,11 @@ class TestAgentBot:
         mock_should_respond.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_resolve_response_action_skips_unmentioned_thread_when_policy_history_partial(
+    async def test_resolve_response_action_continues_single_agent_thread_when_policy_history_partial(
         self,
         tmp_path: Path,
     ) -> None:
-        """Partial policy history should fail closed instead of behaving like complete context."""
+        """Partial policy history should not drop ordinary single-agent thread follow-ups."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -8974,17 +8974,15 @@ class TestAgentBot:
             requires_model_history_refresh=True,
         )
 
-        with patch("mindroom.turn_policy.should_agent_respond", return_value=True) as mock_should_respond:
-            action = await bot._turn_policy.resolve_response_action(
-                context,
-                room,
-                "@bas:localhost",
-                "Follow-up",
-                False,
-            )
+        action = await bot._turn_policy.resolve_response_action(
+            context,
+            room,
+            "@bas:localhost",
+            "Follow-up",
+            False,
+        )
 
-        assert action.kind == "skip"
-        mock_should_respond.assert_not_called()
+        assert action.kind == "individual"
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_skips_unmentioned_thread_when_policy_history_degraded(
@@ -9320,12 +9318,12 @@ class TestAgentBot:
         )
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_uses_thread_snapshot_without_full_history(
+    async def test_extract_dispatch_context_uses_bounded_full_thread_history(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Dispatch startup should use a lightweight thread snapshot instead of full history."""
+        """Dispatch startup should use the bounded full-history read."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
@@ -9345,7 +9343,7 @@ class TestAgentBot:
                 "type": "m.room.message",
             },
         )
-        snapshot = ThreadHistoryResult(
+        history = ThreadHistoryResult(
             [
                 ResolvedVisibleMessage.synthetic(
                     sender="@user:localhost",
@@ -9355,15 +9353,15 @@ class TestAgentBot:
                     content={"body": "Root"},
                 ),
             ],
-            is_full_history=False,
+            is_full_history=True,
         )
 
-        mock_history = AsyncMock()
-        mock_snapshot = AsyncMock(return_value=snapshot)
+        mock_advisory_history = AsyncMock()
+        mock_dispatch_history = AsyncMock(return_value=history)
 
         with (
-            patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot", new=mock_snapshot),
-            patch.object(bot._conversation_cache, "get_thread_history", new=mock_history),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history", new=mock_dispatch_history),
+            patch.object(bot._conversation_cache, "get_thread_history", new=mock_advisory_history),
         ):
             context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
             context = context_result.context
@@ -9371,21 +9369,21 @@ class TestAgentBot:
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
         assert [message.event_id for message in context.thread_history] == ["$thread_root"]
-        assert context.requires_model_history_refresh is True
-        mock_snapshot.assert_awaited_once_with(
+        assert context.requires_model_history_refresh is False
+        mock_dispatch_history.assert_awaited_once_with(
             room.room_id,
             "$thread_root",
             caller_label="dispatch_context",
         )
-        mock_history.assert_not_awaited()
+        mock_advisory_history.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_marks_direct_thread_snapshot_for_later_full_hydration(
+    async def test_extract_dispatch_context_fetches_direct_thread_history_through_dispatch_fetcher(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Direct-thread preview should stay lightweight and request later full hydration."""
+        """Direct-thread dispatch context should read bounded full history through the dispatch fetcher."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_runtime_cache_support(bot)
@@ -9406,7 +9404,7 @@ class TestAgentBot:
                 "type": "m.room.message",
             },
         )
-        snapshot_history = ThreadHistoryResult(
+        dispatch_history = ThreadHistoryResult(
             [
                 ResolvedVisibleMessage.synthetic(
                     sender="@user:localhost",
@@ -9423,24 +9421,24 @@ class TestAgentBot:
                     content={"body": "Reply"},
                 ),
             ],
-            is_full_history=False,
+            is_full_history=True,
         )
 
         with patch(
-            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
-            new=AsyncMock(return_value=snapshot_history),
-        ) as mock_snapshot:
+            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
+            new=AsyncMock(return_value=dispatch_history),
+        ) as mock_history:
             context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
             context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
-        assert context.thread_history == snapshot_history
-        assert context.requires_model_history_refresh is True
+        assert context.thread_history == dispatch_history
+        assert context.requires_model_history_refresh is False
         trusted_sender_ids = frozenset(
             matrix_id.full_id for matrix_id in config.get_ids(runtime_paths_for(config)).values()
         )
-        mock_snapshot.assert_awaited_once_with(
+        mock_history.assert_awaited_once_with(
             bot.client,
             room.room_id,
             "$thread_root",

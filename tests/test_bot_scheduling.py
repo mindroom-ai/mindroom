@@ -147,9 +147,6 @@ def mock_agent_bot() -> AgentBot:
     _sync_turn_policy_runtime(bot)
     install_send_response_mock(bot, bot._send_response)
     bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
-    bot._conversation_cache.get_thread_snapshot = AsyncMock(
-        return_value=thread_history_result([], is_full_history=False),
-    )
     bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
         return_value=thread_history_result([], is_full_history=True),
     )
@@ -583,9 +580,6 @@ class TestCommandHandling:
             bot._turn_controller._execute_command = AsyncMock()
             bot._conversation_cache.get_thread_history = AsyncMock(
                 return_value=thread_history_result([], is_full_history=True),
-            )
-            bot._conversation_cache.get_thread_snapshot = AsyncMock(
-                return_value=thread_history_result([], is_full_history=False),
             )
             bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
                 return_value=thread_history_result([], is_full_history=True),

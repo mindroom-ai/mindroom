@@ -49,6 +49,7 @@ def planning_history_unavailable_for(
         return True
     if isinstance(thread_history, ThreadHistoryResult):
         return not thread_history.is_full_history
+    # Plain sequences have no completeness signal, so visible content must not masquerade as policy-grade history.
     return requires_model_history_refresh or bool(thread_history)
 
 
@@ -68,7 +69,7 @@ def context_with_dispatch_thread_context(
 ) -> MessageContext:
     """Return ``context`` with finalized stable thread state from dispatch evidence."""
     source_thread_id = thread_context.stable_target.source_thread_id
-    stable_thread_id = None if source_thread_id == thread_context.stable_target.reply_to_event_id else source_thread_id
+    stable_thread_id = None if thread_context.stable_target.represents_new_thread_root else source_thread_id
     return replace(
         context,
         is_thread=stable_thread_id is not None,

@@ -41,7 +41,6 @@ _DISPATCH_READ_TIMEOUT = "dispatch_read_timeout"
 class ThreadReadMode(Enum):
     """Named thread-read policies for cache coordination and source freshness."""
 
-    ADVISORY_SNAPSHOT = auto()
     ADVISORY_FULL = auto()
     DISPATCH_SNAPSHOT = auto()
     DISPATCH_FULL = auto()
@@ -89,14 +88,12 @@ class ThreadReadPolicy:
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
         fetch_thread_history_from_client: _ThreadHistoryFetcher,
-        fetch_thread_snapshot_from_client: _ThreadHistoryFetcher,
         fetch_dispatch_thread_history_from_client: _ThreadHistoryFetcher,
         fetch_dispatch_thread_snapshot_from_client: _ThreadHistoryFetcher,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
         self.fetch_thread_history_from_client = fetch_thread_history_from_client
-        self.fetch_thread_snapshot_from_client = fetch_thread_snapshot_from_client
         self.fetch_dispatch_thread_history_from_client = fetch_dispatch_thread_history_from_client
         self.fetch_dispatch_thread_snapshot_from_client = fetch_dispatch_thread_snapshot_from_client
 
@@ -111,8 +108,6 @@ class ThreadReadPolicy:
     def _fetcher_for_mode(self, mode: ThreadReadMode) -> _ThreadHistoryFetcher:
         """Return the client fetcher matching one named read policy."""
         match mode:
-            case ThreadReadMode.ADVISORY_SNAPSHOT:
-                return self.fetch_thread_snapshot_from_client
             case ThreadReadMode.ADVISORY_FULL:
                 return self.fetch_thread_history_from_client
             case ThreadReadMode.DISPATCH_SNAPSHOT:
@@ -126,8 +121,6 @@ class ThreadReadPolicy:
     def _operation_name_for_mode(self, mode: ThreadReadMode) -> str:
         """Return the cache coordinator operation name for one queued read mode."""
         match mode:
-            case ThreadReadMode.ADVISORY_SNAPSHOT:
-                return "matrix_cache_refresh_thread_snapshot"
             case ThreadReadMode.ADVISORY_FULL:
                 return "matrix_cache_refresh_thread_history"
             case ThreadReadMode.STRICT_FULL:

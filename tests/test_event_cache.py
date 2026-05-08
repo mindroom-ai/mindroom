@@ -299,10 +299,9 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
     read_modes = [
-        ("get_thread_snapshot", "fetch_thread_snapshot", False, 101.0, 25.0),
-        ("get_thread_history", "fetch_thread_history", True, 102.0, 50.0),
-        ("get_dispatch_thread_snapshot", "fetch_dispatch_thread_snapshot", False, 103.0, 75.0),
-        ("get_dispatch_thread_history", "fetch_dispatch_thread_history", True, 104.0, 100.0),
+        ("get_thread_history", "fetch_thread_history", True, 101.0, 50.0),
+        ("get_dispatch_thread_snapshot", "fetch_dispatch_thread_snapshot", False, 102.0, 75.0),
+        ("get_dispatch_thread_history", "fetch_dispatch_thread_history", True, 103.0, 100.0),
     ]
     fetchers = {
         name: AsyncMock(return_value=thread_history_result([], is_full_history=is_full_history))
@@ -311,7 +310,6 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
 
     try:
         with (
-            patch("mindroom.matrix.conversation_cache.fetch_thread_snapshot", fetchers["fetch_thread_snapshot"]),
             patch("mindroom.matrix.conversation_cache.fetch_thread_history", fetchers["fetch_thread_history"]),
             patch(
                 "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
@@ -321,14 +319,13 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
                 fetchers["fetch_dispatch_thread_history"],
             ),
-            patch("mindroom.matrix.conversation_cache.time.time", side_effect=[101.0, 102.0, 103.0, 104.0]),
+            patch("mindroom.matrix.conversation_cache.time.time", side_effect=[101.0, 102.0, 103.0]),
             patch(
                 "mindroom.matrix.cache.thread_reads.time.perf_counter",
-                side_effect=[1.0, 1.025, 2.0, 2.05, 3.0, 3.01, 3.075, 4.0, 4.01, 4.1],
+                side_effect=[1.0, 1.05, 2.0, 2.01, 2.075, 3.0, 3.01, 3.1],
             ),
         ):
             read_methods = {
-                "get_thread_snapshot": conversation_cache.get_thread_snapshot,
                 "get_thread_history": conversation_cache.get_thread_history,
                 "get_dispatch_thread_snapshot": conversation_cache.get_dispatch_thread_snapshot,
                 "get_dispatch_thread_history": conversation_cache.get_dispatch_thread_history,

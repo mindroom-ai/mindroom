@@ -30,6 +30,7 @@ from mindroom.hooks import (
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.identity import MatrixID, is_agent_id
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.teams import (
     TeamIntent,
@@ -530,6 +531,7 @@ class TurnPolicy:
     ) -> ResponseAction:
         """Decide whether to respond as a team, individually, or not at all."""
         planning_thread_history = context.planning_thread_history
+        available_agents_in_room = await self.available_agents_for_sender(room, requester_user_id)
         if (
             context.is_thread
             and context.planning_thread_history_unavailable
@@ -537,12 +539,19 @@ class TurnPolicy:
             and not context.mentioned_agents
             and not context.has_non_agent_mentions
         ):
-            if self._should_queue_follow_up_in_active_response_thread(
+            should_continue_active_thread = self._should_queue_follow_up_in_active_response_thread(
                 context=context,
                 target=target,
                 source_envelope=source_envelope,
                 has_active_response_for_target=has_active_response_for_target,
-            ):
+            )
+            agent_matrix_id = self.deps.runtime.config.get_ids(self.deps.runtime_paths)[self.deps.agent_name]
+            single_visible_self = (
+                not is_thread_history_degraded(context.thread_history)
+                and len(available_agents_in_room) == 1
+                and available_agents_in_room[0] == agent_matrix_id
+            )
+            if should_continue_active_thread or single_visible_self:
                 return ResponseAction(kind="individual")
             return ResponseAction(kind="skip")
         agents_in_thread = get_agents_in_thread(
@@ -550,7 +559,6 @@ class TurnPolicy:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        available_agents_in_room = await self.available_agents_for_sender(room, requester_user_id)
         materializable_agent_names = self.materializable_agent_names()
         responder_pool = self.filter_materializable_agents(
             available_agents_in_room,

@@ -97,16 +97,6 @@ def _source_with_payload_metadata(
     return {**event_source, "content": content}
 
 
-def _thread_read_mode(
-    *,
-    full_history: bool,
-    dispatch_safe: bool,
-) -> ThreadReadMode:
-    if dispatch_safe:
-        return ThreadReadMode.DISPATCH_FULL if full_history else ThreadReadMode.DISPATCH_SNAPSHOT
-    return ThreadReadMode.ADVISORY_FULL if full_history else ThreadReadMode.ADVISORY_SNAPSHOT
-
-
 def _thread_history_proves_root(
     thread_root_id: str,
     thread_history: Sequence[ResolvedVisibleMessage],
@@ -537,20 +527,6 @@ class ConversationResolver:
             )
         return _ThreadIdLookup(thread_id=None, thread_history=thread_history)
 
-    async def resolve_related_event_thread_id_best_effort(
-        self,
-        room_id: str,
-        related_event_id: str,
-        *,
-        access: ThreadMembershipAccess,
-    ) -> str | None:
-        """Return best-effort canonical thread membership for one related target event."""
-        return await resolve_related_event_thread_id_best_effort(
-            room_id,
-            related_event_id,
-            access=access,
-        )
-
     async def resolve_related_event_thread_id_dispatch_snapshot_best_effort(
         self,
         room_id: str,
@@ -559,7 +535,7 @@ class ConversationResolver:
         caller_label: str,
     ) -> str | None:
         """Return dispatch-snapshot thread membership without exposing cache read modes."""
-        return await self.resolve_related_event_thread_id_best_effort(
+        return await resolve_related_event_thread_id_best_effort(
             room_id,
             related_event_id,
             access=self.thread_membership_access(
@@ -596,12 +572,6 @@ class ConversationResolver:
     ) -> ThreadReadResult:
         """Resolve one thread read through the shared cache entrypoint."""
         match mode:
-            case ThreadReadMode.ADVISORY_SNAPSHOT:
-                return await self.deps.conversation_cache.get_thread_snapshot(
-                    room_id,
-                    thread_id,
-                    caller_label=caller_label,
-                )
             case ThreadReadMode.ADVISORY_FULL:
                 return await self.deps.conversation_cache.get_thread_history(
                     room_id,
@@ -718,12 +688,12 @@ class ConversationResolver:
         payload_metadata: DispatchPayloadMetadata | None = None,
         caller_label: str = "dispatch_context",
     ) -> _DispatchContextResult:
-        """Extract lightweight routing context without hydrating full thread history."""
+        """Extract bounded full routing context for live dispatch planning."""
         context, thread_context = await self._extract_message_context_parts(
             room,
             event,
-            full_history=False,
-            dispatch_safe=True,
+            mode=ThreadReadMode.DISPATCH_FULL,
+            include_dispatch_context=True,
             payload_metadata=payload_metadata,
             caller_label=caller_label,
         )
@@ -785,36 +755,15 @@ class ConversationResolver:
         room: nio.MatrixRoom,
         event: DispatchEvent,
         *,
-        full_history: bool = True,
         payload_metadata: DispatchPayloadMetadata | None = None,
         caller_label: str = "message_context",
     ) -> MessageContext:
-        """Extract message context, optionally using a lightweight thread snapshot."""
-        return await self.extract_message_context_impl(
-            room,
-            event,
-            full_history=full_history,
-            dispatch_safe=False,
-            payload_metadata=payload_metadata,
-            caller_label=caller_label,
-        )
-
-    async def extract_message_context_impl(
-        self,
-        room: nio.MatrixRoom,
-        event: DispatchEvent,
-        *,
-        full_history: bool,
-        dispatch_safe: bool,
-        payload_metadata: DispatchPayloadMetadata | None = None,
-        caller_label: str,
-    ) -> MessageContext:
-        """Resolve event metadata, mentions, and thread history for one inbound turn."""
+        """Extract advisory full message context for one inbound turn."""
         context, _thread_context = await self._extract_message_context_parts(
             room,
             event,
-            full_history=full_history,
-            dispatch_safe=dispatch_safe,
+            mode=ThreadReadMode.ADVISORY_FULL,
+            include_dispatch_context=False,
             payload_metadata=payload_metadata,
             caller_label=caller_label,
         )
@@ -825,8 +774,8 @@ class ConversationResolver:
         room: nio.MatrixRoom,
         event: DispatchEvent,
         *,
-        full_history: bool,
-        dispatch_safe: bool,
+        mode: ThreadReadMode,
+        include_dispatch_context: bool,
         payload_metadata: DispatchPayloadMetadata | None = None,
         caller_label: str,
     ) -> tuple[MessageContext, DispatchThreadContext | None]:
@@ -870,10 +819,7 @@ class ConversationResolver:
                 room.room_id,
                 event.event_id,
                 event_info,
-                mode=_thread_read_mode(
-                    full_history=full_history,
-                    dispatch_safe=dispatch_safe,
-                ),
+                mode=mode,
                 caller_label=caller_label,
             )
             is_thread = thread_lookup.is_thread
@@ -881,7 +827,7 @@ class ConversationResolver:
             thread_history = thread_lookup.thread_history
             requires_model_history_refresh = thread_lookup.requires_model_history_refresh
             replay_guard_history = thread_lookup.replay_guard_history
-            if dispatch_safe:
+            if include_dispatch_context:
                 if thread_lookup.candidate_thread_root_id is not None and thread_lookup.thread_id is None:
                     stable_target = room_level_target(
                         self.build_message_target(

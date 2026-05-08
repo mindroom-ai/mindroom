@@ -26,7 +26,6 @@ from mindroom.matrix.client_thread_history import (
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,
-    fetch_thread_snapshot,
     get_room_threads_page,
 )
 from mindroom.matrix.event_info import EventInfo
@@ -133,15 +132,6 @@ class ConversationCacheProtocol(Protocol):
 
     async def get_event(self, room_id: str, event_id: str) -> EventLookupResult:
         """Resolve one Matrix event by ID."""
-
-    async def get_thread_snapshot(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve advisory thread context for non-dispatch callers."""
 
     async def get_thread_history(
         self,
@@ -374,7 +364,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
             fetch_thread_history_from_client=self._fetch_thread_history_from_client,
-            fetch_thread_snapshot_from_client=self._fetch_thread_snapshot_from_client,
             fetch_dispatch_thread_history_from_client=self._fetch_dispatch_thread_history_from_client,
             fetch_dispatch_thread_snapshot_from_client=self._fetch_dispatch_thread_snapshot_from_client,
         )
@@ -585,22 +574,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         )
 
-    async def _fetch_thread_snapshot_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str,
-        coordinator_queue_wait_ms: float,
-    ) -> ThreadHistoryResult:
-        return await self._fetch_thread_from_client(
-            fetch_thread_snapshot,
-            room_id,
-            thread_id,
-            caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        )
-
     async def _fetch_dispatch_thread_history_from_client(
         self,
         room_id: str,
@@ -797,21 +770,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
         await asyncio.sleep(0)
         return "warmed"
-
-    async def get_thread_snapshot(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve advisory thread context for non-dispatch callers."""
-        return await self._read_thread_memoized(
-            room_id,
-            thread_id,
-            mode=ThreadReadMode.ADVISORY_SNAPSHOT,
-            caller_label=caller_label,
-        )
 
     async def get_thread_history(
         self,

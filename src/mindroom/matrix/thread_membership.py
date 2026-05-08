@@ -238,9 +238,15 @@ async def resolve_related_event_thread_membership(
         try:
             related_event_info = await access.fetch_event_info(room_id, current_event_id)
         except Exception as exc:
+            # Keep lookup-failed related events separately scoped for dispatch coalescing and replay checks.
             resolution = ThreadResolution.indeterminate(exc, candidate_thread_root_id=current_event_id)
             break
         if related_event_info is None:
+            # Missing related events are still possible thread roots; demote later without losing the candidate.
+            resolution = ThreadResolution.indeterminate(
+                ThreadMembershipLookupError(f"Related event {current_event_id} is unavailable"),
+                candidate_thread_root_id=current_event_id,
+            )
             break
 
         thread_id = related_event_info.thread_id or related_event_info.thread_id_from_edit

@@ -744,7 +744,7 @@ async def test_prepare_dispatch_builds_target_via_conversation_resolver(tmp_path
 
 @pytest.mark.asyncio
 async def test_prepare_dispatch_uses_trusted_router_context_for_router_relays(tmp_path: Path) -> None:
-    """Router relays should skip the expensive dispatch preview read during preparation."""
+    """Router relays should skip the expensive dispatch context read during preparation."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
     event = nio.RoomMessageText.from_dict(
