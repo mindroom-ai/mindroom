@@ -1097,6 +1097,7 @@ visibility = [
 path = "mindroom.topic_generator"
 depends_on = [
     "mindroom.ai_runtime",
+    "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.model_loading",
 ]

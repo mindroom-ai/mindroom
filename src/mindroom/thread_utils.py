@@ -286,8 +286,12 @@ def should_agent_respond(  # noqa: PLR0911
     if has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths):
         return False
 
+    available_agent_ids = {agent.full_id for agent in available_agents}
+    if agent_matrix_id.full_id not in available_agent_ids:
+        return False
+
     # For threads, continue only if we're the single participating agent
-    # that may reply to this sender.
+    # that may reply to this sender within this room's responder boundary.
     agents_in_thread = get_agents_in_thread(thread_history, config, runtime_paths)
     agents_in_thread = authorization.filter_agents_by_sender_permissions(
         agents_in_thread,
@@ -295,6 +299,7 @@ def should_agent_respond(  # noqa: PLR0911
         config,
         runtime_paths,
     )
+    agents_in_thread = [agent for agent in agents_in_thread if agent.full_id in available_agent_ids]
     if agents_in_thread:
         return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 

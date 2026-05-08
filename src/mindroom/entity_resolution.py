@@ -23,7 +23,7 @@ def configured_bot_usernames_for_room(
     """Return bot username localparts configured for one Matrix room."""
     configured_bots = {
         agent_username_localpart(entity_name, runtime_paths)
-        for entity_name in _configured_routable_entity_names_for_room(config, room_id, runtime_paths)
+        for entity_name in configured_routable_entity_names_for_room(config, room_id, runtime_paths)
     }
 
     if configured_bots:
@@ -32,7 +32,7 @@ def configured_bot_usernames_for_room(
     return configured_bots
 
 
-def _configured_routable_entity_names_for_room(
+def configured_routable_entity_names_for_room(
     config: Config,
     room_id: str,
     runtime_paths: RuntimePaths,
@@ -61,7 +61,7 @@ def configured_routable_entity_ids_for_room(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return non-router agent and team IDs statically configured for one room."""
-    configured_names = _configured_routable_entity_names_for_room(config, room_id, runtime_paths)
+    configured_names = configured_routable_entity_names_for_room(config, room_id, runtime_paths)
     config_ids = entity_matrix_ids(config, runtime_paths)
     return sorted((config_ids[name] for name in configured_names), key=lambda value: value.full_id)
 

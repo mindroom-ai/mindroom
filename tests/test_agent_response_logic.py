@@ -142,6 +142,8 @@ class TestAgentResponseLogic:
         self.config.authorization.agent_reply_permissions = {
             "calculator": [f"@alice:{self.domain}"],
             "general": [f"@bob:{self.domain}"],
+            "agent1": [f"@bob:{self.domain}"],
+            "research": [f"@bob:{self.domain}"],
         }
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
 
@@ -358,6 +360,45 @@ class TestAgentResponseLogic:
         )
         assert should_respond is True
 
+    def test_thread_continuation_cannot_widen_configured_room_boundary(self) -> None:
+        """Thread ownership must stay inside the configured-room responder boundary."""
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator"),
+                    "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "calculator": [f"@bob:{self.domain}"],
+                        "research": [f"@alice:{self.domain}"],
+                    },
+                },
+            ),
+            self.runtime_paths,
+        )
+        runtime_paths = runtime_paths_for(config)
+        room = create_mock_room("!room:localhost", ["calculator", "research"], config)
+        thread_history = [
+            _message(sender=self.agent_id("calculator"), body="I can help."),
+            _message(sender=f"@bob:{self.domain}", body="continue"),
+        ]
+
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            room=room,
+            thread_history=thread_history,
+            config=config,
+            runtime_paths=runtime_paths,
+            sender_id=f"@bob:{self.domain}",
+        )
+
+        assert should_respond is False
+
     def test_not_in_thread_uses_router(self) -> None:
         """If not in a thread, use router to determine response."""
         should_respond = should_agent_respond(
@@ -557,19 +598,20 @@ class TestAgentResponseLogic:
         assert should_respond
 
     def test_single_agent_takes_ownership_of_empty_thread(self) -> None:
-        """When there's only one agent with access to an empty thread, it takes ownership."""
-        # Only one agent in the room
+        """When an ad-hoc room has one agent with access to an empty thread, it takes ownership."""
+        room = create_mock_room("!adhoc:localhost", ["calculator"], self.config)
+
         should_respond = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            room=create_mock_room("!room:localhost", ["calculator"], self.config),  # Only calculator in room
-            thread_history=[],  # Empty thread
+            room=room,
+            thread_history=[],
             config=self.config,
             runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
-        assert should_respond is True  # Single agent takes ownership
+        assert should_respond is True
 
         # Thread with only user messages - single agent should also take ownership
         thread_history = [
@@ -580,17 +622,17 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            room=create_mock_room("!room:localhost", ["calculator"], self.config),  # Only calculator
+            room=room,
             thread_history=thread_history,
             config=self.config,
             runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
-        assert should_respond is True  # Single agent takes ownership when only users have spoken
+        assert should_respond is True
 
     def test_multiple_non_agent_users_in_thread_require_mentions(self) -> None:
         """Require mention when multiple humans posted in a thread, but allow thread continuity."""
-        room = create_mock_room("!room:localhost", ["calculator"], self.config)
+        room = create_mock_room("!adhoc:localhost", ["calculator"], self.config)
 
         # Thread with two different human senders and no agent yet → require mention
         multi_human_thread = [
@@ -686,7 +728,7 @@ class TestAgentResponseLogic:
 
     def test_multi_human_room_non_thread_auto_responds(self) -> None:
         """Non-thread messages in multi-human rooms auto-respond (single agent)."""
-        room = create_mock_room("!room:localhost", ["calculator"], self.config)
+        room = create_mock_room("!adhoc:localhost", ["calculator"], self.config)
         room.users["@alice:localhost"] = None
         room.users["@bob:localhost"] = None
 

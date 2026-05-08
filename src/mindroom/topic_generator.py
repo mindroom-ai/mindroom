@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from mindroom import model_loading
 from mindroom.ai_runtime import cached_agent_run
+from mindroom.entity_resolution import configured_routable_entity_names_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix import state as matrix_state
 
@@ -32,16 +33,13 @@ def _configured_entity_display_names_for_room(
     runtime_paths: RuntimePaths,
 ) -> list[str]:
     """Return configured agent and team display names for one room key or ID."""
-    entity_names: list[str] = []
-    for agent_name, agent_config in config.agents.items():
-        if room_key in matrix_state.resolve_room_aliases(agent_config.rooms, runtime_paths):
-            entity_names.append(agent_config.display_name or agent_name)
-
-    for team_name, team_config in config.teams.items():
-        if room_key in matrix_state.resolve_room_aliases(team_config.rooms, runtime_paths):
-            entity_names.append(team_config.display_name or team_name)
-
-    return entity_names
+    room_id = matrix_state.get_room_id(room_key, runtime_paths) or room_key
+    return [
+        (config.agents[entity_name].display_name or entity_name)
+        if entity_name in config.agents
+        else (config.teams[entity_name].display_name or entity_name)
+        for entity_name in configured_routable_entity_names_for_room(config, room_id, runtime_paths)
+    ]
 
 
 async def generate_room_topic_ai(
