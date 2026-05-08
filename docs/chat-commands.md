@@ -55,7 +55,7 @@ Display available commands or get detailed help on a specific topic.
 
 ### `!hi`
 
-Show the welcome message for the current room, listing available agents, their roles and tools, and quick-start instructions.
+Show the welcome message for the current room, listing available agents and teams, their roles and tools, and quick-start instructions.
 
 ```
 !hi

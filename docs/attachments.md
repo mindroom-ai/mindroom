@@ -112,5 +112,5 @@ Pruning runs opportunistically during new attachment registration.
 
 ## Limitations
 
-- **Routing in multi-agent rooms** -- in multi-agent rooms without an `@mention`, the router selects the best agent based on the file caption.
+- **Routing in rooms with multiple agents or teams** -- without an `@mention`, the router selects the best agent or team based on the file caption.
 - **Model support** -- the configured model must support file or video inputs for direct analysis. Models that do not can still use the `attachments` tool to inspect and process files via tool calls.

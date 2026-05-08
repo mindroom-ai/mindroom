@@ -1230,15 +1230,15 @@ prompts:
     Tool calls are hidden from users.
     Answer directly without narrating internal tool use.
   ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE: |
-    Decide which agent should respond to this message.
+    Decide which agent or team should respond to this message.
 
-    Available agents and their capabilities:
+    Available agents and teams:
 
     {agents_info}
 
     User message: {message}
 
-    Return only the agent name.
+    Return only the agent or team name.
 ```
 
 Discover allowed names by inspecting `src/mindroom/prompts.py` or by importing `PROMPT_DEFAULT_NAMES` from `mindroom.prompts`. For prompts with `{...}` placeholders, discover the allowed fields from `PROMPT_TEMPLATE_FIELDS` in `mindroom.prompts`. MindRoom validates configured prompt placeholders at config load, and unsupported placeholders fail validation before runtime. Prompt placeholders are not Jinja and not Python `str.format`; MindRoom only replaces exact `{field_name}` placeholders. Only bare placeholder names are supported; compound access, conversions, and format specs such as `{message.text}`, `{message!r}`, or `{message:.2f}` are rejected. Escape literal braces as `{{` and `}}` inside prompt overrides that use placeholders. Changing construction-time root prompt overrides in a running process restarts existing agents, teams, and the router through hot reload. Prompt overrides that are read per request are picked up without restarting bots.
@@ -10986,7 +10986,7 @@ This fallback is transparent — no user action is required. It detects provider
 
 ## Limitations
 
-- **Routing in multi-agent rooms** -- in multi-agent rooms without an `@mention`, the router selects the best agent based on the image caption.
+- **Routing in rooms with multiple agents or teams** -- without an `@mention`, the router selects the best agent or team based on the image caption.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
 - **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error. If the model rejects the image entirely, the [media fallback](#media-fallback) retries without the inline image.
 
@@ -11086,7 +11086,7 @@ MindRoom automatically prunes attachment metadata and managed `incoming_media/` 
 
 ## Limitations
 
-- **Routing in multi-agent rooms** -- in multi-agent rooms without an `@mention`, the router selects the best agent based on the file caption.
+- **Routing in rooms with multiple agents or teams** -- without an `@mention`, the router selects the best agent or team based on the file caption.
 - **Model support** -- the configured model must support file or video inputs for direct analysis. Models that do not can still use the `attachments` tool to inspect and process files via tool calls.
 
 # Chat Commands
@@ -11136,7 +11136,7 @@ Display available commands or get detailed help on a specific topic.
 
 ### `!hi`
 
-Show the welcome message for the current room, listing available agents, their roles and tools, and quick-start instructions.
+Show the welcome message for the current room, listing available agents and teams, their roles and tools, and quick-start instructions.
 
 ```
 !hi
@@ -12418,17 +12418,17 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 1. Router handles commands exclusively
 1. Extract message context (mentions, thread history, non-agent mention detection)
 1. Skip messages from other agents (unless mentioned)
-1. Router performs AI routing when no agent mentioned and thread doesn't have multiple human participants
+1. Router routes when no agent or team is mentioned and thread doesn't have multiple human participants
 1. Check for team formation or individual response
 1. Generate response and store memory
 
 **Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content. The agent edits its own previous reply in place rather than sending a new message. Edits from other agents are ignored, and the feature requires that the original response event ID is tracked by the `ResponseTracker`.
 
-**`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the agent. When no agent is mentioned, AI routing is used to select the appropriate agent, similar to text messages.
+**`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the agent. When no agent or team is mentioned, routing selects the appropriate agent or team, similar to text messages.
 
 **`_on_reaction`**: Handles `ReactionEvent` for the interactive Q&A system (e.g., confirming or rejecting agent suggestions) and config confirmation workflows.
 
-**Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required. Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
+**Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, routes directly when one candidate remains, and uses `suggest_agent_for_message()` only when multiple candidates remain. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required. Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency
 

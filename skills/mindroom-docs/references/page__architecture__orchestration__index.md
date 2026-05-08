@@ -75,10 +75,10 @@ main() entry
 Config changes are detected via polling (`watch_file()` checks `st_mtime` every second):
 
 1. On change, `update_config()` is called
-2. `_identify_entities_to_restart()` computes diff using `model_dump(exclude_none=True)`
-3. Affected entities are stopped, recreated, and restarted
-4. Removed entities run `cleanup()` (leave rooms, stop bot)
-5. New/restarted bots go through room setup
+1. `_identify_entities_to_restart()` computes diff using `model_dump(exclude_none=True)`
+1. Affected entities are stopped, recreated, and restarted
+1. Removed entities run `cleanup()` (leave rooms, stop bot)
+1. New/restarted bots go through room setup
 
 Skills are watched separately via `_watch_skills_task()` with cache invalidation.
 
@@ -110,24 +110,23 @@ Event callbacks are wrapped in `_create_task_wrapper()` to run as background tas
 **`_on_message` flow:**
 
 1. Skip own messages (except voice transcriptions from router)
-2. Check sender authorization and handle edits
-3. Check if already responded (`ResponseTracker`)
-4. Router handles commands exclusively
-5. Extract message context (mentions, thread history, non-agent mention detection)
-6. Skip messages from other agents (unless mentioned)
-7. Router performs AI routing when no agent mentioned and thread doesn't have multiple human participants
-8. Check for team formation or individual response
-9. Generate response and store memory
+1. Check sender authorization and handle edits
+1. Check if already responded (`ResponseTracker`)
+1. Router handles commands exclusively
+1. Extract message context (mentions, thread history, non-agent mention detection)
+1. Skip messages from other agents (unless mentioned)
+1. Router routes when no agent or team is mentioned and thread doesn't have multiple human participants
+1. Check for team formation or individual response
+1. Generate response and store memory
 
-**Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content.
-The agent edits its own previous reply in place rather than sending a new message.
+**Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content. The agent edits its own previous reply in place rather than sending a new message.
 Edits from other agents are ignored, and the feature requires that the original response event ID is tracked by the `ResponseTracker`.
 
-**`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the agent. When no agent is mentioned, AI routing is used to select the appropriate agent, similar to text messages.
+**`_on_media_message`**: Handles media events (images, videos, files, and audio). Downloads and decrypts media data, then processes it through the agent. When no agent or team is mentioned, routing selects the appropriate agent or team, similar to text messages.
 
 **`_on_reaction`**: Handles `ReactionEvent` for the interactive Q&A system (e.g., confirming or rejecting agent suggestions) and config confirmation workflows.
 
-**Routing** (when no agent mentioned): Router uses `suggest_agent_for_message()` to pick the best agent based on room configuration and message content. Only routes when multiple agents are available. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required. Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
+**Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, routes directly when one candidate remains, and uses `suggest_agent_for_message()` only when multiple candidates remain. In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required. Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency
 
@@ -142,11 +141,11 @@ Edits from other agents are ignored, and the feature requires that the original 
 On `orchestrator.stop()`:
 
 1. Set `self.running = False`
-2. Cancel config reload task
-3. Stop memory auto-flush worker
-4. Shut down the per-binding knowledge refresh scheduler
-5. Cancel pending bot start tasks
-6. Stop the MCP manager
-7. Cancel all sync tasks
-8. Signal all bots to stop (`bot.running = False`)
-9. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)
+1. Cancel config reload task
+1. Stop memory auto-flush worker
+1. Shut down the per-binding knowledge refresh scheduler
+1. Cancel pending bot start tasks
+1. Stop the MCP manager
+1. Cancel all sync tasks
+1. Signal all bots to stop (`bot.running = False`)
+1. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)

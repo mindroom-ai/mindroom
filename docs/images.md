@@ -85,6 +85,6 @@ It detects provider-specific error patterns such as unsupported media type, base
 
 ## Limitations
 
-- **Routing in multi-agent rooms** -- in multi-agent rooms without an `@mention`, the router selects the best agent based on the image caption.
+- **Routing in rooms with multiple agents or teams** -- without an `@mention`, the router selects the best agent or team based on the image caption.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
 - **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error. If the model rejects the image entirely, the [media fallback](#media-fallback) retries without the inline image.

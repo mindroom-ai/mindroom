@@ -529,15 +529,15 @@ prompts:
     Tool calls are hidden from users.
     Answer directly without narrating internal tool use.
   ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE: |
-    Decide which agent should respond to this message.
+    Decide which agent or team should respond to this message.
 
-    Available agents and their capabilities:
+    Available agents and teams:
 
     {agents_info}
 
     User message: {message}
 
-    Return only the agent name.
+    Return only the agent or team name.
 ```
 
 Discover allowed names by inspecting `src/mindroom/prompts.py` or by importing `PROMPT_DEFAULT_NAMES` from `mindroom.prompts`.
