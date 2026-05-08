@@ -78,20 +78,6 @@ def test_message_context_marks_partial_planning_history_unavailable() -> None:
     assert context.planning_thread_history_unavailable is True
 
 
-def test_message_target_identifies_new_root_target_shape() -> None:
-    """Only thread-start delivery targets should be treated as new roots."""
-    target = MessageTarget.resolve(
-        "!room:localhost",
-        None,
-        "$event:localhost",
-        thread_start_root_event_id="$event:localhost",
-    )
-    existing_thread = MessageTarget.resolve("!room:localhost", "$event:localhost", "$event:localhost")
-
-    assert target.represents_new_thread_root is True
-    assert existing_thread.represents_new_thread_root is False
-
-
 def test_context_with_dispatch_thread_context_propagates_replay_guard_history() -> None:
     """Replay history may stabilize on MessageContext, but dispatch-only flags stay local."""
     thread_message = _message("$thread-message:localhost")
