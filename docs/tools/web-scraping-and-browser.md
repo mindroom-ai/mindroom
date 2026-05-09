@@ -99,7 +99,8 @@ crawl("https://matrix.org/blog/", search_query="bridges and federation")
 
 #### What It Does
 
-With normal MindRoom YAML configuration, `website` exposes `read_url(url)` and returns JSON-serialized `Document` objects from Agno's `WebsiteReader`.
+With normal MindRoom YAML configuration, `website` exposes `read_url(url)` and returns JSON-serialized `Document` objects from MindRoom's WebsiteReader variant.
+That reader keeps Agno's crawl and document shape while filtering search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
 If a `Knowledge` object is injected programmatically through the `knowledge` constructor argument, the tool exposes `add_website_to_knowledge(url)` instead of `read_url()`.
 That means the same registry entry can act either as a simple page reader or as a knowledge-base ingestion hook depending on how it is constructed.
 In normal hand-authored `config.yaml`, you should treat this as a quick page-reading tool.
@@ -661,7 +662,7 @@ get_page_content()
 
 #### What It Does
 
-`browser` exposes one callable, `browser(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, and `act`.
+`browser` exposes one callable, `browser(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, `act`, `help`, and `actions`.
 It manages named browser profiles, with `mindroom` as the default profile name.
 It creates tabs, tracks the active tab, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
 `snapshot()` can return either `ai` or `aria` format.

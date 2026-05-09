@@ -8924,7 +8924,7 @@
       "dependencies": [
         "playwright"
       ],
-      "description": "OpenClaw-style browser control (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act)",
+      "description": "OpenClaw-style browser control (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)",
       "display_name": "Browser",
       "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
       "function_names": [

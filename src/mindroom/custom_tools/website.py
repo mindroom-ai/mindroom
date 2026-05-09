@@ -5,18 +5,18 @@ from __future__ import annotations
 import json
 import re
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
+import httpx
+from agno.knowledge.document import Document
 from agno.knowledge.reader.website_reader import WebsiteReader
 from agno.tools import Toolkit
-from agno.utils.log import log_debug
+from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
 if TYPE_CHECKING:
-    from agno.knowledge.document import Document
     from agno.knowledge.knowledge import Knowledge
 else:
-    type Document = Any
     type Knowledge = Any
 
 _PREFERRED_CONTENT_SELECTORS = (
@@ -49,6 +49,8 @@ _UNWANTED_SELECTORS = (
 )
 
 _LOW_VALUE_NAME_PATTERN = re.compile(r"(?:^|[-_])(nav|navbar|menu|search|modal|header|footer|sidebar)(?:$|[-_])")
+_FAILED_CRAWL_CONTENT = "Failed to extract any content"
+_FAILED_STARTING_URL = "Failed to crawl starting URL"
 
 
 def _normalize_text(text: str) -> str:
@@ -96,13 +98,235 @@ def _best_text_candidate(candidates: list[Tag], *, min_chars: int = 40) -> str |
 
 
 def _safe_url_for_log(url: str) -> str:
-    """Return a URL safe for logs by dropping query and fragment data."""
+    """Return a URL safe for logs by dropping credentials, query, and fragment data."""
     parts = urlsplit(url)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{parts.port}" if parts.port is not None else host
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 class _MindRoomWebsiteReader(WebsiteReader):
     """WebsiteReader variant that avoids selecting early search/navigation sections."""
+
+    def _get_primary_domain(self, url: str) -> str:
+        """Extract the primary domain without treating URL userinfo as part of the host."""
+        host = urlparse(url).hostname or ""
+        return ".".join(host.split(".")[-2:])
+
+    def _queue_links(self, soup: BeautifulSoup, current_url: str, current_depth: int, primary_domain: str) -> None:
+        """Queue same-domain crawl links from the unmodified page soup."""
+        for link in soup.find_all("a", href=True):
+            if not isinstance(link, Tag):
+                continue
+
+            href_str = str(link["href"])
+            full_url = urljoin(current_url, href_str)
+            parsed_url = urlparse(full_url)
+            if not parsed_url.netloc.endswith(primary_domain) or parsed_url.path.endswith((".pdf", ".jpg", ".png")):
+                continue
+
+            full_url_str = str(full_url)
+            if full_url_str not in self._visited and (full_url_str, current_depth + 1) not in self._urls_to_crawl:
+                self._urls_to_crawl.append((full_url_str, current_depth + 1))
+
+    def _should_skip_crawl_url(
+        self,
+        *,
+        current_url: str,
+        starting_url: str,
+        current_depth: int,
+        num_links: int,
+        primary_domain: str,
+    ) -> bool:
+        """Return whether a queued crawl URL is outside the current crawl budget."""
+        return (
+            current_url in self._visited
+            or not urlparse(current_url).netloc.endswith(primary_domain)
+            or (current_depth > self.max_depth and current_url != starting_url)
+            or num_links >= self.max_links
+        )
+
+    def _log_http_status_error(self, *, safe_current_url: str, error: httpx.HTTPStatusError, async_mode: bool) -> None:
+        """Log HTTP crawl failures without including provider exception text."""
+        if 300 <= error.response.status_code < 400 and not async_mode:
+            log_debug(f"Redirect encountered for {safe_current_url}, skipping")
+            return
+
+        prefix = "HTTP status error while crawling asynchronously" if async_mode else "HTTP status error while crawling"
+        log_warning(f"{prefix} {safe_current_url}: {error.response.status_code}")
+
+    def _documents_from_crawl(
+        self,
+        crawler_result: dict[str, str],
+        *,
+        url: str,
+        name: str | None,
+    ) -> list[Document]:
+        """Build Agno documents from crawled page content."""
+        documents: list[Document] = []
+        for crawled_url, crawled_content in crawler_result.items():
+            document = Document(
+                name=name or url,
+                id=str(crawled_url),
+                meta_data={"url": str(crawled_url)},
+                content=crawled_content,
+            )
+            if self.chunk:
+                documents.extend(self.chunk_document(document))
+            else:
+                documents.append(document)
+        return documents
+
+    def _record_response_content(
+        self,
+        response: httpx.Response,
+        *,
+        current_url: str,
+        current_depth: int,
+        primary_domain: str,
+        crawler_result: dict[str, str],
+    ) -> bool:
+        """Extract content from a response and queue crawl links from the original soup."""
+        soup = BeautifulSoup(response.content, "html.parser")
+        main_content = self._extract_main_content(soup)
+        if main_content:
+            crawler_result[current_url] = main_content
+
+        self._queue_links(soup, current_url, current_depth, primary_domain)
+        return bool(main_content)
+
+    def crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
+        """Crawl a website while logging only sanitized URL forms."""
+        num_links = 0
+        crawler_result: dict[str, str] = {}
+        primary_domain = self._get_primary_domain(url)
+
+        self._visited = set()
+        self._urls_to_crawl = [(url, starting_depth)]
+        while self._urls_to_crawl:
+            current_url, current_depth = self._urls_to_crawl.pop(0)
+            if self._should_skip_crawl_url(
+                current_url=current_url,
+                starting_url=url,
+                current_depth=current_depth,
+                num_links=num_links,
+                primary_domain=primary_domain,
+            ):
+                continue
+
+            self._visited.add(current_url)
+            self.delay()
+            safe_current_url = _safe_url_for_log(current_url)
+
+            try:
+                log_debug(f"Crawling: {safe_current_url}")
+                response = (
+                    httpx.get(current_url, timeout=self.timeout, proxy=self.proxy, follow_redirects=True)
+                    if self.proxy
+                    else httpx.get(current_url, timeout=self.timeout, follow_redirects=True)
+                )
+                response.raise_for_status()
+                num_links += self._record_response_content(
+                    response,
+                    current_url=current_url,
+                    current_depth=current_depth,
+                    primary_domain=primary_domain,
+                    crawler_result=crawler_result,
+                )
+            except httpx.HTTPStatusError as e:
+                self._log_http_status_error(safe_current_url=safe_current_url, error=e, async_mode=False)
+                if current_url == url and not crawler_result and not (300 <= e.response.status_code < 400):
+                    raise
+            except httpx.RequestError as e:
+                log_warning(f"Request error while crawling {safe_current_url}: {e.__class__.__name__}")
+                if current_url == url and not crawler_result:
+                    raise
+            except Exception as e:
+                log_warning(f"Failed to crawl {safe_current_url}: {e.__class__.__name__}")
+                if current_url == url and not crawler_result:
+                    raise httpx.RequestError(_FAILED_STARTING_URL, request=None) from e
+
+        if not crawler_result:
+            raise httpx.RequestError(_FAILED_CRAWL_CONTENT, request=None)
+
+        return crawler_result
+
+    async def async_crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
+        """Asynchronously crawl a website while logging only sanitized URL forms."""
+        num_links = 0
+        crawler_result: dict[str, str] = {}
+        primary_domain = self._get_primary_domain(url)
+
+        self._visited = set()
+        self._urls_to_crawl = [(url, starting_depth)]
+
+        async_client = httpx.AsyncClient(proxy=self.proxy) if self.proxy else httpx.AsyncClient()
+        async with async_client as client:
+            while self._urls_to_crawl and num_links < self.max_links:
+                current_url, current_depth = self._urls_to_crawl.pop(0)
+                if self._should_skip_crawl_url(
+                    current_url=current_url,
+                    starting_url=url,
+                    current_depth=current_depth,
+                    num_links=num_links,
+                    primary_domain=primary_domain,
+                ):
+                    continue
+
+                self._visited.add(current_url)
+                await self.async_delay()
+                safe_current_url = _safe_url_for_log(current_url)
+
+                try:
+                    log_debug(f"Crawling asynchronously: {safe_current_url}")
+                    response = await client.get(current_url, timeout=self.timeout, follow_redirects=True)
+                    response.raise_for_status()
+                    num_links += self._record_response_content(
+                        response,
+                        current_url=current_url,
+                        current_depth=current_depth,
+                        primary_domain=primary_domain,
+                        crawler_result=crawler_result,
+                    )
+                except httpx.HTTPStatusError as e:
+                    self._log_http_status_error(safe_current_url=safe_current_url, error=e, async_mode=True)
+                    if current_url == url and not crawler_result:
+                        raise
+                except httpx.RequestError as e:
+                    log_warning(
+                        f"Request error while crawling asynchronously {safe_current_url}: {e.__class__.__name__}",
+                    )
+                    if current_url == url and not crawler_result:
+                        raise
+                except Exception as e:
+                    log_warning(f"Failed to crawl asynchronously {safe_current_url}: {e.__class__.__name__}")
+                    if current_url == url and not crawler_result:
+                        raise httpx.RequestError(_FAILED_STARTING_URL, request=None) from e
+
+        if not crawler_result:
+            raise httpx.RequestError(_FAILED_CRAWL_CONTENT, request=None)
+
+        return crawler_result
+
+    def read(self, url: str, name: str | None = None) -> list[Document]:
+        """Read a website while logging only sanitized URL forms."""
+        log_debug(f"Reading: {_safe_url_for_log(url)}")
+        try:
+            return self._documents_from_crawl(self.crawl(url), url=url, name=name)
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            log_error(f"Error reading website {_safe_url_for_log(url)}: {e.__class__.__name__}")
+            raise
+
+    async def async_read(self, url: str, name: str | None = None) -> list[Document]:
+        """Asynchronously read a website while logging only sanitized URL forms."""
+        log_debug(f"Reading asynchronously: {_safe_url_for_log(url)}")
+        try:
+            return self._documents_from_crawl(await self.async_crawl(url), url=url, name=name)
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            log_error(f"Error reading website asynchronously {_safe_url_for_log(url)}: {e.__class__.__name__}")
+            raise
 
     def _extract_main_content(self, soup: BeautifulSoup) -> str:
         """Extract the best available page body text."""

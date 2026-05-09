@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import textwrap
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -132,6 +133,38 @@ def test_core_runtime_imports_are_declared_as_base_dependencies() -> None:
         assert dependency_name in base_dependencies, (
             f"{module_path} imports {dependency_name!r} directly and it should be declared in project.dependencies"
         )
+
+
+def test_website_tool_registry_import_does_not_require_website_extra() -> None:
+    """Registry imports should not import optional website implementation dependencies."""
+    script = """
+    import importlib.abc
+    import sys
+
+
+    class BlockWebsiteImplementation(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == "mindroom.custom_tools.website" or fullname.startswith("bs4"):
+                raise ImportError(f"blocked optional website dependency: {fullname}")
+            return None
+
+
+    sys.meta_path.insert(0, BlockWebsiteImplementation())
+    import mindroom.tools
+    import mindroom.tools.website
+
+    assert "mindroom.custom_tools.website" not in sys.modules
+    print("ok")
+    """
+
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(script)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_vertexai_claude_google_auth_is_declared_as_base_dependency() -> None:

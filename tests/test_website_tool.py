@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 from bs4 import BeautifulSoup
 
-from mindroom.custom_tools.website import WebsiteTools, _MindRoomWebsiteReader
+from mindroom.custom_tools.website import WebsiteTools, _MindRoomWebsiteReader, _safe_url_for_log
 from mindroom.tools.website import website_tools
 
 if TYPE_CHECKING:
@@ -90,10 +91,28 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
     assert "Detailed reference material" in content_by_url[docs_url]
 
 
-def test_website_tool_logs_urls_without_query_or_fragment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Website tools should not put caller query strings or fragments in logs."""
-    full_url = "https://example.test/docs?token=secret#private"
+def test_safe_url_for_log_strips_userinfo_query_and_fragment() -> None:
+    """Website logs should keep origin/path context without exposing secrets."""
+    assert (
+        _safe_url_for_log("https://user:pass@example.test:8443/docs?token=secret#private")
+        == "https://example.test:8443/docs"
+    )
+
+
+def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Website reads should not leak caller URL secrets through wrapper or reader logs."""
+    full_url = "https://user:secret@example.test/docs?token=query-secret#frag-secret"
     logged_messages: list[str] = []
+    html = """
+    <html>
+      <body>
+        <main>
+          <h1>Docs</h1>
+          <p>Reference material with enough page text to exercise the reader.</p>
+        </main>
+      </body>
+    </html>
+    """
 
     class FakeKnowledge:
         def insert(self, *, url: str, reader: object) -> None:
@@ -103,22 +122,36 @@ def test_website_tool_logs_urls_without_query_or_fragment(monkeypatch: pytest.Mo
     def fake_log_debug(message: str) -> None:
         logged_messages.append(message)
 
-    def fake_read(_reader: _MindRoomWebsiteReader, *, url: str) -> list[object]:
+    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
         assert url == full_url
-        return []
+        assert timeout == 10
+        assert follow_redirects is True
+        request = httpx.Request("GET", url)
+        return httpx.Response(200, content=html.encode(), request=request)
+
+    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
+        assert min_seconds == 1
+        assert max_seconds == 3
 
     monkeypatch.setattr("mindroom.custom_tools.website.log_debug", fake_log_debug)
-    monkeypatch.setattr(_MindRoomWebsiteReader, "read", fake_read)
+    monkeypatch.setattr("agno.knowledge.reader.website_reader.log_debug", fake_log_debug)
+    monkeypatch.setattr("agno.knowledge.reader.website_reader.httpx.get", fake_get)
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     WebsiteTools().read_url(full_url)
     WebsiteTools(knowledge=FakeKnowledge()).add_website_to_knowledge(full_url)
 
     assert logged_messages == [
         "Reading website: https://example.test/docs",
+        "Reading: https://example.test/docs",
+        "Crawling: https://example.test/docs",
         "Adding to knowledge base: https://example.test/docs",
     ]
-    assert "secret" not in " ".join(logged_messages)
-    assert "private" not in " ".join(logged_messages)
+    joined_messages = " ".join(logged_messages)
+    assert full_url not in joined_messages
+    assert "user:secret" not in joined_messages
+    assert "query-secret" not in joined_messages
+    assert "frag-secret" not in joined_messages
 
 
 def test_website_tool_adds_urls_to_knowledge_with_mindroom_reader() -> None:
@@ -149,3 +182,10 @@ def test_website_tool_adds_urls_to_knowledge_with_mindroom_reader() -> None:
 def test_website_tool_factory_uses_mindroom_reader() -> None:
     """The configured website toolkit should use MindRoom's fixed extractor."""
     assert website_tools().__module__ == "mindroom.custom_tools.website"
+
+
+def test_website_docs_describe_mindroom_reader() -> None:
+    """Website docs should describe the reader users actually get."""
+    docs = Path("docs/tools/web-scraping-and-browser.md").read_text(encoding="utf-8")
+
+    assert "MindRoom's WebsiteReader variant" in docs

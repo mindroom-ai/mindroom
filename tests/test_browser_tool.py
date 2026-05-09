@@ -299,6 +299,22 @@ def test_browser_metadata_documents_default_output_dir() -> None:
     assert "storage path's browser/ directory" in output_dir_field.description
 
 
+def test_browser_metadata_lists_discovery_actions() -> None:
+    """Dashboard metadata should expose the callable discovery actions."""
+    description = TOOL_METADATA["browser"].description
+
+    assert "help" in description
+    assert "actions" in description
+
+
+def test_browser_docs_list_discovery_actions() -> None:
+    """Tool docs should expose the callable discovery actions."""
+    docs = Path("docs/tools/web-scraping-and-browser.md").read_text(encoding="utf-8")
+
+    assert "`help`" in docs
+    assert "`actions`" in docs
+
+
 @pytest.mark.asyncio
 async def test_browser_open_requires_target_url() -> None:
     """Open action requires targetUrl."""
