@@ -602,7 +602,6 @@ defaults:
   show_tool_calls: true                 # Show tool-call markers and trace metadata; hidden mode still allows generic worker warmup copy
   worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null                     # Worker runtime reuse for proxied tools (shared, user, user_agent)
-  tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
 ```
 
