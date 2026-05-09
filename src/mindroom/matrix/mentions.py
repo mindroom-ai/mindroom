@@ -344,11 +344,21 @@ def _apply_replacements(
     parts: list[str] = []
     last_end = 0
     for replacement in replacements:
-        parts.append(text[last_end : replacement.start])
+        start = replacement.start
+        end = replacement.end
+        if _is_wrapped_in_single_backticks(text, replacement.start, replacement.end):
+            start -= 1
+            end += 1
+        parts.append(text[last_end:start])
         parts.append(replacement.markdown_text if use_markdown else replacement.plain_text)
-        last_end = replacement.end
+        last_end = end
     parts.append(text[last_end:])
     return "".join(parts)
+
+
+def _is_wrapped_in_single_backticks(text: str, start: int, end: int) -> bool:
+    """Return whether one replacement is wrapped as exactly one inline code token."""
+    return start > 0 and end < len(text) and text[start - 1] == "`" and text[end] == "`"
 
 
 def format_message_with_mentions(

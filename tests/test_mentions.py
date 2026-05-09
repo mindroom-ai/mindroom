@@ -291,6 +291,24 @@ class TestMentionParsing:
             "@bas.nijholt:chat-mindroom.example.com</a> -- noted.</p>\n"
         )
 
+    def test_format_message_with_backticked_full_matrix_user_id_creates_clickable_mention(self) -> None:
+        """Accidentally backticked MXIDs should become normal clickable mentions."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "Mind ID is `@mindroom_mind_5ckzneqq:mindroom.chat`.",
+            sender_domain="matrix.org",
+        )
+
+        assert content["body"] == "Mind ID is @mindroom_mind_5ckzneqq:mindroom.chat."
+        assert content["m.mentions"]["user_ids"] == ["@mindroom_mind_5ckzneqq:mindroom.chat"]
+        assert (
+            content["formatted_body"]
+            == '<p>Mind ID is <a href="https://matrix.to/#/@mindroom_mind_5ckzneqq:mindroom.chat">'
+            "@mindroom_mind_5ckzneqq:mindroom.chat</a>.</p>\n"
+        )
+
     def test_format_message_with_full_matrix_user_id_excludes_sentence_period(self) -> None:
         """Sentence punctuation should not become part of a full Matrix ID mention."""
         config = _make_config(_default_runtime_paths())
