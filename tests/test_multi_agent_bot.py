@@ -119,6 +119,7 @@ from mindroom.response_runner import (
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
+from mindroom.startup_errors import PermanentStartupError
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
@@ -13156,6 +13157,28 @@ class TestMultiAgentOrchestrator:
 
         assert "general" in orchestrator.agent_bots
         mock_schedule_retry.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_background_bot_recovery_stops_on_permanent_room_setup_failure(self, tmp_path: Path) -> None:
+        """Recovered background starts should not retry permanent room setup failures forever."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+
+        bot = MagicMock()
+        bot.agent_name = "general"
+        bot.try_start = AsyncMock(return_value=True)
+        orchestrator.agent_bots = {"general": bot}
+
+        with (
+            patch.object(orchestrator, "_retry_blocked_mcp_entities", new=AsyncMock(return_value=set())),
+            patch.object(
+                orchestrator,
+                "_setup_rooms_and_memberships",
+                new=AsyncMock(side_effect=PermanentStartupError("bad ADC")),
+            ),
+            pytest.raises(PermanentStartupError, match="bad ADC"),
+        ):
+            await orchestrator._run_bot_start_retry("general")
 
     @pytest.mark.asyncio
     async def test_shutdown_expires_in_flight_approval_send_after_event_id_arrives(  # noqa: PLR0915

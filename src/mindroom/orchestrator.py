@@ -54,6 +54,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.scheduling import set_scheduling_hook_registry
+from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.plugins import (
     PluginReloadResult,
@@ -498,6 +499,7 @@ class _MultiAgentOrchestrator:
                         await run_with_retry(
                             f"Updating Matrix room memberships for {entity_name}",
                             partial(self._setup_rooms_and_memberships, bots_to_setup),
+                            permanent_error_check=is_permanent_startup_error,
                             update_runtime_state=False,
                         )
                     self._start_sync_task(entity_name, bot)
@@ -1108,6 +1110,7 @@ class _MultiAgentOrchestrator:
         await run_with_retry(
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
+            permanent_error_check=is_permanent_startup_error,
         )
         interrupted_threads = await self._cleanup_stale_streams_after_restart(started_bots, config)
         await self._auto_resume_after_restart(interrupted_threads, config)
@@ -2003,6 +2006,10 @@ async def main(
     except KeyboardInterrupt:
         shutdown_requested.set()
         logger.info("Multi-agent bot system stopped by user")
+    except PermanentStartupError as exc:
+        shutdown_requested.set()
+        logger.error("MindRoom startup failed", error=str(exc))  # noqa: TRY400
+        raise
     except Exception:
         shutdown_requested.set()
         logger.exception("Error in MindRoom runtime")

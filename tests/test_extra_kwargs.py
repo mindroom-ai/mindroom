@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
+from mindroom.startup_errors import PermanentStartupError
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
 from mindroom.vertex_claude_prompt_cache import (
     _copy_messages_with_vertex_prompt_cache_breakpoint,
@@ -577,19 +578,102 @@ def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatc
     )
     config = Config(**config_data)
     fake_google_credentials = object()
+    import_order: list[str] = []
 
-    def fake_load_credentials_from_file(path: str, *, scopes: list[str]) -> tuple[object, str]:
-        assert Path(path).resolve() == credentials_path.resolve()
-        assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
-        return fake_google_credentials, "ignored-project"
+    class FakeAuthorizedUserCredentials:
+        @classmethod
+        def from_authorized_user_file(cls, path: str, *, scopes: list[str]) -> object:
+            assert Path(path).resolve() == credentials_path.resolve()
+            assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
+            return fake_google_credentials
 
-    monkeypatch.setattr("google.auth.load_credentials_from_file", fake_load_credentials_from_file)
+    original_import_module = importlib.import_module
+
+    def fake_import_module(module_name: str) -> object:
+        import_order.append(module_name)
+        if module_name == "google.auth":
+            msg = "google.auth should not be used for authorized-user ADC"
+            raise AssertionError(msg)
+        if module_name == "google.oauth2.credentials":
+            return type("FakeOauthCredentialsModule", (), {"Credentials": FakeAuthorizedUserCredentials})
+        return original_import_module(module_name)
+
+    monkeypatch.setattr("mindroom.google_adc.importlib.import_module", fake_import_module)
 
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 
     assert isinstance(model, VertexAIClaude)
     assert model.client_params is not None
     assert model.client_params["credentials"] is fake_google_credentials
+    assert import_order == ["google.oauth2.credentials"]
+
+
+def test_vertexai_claude_rejects_missing_runtime_google_application_credentials() -> None:
+    """Missing GOOGLE_APPLICATION_CREDENTIALS should fail with an actionable error."""
+    config_data = {
+        "models": {
+            "vertex_claude_model": {
+                "provider": "vertexai_claude",
+                "id": "claude-sonnet-4-6",
+                "extra_kwargs": {
+                    "project_id": "demo-project",
+                    "region": "us-central1",
+                },
+            },
+        },
+        "router": {
+            "model": "vertex_claude_model",
+        },
+        "agents": {},
+    }
+
+    runtime_root = Path(tempfile.mkdtemp())
+    credentials_path = runtime_root / "missing-google-credentials.json"
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    )
+    config = Config(**config_data)
+
+    with pytest.raises(
+        PermanentStartupError,
+        match="GOOGLE_APPLICATION_CREDENTIALS points to a file that does not exist",
+    ):
+        get_model_instance(config, runtime_paths, "vertex_claude_model")
+
+
+def test_vertexai_claude_rejects_invalid_runtime_google_application_credentials() -> None:
+    """Invalid ADC files should fail as permanent startup errors."""
+    config_data = {
+        "models": {
+            "vertex_claude_model": {
+                "provider": "vertexai_claude",
+                "id": "claude-sonnet-4-6",
+                "extra_kwargs": {
+                    "project_id": "demo-project",
+                    "region": "us-central1",
+                },
+            },
+        },
+        "router": {
+            "model": "vertex_claude_model",
+        },
+        "agents": {},
+    }
+
+    runtime_root = Path(tempfile.mkdtemp())
+    credentials_path = runtime_root / "invalid-google-credentials.json"
+    credentials_path.write_text('{"type":"authorized_user"}\n', encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    )
+    config = Config(**config_data)
+
+    with pytest.raises(PermanentStartupError, match="Failed to load GOOGLE_APPLICATION_CREDENTIALS"):
+        get_model_instance(config, runtime_paths, "vertex_claude_model")
 
 
 def test_vertexai_claude_loads_service_account_credentials_directly(
@@ -643,7 +727,7 @@ def test_vertexai_claude_loads_service_account_credentials_directly(
             return type("FakeServiceAccountModule", (), {"Credentials": FakeServiceAccountCredentials})
         return original_import_module(module_name)
 
-    monkeypatch.setattr("mindroom.model_loading.importlib.import_module", fake_import_module)
+    monkeypatch.setattr("mindroom.google_adc.importlib.import_module", fake_import_module)
 
     model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 

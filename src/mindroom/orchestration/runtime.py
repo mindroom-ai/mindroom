@@ -23,7 +23,6 @@ from mindroom.cancellation import (
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.health import (
     MATRIX_SYNC_STARTUP_GRACE_SECONDS,
     MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS,
@@ -32,6 +31,7 @@ from mindroom.matrix.health import (
 )
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_state import set_runtime_starting
+from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -171,7 +171,7 @@ def retry_delay_seconds(
 
 def is_permanent_startup_error(exc: Exception) -> bool:
     """Return whether a startup exception is clearly non-retryable."""
-    return isinstance(exc, PermanentMatrixStartupError)
+    return isinstance(exc, PermanentStartupError)
 
 
 async def cancel_task(

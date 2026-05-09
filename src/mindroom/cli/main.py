@@ -17,6 +17,7 @@ from mindroom import __version__, constants
 from mindroom.constants import ensure_writable_config_path
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.frontend_assets import ensure_frontend_dist_dir
+from mindroom.startup_errors import PermanentStartupError
 
 from .banner import make_banner
 from .config import (
@@ -184,6 +185,9 @@ async def _run(
         console.print("\nStopped")
     except ConnectionError as exc:
         _print_connection_error(exc, runtime_paths)
+        raise typer.Exit(1) from None
+    except PermanentStartupError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     except OSError as exc:
         if "connect" in str(exc).lower() or "refused" in str(exc).lower():
