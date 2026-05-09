@@ -242,13 +242,14 @@ async def test_browser_unknown_action_lists_valid_actions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_browser_help_returns_action_table() -> None:
-    """The browser tool should expose a callable discovery path."""
+@pytest.mark.parametrize("action", ["help", "actions"])
+async def test_browser_discovery_actions_return_action_table(action: str) -> None:
+    """The browser tool should expose callable discovery paths."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-    payload = json.loads(await tool.browser(action="help"))
+    payload = json.loads(await tool.browser(action=action))
 
-    assert payload["action"] == "help"
+    assert payload["action"] == action
     assert payload["status"] == "ok"
     assert "act" in payload["actions"]
     assert "help" in payload["actions"]
