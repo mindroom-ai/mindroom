@@ -43,7 +43,7 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
 
     assert len(messages) == 2
     assert messages[0].role == "user"
-    assert messages[0].content == f"@alice:localhost: {'x' * 200}"
+    assert messages[0].content == f"@alice:localhost: {'x' * 199}…"
     assert long_body not in str(messages[0].content)
     assert messages[1].content == "Current request"
 

@@ -183,6 +183,15 @@ def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
     return isinstance(original_sender, str) and bool(original_sender)
 
 
+def _cap_visible_message_body(body: str, max_length: int | None) -> str:
+    """Return a body capped for fallback context while marking truncated text."""
+    if max_length is None or len(body) <= max_length:
+        return body
+    if max_length <= 0:
+        return ""
+    return f"{body[: max_length - 1]}…"
+
+
 def _build_unseen_messages_header(
     partial_reply_kinds: set[_PartialReplyKind],
     *,
@@ -235,7 +244,7 @@ def _context_messages_from_visible_messages(
             continue
         capped_message = message
         if max_message_length is not None:
-            capped_body = message.body[:max_message_length]
+            capped_body = _cap_visible_message_body(message.body, max_message_length)
             if not capped_body:
                 continue
             capped_message = replace_visible_message(message, body=capped_body)

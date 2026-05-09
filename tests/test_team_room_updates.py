@@ -48,7 +48,7 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.config.main.load_config") as mock_load_config:
+        with patch("mindroom.orchestrator.load_config") as mock_load_config:
             config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
@@ -83,6 +83,8 @@ class TestTeamRoomUpdates:
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
                         mock_bot.sync_forever = AsyncMock()
+                        mock_bot.mark_sync_loop_started = MagicMock()
+                        mock_bot.reset_watchdog_clock = MagicMock()
                         mock_create_bot.return_value = mock_bot
 
                         await orchestrator.initialize()
@@ -112,20 +114,30 @@ class TestTeamRoomUpdates:
         """Test that a new team in config gets created."""
         # Start with no teams
         initial_config_data: dict[str, Any] = {
-            "agents": {},
+            "agents": {
+                "agent1": {
+                    "display_name": "Agent1",
+                    "role": "Test",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["room1"],
+                    "model": "default",
+                },
+            },
             "teams": {},
             "defaults": {"markdown": True},
             "models": {"default": {"provider": "ollama", "id": "test-model", "host": None, "api_key": None}},
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.config.main.load_config") as mock_load_config:
+        with patch("mindroom.orchestrator.load_config") as mock_load_config:
             config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
             with patch("mindroom.orchestrator.create_agent_user", new_callable=AsyncMock) as mock_ensure_users:
+                mock_agent1_user = MagicMock(user_id="@agent1:localhost", agent_name="agent1")
                 mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
-                mock_ensure_users.return_value = {"router": mock_router_user}
+                mock_ensure_users.return_value = {"agent1": mock_agent1_user, "router": mock_router_user}
 
                 # Mock topic generation to avoid calling AI
                 async def mock_generate_room_topic_ai(room_key: str, room_name: str, config: Config) -> str:  # noqa: ARG001
@@ -148,6 +160,8 @@ class TestTeamRoomUpdates:
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
                         mock_bot.sync_forever = AsyncMock()
+                        mock_bot.mark_sync_loop_started = MagicMock()
+                        mock_bot.reset_watchdog_clock = MagicMock()
                         mock_create_bot.return_value = mock_bot
 
                         await orchestrator.initialize()
@@ -158,7 +172,7 @@ class TestTeamRoomUpdates:
                         updated_config_data["teams"]["new_team"] = {
                             "display_name": "NewTeam",
                             "role": "New test team",
-                            "agents": [],
+                            "agents": ["agent1"],
                             "rooms": ["room1"],
                             "model": "default",
                             "mode": "coordinate",
@@ -169,6 +183,7 @@ class TestTeamRoomUpdates:
                         # Mock ensure_users to include the new team
                         mock_team_user = MagicMock(user_id="@new_team:localhost", agent_name="new_team")
                         mock_ensure_users.return_value = {
+                            "agent1": mock_agent1_user,
                             "router": mock_router_user,
                             "new_team": mock_team_user,
                         }
@@ -187,12 +202,21 @@ class TestTeamRoomUpdates:
     async def test_no_change_no_restart(self, tmp_path: Path) -> None:
         """Test that no changes in team config doesn't trigger restart."""
         config_data: dict[str, Any] = {
-            "agents": {},
+            "agents": {
+                "agent1": {
+                    "display_name": "Agent1",
+                    "role": "Test",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["room1"],
+                    "model": "default",
+                },
+            },
             "teams": {
                 "team1": {
                     "display_name": "Team1",
                     "role": "Test team",
-                    "agents": [],
+                    "agents": ["agent1"],
                     "rooms": ["room1"],
                     "model": "default",
                     "mode": "coordinate",
@@ -203,14 +227,19 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.config.main.load_config") as mock_load_config:
+        with patch("mindroom.orchestrator.load_config") as mock_load_config:
             config = Config.model_validate(config_data)
             mock_load_config.return_value = config
 
             with patch("mindroom.orchestrator.create_agent_user", new_callable=AsyncMock) as mock_ensure_users:
+                mock_agent1_user = MagicMock(user_id="@agent1:localhost", agent_name="agent1")
                 mock_team_user = MagicMock(user_id="@team1:localhost", agent_name="team1")
                 mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
-                mock_ensure_users.return_value = {"team1": mock_team_user, "router": mock_router_user}
+                mock_ensure_users.return_value = {
+                    "agent1": mock_agent1_user,
+                    "team1": mock_team_user,
+                    "router": mock_router_user,
+                }
 
                 # Mock topic generation to avoid calling AI
                 async def mock_generate_room_topic_ai(room_key: str, room_name: str, config: Config) -> str:  # noqa: ARG001
@@ -233,6 +262,8 @@ class TestTeamRoomUpdates:
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
                         mock_bot.sync_forever = AsyncMock()
+                        mock_bot.mark_sync_loop_started = MagicMock()
+                        mock_bot.reset_watchdog_clock = MagicMock()
                         mock_create_bot.return_value = mock_bot
 
                         await orchestrator.initialize()

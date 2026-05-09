@@ -240,10 +240,10 @@ async def test_orchestrator_creates_router_with_all_rooms(
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock load_config to return our test config
-    def mock_load_config(_config_path: Path | None = None) -> Config:
+    def mock_load_config(_runtime_paths: object | None = None, **_kwargs: object) -> Config:
         return config_with_rooms
 
-    monkeypatch.setattr("mindroom.config.main.load_config", mock_load_config)
+    monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
@@ -306,12 +306,12 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
     load_config_returns = [initial_config, updated_config]
     load_config_counter = [0]
 
-    def mock_load_config(_config_path: Path | None = None) -> Config:
+    def mock_load_config(_runtime_paths: object | None = None, **_kwargs: object) -> Config:
         result = load_config_returns[min(load_config_counter[0], len(load_config_returns) - 1)]
         load_config_counter[0] += 1
         return result
 
-    monkeypatch.setattr("mindroom.config.main.load_config", mock_load_config)
+    monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
@@ -335,8 +335,8 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
     assert set(router_bot.rooms) == {"room1"}
 
     # Mock bot operations using monkeypatch to avoid method assignment errors
-    async def mock_stop() -> None:
-        pass
+    async def mock_stop(*, reason: str | None = None) -> None:
+        del reason
 
     async def mock_start() -> None:
         pass
