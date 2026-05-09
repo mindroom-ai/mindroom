@@ -25,6 +25,7 @@ from mindroom.teams import TeamMode
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
+    bind_mock_config_cache,
     bind_runtime_paths,
     drain_coalescing,
     install_runtime_cache_support,
@@ -576,40 +577,45 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
             "general": MagicMock(display_name="GeneralAgent", rooms=["room1"]),
         }
         mock_config.teams = {}
+        cache_path = bind_mock_config_cache(mock_config, tmp_path)
         mock_from_yaml.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-            await orchestrator.initialize()
+            try:
+                await orchestrator.initialize()
 
-            # Verify agents were created (2 agents + 1 router)
-            assert len(orchestrator.agent_bots) == 3
-            assert "calculator" in orchestrator.agent_bots
-            assert "general" in orchestrator.agent_bots
-            assert "router" in orchestrator.agent_bots
+                # Verify agents were created (2 agents + 1 router)
+                assert len(orchestrator.agent_bots) == 3
+                assert "calculator" in orchestrator.agent_bots
+                assert "general" in orchestrator.agent_bots
+                assert "router" in orchestrator.agent_bots
+                assert orchestrator._runtime_support.event_cache.db_path == cache_path
 
-    # Test that agents can be started
-    with (
-        patch("mindroom.bot.login_agent_user") as mock_login,
-        patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
-    ):
-        mock_client = AsyncMock()
-        mock_client.add_event_callback = MagicMock()
-        mock_client.add_response_callback = MagicMock()
-        mock_client.user_id = "@mindroom_calculator:localhost"
-        mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:localhost"))
-        # Don't run sync_forever, just verify setup
-        mock_client.sync_forever = AsyncMock()
-        mock_login.return_value = mock_client
+                # Test that agents can be started
+                with (
+                    patch("mindroom.bot.login_agent_user") as mock_login,
+                    patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
+                ):
+                    mock_client = AsyncMock()
+                    mock_client.add_event_callback = MagicMock()
+                    mock_client.add_response_callback = MagicMock()
+                    mock_client.user_id = "@mindroom_calculator:localhost"
+                    mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:localhost"))
+                    # Don't run sync_forever, just verify setup
+                    mock_client.sync_forever = AsyncMock()
+                    mock_login.return_value = mock_client
 
-        # Manually start agents without running sync_forever
-        for bot in orchestrator.agent_bots.values():
-            await bot.start()
+                    # Manually start agents without running sync_forever
+                    for bot in orchestrator.agent_bots.values():
+                        await bot.start()
 
-        # Verify all agents were started (2 agents + 1 router = 3)
-        assert mock_login.call_count == 3
-        assert all(bot.running for bot in orchestrator.agent_bots.values())
-        assert all(bot.client is not None for bot in orchestrator.agent_bots.values())
+                    # Verify all agents were started (2 agents + 1 router = 3)
+                    assert mock_login.call_count == 3
+                    assert all(bot.running for bot in orchestrator.agent_bots.values())
+                    assert all(bot.client is not None for bot in orchestrator.agent_bots.values())
+            finally:
+                await orchestrator._close_runtime_support_services()
 
 
 @pytest.mark.asyncio

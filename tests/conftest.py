@@ -52,6 +52,7 @@ __all__ = [
     "TEST_PASSWORD",
     "FakeCredentialsManager",
     "aioresponse",
+    "bind_mock_config_cache",
     "bind_runtime_paths",
     "build_private_template_dir",
     "bypass_authorization",
@@ -642,6 +643,14 @@ def bind_runtime_paths(
         bound.defaults.coalescing.upload_grace_ms = 0
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
     return bound
+
+
+def bind_mock_config_cache(mock_config: MagicMock, runtime_root: Path) -> Path:
+    """Give a config mock the cache path contract used by orchestrator init."""
+    cache_path = runtime_root / "event_cache.db"
+    mock_config.cache.backend = "sqlite"
+    mock_config.cache.resolve_db_path.return_value = cache_path
+    return cache_path
 
 
 def runtime_paths_for(config: Config) -> RuntimePaths:
