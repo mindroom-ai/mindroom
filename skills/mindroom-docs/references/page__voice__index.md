@@ -168,10 +168,10 @@ If multiple eligible agents remain and the audio does not already target one of 
 
 ### Visibility rule
 
-MindRoom does not automatically post the transcript to the room.
-A visible router message appears only when the router must disambiguate between multiple eligible responders.
-If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent replies directly without an extra router message.
-Setting `voice.visible_router_echo: true` adds a visible router-authored echo of the normalized voice text when the router is actually allowed to process the event, without changing which event agents actually answer.
+By default, MindRoom posts a display-only router echo of normalized voice text when the router is allowed to process the event.
+The router handoff message still appears only when the router must disambiguate between multiple eligible responders.
+If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent replies directly to the original audio event.
+Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event agents actually answer.
 
 ### Attachment access
 
