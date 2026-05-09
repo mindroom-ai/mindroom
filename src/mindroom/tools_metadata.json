@@ -8910,7 +8910,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Optional directory for browser screenshots, PDFs, and downloads.",
+          "description": "Optional directory for browser screenshots, PDFs, and downloads. Defaults to the active storage path's browser/ directory.",
           "label": "Output Directory",
           "name": "output_dir",
           "options": null,

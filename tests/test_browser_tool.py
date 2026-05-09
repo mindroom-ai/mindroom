@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import (
@@ -24,6 +25,7 @@ from mindroom.custom_tools.browser import (
     _persistent_launch_kwargs,
     _profile_dir,
 )
+from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
 
@@ -222,6 +224,79 @@ async def test_browser_unknown_action_raises() -> None:
 
     with pytest.raises(ValueError, match="Unknown action: nope"):
         await tool.browser(action="nope")
+
+
+@pytest.mark.asyncio
+async def test_browser_unknown_action_lists_valid_actions() -> None:
+    """Unknown browser actions should point callers at the valid action vocabulary."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    with pytest.raises(ValueError, match="Unknown action: click") as exc_info:
+        await tool.browser(action="click")
+
+    message = str(exc_info.value)
+    assert "Unknown action: click" in message
+    assert "Valid actions:" in message
+    assert "act" in message
+    assert "request.kind='click'" in message
+
+
+@pytest.mark.asyncio
+async def test_browser_help_returns_action_table() -> None:
+    """The browser tool should expose a callable discovery path."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    payload = json.loads(await tool.browser(action="help"))
+
+    assert payload["action"] == "help"
+    assert payload["status"] == "ok"
+    assert "act" in payload["actions"]
+    assert "help" in payload["actions"]
+    assert "click" in payload["actKinds"]
+    assert "evaluate" in payload["actKinds"]
+    assert any(entry["action"] == "act" for entry in payload["actionTable"])
+
+
+def test_browser_function_schema_documents_actions_and_act_request() -> None:
+    """Tool schema should make browser actions and act request kinds discoverable."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    parameters = tool.async_functions["browser"].parameters
+    properties = parameters["properties"]
+
+    action_schema = properties["action"]
+    assert "act" in action_schema["enum"]
+    assert "help" in action_schema["enum"]
+
+    request_description = properties["request"]["description"]
+    assert "request.kind" in request_description
+    assert "click" in request_description
+    assert "evaluate" in request_description
+
+
+def test_browser_schema_description_requires_registered_browser_function() -> None:
+    """BrowserTools should fail fast if the browser entrypoint is missing."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    function = tool.async_functions.pop("browser")
+    try:
+        with pytest.raises(RuntimeError, match="Browser function was not registered"):
+            tool._describe_browser_schema()
+    finally:
+        tool.async_functions["browser"] = function
+
+
+def test_browser_docstring_lists_discovery_actions() -> None:
+    """The source docstring should match the browser action vocabulary."""
+    assert BrowserTools.browser.__doc__ is not None
+    assert "/act/help/actions" in BrowserTools.browser.__doc__
+
+
+def test_browser_metadata_documents_default_output_dir() -> None:
+    """Dashboard metadata should mention where screenshots/PDFs land by default."""
+    output_dir_field = next(field for field in TOOL_METADATA["browser"].config_fields if field.name == "output_dir")
+
+    assert output_dir_field.description is not None
+    assert "storage path's browser/ directory" in output_dir_field.description
 
 
 @pytest.mark.asyncio
@@ -439,6 +514,56 @@ async def test_ensure_profile_creates_user_data_dir_on_disk(
     user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
     assert user_data_dir.is_dir()
     assert stat.S_IMODE(user_data_dir.stat().st_mode) == 0o700
+
+
+@pytest.mark.asyncio
+async def test_ensure_profile_rewrites_playwright_browser_revision_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Playwright binary revision mismatches should produce actionable MindRoom guidance."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths)
+    playwright_message = (
+        "Executable doesn't exist at "
+        "/home/alice/.cache/ms-playwright/chromium_headless_shell-1208/chrome-linux/headless_shell\n"
+        "╔════════════════════════════════════════════════════════════╗\n"
+        "║ Looks like Playwright was just installed or updated.       ║\n"
+        "║ Please run the following command to download new browsers: ║\n"
+        "║                                                            ║\n"
+        "║     playwright install                                     ║\n"
+        "╚════════════════════════════════════════════════════════════╝"
+    )
+
+    class _FakeChromium:
+        async def launch_persistent_context(self, **_kwargs: object) -> _FakeContext:
+            raise PlaywrightError(playwright_message)
+
+    class _FakePlaywright:
+        def __init__(self) -> None:
+            self.chromium = _FakeChromium()
+            self.stop = AsyncMock()
+
+    playwright = _FakePlaywright()
+
+    class _FakePlaywrightStarter:
+        async def start(self) -> _FakePlaywright:
+            return playwright
+
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: _FakePlaywrightStarter())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await tool._ensure_profile("mindroom")
+
+    message = str(exc_info.value)
+    assert "chromium_headless_shell-1208" in message
+    assert "uv run playwright install chromium" in message
+    assert "Looks like Playwright was just installed or updated" not in message
+    playwright.stop.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

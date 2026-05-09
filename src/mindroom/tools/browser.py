@@ -38,7 +38,10 @@ if TYPE_CHECKING:
             label="Output Directory",
             type="text",
             required=False,
-            description="Optional directory for browser screenshots, PDFs, and downloads.",
+            description=(
+                "Optional directory for browser screenshots, PDFs, and downloads. "
+                "Defaults to the active storage path's browser/ directory."
+            ),
         ),
     ],
     function_names=("browser",),

@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+from mindroom.custom_tools.website import WebsiteTools
 from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
-
-if TYPE_CHECKING:
-    from agno.tools.website import WebsiteTools
 
 
 @register_tool_with_metadata(
@@ -34,6 +30,4 @@ if TYPE_CHECKING:
 )
 def website_tools() -> type[WebsiteTools]:
     """Return website tools for web scraping and content extraction."""
-    from agno.tools.website import WebsiteTools
-
     return WebsiteTools

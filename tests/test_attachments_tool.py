@@ -872,6 +872,30 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_path: Path) -> None:
+    """Registering a local path should preserve filename, MIME type, and media kind."""
+    tool = AttachmentTools()
+    generated_file = tmp_path / "clip.wav"
+    generated_file.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+    ctx = _tool_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.register_attachment(str(generated_file)))
+
+    assert payload["status"] == "ok"
+    assert payload["attachment"]["filename"] == "clip.wav"
+    assert payload["attachment"]["mime_type"].startswith("audio/")
+    assert payload["attachment"]["kind"] == "audio"
+
+    attachment = load_attachment(tmp_path, payload["attachment_id"])
+    assert attachment is not None
+    assert attachment.filename == "clip.wav"
+    assert attachment.mime_type is not None
+    assert attachment.mime_type.startswith("audio/")
+    assert attachment.kind == "audio"
+
+
+@pytest.mark.asyncio
 async def test_attachments_tool_register_attachment_available_after_task_boundary(tmp_path: Path) -> None:
     """Registered attachments should remain available when a later tool call runs in another task."""
     tool = AttachmentTools()

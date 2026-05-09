@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from agno.tools import Toolkit
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -32,10 +33,12 @@ _DEFAULT_TIMEOUT_MS = 30_000
 _MAX_CONSOLE_ENTRIES = 200
 _VIEWPORT_WIDTH = 1280
 _VIEWPORT_HEIGHT = 720
+_PLAYWRIGHT_INSTALL_COMMAND = "uv run playwright install chromium"
 
 logger = get_logger(__name__)
 
 _BROWSER_ACTIONS = {
+    "actions",
     "status",
     "start",
     "stop",
@@ -52,7 +55,54 @@ _BROWSER_ACTIONS = {
     "upload",
     "dialog",
     "act",
+    "help",
 }
+
+_ACT_REQUEST_KINDS = (
+    "click",
+    "type",
+    "press",
+    "hover",
+    "drag",
+    "select",
+    "fill",
+    "resize",
+    "wait",
+    "evaluate",
+    "close",
+)
+
+_BROWSER_ACTION_TABLE = (
+    {"action": "status", "description": "Report whether the selected browser profile is running."},
+    {"action": "start", "description": "Start the selected browser profile."},
+    {"action": "stop", "description": "Stop the selected browser profile."},
+    {"action": "profiles", "description": "List known browser profiles."},
+    {"action": "tabs", "description": "List tabs for the selected browser profile."},
+    {"action": "open", "description": "Open targetUrl in a new tab."},
+    {"action": "focus", "description": "Focus targetId."},
+    {"action": "close", "description": "Close targetId or the active tab."},
+    {"action": "snapshot", "description": "Capture a model-friendly page snapshot and element refs."},
+    {"action": "screenshot", "description": "Save a screenshot to the browser output directory."},
+    {"action": "navigate", "description": "Navigate targetId or the active tab to targetUrl."},
+    {"action": "console", "description": "Read collected console entries."},
+    {"action": "pdf", "description": "Save the current page as a PDF."},
+    {"action": "upload", "description": "Upload local paths through an input selector or ref."},
+    {"action": "dialog", "description": "Arm how the next browser dialog should be handled."},
+    {"action": "act", "description": "Run a browser interaction described by request.kind."},
+    {"action": "help", "description": "Return this browser action and request-kind table."},
+    {"action": "actions", "description": "Alias for help."},
+)
+
+_ACT_REQUEST_DESCRIPTION = (
+    "Act request object for action='act'. Set request.kind to one of: click, type, press, hover, drag, select, "
+    "fill, resize, wait, evaluate, close. "
+    "Common shapes: click {kind, ref, doubleClick?, button?, modifiers?}; "
+    "type {kind, ref, text, submit?, slowly?}; press {kind, key}; "
+    "hover {kind, ref}; drag {kind, startRef, endRef}; "
+    "select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]}; "
+    "resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; "
+    "evaluate {kind, fn, ref?}; close {kind}. Refs come from action='snapshot'."
+)
 
 _SNAPSHOT_JS = """
 ({ selector, limit, depth, interactiveOnly }) => {
@@ -248,6 +298,99 @@ def _clear_stale_singleton_locks(_profile_dir: Path) -> None:
             )
 
 
+def _browser_help_payload(action: str) -> dict[str, Any]:
+    """Return a compact browser action discovery payload."""
+    return {
+        "action": action,
+        "actions": sorted(_BROWSER_ACTIONS),
+        "actKinds": list(_ACT_REQUEST_KINDS),
+        "actRequestDescription": _ACT_REQUEST_DESCRIPTION,
+        "actionTable": list(_BROWSER_ACTION_TABLE),
+        "status": "ok",
+    }
+
+
+def _unknown_browser_action_message(action: str) -> str:
+    """Return an actionable unknown-action error for browser callers."""
+    valid_actions = ", ".join(sorted(_BROWSER_ACTIONS))
+    return (
+        f"Unknown action: {action}. Valid actions: {valid_actions}. "
+        "For click/type/press/hover/drag/select/fill/resize/wait/evaluate/close interactions, "
+        "use action='act' with request.kind='click' (or another act kind). "
+        "Use action='help' to inspect the full table."
+    )
+
+
+def _playwright_cache_root(expected_executable_path: Path | None) -> Path | None:
+    """Return the Playwright browser cache root for an executable path."""
+    if expected_executable_path is None:
+        return None
+    for parent in expected_executable_path.parents:
+        if parent.name == "ms-playwright":
+            return parent
+    return None
+
+
+def _playwright_revision_dir_name(expected_executable_path: Path | None) -> str | None:
+    """Return the expected Playwright revision directory from an executable path."""
+    if expected_executable_path is None:
+        return None
+    for parent in expected_executable_path.parents:
+        if re.fullmatch(r"(chromium|chromium_headless_shell)-\d+", parent.name):
+            return parent.name
+    return None
+
+
+def _installed_playwright_chromium_revisions(cache_root: Path | None) -> list[str]:
+    """List locally cached Playwright Chromium revisions."""
+    if cache_root is None or not cache_root.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in cache_root.iterdir()
+        if entry.is_dir() and re.fullmatch(r"(chromium|chromium_headless_shell)-\d+", entry.name)
+    )
+
+
+def _friendly_playwright_browser_error_message(exc: PlaywrightError) -> str | None:
+    """Translate Playwright's install banner into MindRoom-specific guidance."""
+    raw_message = str(exc)
+    expected_path: Path | None = None
+    executable_match = re.search(r"Executable doesn't exist at (?P<path>[^\n]+)", raw_message)
+    if executable_match is not None:
+        expected_path = Path(executable_match.group("path").strip()).expanduser()
+    elif "Looks like Playwright was just installed or updated" not in raw_message:
+        return None
+
+    cache_root = _playwright_cache_root(expected_path)
+    expected_revision = _playwright_revision_dir_name(expected_path)
+    installed_revisions = _installed_playwright_chromium_revisions(cache_root)
+
+    expected_text = (
+        f"Expected Chromium runtime revision {expected_revision}"
+        if expected_revision is not None
+        else "Expected the Chromium runtime revision pinned by the installed Playwright package"
+    )
+    cache_text = f" in {cache_root}" if cache_root is not None else ""
+    installed_text = (
+        f" Cached Chromium revisions: {', '.join(installed_revisions)}."
+        if installed_revisions
+        else " No cached Chromium runtime for that revision was found."
+    )
+    return (
+        f"{expected_text}{cache_text}.{installed_text} Run `{_PLAYWRIGHT_INSTALL_COMMAND}` from the MindRoom checkout."
+    )
+
+
+class _BrowserFunctionNotRegisteredError(RuntimeError):
+    """Raised when the BrowserTools entrypoint is missing after Toolkit registration."""
+
+    _MESSAGE = "Browser function was not registered"
+
+    def __init__(self) -> None:
+        super().__init__(self._MESSAGE)
+
+
 class BrowserTools(Toolkit):
     """Browser control for MindRoom agents."""
 
@@ -260,6 +403,31 @@ class BrowserTools(Toolkit):
         if self._output_dir is not None:
             self._output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
+        self._describe_browser_schema()
+
+    def _describe_browser_schema(self) -> None:
+        """Attach explicit model-facing descriptions for browser action routing."""
+        function = self.async_functions.get("browser")
+        if function is None:
+            raise _BrowserFunctionNotRegisteredError
+        function.process_entrypoint(strict=False)
+        parameters = dict(function.parameters)
+        properties = dict(parameters.get("properties") or {})
+
+        action_schema = dict(properties.get("action") or {})
+        action_schema["description"] = (
+            f"Browser action. Valid actions: {', '.join(sorted(_BROWSER_ACTIONS))}. "
+            "Use action='help' to inspect the full table."
+        )
+        action_schema["enum"] = sorted(_BROWSER_ACTIONS)
+        properties["action"] = action_schema
+
+        request_schema = dict(properties.get("request") or {})
+        request_schema["description"] = _ACT_REQUEST_DESCRIPTION
+        properties["request"] = request_schema
+
+        parameters["properties"] = properties
+        function.parameters = parameters
 
     async def _close_profiles(self) -> None:
         """Close all active browser profiles."""
@@ -309,7 +477,7 @@ class BrowserTools(Toolkit):
         """Control browser state and actions.
 
         Args:
-            action: Browser action (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act)
+            action: Browser action (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)
             target: Browser target location. Only ``host`` is currently supported.
             node: Node id compatibility field; unsupported in MindRoom runtime.
             profile: Browser profile name (defaults to ``mindroom``).
@@ -344,8 +512,10 @@ class BrowserTools(Toolkit):
         """
         normalized_action = action.strip().lower()
         if normalized_action not in _BROWSER_ACTIONS:
-            msg = f"Unknown action: {action}"
+            msg = _unknown_browser_action_message(action)
             raise ValueError(msg)
+        if normalized_action in {"actions", "help"}:
+            return json.dumps(_browser_help_payload(normalized_action), sort_keys=True)
 
         self._validate_target(target=target, node=node)
         profile_name = _clean_str(profile) or _DEFAULT_PROFILE
@@ -1000,7 +1170,17 @@ class BrowserTools(Toolkit):
             launch_kwargs = _persistent_launch_kwargs(self._runtime_paths, profile_name, headless=True)
             user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
             _clear_stale_singleton_locks(user_data_dir)
-            context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
+            try:
+                context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
+            except PlaywrightError as exc:
+                await playwright.stop()
+                friendly_message = _friendly_playwright_browser_error_message(exc)
+                if friendly_message is not None:
+                    raise RuntimeError(friendly_message) from exc
+                raise
+            except Exception:
+                await playwright.stop()
+                raise
             state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state
 

@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from agno.tools import Toolkit
 
@@ -45,6 +46,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
+_LocalAttachmentKind = Literal["audio", "file", "image", "video"]
+
 
 @dataclass(frozen=True)
 class _AttachmentSendResult:
@@ -65,6 +68,17 @@ def _attachment_tool_payload(status: str, **kwargs: object) -> str:
     }
     payload.update(kwargs)
     return json.dumps(payload, sort_keys=True)
+
+
+def _infer_local_attachment_metadata(local_path: Path) -> tuple[_LocalAttachmentKind, str, str | None]:
+    """Infer attachment metadata for local files registered by path."""
+    mime_type, _encoding = mimetypes.guess_type(local_path.name)
+    if mime_type is None:
+        return "file", local_path.name, None
+    media_type = mime_type.split("/", 1)[0].lower()
+    if media_type in {"audio", "image", "video"}:
+        return cast("_LocalAttachmentKind", media_type), local_path.name, mime_type
+    return "file", local_path.name, mime_type
 
 
 def _get_attachment_listing(
@@ -182,10 +196,13 @@ def _register_attachment_file_path(
         return None, "Attachment storage path is unavailable in this runtime path."
 
     resolved_path = Path(file_path).expanduser().resolve()
+    kind, filename, mime_type = _infer_local_attachment_metadata(resolved_path)
     attachment_record = register_local_attachment(
         context.storage_path,
         resolved_path,
-        kind="file",
+        kind=kind,
+        filename=filename,
+        mime_type=mime_type,
         room_id=context.room_id,
         thread_id=context.resolved_thread_id,
         sender=context.requester_id,
