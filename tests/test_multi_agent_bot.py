@@ -12533,7 +12533,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.main.load_config")
+    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_initialize(
         self,
         mock_load_config: MagicMock,
@@ -12709,7 +12709,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.main.load_config")
+    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_start(
         self,
         mock_load_config: MagicMock,
@@ -14488,7 +14488,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.main.load_config")
+    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_stop(
         self,
         mock_load_config: MagicMock,
@@ -14526,7 +14526,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator streaming
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.main.load_config")
+    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_streaming_default_config(
         self,
         mock_load_config: MagicMock,

@@ -1685,7 +1685,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
     # Mock resolve_room_aliases
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -1769,7 +1769,7 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
     # Mock resolve_room_aliases
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -1975,14 +1975,17 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     config_loads = [initial_config, updated_config]
     load_count = [0]
 
-    def mock_load_config(_config_path: Path | None = None) -> Config:
+    def mock_load_config(
+        _runtime_paths: object | None = None,
+        **_kwargs: object,
+    ) -> Config:
         result = config_loads[min(load_count[0], len(config_loads) - 1)]
         load_count[0] += 1
         return result
 
-    monkeypatch.setattr("mindroom.config.main.load_config", mock_load_config)
+    monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
 
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
