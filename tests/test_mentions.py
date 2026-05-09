@@ -474,7 +474,6 @@ class TestMentionParsing:
         content = _format_message_with_mentions(
             config,
             "Mind ID is `@mindroom_mind_5ckzneqq:mindroom.chat`.",
-            sender_domain="matrix.org",
         )
 
         assert content["body"] == "Mind ID is @mindroom_mind_5ckzneqq:mindroom.chat."
