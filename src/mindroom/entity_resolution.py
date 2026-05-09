@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
@@ -78,9 +79,43 @@ def entity_matrix_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, 
     return _entity_matrix_id_map(config, runtime_paths, _entity_matrix_id)
 
 
-def bootstrap_entity_matrix_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
-    """Return config-derived Matrix IDs for configured agents, teams, and the router."""
-    return _entity_matrix_id_map(config, runtime_paths, MatrixID.from_agent)
+@dataclass(frozen=True)
+class EntityMatrixIdentity:
+    """Current configured entity IDs plus stale bootstrap-ID predicates."""
+
+    current_ids: dict[str, MatrixID]
+    _bootstrap_ids: dict[str, MatrixID]
+
+    def current_entity_name_for_user_id(self, user_id: str, *, include_router: bool = True) -> str | None:
+        """Return the configured entity currently represented by one Matrix user ID."""
+        for entity_name, current_id in self.current_ids.items():
+            if not include_router and entity_name == ROUTER_AGENT_NAME:
+                continue
+            if current_id.full_id == user_id:
+                return entity_name
+        return None
+
+    def is_stale_localpart(self, entity_name: str, localpart: str) -> bool:
+        """Return whether a localpart is this entity's old generated localpart."""
+        generated_localpart = self._bootstrap_ids[entity_name].username
+        if localpart.lower() != generated_localpart.lower():
+            return False
+        return self.current_ids[entity_name].username.lower() != localpart.lower()
+
+    def is_stale_user_id(self, user_id: str) -> bool:
+        """Return whether a user ID is an old generated ID for any configured entity."""
+        return any(
+            bootstrap_id.full_id == user_id and self.current_ids[entity_name].full_id != user_id
+            for entity_name, bootstrap_id in self._bootstrap_ids.items()
+        )
+
+
+def entity_matrix_identity(config: Config, runtime_paths: RuntimePaths) -> EntityMatrixIdentity:
+    """Return current entity IDs with generated-ID staleness checks."""
+    return EntityMatrixIdentity(
+        current_ids=entity_matrix_ids(config, runtime_paths),
+        _bootstrap_ids=_entity_matrix_id_map(config, runtime_paths, MatrixID.from_agent),
+    )
 
 
 def _entity_matrix_id_map(

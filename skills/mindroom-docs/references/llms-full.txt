@@ -10836,8 +10836,8 @@ You can specify a different model for faster or more accurate command recognitio
                                                            └──────┬─────┘
                                                                   ▼
                                                            ┌─────────────┐
-                                                           │ Entity      │
-                                                           │ Responds    │
+                                                           │ Responder   │
+                                                           │ Answers     │
                                                            └─────────────┘
 ```
 
@@ -12175,13 +12175,18 @@ Streaming behavior is configured in `config.yaml` with `defaults.enable_streamin
 
 ## Agent Users
 
-Each agent, team, and the router gets its own Matrix user. New accounts bootstrap with the generated `mindroom_` localpart, but persisted Matrix state is authoritative after provisioning and may contain a drifted username.
+Each agent, team, and the router gets its own Matrix user.
+
+New accounts bootstrap with the generated `mindroom_` localpart, but persisted Matrix state is authoritative after provisioning and may contain a drifted username.
 
 ```
 @mindroom_assistant:example.com
 @mindroom_router:example.com  (built-in routing agent)
-@mindroom_assistant_oldns:example.com  (persisted drifted username)
 ```
+
+After provisioning, persisted Matrix state may replace a generated bootstrap username.
+
+For example, `@mindroom_assistant_oldns:example.com` can become the live assistant account instead of `@mindroom_assistant:example.com`.
 
 Users are automatically created during orchestrator startup and credentials are persisted in `mindroom_data/matrix_state.yaml`.
 

@@ -139,8 +139,8 @@ You can specify a different model for faster or more accurate command recognitio
                                                            └──────┬─────┘
                                                                   ▼
                                                            ┌─────────────┐
-                                                           │ Entity      │
-                                                           │ Responds    │
+                                                           │ Responder   │
+                                                           │ Answers     │
                                                            └─────────────┘
 ```
 

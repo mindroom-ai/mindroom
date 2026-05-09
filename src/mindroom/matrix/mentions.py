@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.entity_resolution import bootstrap_entity_matrix_ids, entity_matrix_ids
+from mindroom.entity_resolution import EntityMatrixIdentity, entity_matrix_identity
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix_identifiers import mindroom_namespace
@@ -58,8 +58,10 @@ def parse_mentions_in_text(
 
     """
     tokens = _scan_mention_tokens(text)
+    identity = entity_matrix_identity(config, runtime_paths)
     replacements = _resolve_mention_tokens(
         tokens,
+        identity=identity,
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -137,6 +139,7 @@ def _mention_localpart(mention_text: str) -> str:
 def _resolve_mention_tokens(
     tokens: list[_MentionToken],
     *,
+    identity: EntityMatrixIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[_MentionReplacement]:
@@ -145,6 +148,7 @@ def _resolve_mention_tokens(
     for token in tokens:
         resolution = _resolve_mention_token(
             token,
+            identity=identity,
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -165,6 +169,7 @@ def _resolve_mention_tokens(
 def _resolve_mention_token(
     token: _MentionToken,
     *,
+    identity: EntityMatrixIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _MentionResolution | None:
@@ -172,12 +177,13 @@ def _resolve_mention_token(
     if token.explicit_user_id is not None:
         return _resolve_explicit_matrix_id_token(
             token,
+            identity=identity,
             config=config,
-            runtime_paths=runtime_paths,
         )
     return _resolve_entity_alias_token(
         token.localpart,
         has_server_name=token.has_server_name,
+        identity=identity,
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -186,8 +192,8 @@ def _resolve_mention_token(
 def _resolve_explicit_matrix_id_token(
     token: _MentionToken,
     *,
+    identity: EntityMatrixIdentity,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> _MentionResolution | None:
     """Resolve one explicit full MXID token."""
     explicit_user_id = token.explicit_user_id
@@ -195,17 +201,13 @@ def _resolve_explicit_matrix_id_token(
         msg = "Explicit MXID token is missing explicit_user_id"
         raise ValueError(msg)
 
-    current_entity_ids = entity_matrix_ids(config, runtime_paths)
-    for entity_name, current_id in current_entity_ids.items():
-        if entity_name == ROUTER_AGENT_NAME:
-            continue
-        if current_id.full_id == explicit_user_id:
-            return _entity_mention_resolution(
-                entity_name,
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-    if _is_stale_configured_user_id(explicit_user_id, config, runtime_paths):
+    if entity_name := identity.current_entity_name_for_user_id(explicit_user_id, include_router=False):
+        return _entity_mention_resolution(
+            entity_name,
+            identity=identity,
+            config=config,
+        )
+    if identity.is_stale_user_id(explicit_user_id):
         return None
     return _literal_user_resolution(explicit_user_id)
 
@@ -214,17 +216,18 @@ def _resolve_entity_alias_token(
     localpart: str,
     *,
     has_server_name: bool,
+    identity: EntityMatrixIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _MentionResolution | None:
     """Resolve one alias-style token to a local configured agent or team, if any."""
     if has_server_name and not localpart.lower().startswith(MatrixID.AGENT_PREFIX):
         return None
-    if entity_name := _find_matching_entity_name_for_localpart(localpart, config, runtime_paths):
+    if entity_name := _find_matching_entity_name_for_localpart(localpart, identity, runtime_paths):
         return _entity_mention_resolution(
             entity_name,
+            identity=identity,
             config=config,
-            runtime_paths=runtime_paths,
         )
     return None
 
@@ -232,12 +235,12 @@ def _resolve_entity_alias_token(
 def _entity_mention_resolution(
     entity_name: str,
     *,
+    identity: EntityMatrixIdentity,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> _MentionResolution:
     """Return rendering data for one resolved local agent or team mention."""
     entity_config = config.agents.get(entity_name) or config.teams[entity_name]
-    resolved_user_id = entity_matrix_ids(config, runtime_paths)[entity_name].full_id
+    resolved_user_id = identity.current_ids[entity_name].full_id
     return _MentionResolution(
         plain_text=resolved_user_id,
         markdown_text=f"[@{entity_config.display_name}](https://matrix.to/#/{resolved_user_id})",
@@ -274,28 +277,22 @@ def _is_valid_explicit_matrix_user_id(candidate: str) -> bool:
 
 def _find_matching_entity_name_for_localpart(
     localpart: str,
-    config: Config,
+    identity: EntityMatrixIdentity,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Return the configured agent or team name matched by one localpart string, if any."""
     lower_localpart = localpart.lower()
-    current_entity_ids = entity_matrix_ids(config, runtime_paths)
-    for config_entity_name, current_id in current_entity_ids.items():
-        if config_entity_name == ROUTER_AGENT_NAME:
+    candidate_names = {
+        candidate_name.lower() for candidate_name in _localpart_candidate_names(localpart, runtime_paths)
+    }
+
+    for entity_name, current_id in identity.current_ids.items():
+        if entity_name == ROUTER_AGENT_NAME:
             continue
         if current_id.username.lower() == lower_localpart:
-            return config_entity_name
-
-    for candidate_name in _localpart_candidate_names(localpart, runtime_paths):
-        candidate_lower = candidate_name.lower()
-        for config_entity_name in (*config.agents, *config.teams):
-            if config_entity_name.lower() == candidate_lower and not _is_stale_prefixed_entity_localpart(
-                localpart,
-                config_entity_name,
-                config,
-                runtime_paths,
-            ):
-                return config_entity_name
+            return entity_name
+        if entity_name.lower() in candidate_names and not identity.is_stale_localpart(entity_name, localpart):
+            return entity_name
     return None
 
 
@@ -305,31 +302,10 @@ def resolve_entity_name_for_mention_localpart(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Return the configured agent or team name matched by one Matrix mention localpart."""
-    return _find_matching_entity_name_for_localpart(localpart, config, runtime_paths)
-
-
-def _is_stale_prefixed_entity_localpart(
-    localpart: str,
-    entity_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    generated_localpart = bootstrap_entity_matrix_ids(config, runtime_paths)[entity_name].username
-    if localpart.lower() != generated_localpart.lower():
-        return False
-    return entity_matrix_ids(config, runtime_paths)[entity_name].username.lower() != localpart.lower()
-
-
-def _is_stale_configured_user_id(
-    user_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    bootstrap_ids = bootstrap_entity_matrix_ids(config, runtime_paths)
-    current_ids = entity_matrix_ids(config, runtime_paths)
-    return any(
-        bootstrap_ids[entity_name].full_id == user_id and current_ids[entity_name].full_id != user_id
-        for entity_name in bootstrap_ids
+    return _find_matching_entity_name_for_localpart(
+        localpart,
+        entity_matrix_identity(config, runtime_paths),
+        runtime_paths,
     )
 
 
