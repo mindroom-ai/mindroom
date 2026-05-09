@@ -158,6 +158,7 @@ class TestConfigInit:
             "scheduler",
             "subagents",
             "matrix_message",
+            "thread_tags",
         ]
         assert mind["skills"] == ["mindroom-docs"]
         assert config["knowledge_bases"]["mind_memory"]["path"] == (

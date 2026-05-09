@@ -813,6 +813,7 @@ agents:
       - scheduler
       - subagents
       - matrix_message
+      - thread_tags
     skills:
       - mindroom-docs
     instructions:
