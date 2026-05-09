@@ -5,6 +5,7 @@ from __future__ import annotations
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.execution_preparation import (
+    _build_thread_history_messages,
     _build_unseen_context_messages,
     _fallback_static_token_budget,
 )
@@ -21,6 +22,30 @@ def test_fallback_static_token_budget_preserves_context_window_bounds() -> None:
     assert _fallback_static_token_budget(context_window=0, reserve_tokens=100) is None
     assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=800) == 500
     assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=100) == 900
+
+
+def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> None:
+    """Oversized Matrix fallback messages should stay in context with a capped body."""
+    long_body = "x" * 201
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body=long_body,
+                event_id="$long",
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        max_message_length=200,
+    )
+
+    assert len(messages) == 2
+    assert messages[0].role == "user"
+    assert messages[0].content == f"@alice:localhost: {'x' * 200}"
+    assert long_body not in str(messages[0].content)
+    assert messages[1].content == "Current request"
 
 
 def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:

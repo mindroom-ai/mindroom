@@ -229,15 +229,24 @@ def _context_messages_from_visible_messages(
 ) -> tuple[Message, ...]:
     """Convert visible Matrix context into provider-native message objects."""
     visible_messages = messages[-max_messages:] if max_messages is not None else messages
-    return tuple(
-        _context_message_from_visible_message(
-            message,
-            response_sender_id=response_sender_id,
-            missing_sender_label=missing_sender_label,
+    context_messages: list[Message] = []
+    for message in visible_messages:
+        if not message.body:
+            continue
+        capped_message = message
+        if max_message_length is not None:
+            capped_body = message.body[:max_message_length]
+            if not capped_body:
+                continue
+            capped_message = replace_visible_message(message, body=capped_body)
+        context_messages.append(
+            _context_message_from_visible_message(
+                capped_message,
+                response_sender_id=response_sender_id,
+                missing_sender_label=missing_sender_label,
+            ),
         )
-        for message in visible_messages
-        if message.body and (max_message_length is None or len(message.body) < max_message_length)
-    )
+    return tuple(context_messages)
 
 
 def _messages_with_capped_context(
