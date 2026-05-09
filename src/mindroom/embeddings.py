@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.knowledge.embedder.openai import OpenAIEmbedder
-from agno.utils.log import log_warning
+from agno.utils.log import log_info, log_warning
 
 from mindroom.tool_system.dependencies import ensure_optional_deps
 
@@ -150,3 +150,37 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
         except Exception as e:
             log_warning(f"Error getting embedding: {e}")
             return [], None
+
+    async def async_get_embeddings_batch_and_usage(
+        self,
+        texts: list[str],
+    ) -> tuple[list[list[float]], list[dict[str, Any] | None]]:
+        """Request embeddings for a batch of texts and return per-item usage."""
+        all_embeddings: list[list[float]] = []
+        all_usage: list[dict[str, Any] | None] = []
+        log_info(f"Getting embeddings and usage for {len(texts)} texts in batches of {self.batch_size} (async)")
+
+        for i in range(0, len(texts), self.batch_size):
+            batch_texts = texts[i : i + self.batch_size]
+            try:
+                response: CreateEmbeddingResponse = await self.aclient.embeddings.create(
+                    **self._request_params(batch_texts),
+                )
+                batch_embeddings = [data.embedding for data in response.data]
+                all_embeddings.extend(batch_embeddings)
+
+                usage_dict = response.usage.model_dump() if response.usage else None
+                all_usage.extend([usage_dict] * len(batch_embeddings))
+            except Exception as e:
+                log_warning(f"Error in async batch embedding: {e}")
+                for text in batch_texts:
+                    try:
+                        embedding, usage = await self.async_get_embedding_and_usage(text)
+                        all_embeddings.append(embedding)
+                        all_usage.append(usage)
+                    except Exception as inner:
+                        log_warning(f"Error in individual async embedding fallback: {inner}")
+                        all_embeddings.append([])
+                        all_usage.append(None)
+
+        return all_embeddings, all_usage
