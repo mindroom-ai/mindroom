@@ -1484,6 +1484,49 @@ def test_config_update_plan_does_not_restart_for_request_time_prompt_change() ->
     assert plan.only_support_service_changes is True
 
 
+def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes() -> None:
+    """The tool output auto-save threshold is captured when agent and team toolkits are built."""
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            teams={
+                "team1": TeamConfig(
+                    display_name="Team 1",
+                    role="Collaborate",
+                    agents=["general"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            teams={
+                "team1": TeamConfig(
+                    display_name="Team 1",
+                    role="Collaborate",
+                    agents=["general"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+            defaults={"tool_output_auto_save_threshold_bytes": 64 * 1024},
+        ),
+    )
+
+    running_entities = {ROUTER_AGENT_NAME, "general", "team1"}
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.entities_to_restart == {"general", "team1"}
+    assert plan.only_support_service_changes is False
+
+
 @pytest.fixture
 def initial_config() -> Config:
     """Initial configuration with some agents and rooms."""

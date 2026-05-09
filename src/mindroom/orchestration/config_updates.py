@@ -212,6 +212,16 @@ def _changed_entity_construction_prompts(config: Config, new_config: Config) -> 
     return changed_prompt_names & _ENTITY_CONSTRUCTION_PROMPTS
 
 
+def _changed_entity_construction_defaults(config: Config, new_config: Config) -> set[str]:
+    """Return defaults that require rebuilding agent and team entities."""
+    if (
+        config.defaults.tool_output_auto_save_threshold_bytes
+        != new_config.defaults.tool_output_auto_save_threshold_bytes
+    ):
+        return {"tool_output_auto_save_threshold_bytes"}
+    return set()
+
+
 def build_config_update_plan(
     *,
     current_config: Config,
@@ -238,6 +248,17 @@ def build_config_update_plan(
                 entities=sorted(prompt_affected_entities),
             )
         entities_to_restart |= prompt_affected_entities
+
+    changed_entity_construction_defaults = _changed_entity_construction_defaults(current_config, new_config)
+    if changed_entity_construction_defaults:
+        default_affected_entities = existing_entities & (set(new_config.agents) | set(new_config.teams))
+        if default_affected_entities:
+            logger.info(
+                "entity_construction_defaults_changed_restart_required",
+                defaults=sorted(changed_entity_construction_defaults),
+                entities=sorted(default_affected_entities),
+            )
+        entities_to_restart |= default_affected_entities
 
     new_entities = configured_entities - existing_entities - entities_to_restart
 
