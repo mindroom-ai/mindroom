@@ -17,6 +17,7 @@ from mindroom.services.config import (
     find_uv,
     install_uv,
 )
+from mindroom.services.runtime import resolve_service_environment
 
 _MACOS_UV_PATHS = [Path("/opt/homebrew/bin/uv")]
 _LABEL = "chat.mindroom.local"
@@ -53,11 +54,17 @@ def _get_recent_logs(num_lines: int = 10) -> list[str]:
     return lines
 
 
-def _generate_plist(uv_path: Path, home_dir: Path, log_dir: Path) -> dict[str, object]:
+def _generate_plist(
+    uv_path: Path,
+    home_dir: Path,
+    log_dir: Path,
+    service_environment: dict[str, str],
+) -> dict[str, object]:
     """Generate the launchd plist dictionary."""
     return {
         "Label": _LABEL,
         "ProgramArguments": build_service_command(uv_path),
+        "EnvironmentVariables": service_environment,
         "RunAtLoad": True,
         "KeepAlive": True,
         "WorkingDirectory": str(home_dir),
@@ -105,7 +112,7 @@ def _install_service() -> InstallResult:
     plist_path.parent.mkdir(parents=True, exist_ok=True)
 
     with plist_path.open("wb") as f:
-        plistlib.dump(_generate_plist(uv_path, home_dir, log_dir), f)
+        plistlib.dump(_generate_plist(uv_path, home_dir, log_dir, resolve_service_environment()), f)
 
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], capture_output=True, check=False)

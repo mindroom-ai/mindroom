@@ -1698,11 +1698,21 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.services.launchd"
-depends_on = ["mindroom.services.config"]
+depends_on = [
+    "mindroom.services.config",
+    "mindroom.services.runtime",
+]
+
+[[modules]]
+path = "mindroom.services.runtime"
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.services.systemd"
-depends_on = ["mindroom.services.config"]
+depends_on = [
+    "mindroom.services.config",
+    "mindroom.services.runtime",
+]
 
 [[modules]]
 path = "mindroom.commands"

@@ -21,6 +21,7 @@ from mindroom.services.config import (
 )
 from mindroom.services.launchd import _generate_plist
 from mindroom.services.manager import get_service_manager
+from mindroom.services.runtime import resolve_service_environment
 from mindroom.services.systemd import _generate_unit_file, _get_unit_name
 
 runner = CliRunner(env={"NO_COLOR": "1", "TERM": "dumb"})
@@ -108,17 +109,29 @@ def test_get_service_manager_unsupported(mock_system: MagicMock) -> None:
 
 def test_systemd_unit_runs_mindroom() -> None:
     """The generated systemd unit starts MindRoom and restarts on failure."""
-    unit = _generate_unit_file(Path("/usr/bin/uv"))
+    unit = _generate_unit_file(
+        Path("/usr/bin/uv"),
+        {
+            "MINDROOM_CONFIG_PATH": "/Users/test/Mind Room/config.yaml",
+            "MINDROOM_STORAGE_PATH": "/Users/test/Mind Room/data%root",
+        },
+    )
 
     assert _get_unit_name() == "mindroom.service"
     assert "Description=MindRoom" in unit
     assert "ExecStart=/usr/bin/uv tool run --from mindroom mindroom run" in unit
+    assert 'Environment="MINDROOM_CONFIG_PATH=/Users/test/Mind Room/config.yaml"' in unit
+    assert 'Environment="MINDROOM_STORAGE_PATH=/Users/test/Mind Room/data%%root"' in unit
     assert "Restart=on-failure" in unit
 
 
 def test_launchd_plist_runs_mindroom(tmp_path: Path) -> None:
     """The generated launchd plist starts MindRoom and writes logs."""
-    plist_data = _generate_plist(tmp_path / "uv", tmp_path, tmp_path / "logs")
+    service_environment = {
+        "MINDROOM_CONFIG_PATH": str(tmp_path / "config.yaml"),
+        "MINDROOM_STORAGE_PATH": str(tmp_path / "mindroom_data"),
+    }
+    plist_data = _generate_plist(tmp_path / "uv", tmp_path, tmp_path / "logs", service_environment)
     rendered = plistlib.dumps(plist_data)
 
     assert plist_data["Label"] == "chat.mindroom.local"
@@ -131,7 +144,24 @@ def test_launchd_plist_runs_mindroom(tmp_path: Path) -> None:
         "mindroom",
         "run",
     ]
+    assert plist_data["EnvironmentVariables"] == service_environment
     assert b"StandardOutPath" in rendered
+
+
+def test_resolve_service_environment_captures_active_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Installed services capture the same config and storage context as the invoking CLI."""
+    config_path = tmp_path / "local config.yaml"
+    storage_path = tmp_path / "local storage"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
+
+    service_environment = resolve_service_environment()
+
+    assert service_environment == {
+        "MINDROOM_CONFIG_PATH": str(config_path.resolve()),
+        "MINDROOM_STORAGE_PATH": str(storage_path.resolve()),
+    }
 
 
 def test_service_help_is_registered() -> None:

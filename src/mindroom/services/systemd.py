@@ -16,6 +16,7 @@ from mindroom.services.config import (
     find_uv,
     install_uv,
 )
+from mindroom.services.runtime import resolve_service_environment
 
 _LINUX_UV_PATHS = [Path("/usr/bin/uv")]
 
@@ -58,15 +59,26 @@ def _get_recent_logs(num_lines: int = 10) -> list[str]:
     return [line.rstrip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def _generate_unit_file(uv_path: Path) -> str:
+def _quote_environment_assignment(name: str, value: str) -> str:
+    """Return one safely quoted systemd Environment assignment."""
+    escaped_value = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return f'"{name}={escaped_value}"'
+
+
+def _generate_unit_file(uv_path: Path, service_environment: dict[str, str]) -> str:
     """Generate the systemd unit file content."""
     exec_start = " ".join(shlex.quote(part) for part in build_service_command(uv_path))
+    environment = "\n".join(
+        f"Environment={_quote_environment_assignment(name, value)}"
+        for name, value in sorted(service_environment.items())
+    )
     return f"""[Unit]
 Description=MindRoom
 After=network.target
 
 [Service]
 ExecStart={exec_start}
+{environment}
 Restart=on-failure
 RestartSec=5
 
@@ -116,7 +128,7 @@ def _install_service() -> InstallResult:
     unit_path = _get_unit_path()
     unit_name = _get_unit_name()
     unit_path.parent.mkdir(parents=True, exist_ok=True)
-    unit_path.write_text(_generate_unit_file(uv_path), encoding="utf-8")
+    unit_path.write_text(_generate_unit_file(uv_path, resolve_service_environment()), encoding="utf-8")
 
     subprocess.run(["systemctl", "--user", "stop", unit_name], capture_output=True, check=False)
 

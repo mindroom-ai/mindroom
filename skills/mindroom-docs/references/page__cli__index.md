@@ -19,24 +19,23 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  mindroom config init   Create a starter config
  mindroom run           Start the system
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --install-completion            Install completion for the current shell.    │
-│ --show-completion               Show completion for the current shell, to    │
-│                                 copy it or customize the installation.       │
-│ --help                -h        Show this message and exit.                  │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ version             Show the current version of Mindroom.                    │
-│ run                 Run the mindroom multi-agent system.                     │
-│ doctor              Check your environment for common issues.                │
-│ connect             Pair this local MindRoom install with the hosted         │
-│                     provisioning service.                                    │
-│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.  │
-│ config              Manage MindRoom configuration files.                     │
-│ avatars             Generate and sync managed avatar assets.                 │
-│ service             Install and manage MindRoom as a background user         │
-│                     service.                                                 │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --install-completion            Install completion for the current shell.              │
+│ --show-completion               Show completion for the current shell, to copy it or   │
+│                                 customize the installation.                            │
+│ --help                -h        Show this message and exit.                            │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ version             Show the current version of Mindroom.                              │
+│ run                 Run the mindroom multi-agent system.                               │
+│ doctor              Check your environment for common issues.                          │
+│ connect             Pair this local MindRoom install with the hosted provisioning      │
+│                     service.                                                           │
+│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
+│ config              Manage MindRoom configuration files.                               │
+│ avatars             Generate and sync managed avatar assets.                           │
+│ service             Install and manage MindRoom as a background user service.          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## version
@@ -48,9 +47,9 @@ Show the current MindRoom version.
 
  Show the current version of Mindroom.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## run
@@ -68,25 +67,22 @@ Start MindRoom with your configuration.
  - Manages agent room memberships
  - Starts the bundled dashboard/API server (disable with --no-api)
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, │
-│                                          WARNING, ERROR)                     │
-│                                          [env var: LOG_LEVEL]                │
-│                                          [default: INFO]                     │
-│ --storage-path  -s              PATH     Base directory for persistent       │
-│                                          MindRoom data (state, sessions,     │
-│                                          tracking)                           │
-│ --api               --no-api             Start the bundled dashboard/API     │
-│                                          server alongside the bot            │
-│                                          [default: api]                      │
-│ --api-port                      INTEGER  Port for the bundled dashboard/API  │
-│                                          server                              │
-│                                          [default: 8765]                     │
-│ --api-host                      TEXT     Host for the bundled dashboard/API  │
-│                                          server                              │
-│                                          [default: 0.0.0.0]                  │
-│ --help          -h                       Show this message and exit.         │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
+│                                          ERROR)                                        │
+│                                          [env var: LOG_LEVEL]                          │
+│                                          [default: INFO]                               │
+│ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
+│                                          (state, sessions, tracking)                   │
+│ --api               --no-api             Start the bundled dashboard/API server        │
+│                                          alongside the bot                             │
+│                                          [default: api]                                │
+│ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
+│                                          [default: 8765]                               │
+│ --api-host                      TEXT     Host for the bundled dashboard/API server     │
+│                                          [default: 0.0.0.0]                            │
+│ --help          -h                       Show this message and exit.                   │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars
@@ -98,14 +94,14 @@ Generate and sync managed avatar assets.
 
  Generate and sync managed avatar assets.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ generate   Generate missing managed avatar files in the workspace.           │
-│ sync       Sync configured room and root-space avatars to Matrix using the   │
-│            initialized router account.                                       │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ generate   Generate missing managed avatar files in the workspace.                     │
+│ sync       Sync configured room and root-space avatars to Matrix using the initialized │
+│            router account.                                                             │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars generate
@@ -121,10 +117,10 @@ Use `--force` to overwrite them after changing avatar prompts or styles.
 
  Generate missing managed avatar files in the workspace.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --force            Overwrite existing managed workspace avatar files.        │
-│ --help   -h        Show this message and exit.                               │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --force            Overwrite existing managed workspace avatar files.                  │
+│ --help   -h        Show this message and exit.                                         │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars sync
@@ -136,13 +132,13 @@ Use `--force` to replace them.
 ```
  Usage: root avatars sync [OPTIONS]
 
- Sync configured room and root-space avatars to Matrix using the initialized
- router account.
+ Sync configured room and root-space avatars to Matrix using the initialized router
+ account.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --force            Replace existing Matrix room and root-space avatars.      │
-│ --help   -h        Show this message and exit.                               │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --force            Replace existing Matrix room and root-space avatars.                │
+│ --help   -h        Show this message and exit.                                         │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## service
@@ -163,14 +159,14 @@ On Linux, MindRoom uses systemd user services.
  - macOS: launchd (`~/Library/LaunchAgents/`)
  - Linux: systemd user services (`~/.config/systemd/user/`)
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ install     Install and start MindRoom as a background user service.         │
-│ uninstall   Stop and remove the MindRoom user service.                       │
-│ status      Show MindRoom service status and recent logs.                    │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ install     Install and start MindRoom as a background user service.                   │
+│ uninstall   Stop and remove the MindRoom user service.                                 │
+│ status      Show MindRoom service status and recent logs.                              │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ### service install
@@ -183,11 +179,11 @@ Use `--no-confirm` for non-interactive setup.
 
  Install and start MindRoom as a background user service.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --skip-deps             Skip uv dependency check.                            │
-│ --no-confirm  -y        Skip confirmation prompts.                           │
-│ --help        -h        Show this message and exit.                          │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --skip-deps             Skip uv dependency check.                                      │
+│ --no-confirm  -y        Skip confirmation prompts.                                     │
+│ --help        -h        Show this message and exit.                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ### service status
@@ -199,12 +195,11 @@ Show MindRoom service status and recent logs.
 
  Show MindRoom service status and recent logs.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --logs  -l      INTEGER  Number of recent log lines to show. Use 0 to hide   │
-│                          logs.                                               │
-│                          [default: 10]                                       │
-│ --help  -h               Show this message and exit.                         │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --logs  -l      INTEGER  Number of recent log lines to show. Use 0 to hide logs.       │
+│                          [default: 10]                                                 │
+│ --help  -h               Show this message and exit.                                   │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ### service uninstall
@@ -217,10 +212,10 @@ On macOS, log files are preserved under `~/Library/Logs/mindroom/`.
 
  Stop and remove the MindRoom user service.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --no-confirm  -y        Skip confirmation prompts.                           │
-│ --help        -h        Show this message and exit.                          │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --no-confirm  -y        Skip confirmation prompts.                                     │
+│ --help        -h        Show this message and exit.                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## doctor
@@ -243,9 +238,9 @@ Runs a series of checks in one pass:
  Runs connectivity, configuration, and credential checks in a single pass
  so you can fix everything before running `mindroom run`.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## config
@@ -258,16 +253,16 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
  Manage MindRoom configuration files.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ init       Create a starter config.yaml with example agents and models.      │
-│ show       Display the current config file with syntax highlighting.         │
-│ edit       Open config.yaml in your default editor.                          │
-│ validate   Validate config.yaml and check for common issues.                 │
-│ path       Show the resolved config file path and search locations.          │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ init       Create a starter config.yaml with example agents and models.                │
+│ show       Display the current config file with syntax highlighting.                   │
+│ edit       Open config.yaml in your default editor.                                    │
+│ validate   Validate config.yaml and check for common issues.                           │
+│ path       Show the resolved config file path and search locations.                    │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ### config init
@@ -392,55 +387,50 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 
  Start local Synapse + MindRoom Cinny using Docker only.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --synapse-dir                             PATH              Directory        │
-│                                                             containing       │
-│                                                             Synapse          │
-│                                                             docker-compose.… │
-│                                                             (from            │
-│                                                             mindroom-stack   │
-│                                                             settings).       │
-│                                                             [default:        │
-│                                                             local/matrix]    │
-│ --homeserver-url                          TEXT              Homeserver URL   │
-│                                                             that Cinny and   │
-│                                                             MindRoom should  │
-│                                                             use.             │
-│                                                             [default:        │
-│                                                             http://localhos… │
-│ --server-name                             TEXT              Matrix server    │
-│                                                             name (default:   │
-│                                                             inferred from    │
-│                                                             --homeserver-url │
-│                                                             hostname).       │
-│ --cinny-port                              INTEGER RANGE     Local host port  │
-│                                           [1<=x<=65535]     for the MindRoom │
-│                                                             Cinny container. │
-│                                                             [default: 8080]  │
-│ --cinny-image                             TEXT              Docker image for │
-│                                                             MindRoom Cinny.  │
-│                                                             [default:        │
-│                                                             ghcr.io/mindroo… │
-│ --cinny-containe…                         TEXT              Container name   │
-│                                                             for MindRoom     │
-│                                                             Cinny.           │
-│                                                             [default:        │
-│                                                             mindroom-cinny-… │
-│ --skip-synapse                                              Skip starting    │
-│                                                             Synapse (assume  │
-│                                                             it is already    │
-│                                                             running).        │
-│ --persist-env          --no-persist-e…                      Persist Matrix   │
-│                                                             local dev        │
-│                                                             settings to .env │
-│                                                             next to          │
-│                                                             config.yaml.     │
-│                                                             [default:        │
-│                                                             persist-env]     │
-│ --help             -h                                       Show this        │
-│                                                             message and      │
-│                                                             exit.            │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --synapse-dir                                 PATH                 Directory           │
+│                                                                    containing Synapse  │
+│                                                                    docker-compose.yml  │
+│                                                                    (from               │
+│                                                                    mindroom-stack      │
+│                                                                    settings).          │
+│                                                                    [default:           │
+│                                                                    local/matrix]       │
+│ --homeserver-url                              TEXT                 Homeserver URL that │
+│                                                                    Cinny and MindRoom  │
+│                                                                    should use.         │
+│                                                                    [default:           │
+│                                                                    http://localhost:8… │
+│ --server-name                                 TEXT                 Matrix server name  │
+│                                                                    (default: inferred  │
+│                                                                    from                │
+│                                                                    --homeserver-url    │
+│                                                                    hostname).          │
+│ --cinny-port                                  INTEGER RANGE        Local host port for │
+│                                               [1<=x<=65535]        the MindRoom Cinny  │
+│                                                                    container.          │
+│                                                                    [default: 8080]     │
+│ --cinny-image                                 TEXT                 Docker image for    │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    ghcr.io/mindroom-a… │
+│ --cinny-container-n…                          TEXT                 Container name for  │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    mindroom-cinny-loc… │
+│ --skip-synapse                                                     Skip starting       │
+│                                                                    Synapse (assume it  │
+│                                                                    is already          │
+│                                                                    running).           │
+│ --persist-env             --no-persist-env                         Persist Matrix      │
+│                                                                    local dev settings  │
+│                                                                    to .env next to     │
+│                                                                    config.yaml.        │
+│                                                                    [default:           │
+│                                                                    persist-env]        │
+│ --help                -h                                           Show this message   │
+│                                                                    and exit.           │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Examples
