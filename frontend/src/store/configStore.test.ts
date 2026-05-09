@@ -2069,7 +2069,7 @@ describe("configStore", () => {
         },
         voice: {
           enabled: false,
-          visible_router_echo: false,
+          visible_router_echo: true,
           stt: {
             provider: "openai",
             model: "whisper-1",

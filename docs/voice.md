@@ -29,7 +29,7 @@ Enable STT and voice-intelligence formatting in `config.yaml`:
 ```yaml
 voice:
   enabled: true
-  visible_router_echo: false
+  visible_router_echo: true
   stt:
     provider: openai
     model: whisper-1

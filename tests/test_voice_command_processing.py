@@ -902,7 +902,7 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         Config(
             agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
             authorization={"default_room_access": True},
-            voice={"enabled": True},
+            voice={"enabled": True, "visible_router_echo": False},
         ),
         tmp_path,
     )
@@ -1173,7 +1173,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
                 "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
             },
             authorization={"default_room_access": True},
-            voice={"enabled": True},
+            voice={"enabled": True, "visible_router_echo": False},
         ),
         tmp_path,
     )
