@@ -9,6 +9,7 @@ import pytest
 
 from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache
 from mindroom.matrix.cache.agent_message_snapshot import AgentMessageSnapshotUnavailable
+from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,25 +63,6 @@ async def _read_snapshot(
         )
     finally:
         await cache.close()
-
-
-async def _replace_thread(
-    cache: ConversationEventCache,
-    room_id: str,
-    thread_id: str,
-    events: list[dict[str, Any]],
-    *,
-    validated_at: float | None = None,
-) -> None:
-    timestamp = time.time() if validated_at is None else validated_at
-    replaced = await cache.replace_thread_if_not_newer(
-        room_id,
-        thread_id,
-        events,
-        fetch_started_at=float("inf"),
-        validated_at=timestamp,
-    )
-    assert replaced
 
 
 @pytest.mark.asyncio

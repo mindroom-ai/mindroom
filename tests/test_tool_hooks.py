@@ -19,7 +19,6 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import create_agent
 from mindroom.approval_manager import (
-    ApprovalActionResult,
     PendingApproval,
     SentApprovalEvent,
     _ApprovalManager,
@@ -61,6 +60,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
@@ -313,22 +313,6 @@ async def _wait_for_sent_pending(
                 if pending is not None:
                     return pending
             await asyncio.sleep(0)
-
-
-async def _resolve_pending_approval(
-    store: _ApprovalManager,
-    pending: PendingApproval,
-    *,
-    status: Literal["approved", "denied", "expired", "cancelled"],
-    reason: str | None = None,
-) -> ApprovalActionResult:
-    return await store.handle_card_response(
-        room_id=pending.room_id,
-        sender_id=pending.approver_user_id,
-        card_event_id=pending.card_event_id,
-        status=status,
-        reason=reason,
-    )
 
 
 def _first_function(toolkit: Toolkit) -> Function:

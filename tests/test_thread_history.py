@@ -42,12 +42,11 @@ from mindroom.matrix.thread_diagnostics import (
 )
 from mindroom.matrix.thread_projection import ordered_event_ids_from_scanned_event_sources
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, test_runtime_paths
+from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
-
-    from mindroom.matrix.cache import ConversationEventCache
 
 
 def _event_cache() -> AsyncMock:
@@ -63,25 +62,6 @@ async def fetch_thread_history(*args: object, **kwargs: object) -> ThreadHistory
 def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, object]:
     """Call the real threaded edit-content helper directly."""
     return _build_threaded_edit_content_impl(*args, **kwargs)
-
-
-async def _replace_thread(
-    cache: ConversationEventCache,
-    room_id: str,
-    thread_id: str,
-    events: list[dict[str, object]],
-    *,
-    validated_at: float | None = None,
-) -> None:
-    timestamp = time.time() if validated_at is None else validated_at
-    replaced = await cache.replace_thread_if_not_newer(
-        room_id,
-        thread_id,
-        events,
-        fetch_started_at=float("inf"),
-        validated_at=timestamp,
-    )
-    assert replaced
 
 
 class TestThreadHistory:

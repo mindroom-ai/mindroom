@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, call
 
 import nio
@@ -17,7 +17,6 @@ from mindroom.approval_events import parse_approval_datetime
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     _MAX_REMEMBERED_TERMINAL_CARD_IDS,
-    ApprovalActionResult,
     ApprovalDecision,
     PendingApproval,
     SentApprovalEvent,
@@ -45,6 +44,7 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
     tool_requires_approval_for_openai_compat,
 )
+from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -251,22 +251,6 @@ async def _live_pending_approval(
     if card_event_id is None:
         return None
     return await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
-
-
-async def _resolve_pending_approval(
-    store: _ApprovalManager,
-    pending: PendingApproval,
-    *,
-    status: Literal["approved", "denied", "expired", "cancelled"],
-    reason: str | None = None,
-) -> ApprovalActionResult:
-    return await store.handle_card_response(
-        room_id=pending.room_id,
-        sender_id=pending.approver_user_id,
-        card_event_id=pending.card_event_id,
-        status=status,
-        reason=reason,
-    )
 
 
 @pytest.mark.asyncio

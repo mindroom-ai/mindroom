@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 from zoneinfo import ZoneInfo
 
@@ -130,6 +130,7 @@ from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skil
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from mindroom.turn_controller import TurnController, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _DispatchPlan
+from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -527,22 +528,6 @@ async def _wait_for_pending_approval_id(store: _ApprovalManager, approval_ids: l
             ):
                 return approval_ids[0]
             await asyncio.sleep(0)
-
-
-async def _resolve_pending_approval(
-    store: _ApprovalManager,
-    pending: PendingApproval,
-    *,
-    status: Literal["approved", "denied", "expired", "cancelled"],
-    reason: str | None = None,
-) -> ApprovalActionResult:
-    return await store.handle_card_response(
-        room_id=pending.room_id,
-        sender_id=pending.approver_user_id,
-        card_event_id=pending.card_event_id,
-        status=status,
-        reason=reason,
-    )
 
 
 async def _start_live_approval(

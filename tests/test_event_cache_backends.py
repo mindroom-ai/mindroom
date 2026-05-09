@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, Mock
 
 import psycopg
@@ -35,31 +34,13 @@ from mindroom.runtime_support import (
     _initialize_event_cache_best_effort,
     sync_owned_runtime_support,
 )
+from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.matrix.cache import ConversationEventCache
-
-
-async def _replace_thread(
-    cache: ConversationEventCache,
-    room_id: str,
-    thread_id: str,
-    events: list[dict[str, Any]],
-    *,
-    validated_at: float | None = None,
-) -> None:
-    timestamp = time.time() if validated_at is None else validated_at
-    replaced = await cache.replace_thread_if_not_newer(
-        room_id,
-        thread_id,
-        events,
-        fetch_started_at=float("inf"),
-        validated_at=timestamp,
-    )
-    assert replaced
 
 
 def _message_event(

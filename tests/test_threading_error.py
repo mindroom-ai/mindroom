@@ -98,29 +98,11 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
     from typing import Any
-
-
-async def _replace_thread(
-    cache: matrix_cache.ConversationEventCache,
-    room_id: str,
-    thread_id: str,
-    events: list[dict[str, object]],
-    *,
-    validated_at: float | None = None,
-) -> None:
-    timestamp = time.time() if validated_at is None else validated_at
-    replaced = await cache.replace_thread_if_not_newer(
-        room_id,
-        thread_id,
-        events,
-        fetch_started_at=float("inf"),
-        validated_at=timestamp,
-    )
-    assert replaced
 
 
 async def _wait_for_room_cache_idle(coordinator: EventCacheWriteCoordinator) -> None:
