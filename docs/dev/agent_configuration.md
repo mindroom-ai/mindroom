@@ -159,7 +159,7 @@ agents:
 
 ### Configuration Fields
 
-- **agent_name**: The identifier used for the Matrix account (becomes `@mindroom_<agent_name>:<server>`)
+- **agent_name**: The configured identifier used for agent config and aliases; generated `@mindroom_<agent_name>:<server>` IDs are bootstrap defaults before persisted Matrix state records the live username.
 - **display_name**: A friendly name shown in conversations
 - **role**: A brief description of the agent's purpose
 - **tools**: List of tools the agent can use — plain strings or single-key dicts with inline config overrides (see Available Tools below and [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration))

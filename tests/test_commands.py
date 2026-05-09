@@ -323,6 +323,8 @@ async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None
 
     quick_command_block = "\u26a1 **Quick commands:**\n" + "\n".join(WELCOME_QUICK_COMMAND_LINES)
     assert quick_command_block in welcome_message
+    assert "using a listed username or configured name" in welcome_message
+    assert "@mindroom_assistant" not in welcome_message
 
 
 @pytest.mark.asyncio

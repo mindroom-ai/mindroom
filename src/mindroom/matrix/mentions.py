@@ -321,9 +321,6 @@ def _localpart_candidate_names(localpart: str, runtime_paths: RuntimePaths) -> l
         prefix = MatrixID.AGENT_PREFIX
         name = localpart[len(prefix) :]
 
-    if _is_reserved_user_alias_localpart(localpart):
-        return []
-
     candidate_names = [name]
     stripped_name: str | None = None
 

@@ -154,7 +154,7 @@ def _format_welcome_message(
     quick_commands = "\n".join(get_compact_command_entries(format_code=True))
     welcome_msg += (
         "💬 **How to interact:**\n"
-        "• Mention an agent or team with @ to get their attention (e.g., @mindroom_assistant)\n"
+        "• Mention an agent or team with @ to get their attention using a listed username or configured name\n"
         "• Use `!help` to see available commands\n"
         "• Agents stay in existing Matrix threads, including compatible plain replies from bridges and non-thread clients\n"
         "• Multiple agents can collaborate when you mention them together; mention a team directly for its team workflow\n"

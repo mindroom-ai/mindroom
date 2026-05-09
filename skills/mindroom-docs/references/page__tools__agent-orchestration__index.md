@@ -46,7 +46,7 @@ If the post-spawn summary or tag write fails, the spawn still succeeds and the r
 `sessions_send()` sends a follow-up message into an existing tracked session.
 If you omit `session_key`, `sessions_send()` defaults to the current room or thread session key from `create_session_id(room_id, thread_id)`.
 If you pass `label` without `session_key`, `sessions_send()` resolves the most recent in-scope session with that label.
-If you pass `agent_id`, `sessions_send()` prefixes the outgoing message with `@mindroom_<agent_id>` before sending it.
+If you pass `agent_id`, `sessions_send()` prefixes the outgoing message with that agent's current Matrix username before sending it.
 Tracked sessions are persisted in `subagents/session_registry.json` under the current runtime storage root.
 `list_sessions()` paginates those tracked sessions with a default `limit` of 50 and a maximum of 200.
 Isolated spawned sessions require thread-capable agents.

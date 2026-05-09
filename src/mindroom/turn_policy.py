@@ -366,7 +366,7 @@ class TurnPolicy:
 
     def effective_response_action(self, action: ResponseAction) -> ResponseAction:
         """Apply configured-team execution behavior before running one response action."""
-        if action.kind == "team":
+        if action.kind != "individual":
             return action
         configured_team_action = self.configured_team_response_action()
         return configured_team_action or action
