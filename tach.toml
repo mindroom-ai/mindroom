@@ -1992,7 +1992,6 @@ path = "mindroom.hooks.sender"
 depends_on = [
     "mindroom.hooks.types",
     "mindroom.matrix.client_delivery",
-    "mindroom.matrix.identity",
     "mindroom.matrix.mentions",
 ]
 

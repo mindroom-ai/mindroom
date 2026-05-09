@@ -320,7 +320,7 @@ def _is_stale_configured_user_id(
     current_ids = entity_matrix_ids(config, runtime_paths)
     return any(
         bootstrap_ids[entity_name].full_id == user_id and current_ids[entity_name].full_id != user_id
-        for entity_name in (*config.agents, *config.teams)
+        for entity_name in bootstrap_ids
     )
 
 

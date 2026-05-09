@@ -319,6 +319,29 @@ class TestMentionParsing:
         assert content["body"] == "@mindroom_general:localhost could you help with this?"
         assert "m.mentions" not in content
 
+    def test_format_message_rejects_stale_generated_router_full_mxid_after_drift(self, tmp_path: Path) -> None:
+        """After router username drift, stale generated full MXIDs should stay plain text."""
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={
+                "MATRIX_HOMESERVER": "http://localhost:8008",
+                "MINDROOM_NAMESPACE": "",
+            },
+        )
+        config = _make_config(runtime_paths)
+        state = MatrixState()
+        state.add_account("agent_router", "mindroom_router_oldns", "pw", domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+
+        content = _format_message_with_mentions(
+            config,
+            "@mindroom_router:localhost could you route this?",
+        )
+
+        assert content["body"] == "@mindroom_router:localhost could you route this?"
+        assert "m.mentions" not in content
+
     def test_format_message_keeps_cross_domain_generated_full_mxid_literal_after_drift(
         self,
         tmp_path: Path,
