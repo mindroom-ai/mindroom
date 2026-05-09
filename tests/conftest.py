@@ -19,36 +19,17 @@ import nio
 import pytest
 import pytest_asyncio
 import yaml
-from agno.agent import Agent
-from agno.db.base import BaseDb
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 from aioresponses import aioresponses
 
 import mindroom.bot  # noqa: F401
-from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config, load_config
-from mindroom.config.models import CompactionConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.history.runtime import (
-    ScopeSessionContext,
-    finalize_history_preparation,
-    open_scope_session_context,
-    prepare_scope_history,
-)
-from mindroom.history.types import (
-    CompactionLifecycle,
-    CompactionOutcome,
-    HistoryScope,
-    PreparedHistoryState,
-    ResolvedHistoryExecutionPlan,
-    ResolvedHistorySettings,
-)
+from mindroom.history import prepare_history_for_run as prepare_history_for_run_for_test
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -59,8 +40,6 @@ from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
-from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
@@ -648,116 +627,6 @@ def write_config_yaml(config: Config, config_path: Path) -> None:
             width=120,
         )
     safe_replace(tmp_path, path)
-
-
-def _history_scope_for_test(agent: Agent) -> HistoryScope | None:
-    """Resolve the production history scope fields exposed by Agno Agent."""
-    team_id = agent.team_id
-    if isinstance(team_id, str) and team_id:
-        return HistoryScope(kind="team", scope_id=team_id)
-    agent_id = agent.id
-    if isinstance(agent_id, str) and agent_id:
-        return HistoryScope(kind="agent", scope_id=agent_id)
-    return None
-
-
-async def prepare_history_for_run_for_test(
-    *,
-    agent: Agent,
-    agent_name: str,
-    full_prompt: str,
-    session_id: str | None,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
-    storage: BaseDb | None = None,
-    session: AgentSession | TeamSession | None = None,
-    history_settings: ResolvedHistorySettings | None = None,
-    compaction_config: CompactionConfig | None = None,
-    has_authored_compaction_config: bool | None = None,
-    active_model_name: str | None = None,
-    active_context_window: int | None = None,
-    static_prompt_tokens: int | None = None,
-    available_history_budget: int | None = None,
-    scope: HistoryScope | None = None,
-    execution_plan: ResolvedHistoryExecutionPlan | None = None,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    pipeline_timing: DispatchPipelineTiming | None = None,
-) -> PreparedHistoryState:
-    """Prepare history in tests by composing the public history runtime APIs."""
-    resolved_scope = scope or _history_scope_for_test(agent)
-    if storage is not None and resolved_scope is not None and session_id is not None:
-        persisted_session = session
-        if persisted_session is None:
-            persisted_session = (
-                get_team_session(storage, session_id)
-                if resolved_scope.kind == "team"
-                else get_agent_session(storage, session_id)
-            )
-        scope_context = ScopeSessionContext(
-            scope=resolved_scope,
-            storage=storage,
-            session=persisted_session,
-            session_id=session_id,
-        )
-        prepared_scope_history = await prepare_scope_history(
-            agent=agent,
-            agent_name=agent_name,
-            full_prompt=full_prompt,
-            runtime_paths=runtime_paths,
-            config=config,
-            compaction_outcomes_collector=compaction_outcomes_collector,
-            scope_context=scope_context,
-            history_settings=history_settings,
-            compaction_config=compaction_config,
-            has_authored_compaction_config=has_authored_compaction_config,
-            active_model_name=active_model_name,
-            active_context_window=active_context_window,
-            static_prompt_tokens=static_prompt_tokens,
-            available_history_budget=available_history_budget,
-            scope=resolved_scope,
-            execution_plan=execution_plan,
-            compaction_lifecycle=compaction_lifecycle,
-            pipeline_timing=pipeline_timing,
-        )
-    else:
-        with open_scope_session_context(
-            agent=agent,
-            agent_name=agent_name,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            scope=resolved_scope,
-        ) as scope_context:
-            prepared_scope_history = await prepare_scope_history(
-                agent=agent,
-                agent_name=agent_name,
-                full_prompt=full_prompt,
-                runtime_paths=runtime_paths,
-                config=config,
-                compaction_outcomes_collector=compaction_outcomes_collector,
-                scope_context=scope_context,
-                history_settings=history_settings,
-                compaction_config=compaction_config,
-                has_authored_compaction_config=has_authored_compaction_config,
-                active_model_name=active_model_name,
-                active_context_window=active_context_window,
-                static_prompt_tokens=static_prompt_tokens,
-                available_history_budget=available_history_budget,
-                scope=resolved_scope,
-                execution_plan=execution_plan,
-                compaction_lifecycle=compaction_lifecycle,
-                pipeline_timing=pipeline_timing,
-            )
-    return finalize_history_preparation(
-        prepared_scope_history=prepared_scope_history,
-        config=config,
-        static_prompt_tokens=static_prompt_tokens,
-        available_history_budget=available_history_budget,
-        pipeline_timing=pipeline_timing,
-    )
 
 
 def bind_runtime_paths(

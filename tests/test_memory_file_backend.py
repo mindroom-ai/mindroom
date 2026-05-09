@@ -13,6 +13,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
+from mindroom.memory import build_memory_enhanced_prompt as public_build_memory_enhanced_prompt
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
 from mindroom.memory import delete_agent_memory as public_delete_agent_memory
 from mindroom.memory import get_agent_memory as public_get_agent_memory
@@ -168,14 +169,14 @@ async def _build_memory_enhanced_prompt(
     storage_path: Path,
     config: Config,
 ) -> str:
-    prompt_parts = await build_memory_prompt_parts(
+    return await public_build_memory_enhanced_prompt(
         prompt,
         agent_name,
         storage_path,
         config,
+        runtime_paths_for(config),
+        get_tool_execution_identity(),
     )
-    prompt_chunks = [chunk for chunk in (prompt_parts.session_preamble, prompt_parts.turn_context, prompt) if chunk]
-    return "\n\n".join(prompt_chunks)
 
 
 async def build_memory_prompt_parts(

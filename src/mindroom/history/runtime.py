@@ -784,6 +784,105 @@ def finalize_history_preparation(
     )
 
 
+async def prepare_history_for_run(
+    *,
+    agent: Agent,
+    agent_name: str,
+    full_prompt: str,
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None = None,
+    storage: BaseDb | None = None,
+    session: AgentSession | TeamSession | None = None,
+    history_settings: ResolvedHistorySettings | None = None,
+    compaction_config: CompactionConfig | None = None,
+    has_authored_compaction_config: bool | None = None,
+    active_model_name: str | None = None,
+    active_context_window: int | None = None,
+    static_prompt_tokens: int | None = None,
+    available_history_budget: int | None = None,
+    scope: HistoryScope | None = None,
+    execution_plan: ResolvedHistoryExecutionPlan | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
+) -> PreparedHistoryState:
+    """Prepare one scope by compacting durable history and planning safe replay for the run."""
+    resolved_scope = scope or _resolve_history_scope(agent)
+    if storage is not None and resolved_scope is not None and session_id is not None:
+        persisted_session = session
+        if persisted_session is None:
+            persisted_session = (
+                get_team_session(storage, session_id)
+                if resolved_scope.kind == "team"
+                else get_agent_session(storage, session_id)
+            )
+        scope_context: ScopeSessionContext | None = ScopeSessionContext(
+            scope=resolved_scope,
+            storage=storage,
+            session=persisted_session,
+            session_id=session_id,
+        )
+        prepared_scope_history = await prepare_scope_history(
+            agent=agent,
+            agent_name=agent_name,
+            full_prompt=full_prompt,
+            runtime_paths=runtime_paths,
+            config=config,
+            compaction_outcomes_collector=compaction_outcomes_collector,
+            scope_context=scope_context,
+            history_settings=history_settings,
+            compaction_config=compaction_config,
+            has_authored_compaction_config=has_authored_compaction_config,
+            active_model_name=active_model_name,
+            active_context_window=active_context_window,
+            static_prompt_tokens=static_prompt_tokens,
+            available_history_budget=available_history_budget,
+            scope=resolved_scope,
+            execution_plan=execution_plan,
+            compaction_lifecycle=compaction_lifecycle,
+            pipeline_timing=pipeline_timing,
+        )
+    else:
+        with open_scope_session_context(
+            agent=agent,
+            agent_name=agent_name,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            scope=resolved_scope,
+        ) as scope_context:
+            prepared_scope_history = await prepare_scope_history(
+                agent=agent,
+                agent_name=agent_name,
+                full_prompt=full_prompt,
+                runtime_paths=runtime_paths,
+                config=config,
+                compaction_outcomes_collector=compaction_outcomes_collector,
+                scope_context=scope_context,
+                history_settings=history_settings,
+                compaction_config=compaction_config,
+                has_authored_compaction_config=has_authored_compaction_config,
+                active_model_name=active_model_name,
+                active_context_window=active_context_window,
+                static_prompt_tokens=static_prompt_tokens,
+                available_history_budget=available_history_budget,
+                scope=resolved_scope,
+                execution_plan=execution_plan,
+                compaction_lifecycle=compaction_lifecycle,
+                pipeline_timing=pipeline_timing,
+            )
+    return finalize_history_preparation(
+        prepared_scope_history=prepared_scope_history,
+        config=config,
+        static_prompt_tokens=static_prompt_tokens,
+        available_history_budget=available_history_budget,
+        pipeline_timing=pipeline_timing,
+    )
+
+
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_bound_scope_history(
     *,

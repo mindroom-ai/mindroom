@@ -425,6 +425,29 @@ async def build_memory_prompt_parts(
     )
 
 
+async def build_memory_enhanced_prompt(
+    prompt: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+    timing_scope: str | None = None,
+) -> str:
+    """Compatibility wrapper that preserves the legacy monolithic prompt shape."""
+    prompt_parts = await build_memory_prompt_parts(
+        prompt,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        timing_scope=timing_scope,
+    )
+    prompt_chunks = [chunk for chunk in (prompt_parts.session_preamble, prompt_parts.turn_context, prompt) if chunk]
+    return "\n\n".join(prompt_chunks)
+
+
 async def store_conversation_memory(
     prompt: str,
     agent_name: str | list[str],

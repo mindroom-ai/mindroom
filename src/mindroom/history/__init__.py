@@ -22,6 +22,7 @@ from mindroom.history.runtime import (
     open_bound_scope_session_context,
     open_resolved_scope_session_context,
     prepare_bound_scope_history,
+    prepare_history_for_run,
     prepare_scope_history,
     resolve_bound_team_scope_context,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "open_bound_scope_session_context",
     "open_resolved_scope_session_context",
     "prepare_bound_scope_history",
+    "prepare_history_for_run",
     "prepare_scope_history",
     "read_scope_seen_event_ids",
     "request_compaction_before_next_reply",
