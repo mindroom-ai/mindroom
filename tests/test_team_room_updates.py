@@ -79,33 +79,39 @@ class TestTeamRoomUpdates:
                     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
                     with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
-                        mock_bot = AsyncMock()
+                        mock_bot = MagicMock()
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
                         mock_bot.sync_forever = AsyncMock()
+                        mock_bot.try_start = AsyncMock(return_value=True)
+                        mock_bot.prepare_for_sync_shutdown = AsyncMock()
+                        mock_bot._set_presence_with_model_info = AsyncMock()
                         mock_bot.mark_sync_loop_started = MagicMock()
                         mock_bot.reset_watchdog_clock = MagicMock()
                         mock_create_bot.return_value = mock_bot
 
-                        await orchestrator.initialize()
-                        orchestrator.running = True
+                        try:
+                            await orchestrator.initialize()
+                            orchestrator.running = True
 
-                        # Update config with different rooms for the team
-                        updated_config_data = initial_config_data.copy()
-                        updated_config_data["teams"]["team1"]["rooms"] = ["room2", "room3", "room4"]
-                        config2 = Config.model_validate(updated_config_data)
-                        mock_load_config.return_value = config2
+                            # Update config with different rooms for the team
+                            updated_config_data = initial_config_data.copy()
+                            updated_config_data["teams"]["team1"]["rooms"] = ["room2", "room3", "room4"]
+                            config2 = Config.model_validate(updated_config_data)
+                            mock_load_config.return_value = config2
 
-                        # Update config
-                        updated = await orchestrator.update_config()
+                            # Update config
+                            updated = await orchestrator.update_config()
 
-                        # Verify the team was restarted
-                        assert updated is True
-                        assert mock_bot.stop.called
+                            # Verify the team was restarted
+                            assert updated is True
+                            assert mock_bot.stop.called
 
-                        # Should create: agent1 + team1 + router on init, team1 + router on update
-                        # (router gets recreated when teams change)
-                        assert mock_create_bot.call_count == 5
+                            # Should create: agent1 + team1 + router on init, team1 + router on update
+                            # (router gets recreated when teams change)
+                            assert mock_create_bot.call_count == 5
+                        finally:
+                            await orchestrator.stop()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for team creation
@@ -156,45 +162,51 @@ class TestTeamRoomUpdates:
                     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
                     with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
-                        mock_bot = AsyncMock()
+                        mock_bot = MagicMock()
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
                         mock_bot.sync_forever = AsyncMock()
+                        mock_bot.try_start = AsyncMock(return_value=True)
+                        mock_bot.prepare_for_sync_shutdown = AsyncMock()
+                        mock_bot._set_presence_with_model_info = AsyncMock()
                         mock_bot.mark_sync_loop_started = MagicMock()
                         mock_bot.reset_watchdog_clock = MagicMock()
                         mock_create_bot.return_value = mock_bot
 
-                        await orchestrator.initialize()
-                        orchestrator.running = True
+                        try:
+                            await orchestrator.initialize()
+                            orchestrator.running = True
 
-                        # Add a new team
-                        updated_config_data = initial_config_data.copy()
-                        updated_config_data["teams"]["new_team"] = {
-                            "display_name": "NewTeam",
-                            "role": "New test team",
-                            "agents": ["agent1"],
-                            "rooms": ["room1"],
-                            "model": "default",
-                            "mode": "coordinate",
-                        }
-                        config2 = Config.model_validate(updated_config_data)
-                        mock_load_config.return_value = config2
+                            # Add a new team
+                            updated_config_data = initial_config_data.copy()
+                            updated_config_data["teams"]["new_team"] = {
+                                "display_name": "NewTeam",
+                                "role": "New test team",
+                                "agents": ["agent1"],
+                                "rooms": ["room1"],
+                                "model": "default",
+                                "mode": "coordinate",
+                            }
+                            config2 = Config.model_validate(updated_config_data)
+                            mock_load_config.return_value = config2
 
-                        # Mock ensure_users to include the new team
-                        mock_team_user = MagicMock(user_id="@new_team:localhost", agent_name="new_team")
-                        mock_ensure_users.return_value = {
-                            "agent1": mock_agent1_user,
-                            "router": mock_router_user,
-                            "new_team": mock_team_user,
-                        }
+                            # Mock ensure_users to include the new team
+                            mock_team_user = MagicMock(user_id="@new_team:localhost", agent_name="new_team")
+                            mock_ensure_users.return_value = {
+                                "agent1": mock_agent1_user,
+                                "router": mock_router_user,
+                                "new_team": mock_team_user,
+                            }
 
-                        # Update config
-                        updated = await orchestrator.update_config()
+                            # Update config
+                            updated = await orchestrator.update_config()
 
-                        # Verify the new team was created
-                        assert updated is True
-                        # The new team should be in the bots now
-                        assert "new_team" in orchestrator.agent_bots
+                            # Verify the new team was created
+                            assert updated is True
+                            # The new team should be in the bots now
+                            assert "new_team" in orchestrator.agent_bots
+                        finally:
+                            await orchestrator.stop()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for team configuration
@@ -258,25 +270,31 @@ class TestTeamRoomUpdates:
                     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
                     with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
-                        mock_bot = AsyncMock()
+                        mock_bot = MagicMock()
                         mock_bot.start = AsyncMock()
                         mock_bot.stop = AsyncMock()
                         mock_bot.sync_forever = AsyncMock()
+                        mock_bot.try_start = AsyncMock(return_value=True)
+                        mock_bot.prepare_for_sync_shutdown = AsyncMock()
+                        mock_bot._set_presence_with_model_info = AsyncMock()
                         mock_bot.mark_sync_loop_started = MagicMock()
                         mock_bot.reset_watchdog_clock = MagicMock()
                         mock_create_bot.return_value = mock_bot
 
-                        await orchestrator.initialize()
-                        orchestrator.running = True
+                        try:
+                            await orchestrator.initialize()
+                            orchestrator.running = True
 
-                        # Reset mocks
-                        mock_bot.stop.reset_mock()
-                        mock_create_bot.reset_mock()
+                            # Reset mocks
+                            mock_bot.stop.reset_mock()
+                            mock_create_bot.reset_mock()
 
-                        # Update with same config
-                        updated = await orchestrator.update_config()
+                            # Update with same config
+                            updated = await orchestrator.update_config()
 
-                        # Verify nothing was restarted
-                        assert updated is False
-                        assert not mock_bot.stop.called
-                        assert mock_create_bot.call_count == 0
+                            # Verify nothing was restarted
+                            assert updated is False
+                            assert not mock_bot.stop.called
+                            assert mock_create_bot.call_count == 0
+                        finally:
+                            await orchestrator.stop()

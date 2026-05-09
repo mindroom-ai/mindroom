@@ -250,15 +250,18 @@ async def test_orchestrator_creates_router_with_all_rooms(
     # Create orchestrator
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
-    # Initialize (creates all bots)
-    await orchestrator.initialize()
+    try:
+        # Initialize (creates all bots)
+        await orchestrator.initialize()
 
-    # Check that router exists and has all rooms
-    assert ROUTER_AGENT_NAME in orchestrator.agent_bots
-    router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        # Check that router exists and has all rooms
+        assert ROUTER_AGENT_NAME in orchestrator.agent_bots
+        router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
 
-    expected_rooms = {"room1", "room2", "room3", "room4"}
-    assert set(router_bot.rooms) == expected_rooms
+        expected_rooms = {"room1", "room2", "room3", "room4"}
+        assert set(router_bot.rooms) == expected_rooms
+    finally:
+        await orchestrator.stop()
 
 
 @pytest.mark.asyncio
@@ -328,35 +331,38 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
-    await orchestrator.initialize()
+    try:
+        await orchestrator.initialize()
 
-    # Check initial router rooms
-    router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
-    assert set(router_bot.rooms) == {"room1"}
+        # Check initial router rooms
+        router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        assert set(router_bot.rooms) == {"room1"}
 
-    # Mock bot operations using monkeypatch to avoid method assignment errors
-    async def mock_stop(*, reason: str | None = None) -> None:
-        del reason
+        # Mock bot operations using monkeypatch to avoid method assignment errors
+        async def mock_stop(*, reason: str | None = None) -> None:
+            del reason
 
-    async def mock_start() -> None:
-        pass
+        async def mock_start() -> None:
+            pass
 
-    async def mock_ensure_user_account() -> None:
-        pass
+        async def mock_ensure_user_account() -> None:
+            pass
 
-    async def mock_sync_forever() -> None:
-        raise asyncio.CancelledError
+        async def mock_sync_forever() -> None:
+            raise asyncio.CancelledError
 
-    for bot in orchestrator.agent_bots.values():
-        monkeypatch.setattr(bot, "stop", mock_stop)
-        monkeypatch.setattr(bot, "start", mock_start)
-        monkeypatch.setattr(bot, "ensure_user_account", mock_ensure_user_account)
-        monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
+        for bot in orchestrator.agent_bots.values():
+            monkeypatch.setattr(bot, "stop", mock_stop)
+            monkeypatch.setattr(bot, "start", mock_start)
+            monkeypatch.setattr(bot, "ensure_user_account", mock_ensure_user_account)
+            monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
 
-    # Update config
-    updated = await orchestrator.update_config()
-    assert updated  # Should return True since router needs restart
+        # Update config
+        updated = await orchestrator.update_config()
+        assert updated  # Should return True since router needs restart
 
-    # Router should be recreated with new rooms
-    new_router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
-    assert set(new_router_bot.rooms) == {"room1", "room2", "room3"}
+        # Router should be recreated with new rooms
+        new_router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        assert set(new_router_bot.rooms) == {"room1", "room2", "room3"}
+    finally:
+        await orchestrator.stop()
