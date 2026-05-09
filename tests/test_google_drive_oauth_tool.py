@@ -8,6 +8,7 @@ import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agno.agent import Agent
 from agno.agent._tools import parse_tools
@@ -22,6 +23,9 @@ from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+
+if TYPE_CHECKING:
+    import pytest
 
 
 class MinimalModel(Model):
@@ -98,6 +102,18 @@ class _FakeDriveService:
 
 class _ValidCredentials:
     valid = True
+
+
+class _FakeMediaIoBaseDownload:
+    def __init__(self, file_handle: object, _request: object) -> None:
+        self._file_handle = file_handle
+        self._done = False
+
+    def next_chunk(self) -> tuple[None, bool]:
+        if not self._done:
+            self._file_handle.write(b"hello")
+            self._done = True
+        return None, self._done
 
 
 def _runtime_paths_with_google_drive_client(
@@ -562,6 +578,37 @@ def test_google_drive_read_media_supports_shared_drive_files(tmp_path: Path) -> 
     result = json.loads(tool.read_file("shared-drive-file-id"))
 
     assert result["content"] == "hello"
+    assert service.files_resource.get_media_kwargs == {
+        "fileId": "shared-drive-file-id",
+        "supportsAllDrives": True,
+    }
+
+
+def test_google_drive_download_media_supports_shared_drive_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseDownload", _FakeMediaIoBaseDownload)
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        creds=_ValidCredentials(),
+        download_file=True,
+        download_dir=tmp_path,
+    )
+    service = _FakeDriveService()
+    service.files_resource.file_metadata = {
+        "name": "notes.txt",
+        "mimeType": "text/plain",
+        "webViewLink": "https://drive.google.com/file/d/example",
+    }
+    tool.service = service
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert result["status"] == "downloaded"
+    assert Path(result["path"]).read_text() == "hello"
     assert service.files_resource.get_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "supportsAllDrives": True,

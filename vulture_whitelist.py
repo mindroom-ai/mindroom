@@ -132,6 +132,7 @@ _.validate_reserved_knowledge_base_ids  # unused method (src/mindroom/config/mai
 _.query_room_state  # unused method (src/mindroom/hooks/context.py)
 _openclaw_compat_tools  # unused function (src/mindroom/tools/__init__.py)
 _.read_file_chunk  # unused method (src/mindroom/tools/file.py)
+_.download_file  # unused method (src/mindroom/custom_tools/google_drive.py)
 _.reject_legacy_defaults_fields  # unused method (src/mindroom/config/models.py)
 _.normalize_tool_filters  # unused method (src/mindroom/mcp/config.py)
 _.handle_exit  # unused method (src/mindroom/orchestrator.py)
