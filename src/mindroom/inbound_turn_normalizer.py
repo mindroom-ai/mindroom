@@ -117,7 +117,6 @@ class InboundTurnNormalizerDeps:
     logger: structlog.stdlib.BoundLogger
     storage_path: Path
     runtime_paths: RuntimePaths
-    sender_domain: str
     conversation_resolver: ConversationResolver
 
 
@@ -172,7 +171,6 @@ class InboundTurnNormalizer:
                 request.event,
                 self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
-                sender_domain=self.deps.sender_domain,
                 thread_id=effective_thread_id,
             )
             if prepared_voice is None:

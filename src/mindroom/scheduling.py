@@ -838,7 +838,6 @@ async def _build_workflow_message_content(
             config,
             runtime_paths,
             message_text,
-            sender_domain=config.get_domain(runtime_paths),
             thread_event_id=None,
         )
     automated_message = (
@@ -856,7 +855,6 @@ async def _build_workflow_message_content(
         config,
         runtime_paths,
         automated_message,
-        sender_domain=config.get_domain(runtime_paths),
         thread_event_id=target.resolved_thread_id,
         latest_thread_event_id=latest_thread_event_id,
     )
@@ -1298,7 +1296,6 @@ def _extract_mentioned_agents_from_text(
     """Extract valid agent mentions from scheduling text."""
     _, mentioned_user_ids, _ = parse_mentions_in_text(
         full_text,
-        config.get_domain(runtime_paths),
         config,
         runtime_paths,
     )

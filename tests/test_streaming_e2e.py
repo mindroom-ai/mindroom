@@ -158,7 +158,6 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
             room_id="!test:localhost",
             reply_to_event_id="$original_123",
             thread_id=None,
-            sender_domain="localhost",
             config=runtime_config,
             runtime_paths=runtime_paths_for(runtime_config),
             response_stream=stream(),

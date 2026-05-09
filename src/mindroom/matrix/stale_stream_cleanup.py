@@ -135,7 +135,6 @@ async def cleanup_stale_streaming_messages(
     if not joined_room_ids:
         return 0, []
 
-    sender_domain = MatrixID.parse(bot_user_id).domain
     exact_bot_user_ids = {bot_user_id} if bot_user_ids is None else set(bot_user_ids)
     cleaned_count = 0
     interrupted_threads: list[InterruptedThread] = []
@@ -147,7 +146,6 @@ async def cleanup_stale_streaming_messages(
                 room_id=room_id,
                 bot_user_id=bot_user_id,
                 bot_user_ids=exact_bot_user_ids,
-                sender_domain=sender_domain,
                 config=config,
                 runtime_paths=runtime_paths,
                 conversation_cache=conversation_cache,
@@ -233,7 +231,6 @@ async def _cleanup_room_stale_streaming_messages(
     room_id: str,
     bot_user_id: str,
     bot_user_ids: set[str],
-    sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
@@ -276,7 +273,6 @@ async def _cleanup_room_stale_streaming_messages(
                 target_event_id=target_event_id,
                 state=state,
                 bot_user_ids=bot_user_ids,
-                sender_domain=sender_domain,
                 config=config,
                 runtime_paths=runtime_paths,
                 conversation_cache=conversation_cache,
@@ -298,7 +294,6 @@ async def _cleanup_room_stale_streaming_messages(
                 room_id=room_id,
                 target_event_id=target_event_id,
                 state=state,
-                sender_domain=sender_domain,
                 config=config,
                 runtime_paths=runtime_paths,
                 conversation_cache=conversation_cache,
@@ -324,7 +319,6 @@ async def _repair_restart_marked_message_metadata(
     room_id: str,
     target_event_id: str,
     state: _MessageState,
-    sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
@@ -346,7 +340,6 @@ async def _repair_restart_marked_message_metadata(
             preserved_content=_terminal_stream_content(state.latest_content),
             thread_id=state.thread_id,
             latest_thread_event_id=state.latest_thread_event_id or state.latest_event_id or target_event_id,
-            sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
@@ -368,7 +361,6 @@ async def _cleanup_one_stale_message(
     target_event_id: str,
     state: _MessageState,
     bot_user_ids: set[str],
-    sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
@@ -384,7 +376,6 @@ async def _cleanup_one_stale_message(
         preserved_content=_terminal_stream_content(state.latest_content),
         thread_id=state.thread_id,
         latest_thread_event_id=state.latest_thread_event_id or state.latest_event_id or target_event_id,
-        sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
         conversation_cache=conversation_cache,
@@ -420,7 +411,6 @@ async def _cleanup_candidate_message(
     target_event_id: str,
     state: _MessageState,
     bot_user_ids: set[str],
-    sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
@@ -437,7 +427,6 @@ async def _cleanup_candidate_message(
             target_event_id=target_event_id,
             state=state,
             bot_user_ids=bot_user_ids,
-            sender_domain=sender_domain,
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
@@ -1105,7 +1094,6 @@ async def _edit_stale_message(
     preserved_content: dict[str, Any] | None,
     thread_id: str | None,
     latest_thread_event_id: str | None,
-    sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
@@ -1121,7 +1109,6 @@ async def _edit_stale_message(
         config,
         runtime_paths,
         new_text,
-        sender_domain=sender_domain,
         thread_event_id=thread_id,
         latest_thread_event_id=latest_thread_event_id,
         extra_content=extra_content,

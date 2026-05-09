@@ -11,6 +11,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import configured_routable_entity_ids_for_room
+from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
@@ -143,6 +144,35 @@ class TestResponderCandidateSelection:
         available_names = [mid.agent_name(self.config, runtime_paths) for mid in available]
         assert available_names == ["calculator", "research"]
         assert "writer" not in available_names
+        client.joined_members.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_responder_candidates_use_persisted_configured_entity_ids(self) -> None:
+        """Configured-room responders should follow persisted Matrix username drift."""
+        runtime_paths = runtime_paths_for(self.config)
+        state = MatrixState()
+        state.add_account("agent_calculator", "mindroom_calculator_oldns", "pw", domain="localhost")
+        state.save(runtime_paths=runtime_paths)
+        room = MagicMock()
+        room.room_id = "#math:localhost"
+        room.members_synced = True
+        room.users = {
+            "@mindroom_calculator_oldns:localhost": None,
+            "@mindroom_writer:localhost": None,
+            "@user:localhost": None,
+        }
+        client = AsyncMock()
+        client.joined_members = AsyncMock()
+
+        available = await responder_candidate_entities_for_room(
+            client,
+            room,
+            "@user:localhost",
+            self.config,
+            runtime_paths,
+        )
+
+        assert [mid.full_id for mid in available] == ["@mindroom_calculator_oldns:localhost"]
         client.joined_members.assert_not_awaited()
 
     @pytest.mark.asyncio

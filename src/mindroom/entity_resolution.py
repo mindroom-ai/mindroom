@@ -10,6 +10,8 @@ from mindroom.matrix.identity import MatrixID, managed_account_key, managed_acco
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -73,27 +75,23 @@ def matrix_domain(runtime_paths: RuntimePaths) -> str:
 
 def entity_matrix_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
     """Return Matrix IDs for configured agents, teams, and the router."""
-    domain = matrix_domain(runtime_paths)
-    mapping: dict[str, MatrixID] = {
-        agent_name: _entity_matrix_id(agent_name, domain, runtime_paths) for agent_name in config.agents
-    }
-    mapping[ROUTER_AGENT_NAME] = _entity_matrix_id(ROUTER_AGENT_NAME, domain, runtime_paths)
-    mapping.update(
-        {team_name: _entity_matrix_id(team_name, domain, runtime_paths) for team_name in config.teams},
-    )
-    return mapping
+    return _entity_matrix_id_map(config, runtime_paths, _entity_matrix_id)
 
 
 def bootstrap_entity_matrix_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
     """Return config-derived Matrix IDs for configured agents, teams, and the router."""
+    return _entity_matrix_id_map(config, runtime_paths, MatrixID.from_agent)
+
+
+def _entity_matrix_id_map(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    build_id: Callable[[str, str, RuntimePaths], MatrixID],
+) -> dict[str, MatrixID]:
     domain = matrix_domain(runtime_paths)
-    mapping: dict[str, MatrixID] = {
-        agent_name: MatrixID.from_agent(agent_name, domain, runtime_paths) for agent_name in config.agents
-    }
-    mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, domain, runtime_paths)
-    mapping.update(
-        {team_name: MatrixID.from_agent(team_name, domain, runtime_paths) for team_name in config.teams},
-    )
+    mapping = {agent_name: build_id(agent_name, domain, runtime_paths) for agent_name in config.agents}
+    mapping[ROUTER_AGENT_NAME] = build_id(ROUTER_AGENT_NAME, domain, runtime_paths)
+    mapping.update({team_name: build_id(team_name, domain, runtime_paths) for team_name in config.teams})
     return mapping
 
 

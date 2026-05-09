@@ -766,7 +766,6 @@ class TestStreamingFinalizeStatuses:
                 room_id="!room:localhost",
                 reply_to_event_id=None,
                 thread_id=None,
-                sender_domain="localhost",
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -797,7 +796,6 @@ class TestStreamingFinalizeStatuses:
                 room_id="!room:localhost",
                 reply_to_event_id=None,
                 thread_id=None,
-                sender_domain="localhost",
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -826,7 +824,6 @@ class TestStreamingFinalizeStatuses:
                 room_id="!room:localhost",
                 reply_to_event_id=None,
                 thread_id=None,
-                sender_domain="localhost",
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -855,7 +852,6 @@ class TestStreamingFinalizeStatuses:
                 room_id="!room:localhost",
                 reply_to_event_id=None,
                 thread_id=None,
-                sender_domain="localhost",
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -885,7 +881,6 @@ class TestStreamingFinalizeStatuses:
                 room_id="!room:localhost",
                 reply_to_event_id=None,
                 thread_id=None,
-                sender_domain="localhost",
                 config=config,
                 runtime_paths=runtime_paths,
             )

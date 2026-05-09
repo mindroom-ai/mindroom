@@ -308,7 +308,7 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
         await response_function(None)
 
     async def fake_send_streaming_response(*args: object, **_kwargs: object) -> tuple[str, str]:
-        response_stream = args[7]
+        response_stream = args[6]
         chunks = [str(chunk) async for chunk in response_stream]
         return "$stream_event", "".join(chunks)
 

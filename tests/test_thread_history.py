@@ -709,7 +709,6 @@ class TestThreadHistory:
                 thread_id="$thread_root",
                 config=MagicMock(),
                 runtime_paths=MagicMock(),
-                sender_domain="localhost",
                 latest_thread_event_id="$latest",
             )
 
@@ -724,7 +723,6 @@ class TestThreadHistory:
                 thread_id="$thread_root",
                 config=MagicMock(),
                 runtime_paths=MagicMock(),
-                sender_domain="localhost",
             )
 
     @pytest.mark.asyncio

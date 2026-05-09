@@ -581,7 +581,7 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         yield "stream chunk"
 
     async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-        response_stream = args[7]
+        response_stream = args[6]
         chunks = [str(chunk) async for chunk in response_stream]
         return StreamTransportOutcome(
             last_physical_stream_event_id="$response",

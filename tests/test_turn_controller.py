@@ -144,7 +144,6 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
                 room_id=room_id,
                 reply_to_event_id=reply_to_event_id,
                 thread_id=thread_id,
-                sender_domain="localhost",
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 response_stream=response_stream(),

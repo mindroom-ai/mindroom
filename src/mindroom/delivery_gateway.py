@@ -310,7 +310,6 @@ class DeliveryGatewayDeps:
     agent_name: str
     logger: structlog.stdlib.BoundLogger
     redact_message_event: Callable[..., Awaitable[bool]]
-    sender_domain: str
     resolver: ConversationResolver
     response_hooks: ResponseHookService
 
@@ -525,7 +524,6 @@ class DeliveryGateway:
                 config,
                 self.deps.runtime_paths,
                 request.response_text,
-                sender_domain=self.deps.sender_domain,
                 thread_event_id=None,
                 reply_to_event_id=resolved_target.reply_to_event_id,
                 latest_thread_event_id=None,
@@ -545,7 +543,6 @@ class DeliveryGateway:
                 config,
                 self.deps.runtime_paths,
                 request.response_text,
-                sender_domain=self.deps.sender_domain,
                 thread_event_id=effective_thread_id,
                 reply_to_event_id=resolved_target.reply_to_event_id,
                 latest_thread_event_id=latest_thread_event_id,
@@ -583,7 +580,6 @@ class DeliveryGateway:
                 config,
                 self.deps.runtime_paths,
                 request.new_text,
-                sender_domain=self.deps.sender_domain,
                 reply_to_event_id=target.reply_to_event_id,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
@@ -601,7 +597,6 @@ class DeliveryGateway:
                 thread_id=target.resolved_thread_id,
                 config=config,
                 runtime_paths=self.deps.runtime_paths,
-                sender_domain=self.deps.sender_domain,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
                 latest_thread_event_id=latest_thread_event_id,
@@ -1060,7 +1055,6 @@ class DeliveryGateway:
             request.target.room_id,
             request.target.reply_to_event_id,
             request.target.resolved_thread_id,
-            self.deps.sender_domain,
             config,
             self.deps.runtime_paths,
             request.response_stream,

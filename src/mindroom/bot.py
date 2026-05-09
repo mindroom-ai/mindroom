@@ -409,7 +409,6 @@ class AgentBot:
                 logger=self.logger,
                 storage_path=self.storage_path,
                 runtime_paths=self.runtime_paths,
-                sender_domain=runtime_matrix_id.domain,
                 conversation_resolver=self._conversation_resolver,
             ),
         )
@@ -419,7 +418,6 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 logger=self.logger,
-                sender_domain=runtime_matrix_id.domain,
                 resolver=self._conversation_resolver,
                 redact_message_event=self._redact_message_event,
                 response_hooks=ResponseHookService(
@@ -1851,7 +1849,6 @@ class AgentBot:
             source_hook,
             extra_content,
             trigger_dispatch=trigger_dispatch,
-            sender_domain=self.matrix_id.domain,
             conversation_cache=self._conversation_cache,
         )
         if event_id:

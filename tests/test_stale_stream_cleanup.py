@@ -780,7 +780,6 @@ async def test_edit_stale_message_records_outbound_edit_when_successful(tmp_path
             preserved_content=None,
             thread_id="$thread-root",
             latest_thread_event_id="$reply-latest",
-            sender_domain="example.com",
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,

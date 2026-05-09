@@ -263,7 +263,6 @@ async def _send_matrix_text(
         context.config,
         context.runtime_paths,
         text,
-        sender_domain=context.config.get_domain(context.runtime_paths),
         thread_event_id=thread_id,
         latest_thread_event_id=latest_thread_event_id,
     )

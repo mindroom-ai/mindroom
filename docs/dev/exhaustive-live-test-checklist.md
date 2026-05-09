@@ -113,7 +113,7 @@ Source anchors: `src/mindroom/matrix/rooms.py`, `src/mindroom/topic_generator.py
 Expected outcome: MindRoom creates the room, applies topic and access settings, and invites the expected participants.
 
 - [ ] `ROOM-002` Verify router onboarding in a newly managed room.
-Expected outcome: The router posts a welcome message only in the intended empty-room onboarding scenario and the content reflects the currently available agents and commands.
+Expected outcome: The router posts a welcome message only in the intended empty-room onboarding scenario and the content reflects the currently available agents, teams, and commands.
 
 - [ ] `ROOM-003` Send `!hi` in a managed room after startup.
 Expected outcome: The router reproduces the current welcome guidance without changing room state or duplicating bot setup.
@@ -325,7 +325,7 @@ Expected outcome: Visible router echo behavior matches the configuration without
 - [ ] `MEDIA-010` Exercise voice command intelligence with an explicit spoken help request, an explicit spoken removed-`!skill` request, and a similar non-command question.
 Expected outcome: Explicit help intent can normalize to `!help`, removed `!skill` intent stays an unknown command, and speculative command rewrites are rejected so natural-language queries stay natural language.
 
-- [ ] `MEDIA-011` Speak or inject unavailable agent mentions while voice normalization runs in a room with limited available entities.
+- [ ] `MEDIA-011` Speak or inject unavailable entity mentions while voice normalization runs in a room with limited available entities.
 Expected outcome: Unavailable configured entities lose their `@` mention marker while available room-scoped entities keep valid mentions and dispatch correctly.
 
 - [ ] `MEDIA-012` Send a voice message that becomes a normalized command or threaded follow-up and then inspect later follow-up or attachment-aware handling.

@@ -70,7 +70,6 @@ async def _prepare_voice_message_with_runtime(
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
     *,
-    sender_domain: str,
     thread_id: str | None,
 ) -> object:
     """Normalize voice input with the test config's explicit runtime context."""
@@ -81,7 +80,6 @@ async def _prepare_voice_message_with_runtime(
         event,
         config,
         runtime_paths=runtime_paths_for(config),
-        sender_domain=sender_domain,
         thread_id=thread_id,
     )
 
@@ -606,7 +604,6 @@ async def test_prepare_voice_message_includes_original_sender_and_attachment_met
             room,
             event,
             config,
-            sender_domain="example.com",
             thread_id=None,
         )
 
@@ -659,7 +656,6 @@ async def test_prepare_voice_message_sanitizes_user_authored_internal_metadata(t
             room,
             event,
             config,
-            sender_domain="example.com",
             thread_id=None,
         )
 
@@ -697,7 +693,6 @@ async def test_prepare_voice_message_marks_raw_audio_fallback_and_thread(tmp_pat
             room,
             event,
             config,
-            sender_domain="example.com",
             thread_id="$thread_root",
         )
 

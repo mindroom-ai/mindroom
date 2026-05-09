@@ -468,7 +468,6 @@ def _build_response_runner(
             agent_name=bot.agent_name,
             logger=bot.logger,
             redact_message_event=AsyncMock(return_value=True),
-            sender_domain="localhost",
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
         ),

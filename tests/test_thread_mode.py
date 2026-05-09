@@ -125,7 +125,6 @@ def _streaming_response(
     room_id: str,
     reply_to_event_id: str | None,
     thread_id: str | None,
-    sender_domain: str,
     room_mode: bool = False,
     latest_thread_event_id: str | None = None,
 ) -> StreamingResponse:
@@ -134,7 +133,6 @@ def _streaming_response(
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
         thread_id=thread_id,
-        sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths_for(config),
         room_mode=room_mode,
@@ -1111,7 +1109,6 @@ class TestStreamingResponseRoomMode:
             room_id="!room:localhost",
             reply_to_event_id="$event123",
             thread_id="$thread123",
-            sender_domain="localhost",
         )
         assert sr.room_mode is False
 
@@ -1123,7 +1120,6 @@ class TestStreamingResponseRoomMode:
             room_id="!room:localhost",
             reply_to_event_id="$event123",
             thread_id="$thread123",
-            sender_domain="localhost",
             room_mode=True,
             latest_thread_event_id="$latest",
         )
@@ -1149,7 +1145,6 @@ class TestStreamingResponseRoomMode:
             room_id="!room:localhost",
             reply_to_event_id="$event123",
             thread_id="$thread123",
-            sender_domain="localhost",
             room_mode=False,
             latest_thread_event_id="$latest",
         )
@@ -1216,7 +1211,6 @@ class TestSendStreamingResponseRoomMode:
                 "!room:localhost",
                 "$event123",
                 "$thread123",
-                "localhost",
                 config,
                 runtime_paths_for(config),
                 empty_stream(),

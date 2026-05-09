@@ -260,7 +260,6 @@ class StreamingResponse:
     room_id: str
     reply_to_event_id: str | None
     thread_id: str | None
-    sender_domain: str
     config: Config
     runtime_paths: RuntimePaths
     target: MessageTarget | None = None
@@ -814,7 +813,6 @@ class StreamingResponse:
             config=self.config,
             runtime_paths=self.runtime_paths,
             text=display_text,
-            sender_domain=self.sender_domain,
             thread_event_id=effective_thread_id,
             reply_to_event_id=self.target.reply_to_event_id,
             latest_thread_event_id=latest_for_message,
@@ -1012,7 +1010,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     room_id: str,
     reply_to_event_id: str | None,
     thread_id: str | None,
-    sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
     response_stream: AsyncIterator[StreamInputChunk],
@@ -1045,7 +1042,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
         thread_id=thread_id,
-        sender_domain=sender_domain,
         config=config,
         runtime_paths=runtime_paths,
         target=resolved_target,

@@ -110,6 +110,7 @@ class TestStreamingEdits:
         self.config = Config(
             agents={
                 "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                "helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"]),
             },
             teams={},
             room_models={},

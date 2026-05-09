@@ -83,7 +83,6 @@ class MatrixMessageOperations:
             context.config,
             context.runtime_paths,
             formatted_text,
-            sender_domain=context.config.get_domain(context.runtime_paths),
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
             extra_content=extra_content or None,
@@ -634,7 +633,6 @@ class MatrixMessageOperations:
             context.config,
             context.runtime_paths,
             formatted_text,
-            sender_domain=context.config.get_domain(context.runtime_paths),
             thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
         )

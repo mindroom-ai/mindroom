@@ -195,7 +195,6 @@ async def prepare_voice_message(
     config: Config,
     *,
     runtime_paths: RuntimePaths,
-    sender_domain: str,
     thread_id: str | None,
 ) -> _PreparedVoiceMessage | None:
     """Download/register audio and normalize it into a synthetic text event."""
@@ -238,7 +237,6 @@ async def prepare_voice_message(
             config,
             runtime_paths,
             text,
-            sender_domain=sender_domain,
             extra_content=extra_content,
         ),
     )

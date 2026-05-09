@@ -43,7 +43,6 @@ class _MentionReplacement(_MentionResolution):
 
 def parse_mentions_in_text(
     text: str,
-    sender_domain: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, list[str], str]:
@@ -51,7 +50,6 @@ def parse_mentions_in_text(
 
     Args:
         text: Text that may contain @entity_name mentions
-        sender_domain: Retained caller context; configured entity mentions use the configured Matrix domain
         config: Application configuration
         runtime_paths: Explicit runtime context for namespace-aware mention resolution
 
@@ -59,7 +57,6 @@ def parse_mentions_in_text(
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
 
     """
-    del sender_domain
     tokens = _scan_mention_tokens(text)
     replacements = _resolve_mention_tokens(
         tokens,
@@ -198,14 +195,16 @@ def _resolve_explicit_matrix_id_token(
         msg = "Explicit MXID token is missing explicit_user_id"
         raise ValueError(msg)
 
-    if token.localpart.lower().startswith(MatrixID.AGENT_PREFIX) and (
-        entity_name := _find_matching_entity_name_for_localpart(token.localpart, config, runtime_paths)
-    ):
-        return _entity_mention_resolution(
-            entity_name,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
+    current_entity_ids = entity_matrix_ids(config, runtime_paths)
+    for entity_name, current_id in current_entity_ids.items():
+        if entity_name == ROUTER_AGENT_NAME:
+            continue
+        if current_id.full_id == explicit_user_id:
+            return _entity_mention_resolution(
+                entity_name,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
     if _is_stale_configured_user_id(explicit_user_id, config, runtime_paths):
         return None
     return _literal_user_resolution(explicit_user_id)
@@ -317,14 +316,10 @@ def _is_stale_configured_user_id(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> bool:
-    parsed = MatrixID.parse(user_id)
+    bootstrap_ids = bootstrap_entity_matrix_ids(config, runtime_paths)
+    current_ids = entity_matrix_ids(config, runtime_paths)
     return any(
-        _is_stale_prefixed_entity_localpart(
-            entity_name=entity_name,
-            localpart=parsed.username,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
+        bootstrap_ids[entity_name].full_id == user_id and current_ids[entity_name].full_id != user_id
         for entity_name in (*config.agents, *config.teams)
     )
 
@@ -400,7 +395,6 @@ def format_message_with_mentions(
     config: Config,
     runtime_paths: RuntimePaths,
     text: str,
-    sender_domain: str = "localhost",
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
     latest_thread_event_id: str | None = None,
@@ -415,7 +409,6 @@ def format_message_with_mentions(
         config: Application configuration
         runtime_paths: Explicit runtime context for mention parsing and HTML rendering
         text: Message text that may contain @entity_name mentions
-        sender_domain: Retained caller context; configured entity mentions use the configured Matrix domain
         thread_event_id: Optional thread root event ID
         reply_to_event_id: Optional event ID to reply to (for genuine replies)
         latest_thread_event_id: Optional latest event ID in thread (for fallback compatibility)
@@ -429,7 +422,6 @@ def format_message_with_mentions(
     spaced_text = ensure_visible_tool_marker_spacing(text)
     plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(
         spaced_text,
-        sender_domain,
         config,
         runtime_paths,
     )

@@ -266,7 +266,7 @@ def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
 
     assert "## Matrix Reply Targeting" in agent.role
     assert "explicit Matrix mention" in agent.role
-    assert "multi-agent or multi-human" in agent.role
+    assert "multi-agent, multi-team, or multi-human" in agent.role
     assert "not dispatched" in agent.role
     assert "natural-language addressing" in agent.role
 

@@ -761,7 +761,6 @@ def test_agent_bot_init_defers_matrix_id_access_until_after_user_id_is_populated
     bot.client = AsyncMock()
     bot.client.user_id = agent_user.user_id
     assert bot._conversation_resolver._matrix_id().full_id == "@mindroom_calculator:localhost"
-    assert bot._inbound_turn_normalizer.deps.sender_domain == "localhost"
 
 
 @asynccontextmanager
@@ -2479,7 +2478,7 @@ class TestAgentBot:
             return _gen()
 
         async def _consuming_send_streaming(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            stream = args[7]  # response_stream positional arg
+            stream = args[6]  # response_stream positional arg
             async for _ in stream:
                 pass
             return StreamTransportOutcome(
@@ -2570,7 +2569,7 @@ class TestAgentBot:
             return _gen()
 
         async def _consuming_send_streaming(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            stream = args[7]
+            stream = args[6]
             async for _ in stream:
                 pass
             return StreamTransportOutcome(
@@ -2633,7 +2632,7 @@ class TestAgentBot:
 
         async def _consuming_send_streaming(*args: object, **kwargs: object) -> StreamTransportOutcome:
             captured_extra_content_ref[0] = kwargs.get("extra_content")
-            stream = args[7]
+            stream = args[6]
             try:
                 async for _ in stream:
                     pass
@@ -5532,7 +5531,7 @@ class TestAgentBot:
             yield "friendly-error"
 
         async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            response_stream = cast("AsyncGenerator[object, None]", args[7])
+            response_stream = cast("AsyncGenerator[object, None]", args[6])
             body_parts = [str(chunk) async for chunk in response_stream]
             return _stream_outcome("$response", "".join(body_parts))
 

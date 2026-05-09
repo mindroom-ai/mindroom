@@ -292,7 +292,6 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
             agent_name="email_agent",
             logger=MagicMock(),
             redact_message_event=AsyncMock(return_value=True),
-            sender_domain="localhost",
             resolver=SimpleNamespace(
                 build_message_target=MagicMock(),
                 deps=SimpleNamespace(conversation_cache=conversation_cache),

@@ -60,7 +60,6 @@ async def _prepare_voice_message(
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
     *,
-    sender_domain: str,
     thread_id: str | None,
 ) -> voice_handler._PreparedVoiceMessage | None:
     """Prepare one voice message with the explicit runtime bound to the test config."""
@@ -71,7 +70,6 @@ async def _prepare_voice_message(
         event,
         config,
         runtime_paths=runtime_paths_for(config),
-        sender_domain=sender_domain,
         thread_id=thread_id,
     )
 
@@ -161,6 +159,7 @@ class TestVoiceHandler:
 
         client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!voice:localhost"
         room.users = {
             f"@mindroom_openclaw:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
             f"@mindroom_router:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
@@ -168,7 +167,10 @@ class TestVoiceHandler:
         }
         room.members_synced = True
         event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$voice"
         event.sender = "@alice:example.com"
+        event.body = "voice.ogg"
+        event.source = {"content": {"body": "voice.ogg"}}
 
         with (
             patch(
@@ -258,7 +260,6 @@ class TestVoiceHandler:
                 room,
                 event,
                 config,
-                sender_domain="example.com",
                 thread_id=None,
             )
 
@@ -312,7 +313,6 @@ class TestVoiceHandler:
                     room,
                     event,
                     config,
-                    sender_domain="example.com",
                     thread_id=None,
                 ),
             )
@@ -325,7 +325,6 @@ class TestVoiceHandler:
                     room,
                     event,
                     config,
-                    sender_domain="example.com",
                     thread_id=None,
                 ),
             )
