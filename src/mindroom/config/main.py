@@ -49,8 +49,6 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
     resolve_config_relative_path,
-    resolve_runtime_paths,
-    safe_replace,
 )
 from mindroom.git_urls import credential_free_repo_url
 
@@ -922,26 +920,6 @@ class Config(BaseModel):
         """Serialize authored config."""
         return _strip_empty_root_sections(cast("dict[str, Any]", self.model_dump(exclude_unset=True)))
 
-    @classmethod
-    def from_yaml(
-        cls,
-        config_path: Path,
-    ) -> Config:
-        """Create a pure Config instance from one explicit YAML file path."""
-        path = Path(config_path).expanduser().resolve()
-        if not path.exists():
-            msg = f"Agent configuration file not found: {path}"
-            raise FileNotFoundError(msg)
-
-        with path.open() as f:
-            data = yaml.safe_load(f) or {}
-
-        runtime_paths = resolve_runtime_paths(config_path=path)
-        config = cls.validate_with_runtime(data, runtime_paths)
-        logger.info("loaded_agent_configuration", path=str(path))
-        logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
-        return config
-
     def get_agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
         """Get the configured culture assignment for an agent, if any."""
         for culture_name, culture_config in self.cultures.items():
@@ -1658,32 +1636,6 @@ class Config(BaseModel):
             resolved_context_window = self.get_model_context_window(resolved_model_name)
 
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
-
-    def save_to_yaml(
-        self,
-        config_path: Path,
-    ) -> None:
-        """Save the config to a YAML file, excluding None values.
-
-        Args:
-            config_path: Path to save the config to.
-
-        """
-        config_dict = self.authored_model_dump()
-        path_obj = Path(config_path)
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path_obj.with_suffix(path_obj.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.dump(
-                config_dict,
-                f,
-                default_flow_style=False,
-                sort_keys=True,
-                allow_unicode=True,  # Preserve Unicode characters like ë
-                width=120,  # Wider lines to reduce wrapping
-            )
-        safe_replace(tmp_path, path_obj)
-        logger.info("saved_configuration", path=str(config_path))
 
 
 def load_config(

@@ -48,7 +48,7 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.config.main.Config.from_yaml") as mock_load_config:
+        with patch("mindroom.config.main.load_config") as mock_load_config:
             config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
@@ -119,7 +119,7 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.config.main.Config.from_yaml") as mock_load_config:
+        with patch("mindroom.config.main.load_config") as mock_load_config:
             config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
@@ -203,7 +203,7 @@ class TestTeamRoomUpdates:
             "router": {"model": "default"},
         }
 
-        with patch("mindroom.config.main.Config.from_yaml") as mock_load_config:
+        with patch("mindroom.config.main.load_config") as mock_load_config:
             config = Config.model_validate(config_data)
             mock_load_config.return_value = config
 

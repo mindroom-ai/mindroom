@@ -31,7 +31,12 @@ from mindroom.orchestration.runtime import (
     sync_forever_with_restart,
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock, orchestrator_runtime_paths
+from tests.conftest import (
+    make_event_cache_mock,
+    make_event_cache_write_coordinator_mock,
+    orchestrator_runtime_paths,
+    write_config_yaml,
+)
 
 
 def _fake_runtime_paths(**env_overrides: str) -> RuntimePaths:
@@ -999,7 +1004,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
             },
             models={"default": {"provider": "test", "id": "test-model"}},
         )
-        new_config.save_to_yaml(orchestrator.config_path)
+        write_config_yaml(new_config, orchestrator.config_path)
 
         # Mock bot creation — record every call
         created_bots: list[AsyncMock] = []

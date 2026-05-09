@@ -446,7 +446,7 @@ async def test_run_avatar_generation_accepts_null_optional_sections(
     tmp_path: Path,
     workspace_avatar_dir: Path,
 ) -> None:
-    """Avatar generation should accept legacy configs normalized by Config.from_yaml()."""
+    """Avatar generation should accept legacy configs normalized by load_config_yaml()."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"

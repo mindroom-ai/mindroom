@@ -172,7 +172,7 @@ async def test_installed_runtime_cache_support_runs_fire_and_forget_sync_cache_w
     )
 
     bot._conversation_cache.cache_sync_timeline(sync_response)
-    await bot.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+    await wait_for_background_tasks(timeout=1.0, owner=bot.event_cache_write_coordinator.background_task_owner)
 
     bot.event_cache.store_events_batch.assert_awaited_once()
 

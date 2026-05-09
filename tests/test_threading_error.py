@@ -123,6 +123,10 @@ async def _replace_thread(
     assert replaced
 
 
+async def _wait_for_room_cache_idle(coordinator: EventCacheWriteCoordinator) -> None:
+    await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
+
+
 def _load_sync_token_value(storage_path: Path, agent_name: str) -> str | None:
     token_record = load_sync_token_record(storage_path, agent_name)
     if token_record is None:
@@ -523,7 +527,7 @@ async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_rac
         release_fetch.set()
         thread_result = await asyncio.wait_for(read_task, timeout=1.0)
         await asyncio.wait_for(live_task, timeout=1.0)
-        await coordinator.wait_for_room_idle(room_id)
+        await _wait_for_room_cache_idle(coordinator)
         thread_state = await event_cache.get_thread_cache_state(room_id, thread_id)
     finally:
         release_fetch.set()
@@ -535,7 +539,7 @@ async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_rac
             ),
             timeout=1.0,
         )
-        await coordinator.wait_for_room_idle(room_id)
+        await _wait_for_room_cache_idle(coordinator)
         await event_cache.close()
 
     assert thread_result is not None
@@ -966,7 +970,7 @@ class TestMatrixConversationCacheThreadReads:
                 "m.relates_to": {"rel_type": "m.replace", "event_id": "$room-message:localhost"},
             },
         )
-        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
         event_cache.mark_room_threads_stale.assert_awaited_once_with(
             "!room:localhost",
@@ -1054,7 +1058,7 @@ class TestMatrixConversationCacheThreadReads:
                 asyncio.gather(sibling_thread_task, return_exceptions=True),
                 timeout=1.0,
             )
-            await coordinator.wait_for_room_idle("!room:localhost")
+            await _wait_for_room_cache_idle(coordinator)
 
     # Resolver disagreement cases now stay covered by the room-barrier fallback for lookup-dependent outbound mutations.
 
@@ -1071,7 +1075,7 @@ class TestMatrixConversationCacheThreadReads:
         )
 
         access.notify_outbound_redaction("!room:localhost", "$room-message:localhost")
-        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
         event_cache.mark_room_threads_stale.assert_not_awaited()
         event_cache.mark_thread_stale.assert_not_awaited()
@@ -1104,7 +1108,7 @@ class TestMatrixConversationCacheThreadReads:
                 },
             },
         )
-        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
         event_cache.store_events_batch.assert_awaited_once()
         stored_batch = event_cache.store_events_batch.await_args.args[0]
@@ -1155,7 +1159,7 @@ class TestMatrixConversationCacheThreadReads:
                     },
                 },
             )
-            await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+            await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
             cached_event = await event_cache.get_event("!room:localhost", "$reaction:localhost")
         finally:
@@ -1193,7 +1197,7 @@ class TestMatrixConversationCacheThreadReads:
                 "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
             },
         )
-        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
         event_cache.mark_thread_stale.assert_awaited_once_with(
             "!room:localhost",
@@ -1229,7 +1233,7 @@ class TestMatrixConversationCacheThreadReads:
                 "m.relates_to": {"rel_type": "m.reference", "event_id": "$thread-reply:localhost"},
             },
         )
-        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
         event_cache.mark_thread_stale.assert_awaited_once_with(
             "!room:localhost",
@@ -1299,7 +1303,7 @@ class TestMatrixConversationCacheThreadReads:
         )
 
         access.notify_outbound_redaction("!room:localhost", "$plain-two:localhost")
-        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
         event_cache.mark_thread_stale.assert_awaited_once_with(
             "!room:localhost",
@@ -1342,7 +1346,7 @@ class TestMatrixConversationCacheThreadReads:
         )
 
         access.notify_outbound_redaction("!room:localhost", "$reaction:localhost")
-        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!room:localhost")
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
         event_cache.mark_thread_stale.assert_not_awaited()
         event_cache.mark_room_threads_stale.assert_not_awaited()
@@ -1379,7 +1383,7 @@ class TestMatrixConversationCacheThreadReads:
             await access.get_event("!test:localhost", "$event:localhost", persist_lookup_fill=False)
             await access.get_event("!test:localhost", "$event:localhost")
 
-        await coordinator.wait_for_room_idle("!test:localhost")
+        await _wait_for_room_cache_idle(coordinator)
 
         client.room_get_event.assert_awaited_once_with("!test:localhost", "$event:localhost")
         event_cache.store_event.assert_awaited_once()
@@ -1767,7 +1771,7 @@ class TestMatrixConversationCacheThreadReads:
                     "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing:localhost"},
                 },
             )
-            await first_access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+            await _wait_for_room_cache_idle(first_access.runtime.event_cache_write_coordinator)
 
             event_cache = await _reopen_event_cache(event_cache)
             second_access = MatrixConversationCache(
@@ -2544,7 +2548,7 @@ class TestThreadingBehavior:
             }
 
             bot._conversation_cache.cache_sync_timeline(sync_response)
-            await bot.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
             cached_thread_events = await bot.event_cache.get_thread_events(
                 "!test:localhost",
@@ -3408,7 +3412,7 @@ class TestThreadingBehavior:
             edit_event,
             event_info=EventInfo.from_event(edit_event.source),
         )
-        await bot.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+        await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$room_msg:localhost")
         event_cache.mark_room_threads_stale.assert_awaited_once_with(
@@ -3451,7 +3455,7 @@ class TestThreadingBehavior:
             edit_event,
             event_info=EventInfo.from_event(edit_event.source),
         )
-        await bot.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+        await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
         event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
@@ -3527,7 +3531,7 @@ class TestThreadingBehavior:
 
         allow_resolve.set()
         await live_task
-        await coordinator.wait_for_room_idle("!test:localhost")
+        await _wait_for_room_cache_idle(coordinator)
 
     @pytest.mark.asyncio
     async def test_live_redaction_resolution_does_not_block_same_room_read(self) -> None:
@@ -3588,7 +3592,7 @@ class TestThreadingBehavior:
 
         allow_resolve.set()
         await live_task
-        await coordinator.wait_for_room_idle("!test:localhost")
+        await _wait_for_room_cache_idle(coordinator)
 
         event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$room-message:localhost")
 
@@ -3643,7 +3647,7 @@ class TestThreadingBehavior:
 
         allow_prior_write_finish.set()
         await live_task
-        await coordinator.wait_for_room_idle("!test:localhost")
+        await _wait_for_room_cache_idle(coordinator)
 
         event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$room-message:localhost")
 
@@ -3722,7 +3726,7 @@ class TestThreadingBehavior:
                 asyncio.gather(sibling_task, return_exceptions=True),
                 timeout=1.0,
             )
-            await coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(coordinator)
 
     @pytest.mark.asyncio
     async def test_live_threaded_redaction_waits_for_same_thread_predecessor(self) -> None:
@@ -3795,7 +3799,7 @@ class TestThreadingBehavior:
                 ),
                 timeout=1.0,
             )
-            await coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(coordinator)
 
     # UNKNOWN-impact live mutation optimization is deferred to ISSUE-189.
 
@@ -3963,7 +3967,7 @@ class TestThreadingBehavior:
                 plain_reply_event,
                 event_info=EventInfo.from_event(plain_reply_event.source),
             )
-            await bot.event_cache_write_coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
             assert await real_event_cache.get_thread_id_for_event(room_id, plain_reply_id) == thread_root_id
         finally:
@@ -4045,7 +4049,7 @@ class TestThreadingBehavior:
                 second_plain_reply_event,
                 event_info=EventInfo.from_event(second_plain_reply_event.source),
             )
-            await bot.event_cache_write_coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
             assert await real_event_cache.get_thread_id_for_event(room_id, second_plain_reply_id) == thread_root_id
         finally:
@@ -4133,7 +4137,7 @@ class TestThreadingBehavior:
 
         try:
             await bot._turn_controller.handle_media_event(room, audio_event)
-            await bot.event_cache_write_coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
             assert await real_event_cache.get_thread_id_for_event(room_id, audio_event_id) == thread_root_id
         finally:
@@ -4911,7 +4915,7 @@ class TestThreadingBehavior:
                 plain_reply_event,
                 event_info=EventInfo.from_event(plain_reply_event.source),
             )
-            await bot.event_cache_write_coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
             edit_event = nio.RoomMessageText.from_dict(
                 {
@@ -4937,7 +4941,7 @@ class TestThreadingBehavior:
                 edit_event,
                 event_info=EventInfo.from_event(edit_event.source),
             )
-            await bot.event_cache_write_coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
             assert await real_event_cache.get_thread_id_for_event(room_id, plain_reply_edit_id) == thread_root_id
         finally:
@@ -5010,23 +5014,6 @@ class TestThreadingBehavior:
             "!test:localhost",
             "$target:localhost",
         )
-
-    @pytest.mark.asyncio
-    async def test_wait_for_room_idle_returns_after_completed_tail_task(self) -> None:
-        """Room-idle waiting should not livelock on a tail task that already finished."""
-        coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=object(),
-        )
-
-        try:
-            completed_task = asyncio.create_task(asyncio.sleep(0, result=object()))
-            await completed_task
-            coordinator._room_update_tasks["!room:localhost"] = completed_task
-            await asyncio.wait_for(coordinator.wait_for_room_idle("!room:localhost"), timeout=0.2)
-            assert coordinator._room_update_tasks.get("!room:localhost") is None
-        finally:
-            await coordinator.close()
 
     @pytest.mark.asyncio
     async def test_queue_room_cache_update_forwards_false_emit_timing(self) -> None:
@@ -5458,243 +5445,6 @@ class TestThreadingBehavior:
         assert timing_call.kwargs["queued_behind_predecessor"] is True
 
     @pytest.mark.asyncio
-    async def test_wait_for_room_idle_logs_timing_when_enabled(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Room-idle waits should log how long the caller sat behind queued room work."""
-        monkeypatch.setenv("MINDROOM_TIMING", "1")
-        timing_logger = MagicMock()
-        monkeypatch.setattr(timing_module, "logger", timing_logger)
-        coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=object(),
-        )
-        update_started = asyncio.Event()
-        allow_update_finish = asyncio.Event()
-
-        async def slow_update() -> None:
-            update_started.set()
-            await allow_update_finish.wait()
-
-        try:
-            queued_task = coordinator.queue_room_update(
-                "!room:localhost",
-                slow_update,
-                name="matrix_cache_slow_update",
-            )
-            await asyncio.wait_for(update_started.wait(), timeout=1.0)
-            waiter = asyncio.create_task(coordinator.wait_for_room_idle("!room:localhost"))
-            await asyncio.sleep(0)
-            allow_update_finish.set()
-            await queued_task
-            await waiter
-        finally:
-            await coordinator.close()
-
-        idle_wait_calls = [
-            call for call in timing_logger.debug.call_args_list if call.args == ("Event cache idle wait timing",)
-        ]
-        assert any(
-            call.kwargs["barrier_kind"] == "room"
-            and call.kwargs["pending_task_count"] >= 1
-            and call.kwargs["wait_ms"] >= 0.0
-            for call in idle_wait_calls
-        )
-
-    @pytest.mark.asyncio
-    async def test_wait_for_room_idle_logs_full_pending_chain_when_enabled(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Room-idle waits should report the full pending same-room backlog."""
-        monkeypatch.setenv("MINDROOM_TIMING", "1")
-        timing_logger = MagicMock()
-        monkeypatch.setattr(timing_module, "logger", timing_logger)
-        coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=object(),
-        )
-        first_started = asyncio.Event()
-        allow_first_finish = asyncio.Event()
-        second_started = asyncio.Event()
-        allow_second_finish = asyncio.Event()
-
-        async def first_update() -> None:
-            first_started.set()
-            await allow_first_finish.wait()
-
-        async def second_update() -> None:
-            second_started.set()
-            await allow_second_finish.wait()
-
-        try:
-            first_task = coordinator.queue_room_update(
-                "!room:localhost",
-                first_update,
-                name="matrix_cache_first_update",
-            )
-            await asyncio.wait_for(first_started.wait(), timeout=1.0)
-            second_task = coordinator.queue_room_update(
-                "!room:localhost",
-                second_update,
-                name="matrix_cache_second_update",
-            )
-            waiter = asyncio.create_task(coordinator.wait_for_room_idle("!room:localhost"))
-            await asyncio.sleep(0)
-            allow_first_finish.set()
-            await asyncio.wait_for(second_started.wait(), timeout=1.0)
-            allow_second_finish.set()
-            await first_task
-            await second_task
-            await waiter
-        finally:
-            await coordinator.close()
-
-        timing_call = next(
-            call for call in timing_logger.debug.call_args_list if call.args == ("Event cache idle wait timing",)
-        )
-        assert timing_call.kwargs["pending_task_count"] == 2
-
-    @pytest.mark.asyncio
-    async def test_wait_for_room_idle_counts_tasks_queued_after_wait_starts(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Room-idle waits should include same-room tasks queued after the wait begins."""
-        monkeypatch.setenv("MINDROOM_TIMING", "1")
-        timing_logger = MagicMock()
-        monkeypatch.setattr(timing_module, "logger", timing_logger)
-        coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=object(),
-        )
-        first_started = asyncio.Event()
-        allow_first_finish = asyncio.Event()
-        second_started = asyncio.Event()
-        allow_second_finish = asyncio.Event()
-
-        async def first_update() -> None:
-            first_started.set()
-            await allow_first_finish.wait()
-
-        async def second_update() -> None:
-            second_started.set()
-            await allow_second_finish.wait()
-
-        try:
-            first_task = coordinator.queue_room_update(
-                "!room:localhost",
-                first_update,
-                name="matrix_cache_first_update",
-            )
-            await asyncio.wait_for(first_started.wait(), timeout=1.0)
-            waiter = asyncio.create_task(coordinator.wait_for_room_idle("!room:localhost"))
-            await asyncio.sleep(0)
-            second_task = coordinator.queue_room_update(
-                "!room:localhost",
-                second_update,
-                name="matrix_cache_second_update",
-            )
-            await asyncio.sleep(0)
-            allow_first_finish.set()
-            await asyncio.wait_for(second_started.wait(), timeout=1.0)
-            allow_second_finish.set()
-            await first_task
-            await second_task
-            await waiter
-        finally:
-            await coordinator.close()
-
-        timing_call = next(
-            call for call in timing_logger.debug.call_args_list if call.args == ("Event cache idle wait timing",)
-        )
-        assert timing_call.kwargs["pending_task_count"] == 2
-
-    @pytest.mark.asyncio
-    async def test_wait_for_room_idle_counts_full_backlog_when_queue_grows_mid_wait(  # noqa: PLR0915
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Room-idle waits should count both the initial backlog and tasks queued later."""
-        monkeypatch.setenv("MINDROOM_TIMING", "1")
-        timing_logger = MagicMock()
-        monkeypatch.setattr(timing_module, "logger", timing_logger)
-        coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=object(),
-        )
-        first_started = asyncio.Event()
-        allow_first_finish = asyncio.Event()
-        second_started = asyncio.Event()
-        allow_second_finish = asyncio.Event()
-        third_started = asyncio.Event()
-        allow_third_finish = asyncio.Event()
-        fourth_started = asyncio.Event()
-        allow_fourth_finish = asyncio.Event()
-
-        async def first_update() -> None:
-            first_started.set()
-            await allow_first_finish.wait()
-
-        async def second_update() -> None:
-            second_started.set()
-            await allow_second_finish.wait()
-
-        async def third_update() -> None:
-            third_started.set()
-            await allow_third_finish.wait()
-
-        async def fourth_update() -> None:
-            fourth_started.set()
-            await allow_fourth_finish.wait()
-
-        try:
-            first_task = coordinator.queue_room_update(
-                "!room:localhost",
-                first_update,
-                name="matrix_cache_first_update",
-            )
-            await asyncio.wait_for(first_started.wait(), timeout=1.0)
-            second_task = coordinator.queue_room_update(
-                "!room:localhost",
-                second_update,
-                name="matrix_cache_second_update",
-            )
-            third_task = coordinator.queue_room_update(
-                "!room:localhost",
-                third_update,
-                name="matrix_cache_third_update",
-            )
-            waiter = asyncio.create_task(coordinator.wait_for_room_idle("!room:localhost"))
-            await asyncio.sleep(0)
-            fourth_task = coordinator.queue_room_update(
-                "!room:localhost",
-                fourth_update,
-                name="matrix_cache_fourth_update",
-            )
-            await asyncio.sleep(0)
-            allow_first_finish.set()
-            await asyncio.wait_for(second_started.wait(), timeout=1.0)
-            allow_second_finish.set()
-            await asyncio.wait_for(third_started.wait(), timeout=1.0)
-            allow_third_finish.set()
-            await asyncio.wait_for(fourth_started.wait(), timeout=1.0)
-            allow_fourth_finish.set()
-            await first_task
-            await second_task
-            await third_task
-            await fourth_task
-            await waiter
-        finally:
-            await coordinator.close()
-
-        timing_call = next(
-            call for call in timing_logger.debug.call_args_list if call.args == ("Event cache idle wait timing",)
-        )
-        assert timing_call.kwargs["pending_task_count"] == 4
-
-    @pytest.mark.asyncio
     async def test_queue_room_update_skips_timing_overhead_when_disabled(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -5967,7 +5717,7 @@ class TestThreadingBehavior:
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[reply_edit])),
             }
             access.cache_sync_timeline(sync_response)
-            await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+            await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
             event_cache = await _reopen_event_cache(event_cache)
 
             restarted_access = MatrixConversationCache(
@@ -6337,7 +6087,7 @@ class TestThreadingBehavior:
                 "!test:localhost": MagicMock(timeline=MagicMock(events=[ambiguous_edit])),
             }
             access.cache_sync_timeline(sync_response)
-            await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+            await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
             cache_state = await event_cache.get_thread_cache_state("!test:localhost", "$thread_root:localhost")
         finally:
             await event_cache.close()
@@ -6402,7 +6152,7 @@ class TestThreadingBehavior:
 
         allow_refresh.set()
         await refresh_task
-        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
         assert queued_update_started.is_set()
 
@@ -6635,7 +6385,7 @@ class TestThreadingBehavior:
             release_reader.set()
             history = await asyncio.wait_for(read_task, timeout=1.0)
             await asyncio.wait_for(live_task, timeout=1.0)
-            await coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(coordinator)
         finally:
             release_reader.set()
             await asyncio.wait_for(
@@ -6646,7 +6396,7 @@ class TestThreadingBehavior:
                 ),
                 timeout=1.0,
             )
-            await coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(coordinator)
             await event_cache.close()
 
         assert history is not None
@@ -6780,7 +6530,7 @@ class TestThreadingBehavior:
             release_fetch.set()
             dispatch_snapshot = await asyncio.wait_for(read_task, timeout=1.0)
             await asyncio.wait_for(live_task, timeout=1.0)
-            await coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(coordinator)
             thread_state = await event_cache.get_thread_cache_state(room_id, thread_id)
         finally:
             release_fetch.set()
@@ -6792,7 +6542,7 @@ class TestThreadingBehavior:
                 ),
                 timeout=1.0,
             )
-            await coordinator.wait_for_room_idle(room_id)
+            await _wait_for_room_cache_idle(coordinator)
             await event_cache.close()
 
         assert dispatch_snapshot is not None
@@ -7213,7 +6963,7 @@ class TestThreadingBehavior:
         assert fetch_started.is_set()
         assert [message.body for message in history] == ["Root"]
         release_other_thread_update.set()
-        await access.runtime.event_cache_write_coordinator.wait_for_room_idle("!test:localhost")
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
     @pytest.mark.asyncio
     async def test_wait_for_thread_idle_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:
@@ -7387,7 +7137,7 @@ class TestThreadingBehavior:
                 ),
                 timeout=1.0,
             )
-            await coordinator.wait_for_room_idle("!test:localhost")
+            await _wait_for_room_cache_idle(coordinator)
 
     @pytest.mark.asyncio
     async def test_get_thread_history_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:

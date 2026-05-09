@@ -23,13 +23,12 @@ from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
 from mindroom.cli.main import _load_active_config_or_exit, app
-from mindroom.config.main import Config
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
 from mindroom.startup_errors import PermanentStartupError
-from tests.conftest import normalize_console_output
+from tests.conftest import load_config_yaml, normalize_console_output
 
 runner = CliRunner()
 
@@ -233,7 +232,7 @@ class TestConfigInit:
         runtime_storage = tmp_path / "alternate-storage"
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(runtime_storage))
 
-        config = Config.from_yaml(target)
+        config = load_config_yaml(target)
         runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
         resolved_knowledge_path = constants_module.resolve_config_relative_path(
             config.knowledge_bases["mind_memory"].path,

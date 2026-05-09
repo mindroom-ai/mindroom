@@ -16,7 +16,7 @@ from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import managed_space_alias_localpart, mindroom_namespace
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, load_config_yaml, orchestrator_runtime_paths, runtime_paths_for
 
 
 def _config_with_runtime_paths(tmp_path, **config_data: object) -> Config:  # noqa: ANN001
@@ -39,7 +39,7 @@ def test_matrix_space_yaml_null_uses_defaults(tmp_path) -> None:  # noqa: ANN001
     config_path = tmp_path / "config.yaml"
     config_path.write_text("matrix_space: null\n", encoding="utf-8")
 
-    config = Config.from_yaml(config_path)
+    config = load_config_yaml(config_path)
 
     assert config.matrix_space.enabled is True
     assert config.matrix_space.name == "MindRoom"

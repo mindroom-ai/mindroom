@@ -1980,7 +1980,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
         load_count[0] += 1
         return result
 
-    monkeypatch.setattr("mindroom.config.main.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.config.main.load_config", mock_load_config)
 
     def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
         return list(aliases)

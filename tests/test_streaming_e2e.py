@@ -314,7 +314,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime)
 
     # Patch the config loading to assign rooms
-    with patch("mindroom.config.main.Config.from_yaml") as mock_config:
+    with patch("mindroom.config.main.load_config") as mock_config:
         mock_cfg = MagicMock()
         mock_cfg.agents = {
             "helper": MagicMock(display_name="HelperAgent", rooms=[test_room_id]),

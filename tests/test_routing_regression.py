@@ -637,7 +637,7 @@ class TestRoutingRegression:
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.model_loading.get_model_instance")
-    @patch("mindroom.config.main.Config.from_yaml")
+    @patch("mindroom.config.main.load_config")
     async def test_multiple_mentions_each_responds_once(
         self,
         mock_from_yaml: MagicMock,

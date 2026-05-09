@@ -290,7 +290,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
     with (
         patch("mindroom.bot.login_agent_user") as mock_login,
-        patch("mindroom.config.main.Config.from_yaml", return_value=mock_config),
+        patch("mindroom.config.main.load_config", return_value=mock_config),
         patch("mindroom.teams._select_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
@@ -569,7 +569,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     """Test that the orchestrator manages multiple agents correctly."""
-    with patch("mindroom.config.main.Config.from_yaml") as mock_from_yaml:
+    with patch("mindroom.config.main.load_config") as mock_from_yaml:
         mock_config = MagicMock()
         mock_config.agents = {
             "calculator": MagicMock(display_name="CalculatorAgent", rooms=["room1"]),

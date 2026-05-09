@@ -16,7 +16,7 @@ from mindroom.matrix import client_room_admin as matrix_room_admin
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.presence import is_user_online
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
-from tests.conftest import TEST_ACCESS_TOKEN, bind_runtime_paths, runtime_paths_for
+from tests.conftest import TEST_ACCESS_TOKEN, bind_runtime_paths, load_config_yaml, runtime_paths_for
 
 
 class _FakeHttpResponse:
@@ -61,7 +61,7 @@ def test_matrix_room_access_yaml_null_uses_defaults(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("matrix_room_access: null\n", encoding="utf-8")
 
-    config = Config.from_yaml(config_path)
+    config = load_config_yaml(config_path)
     assert config.matrix_room_access.mode == "single_user_private"
 
 
