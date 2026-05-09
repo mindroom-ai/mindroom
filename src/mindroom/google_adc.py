@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 _GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 
-class GoogleApplicationCredentialsError(PermanentStartupError):
+class _GoogleApplicationCredentialsError(PermanentStartupError):
     """Raised when Google Application Default Credentials are invalid for startup."""
 
 
@@ -41,7 +41,7 @@ def load_google_application_credentials(credentials_path: str) -> GoogleCredenti
             f"{credentials_path}. Fix the path, recreate the credential file, or unset "
             "GOOGLE_APPLICATION_CREDENTIALS if this MindRoom instance should not use Vertex AI."
         )
-        raise GoogleApplicationCredentialsError(msg)
+        raise _GoogleApplicationCredentialsError(msg)
 
     credentials_type = _google_adc_file_type(credentials_path)
     try:
@@ -72,4 +72,4 @@ def load_google_application_credentials(credentials_path: str) -> GoogleCredenti
         return cast("GoogleCredentials", credentials)
     except Exception as exc:
         msg = f"Failed to load GOOGLE_APPLICATION_CREDENTIALS at {credentials_path}: {exc}"
-        raise GoogleApplicationCredentialsError(msg) from exc
+        raise _GoogleApplicationCredentialsError(msg) from exc

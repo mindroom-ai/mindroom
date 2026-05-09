@@ -594,7 +594,7 @@ def _optional_runner_tool_output_workspace_root(
     runtime_overrides: dict[str, object] | None,
     execution_identity: ToolExecutionIdentity | None,
     routing_agent_name: str | None,
-    output_path: str | None,
+    output_path: object | None,
 ) -> Path | None:
     """Resolve auto-save workspace roots without failing tool calls that can run without one."""
     try:
