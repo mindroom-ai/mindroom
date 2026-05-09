@@ -243,6 +243,11 @@ def _threaded_dispatch_error(
     )
 
 
+def _current_agent_mention(context: ToolRuntimeContext, agent_name: str) -> str:
+    matrix_id = context.config.get_ids(context.runtime_paths)[agent_name]
+    return f"@{matrix_id.username}"
+
+
 async def _send_matrix_text(
     context: ToolRuntimeContext,
     *,
@@ -340,7 +345,7 @@ async def _spawn_session_payload(
     label: str | None,
     target_agent: str,
 ) -> str:
-    spawn_message = f"@mindroom_{target_agent} {task}"
+    spawn_message = f"{_current_agent_mention(context, target_agent)} {task}"
     event_id = await _send_matrix_text(
         context,
         room_id=context.room_id,
@@ -566,7 +571,7 @@ class SubAgentsTools(Toolkit):
 
         outgoing = message.strip()
         if agent_id:
-            outgoing = f"@mindroom_{agent_id} {outgoing}"
+            outgoing = f"{_current_agent_mention(context, agent_id)} {outgoing}"
 
         event_id = await _send_matrix_text(
             context,

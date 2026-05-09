@@ -18,6 +18,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_r
 from mindroom.custom_tools import subagents as subagents_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.subagents import SubAgentsTools
+from mindroom.matrix.identity import MatrixID
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.thread_utils import create_session_id, parse_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
@@ -71,6 +72,11 @@ def _make_config(
     config.get_domain = MagicMock(return_value="localhost")
     config.get_entity_thread_mode = MagicMock(return_value=thread_mode)
     config.get_agent_tools = MagicMock(side_effect=lambda agent_name: config.agents[agent_name].tool_names)
+    config.get_ids = MagicMock(
+        side_effect=lambda runtime_paths: {
+            agent_name: MatrixID.from_agent(agent_name, "localhost", runtime_paths) for agent_name in config.agents
+        },
+    )
     config.render_prompt = MagicMock(return_value="Delegate only to listed agents.")
     return config
 
@@ -337,6 +343,35 @@ async def test_sessions_send_relays_original_sender(
 
 
 @pytest.mark.asyncio
+async def test_sessions_send_agent_id_uses_current_matrix_username(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_send should target the live Matrix username after account drift."""
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    ctx = _make_context(tmp_path)
+    ctx.config.get_ids.side_effect = None
+    ctx.config.get_ids.return_value = {
+        "openclaw": MatrixID.from_username("mindroom_openclaw", "localhost"),
+        "code": MatrixID.from_username("mindroom_code_oldns", "localhost"),
+        "research": MatrixID.from_username("mindroom_research", "localhost"),
+    }
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().sessions_send(message="do it", agent_id="code"))
+
+    assert payload["status"] == "ok"
+    send_mock.assert_awaited_once_with(
+        ctx,
+        room_id=ctx.room_id,
+        text="@mindroom_code_oldns do it",
+        thread_id=ctx.thread_id,
+        original_sender=ctx.requester_id,
+    )
+
+
+@pytest.mark.asyncio
 async def test_sessions_send_defaults_to_resolved_thread_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -549,6 +584,44 @@ async def test_sessions_spawn_relays_original_sender(
         ctx,
         room_id=ctx.room_id,
         text="@mindroom_openclaw do thing",
+        thread_id=None,
+        original_sender=ctx.requester_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_uses_current_matrix_username(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should target the live Matrix username after account drift."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    _stub_spawn_followups(monkeypatch)
+    ctx = _make_context(tmp_path)
+    ctx.config.get_ids.side_effect = None
+    ctx.config.get_ids.return_value = {
+        "openclaw": MatrixID.from_username("mindroom_openclaw", "localhost"),
+        "code": MatrixID.from_username("mindroom_code_oldns", "localhost"),
+        "research": MatrixID.from_username("mindroom_research", "localhost"),
+    }
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                agent_id="code",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["target_agent"] == "code"
+    send_mock.assert_awaited_once_with(
+        ctx,
+        room_id=ctx.room_id,
+        text="@mindroom_code_oldns do thing",
         thread_id=None,
         original_sender=ctx.requester_id,
     )
