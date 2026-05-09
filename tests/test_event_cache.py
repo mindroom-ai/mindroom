@@ -15,6 +15,7 @@ import pytest
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache.sqlite_event_cache as event_cache_module
+import mindroom.matrix.message_content as message_content_module
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -33,9 +34,9 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.message_content import _clear_mxc_cache
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -210,7 +211,7 @@ async def _seed_thread_cache(
     events: list[dict[str, object]],
 ) -> None:
     """Seed one authoritative cached thread snapshot for tests."""
-    await cache.replace_thread(room_id, thread_id, events)
+    await _replace_thread(cache, room_id, thread_id, events)
 
 
 def test_event_cache_normalization_is_backend_neutral() -> None:
@@ -716,7 +717,7 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
     db = await event_cache_module._initialize_event_cache_db(tmp_path / "event_cache.db")
 
     try:
-        await sqlite_event_cache_threads.replace_thread_locked(
+        await sqlite_event_cache_threads._replace_thread_locked(
             db,
             room_id="!room:localhost",
             thread_id="$thread_root",
@@ -1108,8 +1109,8 @@ def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
     for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
         _ = runtime.room_lock_entry(f"!room-{index}:localhost").lock
 
-    assert len(runtime.room_locks) == event_cache_module._MAX_CACHED_ROOM_LOCKS
-    assert "!room-0:localhost" not in runtime.room_locks
+    assert len(runtime._room_locks) == event_cache_module._MAX_CACHED_ROOM_LOCKS
+    assert "!room-0:localhost" not in runtime._room_locks
 
 
 @pytest.mark.asyncio
@@ -1130,7 +1131,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
             await release_holder.wait()
         for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
             _ = runtime.room_lock_entry(f"!churn-{index}:localhost").lock
-        entry = runtime.room_locks.get(room_id)
+        entry = runtime._room_locks.get(room_id)
         post_release_snapshot["room_present"] = entry is not None
         post_release_snapshot["active_users"] = entry.active_users if entry is not None else None
         post_release_snapshot["lock_locked"] = entry.lock.locked() if entry is not None else None
@@ -1146,7 +1147,7 @@ async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path
         waiter_registered = loop.create_future()
 
         def check_waiter_registration() -> None:
-            if runtime.room_locks[room_id].active_users >= 2:
+            if runtime._room_locks[room_id].active_users >= 2:
                 waiter_registered.set_result(None)
                 return
             loop.call_soon(check_waiter_registration)
@@ -2312,80 +2313,87 @@ async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Cached full-history reads should reuse durable sidecar text after a restart."""
-    cache = event_cache_factory()
-    await cache.initialize()
-    _clear_mxc_cache()
+    message_content_module._mxc_cache.clear()
+    try:
+        cache = event_cache_factory()
+        await cache.initialize()
 
-    root_event = _make_text_event(
-        event_id="$thread_root",
-        sender="@user:localhost",
-        body="Root message",
-        server_timestamp=1000,
-        source_content={"body": "Root message"},
-    )
-    sidecar_reply = _make_text_event(
-        event_id="$reply",
-        sender="@agent:localhost",
-        body="Preview reply",
-        server_timestamp=2000,
-        source_content={
-            "body": "Preview reply",
-            "msgtype": "m.file",
-            "io.mindroom.long_text": {
-                "version": 2,
-                "encoding": "matrix_event_content_json",
+        root_event = _make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        sidecar_reply = _make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Preview reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Preview reply",
+                "msgtype": "m.file",
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/sidecar",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
-            "url": "mxc://server/sidecar",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-        },
-    )
-    canonical_sidecar_content = {"body": "Full reply", "msgtype": "m.text"}
-
-    first_client = MagicMock()
-    first_client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(canonical_sidecar_content).encode("utf-8"),
-        ),
-    )
-    first_client.room_get_event = AsyncMock()
-    first_client.room_messages = AsyncMock()
-    first_client.room_get_event_relations = MagicMock()
-
-    try:
-        await _seed_thread_cache(
-            cache,
-            room_id="!room:localhost",
-            thread_id="$thread_root",
-            events=[_cache_source(root_event), _cache_source(sidecar_reply)],
         )
+        canonical_sidecar_content = {"body": "Full reply", "msgtype": "m.text"}
 
-        first_history = await fetch_thread_history(first_client, "!room:localhost", "$thread_root", event_cache=cache)
-    finally:
-        await cache.close()
-
-    _clear_mxc_cache()
-
-    reopened_cache = event_cache_factory()
-    await reopened_cache.initialize()
-    second_client = MagicMock()
-    second_client.download = AsyncMock(
-        return_value=MagicMock(spec=nio.DownloadError),
-    )
-    second_client.room_get_event = AsyncMock()
-    second_client.room_messages = AsyncMock()
-    second_client.room_get_event_relations = MagicMock()
-
-    try:
-        second_history = await fetch_thread_history(
-            second_client,
-            "!room:localhost",
-            "$thread_root",
-            event_cache=reopened_cache,
+        first_client = MagicMock()
+        first_client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(canonical_sidecar_content).encode("utf-8"),
+            ),
         )
+        first_client.room_get_event = AsyncMock()
+        first_client.room_messages = AsyncMock()
+        first_client.room_get_event_relations = MagicMock()
+
+        try:
+            await _seed_thread_cache(
+                cache,
+                room_id="!room:localhost",
+                thread_id="$thread_root",
+                events=[_cache_source(root_event), _cache_source(sidecar_reply)],
+            )
+
+            first_history = await fetch_thread_history(
+                first_client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+            )
+        finally:
+            await cache.close()
+
+        message_content_module._mxc_cache.clear()
+
+        reopened_cache = event_cache_factory()
+        await reopened_cache.initialize()
+        second_client = MagicMock()
+        second_client.download = AsyncMock(
+            return_value=MagicMock(spec=nio.DownloadError),
+        )
+        second_client.room_get_event = AsyncMock()
+        second_client.room_messages = AsyncMock()
+        second_client.room_get_event_relations = MagicMock()
+
+        try:
+            second_history = await fetch_thread_history(
+                second_client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=reopened_cache,
+            )
+        finally:
+            await reopened_cache.close()
     finally:
-        await reopened_cache.close()
-        _clear_mxc_cache()
+        message_content_module._mxc_cache.clear()
 
     assert [message.body for message in first_history] == ["Root message", "Full reply"]
     assert [message.body for message in second_history] == ["Root message", "Full reply"]

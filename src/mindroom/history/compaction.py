@@ -669,19 +669,6 @@ def _sync_remaining_runs_from_working(
     return synced_runs
 
 
-def _estimate_static_tokens(agent: Agent, full_prompt: str) -> int:
-    """Estimate system and current-user prompt tokens outside persisted replay."""
-    static_chars = len(agent.role or "")
-    instructions = agent.instructions
-    if isinstance(instructions, str):
-        static_chars += len(instructions)
-    elif isinstance(instructions, list):
-        for instruction in instructions:
-            static_chars += len(str(instruction))
-    static_chars += len(full_prompt)
-    return (static_chars // 4) + _estimate_tool_definition_tokens(agent)
-
-
 def estimate_agent_static_tokens(agent: Agent, full_prompt: str) -> int:
     """Estimate the non-history agent prompt using Agno's real system-message builder."""
     static_tokens = estimate_text_tokens(full_prompt)

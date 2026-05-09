@@ -195,11 +195,6 @@ def save_loaded_toolkits_for_session(
     _loaded_toolkits[_toolkit_scope_key(session_id)] = _coerce_loaded_toolkits(loaded_toolkits)
 
 
-def _clear_session_toolkits(session_id: str) -> None:
-    """Clear one session's loaded toolkit state."""
-    _loaded_toolkits.pop(_toolkit_scope_key(session_id), None)
-
-
 def merge_runtime_tool_configs(
     *,
     agent_name: str,

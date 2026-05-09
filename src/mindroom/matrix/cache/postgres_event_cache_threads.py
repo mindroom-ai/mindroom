@@ -209,7 +209,7 @@ async def _store_thread_events_locked(
     )
 
 
-async def replace_thread_locked(
+async def _replace_thread_locked(
     db: AsyncConnection,
     *,
     namespace: str,
@@ -291,7 +291,7 @@ async def replace_thread_locked_if_not_newer(
     )
     if _thread_cache_state_changed_after(cache_state_row, fetch_started_at=fetch_started_at):
         return False
-    await replace_thread_locked(
+    await _replace_thread_locked(
         db,
         namespace=namespace,
         room_id=room_id,

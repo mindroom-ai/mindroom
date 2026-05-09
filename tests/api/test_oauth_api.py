@@ -769,28 +769,9 @@ def test_provider_exchange_and_refresh_use_oauth_client(
                 "expires_at": 1234.0,
             }
 
-        async def refresh_token(self, url: str, **kwargs: object) -> dict[str, Any]:
-            seen["refresh"] = {"url": url, **kwargs}
-            return {
-                "access_token": "refreshed-token",
-                "token_type": "Bearer",
-                "expires_at": 2234.0,
-            }
-
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
 
     result = asyncio.run(provider.exchange_code("auth-code", runtime_paths))
-    refreshed = asyncio.run(
-        provider.refresh_token_data(
-            {
-                **result.token_data,
-                "_id_token": "old-raw-id-token",
-                "id_token": "old-standard-id-token",
-                "client_secret": "old-client-secret",
-            },
-            runtime_paths,
-        ),
-    )
 
     assert seen["init_kwargs"][0]["token_endpoint_auth_method"] == "client_secret_post"
     assert seen["fetch"] == {
@@ -803,17 +784,6 @@ def test_provider_exchange_and_refresh_use_oauth_client(
     assert result.token_data["_oauth_provider"] == provider.id
     assert result.token_data["refresh_token"] == "refresh-token"
     assert result.token_data["expires_at"] == 1234.0
-    assert seen["refresh"]["url"] == provider.token_url
-    assert seen["refresh"]["refresh_token"] == "refresh-token"
-    assert refreshed is not None
-    assert refreshed["token"] == "refreshed-token"
-    assert refreshed["_source"] == "oauth"
-    assert refreshed["_oauth_provider"] == provider.id
-    assert refreshed["refresh_token"] == "refresh-token"
-    assert refreshed["expires_at"] == 2234.0
-    assert "_id_token" not in refreshed
-    assert "id_token" not in refreshed
-    assert "client_secret" not in refreshed
 
 
 def test_pkce_provider_exchange_sends_code_verifier(

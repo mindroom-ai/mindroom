@@ -20,7 +20,6 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.identity import active_internal_sender_ids
 from mindroom.matrix.message_content import (
-    _clear_mxc_cache,
     _download_mxc_text,
     extract_and_resolve_message,
     extract_edit_body,
@@ -70,7 +69,7 @@ class TestResolvedMessageExtraction:
 
     def setup_method(self) -> None:
         """Clear cache before each test."""
-        _clear_mxc_cache()
+        message_content_module._mxc_cache.clear()
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:
@@ -707,7 +706,7 @@ class TestDownloadMxcText:
 
     def setup_method(self) -> None:
         """Clear cache before each test."""
-        _clear_mxc_cache()
+        message_content_module._mxc_cache.clear()
 
     @pytest.mark.asyncio
     async def test_invalid_mxc_url(self) -> None:
@@ -769,7 +768,7 @@ class TestCanonicalContentResolution:
 
     def setup_method(self) -> None:
         """Clear cache before each test."""
-        _clear_mxc_cache()
+        message_content_module._mxc_cache.clear()
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_content_metadata(self) -> None:

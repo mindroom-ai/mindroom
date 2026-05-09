@@ -131,11 +131,6 @@ def _missing_avatar_targets(
     }
 
 
-def _has_missing_managed_avatars(config: Config, runtime_paths: constants.RuntimePaths) -> bool:
-    """Return whether any managed avatar file is missing from the workspace."""
-    return bool(_missing_avatar_targets(config, runtime_paths))
-
-
 async def _generate_prompt(
     client: genai.Client,
     target: _AvatarTarget,

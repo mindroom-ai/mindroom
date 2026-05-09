@@ -87,14 +87,6 @@ def clear_sync_token(storage_path: Path, agent_name: str) -> None:
     certification_path.unlink(missing_ok=True)
 
 
-def _load_sync_token(storage_path: Path, agent_name: str) -> str | None:
-    """Load one persisted sync token, or ``None`` on first run."""
-    record = load_sync_token_record(storage_path, agent_name)
-    if record is None:
-        return None
-    return record.token
-
-
 def load_sync_token_record(storage_path: Path, agent_name: str) -> _SyncTokenRecord | None:
     """Load one persisted sync token with its certification provenance."""
     token_path = _sync_token_path(storage_path, agent_name)

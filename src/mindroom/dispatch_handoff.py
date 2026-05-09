@@ -46,7 +46,6 @@ class PreparedTextEvent:
     body: str
     source: dict[str, Any]
     server_timestamp: int | float | None = None
-    is_synthetic: bool = False
     source_kind_override: str | None = None
 
 
@@ -312,7 +311,6 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
         body=batch.prompt,
         source=_merge_batch_source(batch),
         server_timestamp=batch.primary_event.server_timestamp,
-        is_synthetic=True,
         source_kind_override=batch.source_kind,
     )
 

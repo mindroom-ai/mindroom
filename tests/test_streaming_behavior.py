@@ -43,7 +43,7 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.large_messages import _clear_oversized_nonterminal_streaming_edit_rate_limits
+from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_sent_at
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
@@ -85,7 +85,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
 
 IN_PROGRESS_MARKER = " ⋯"
 
@@ -199,6 +199,14 @@ def mock_calculator_agent() -> AgentMatrixUser:
         display_name="CalculatorAgent",
         user_id="@mindroom_calculator:localhost",
     )
+
+
+@pytest.fixture
+def reset_oversized_nonterminal_rate_limit() -> Iterator[None]:
+    """Reset oversized nonterminal sidecar edit rate-limit state around a test."""
+    _oversized_nonterminal_streaming_edit_sent_at.clear()
+    yield
+    _oversized_nonterminal_streaming_edit_sent_at.clear()
 
 
 class TestStreamingBehavior:
@@ -537,9 +545,11 @@ class TestStreamingBehavior:
         assert content["m.relates_to"]["event_id"] == "$stream_123"
 
     @pytest.mark.asyncio
-    async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(self) -> None:
+    async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(
+        self,
+        reset_oversized_nonterminal_rate_limit: None,  # noqa: ARG002
+    ) -> None:
         """Oversized in-progress edits should not burst sidecar uploads while final still sends."""
-        _clear_oversized_nonterminal_streaming_edit_rate_limits()
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -595,9 +605,11 @@ class TestStreamingBehavior:
             assert mock_edit.await_count == 3
 
     @pytest.mark.asyncio
-    async def test_rate_limited_oversized_nonterminal_edit_resolves_capture_completion(self) -> None:
+    async def test_rate_limited_oversized_nonterminal_edit_resolves_capture_completion(
+        self,
+        reset_oversized_nonterminal_rate_limit: None,  # noqa: ARG002
+    ) -> None:
         """Skipping an oversized in-progress edit should still unblock capture waiters."""
-        _clear_oversized_nonterminal_streaming_edit_rate_limits()
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
             room_id="!test:localhost",
@@ -3223,7 +3235,7 @@ class TestStreamingBehavior:
             extra_content=None,
         )
         streaming.event_id = "$thinking_123"
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -3551,7 +3563,7 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -3576,7 +3588,7 @@ class TestStreamingBehavior:
         assert streaming.accumulated_text == ""
 
         streaming.accumulated_text = "hello"
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -3671,7 +3683,7 @@ class TestStreamingBehavior:
             show_tool_calls=False,
         )
         for tool_name, function_name in (("shell", "run"), ("python", "execute")):
-            streaming.apply_worker_progress_event(
+            streaming._warmup_state.apply_event(
                 WorkerProgressEvent(
                     tool_name=tool_name,
                     function_name=function_name,
@@ -3709,7 +3721,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
         )
         streaming.accumulated_text = "```python\nprint('hello')"
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -3750,7 +3762,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
         )
         streaming.accumulated_text = "Ping @helper"
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4007,7 +4019,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
         )
         for tool_name, function_name in (("shell", "run"), ("python", "execute")):
-            streaming.apply_worker_progress_event(
+            streaming._warmup_state.apply_event(
                 WorkerProgressEvent(
                     tool_name=tool_name,
                     function_name=function_name,
@@ -4048,7 +4060,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
         )
         for worker_key, tool_name in (("worker-a", "shell"), ("worker-b", "python")):
-            streaming.apply_worker_progress_event(
+            streaming._warmup_state.apply_event(
                 WorkerProgressEvent(
                     tool_name=tool_name,
                     function_name="run" if tool_name == "shell" else "execute",
@@ -4083,7 +4095,7 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4096,7 +4108,7 @@ class TestStreamingBehavior:
                 ),
             ),
         )
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4132,7 +4144,7 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4453,7 +4465,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=True,
         )
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4499,7 +4511,7 @@ class TestStreamingBehavior:
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",
@@ -4562,7 +4574,7 @@ class TestStreamingBehavior:
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
-        streaming.apply_worker_progress_event(
+        streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
                 function_name="run",

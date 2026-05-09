@@ -1685,7 +1685,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
     # Mock resolve_room_aliases
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -1769,7 +1769,7 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
     # Mock resolve_room_aliases
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -1825,12 +1825,6 @@ async def test_new_agent_joins_rooms_on_config_reload(
     """Test that new agents are created and join their configured rooms."""
     # Track room operations
     joined_rooms: dict[str, list[str]] = {}
-
-    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
-        # Return both existing and new agent users
-        return mock_agent_users
-
-    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users)
 
     async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
@@ -1973,7 +1967,6 @@ async def test_team_room_changes_on_config_reload(
 async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     initial_config: Config,
     updated_config: Config,
-    mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1982,19 +1975,17 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     config_loads = [initial_config, updated_config]
     load_count = [0]
 
-    def mock_load_config(_config_path: Path | None = None) -> Config:
+    def mock_load_config(
+        _runtime_paths: object | None = None,
+        **_kwargs: object,
+    ) -> Config:
         result = config_loads[min(load_count[0], len(config_loads) - 1)]
         load_count[0] += 1
         return result
 
-    monkeypatch.setattr("mindroom.config.main.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
 
-    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
-        return mock_agent_users
-
-    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users)
-
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)

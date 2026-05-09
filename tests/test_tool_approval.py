@@ -44,6 +44,7 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
     tool_requires_approval_for_openai_compat,
 )
+from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -234,10 +235,22 @@ async def _wait_for_pending(
                 elif call_index is not None and len(sender.await_args_list) > call_index:
                     resolved_approval_id = sender.await_args_list[call_index].args[2]["approval_id"]
             if resolved_approval_id is not None:
-                pending = await store.get_pending_approval(room_id, resolved_approval_id)
+                pending = await _live_pending_approval(store, room_id=room_id, approval_id=resolved_approval_id)
                 if pending is not None:
                     return pending
             await asyncio.sleep(0)
+
+
+async def _live_pending_approval(
+    store: _ApprovalManager,
+    *,
+    room_id: str,
+    approval_id: str,
+) -> PendingApproval | None:
+    card_event_id = store._live_card_event_id_for_approval(approval_id)
+    if card_event_id is None:
+        return None
+    return await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
 
 
 @pytest.mark.asyncio
@@ -370,12 +383,11 @@ async def test_handle_card_response_wrong_clicker_noops(tmp_path: Path) -> None:
     assert result.consumed is False
     editor.assert_not_awaited()
 
-    await store.resolve_approval(
-        card_event_id=pending.card_event_id,
-        room_id=pending.room_id,
+    await _resolve_pending_approval(
+        store,
+        pending,
         status="denied",
         reason="Denied by approver.",
-        resolved_by="@user:localhost",
     )
     decision = await task
     assert decision.status == "denied"
@@ -561,21 +573,19 @@ async def test_public_tool_approval_facade_uses_approval_id_over_active_unrelate
         assert not first_task.done()
     finally:
         if not first_task.done():
-            await store.resolve_approval(
-                card_event_id=first_pending.card_event_id,
-                room_id=first_pending.room_id,
+            await _resolve_pending_approval(
+                store,
+                first_pending,
                 status="denied",
                 reason="cleanup",
-                resolved_by="@user:localhost",
             )
             await asyncio.wait_for(first_task, timeout=1)
         if not second_task.done():
-            await store.resolve_approval(
-                card_event_id=second_pending.card_event_id,
-                room_id=second_pending.room_id,
+            await _resolve_pending_approval(
+                store,
+                second_pending,
                 status="denied",
                 reason="cleanup",
-                resolved_by="@user:localhost",
             )
             await asyncio.wait_for(second_task, timeout=1)
 
@@ -645,12 +655,11 @@ async def test_handle_card_response_rejects_live_card_from_wrong_room(tmp_path: 
     assert not task.done()
     editor.assert_not_awaited()
 
-    await store.resolve_approval(
-        card_event_id=pending.card_event_id,
-        room_id=pending.room_id,
+    await _resolve_pending_approval(
+        store,
+        pending,
         status="denied",
         reason="cleanup",
-        resolved_by="@user:localhost",
     )
     await task
 
@@ -726,12 +735,11 @@ async def test_handle_live_approval_id_response_rejects_waiter_from_wrong_room(t
     assert not task.done()
     editor.assert_not_awaited()
 
-    await store.resolve_approval(
-        card_event_id=pending.card_event_id,
-        room_id=pending.room_id,
+    await _resolve_pending_approval(
+        store,
+        pending,
         status="denied",
         reason="cleanup",
-        resolved_by="@user:localhost",
     )
     await task
 
@@ -784,11 +792,10 @@ async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) 
     )
     pending = await _wait_for_pending(store, sender=sender)
 
-    await store.resolve_approval(
-        card_event_id=pending.card_event_id,
-        room_id=pending.room_id,
+    await _resolve_pending_approval(
+        store,
+        pending,
         status="approved",
-        resolved_by="@user:localhost",
     )
     decision = await task
 
@@ -876,7 +883,7 @@ async def test_request_approval_cleans_up_on_cancellation_after_send(tmp_path: P
 
     assert editor.await_args.args[2]["status"] == "expired"
     assert editor.await_args.args[2]["resolution_reason"] == "Tool approval request was cancelled."
-    assert await store.get_pending_approval("!room:localhost", pending.approval_id) is None
+    assert await _live_pending_approval(store, room_id="!room:localhost", approval_id=pending.approval_id) is None
 
 
 @pytest.mark.asyncio
@@ -1555,7 +1562,7 @@ async def test_duplicate_live_response_from_approver_is_consumed_while_resolutio
 
 
 @pytest.mark.asyncio
-async def test_get_pending_approval_returns_none_for_resolved_card(tmp_path: Path) -> None:
+async def test_card_response_for_resolved_card_is_not_consumed_without_live_waiter(tmp_path: Path) -> None:
     cache = FakeEventCache()
     card = _approval_card()
     await cache.store_event("$approval", "!room:localhost", card)
@@ -1577,7 +1584,16 @@ async def test_get_pending_approval_returns_none_for_resolved_card(tmp_path: Pat
     )
     store = _ApprovalManager(test_runtime_paths(tmp_path), event_cache=cache)
 
-    assert await store.get_pending_approval("!room:localhost", "approval-1") is None
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="denied",
+        reason="Too late.",
+    )
+
+    assert result.consumed is False
+    assert result.resolved is False
 
 
 @pytest.mark.asyncio
@@ -1607,7 +1623,7 @@ async def test_card_response_for_cached_approval_is_not_consumed_without_live_wa
 
 
 @pytest.mark.asyncio
-async def test_get_pending_approval_ignores_cached_card_after_live_waiter_is_gone(tmp_path: Path) -> None:
+async def test_live_pending_lookup_ignores_cached_card_after_live_waiter_is_gone(tmp_path: Path) -> None:
     cache = FakeEventCache()
     card = _approval_card()
     await cache.store_event("$approval", "!room:localhost", card)
@@ -1617,7 +1633,7 @@ async def test_get_pending_approval_ignores_cached_card_after_live_waiter_is_gon
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.get_pending_approval("!room:localhost", "approval-1") is None
+    assert await _live_pending_approval(store, room_id="!room:localhost", approval_id="approval-1") is None
 
 
 @pytest.mark.asyncio
@@ -1666,7 +1682,7 @@ async def test_startup_discard_uses_trusted_cached_terminal_edit_despite_newer_u
 
 
 @pytest.mark.asyncio
-async def test_get_pending_approval_does_not_scan_history_when_event_missing(
+async def test_live_pending_lookup_does_not_scan_history_when_event_missing(
     tmp_path: Path,
 ) -> None:
     store = _ApprovalManager(
@@ -1674,11 +1690,11 @@ async def test_get_pending_approval_does_not_scan_history_when_event_missing(
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.get_pending_approval("!room:localhost", "approval-1") is None
+    assert await _live_pending_approval(store, room_id="!room:localhost", approval_id="approval-1") is None
 
 
 @pytest.mark.asyncio
-async def test_get_pending_approval_returns_none_for_cross_router_cached_pending_without_live_waiter(
+async def test_live_pending_lookup_returns_none_for_cross_router_cached_pending_without_live_waiter(
     tmp_path: Path,
 ) -> None:
     cache = FakeEventCache()
@@ -1693,7 +1709,7 @@ async def test_get_pending_approval_returns_none_for_cross_router_cached_pending
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    assert await store.get_pending_approval("!room:localhost", "approval-1") is None
+    assert await _live_pending_approval(store, room_id="!room:localhost", approval_id="approval-1") is None
 
 
 @pytest.mark.asyncio
@@ -2218,11 +2234,10 @@ async def test_initialize_approval_store_rejects_storage_root_change_with_pendin
     with pytest.raises(RuntimeError, match="Cannot reinitialize approval store"):
         initialize_approval_store(second_runtime_paths)
 
-    result = await store.resolve_approval(
-        card_event_id=pending.card_event_id,
-        room_id=pending.room_id,
+    result = await _resolve_pending_approval(
+        store,
+        pending,
         status="approved",
-        resolved_by="@user:localhost",
     )
     decision = await task
 

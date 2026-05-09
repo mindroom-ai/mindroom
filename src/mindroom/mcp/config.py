@@ -70,7 +70,6 @@ class MCPServerConfig(BaseModel):
     startup_timeout_seconds: float = Field(default=20.0, gt=0, description="Startup timeout")
     call_timeout_seconds: float = Field(default=120.0, gt=0, description="Default call timeout")
     max_concurrent_calls: int = Field(default=1, ge=1, description="Maximum concurrent calls")
-    idle_ttl_seconds: int = Field(default=900, ge=0, description="Idle timeout for future cleanup")
     auto_reconnect: bool = Field(default=True, description="Whether to reconnect automatically")
 
     @field_validator("include_tools", "exclude_tools", mode="before")

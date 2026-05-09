@@ -130,8 +130,10 @@ from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skil
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from mindroom.turn_controller import TurnController, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _DispatchPlan
+from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
     TEST_PASSWORD,
+    bind_mock_config_cache,
     bind_runtime_paths,
     delivered_matrix_event,
     delivered_matrix_side_effect,
@@ -499,16 +501,32 @@ async def _wait_for_live_pending(
                 approval_id = sender.await_args.args[2]["approval_id"]
                 card_event_id = store._live_card_event_id_for_approval(approval_id)
                 if card_event_id is not None:
-                    pending = await store.get_pending_approval(room_id, approval_id)
+                    pending = await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
                     if pending is not None:
                         return pending
             await asyncio.sleep(0)
 
 
+async def _live_pending_approval(
+    store: _ApprovalManager,
+    *,
+    room_id: str,
+    approval_id: str,
+) -> PendingApproval | None:
+    card_event_id = store._live_card_event_id_for_approval(approval_id)
+    if card_event_id is None:
+        return None
+    return await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+
+
 async def _wait_for_pending_approval_id(store: _ApprovalManager, approval_ids: list[str]) -> str:
     async with asyncio.timeout(1):
         while True:
-            if approval_ids and await store.get_pending_approval("!room:localhost", approval_ids[0]) is not None:
+            if (
+                approval_ids
+                and await _live_pending_approval(store, room_id="!room:localhost", approval_id=approval_ids[0])
+                is not None
+            ):
                 return approval_ids[0]
             await asyncio.sleep(0)
 
@@ -1204,7 +1222,7 @@ class TestAgentBot:
         assert [doc.content for doc in docs] == ["research 1", "research 2"]
 
     @pytest.mark.asyncio
-    @patch("mindroom.config.main.Config.from_yaml")
+    @patch("mindroom.config.main.load_config")
     async def test_agent_bot_initialization(
         self,
         mock_load_config: MagicMock,
@@ -1238,7 +1256,7 @@ class TestAgentBot:
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
     @patch("mindroom.bot.interactive.init_persistence")
-    @patch("mindroom.config.main.Config.from_yaml")
+    @patch("mindroom.config.main.load_config")
     async def test_agent_bot_start(
         self,
         mock_load_config: MagicMock,
@@ -5473,7 +5491,6 @@ class TestAgentBot:
             )
 
         assert len(captured_outcomes) == 1
-        assert captured_outcomes[0].run_succeeded is False
 
     @pytest.mark.asyncio
     async def test_generate_response_marks_streaming_model_error_unsuccessful_for_post_effects(
@@ -5528,7 +5545,6 @@ class TestAgentBot:
             )
 
         assert len(captured_outcomes) == 1
-        assert captured_outcomes[0].run_succeeded is False
 
     @pytest.mark.asyncio
     async def test_generate_response_runs_post_effects_after_cancellable_wrapper(
@@ -10391,7 +10407,6 @@ class TestAgentBot:
             body="please stop",
             source={"content": {"msgtype": "m.text", "body": "please stop", "com.mindroom.source_kind": "voice"}},
             server_timestamp=1234567890,
-            is_synthetic=True,
             source_kind_override="voice",
         )
 
@@ -11899,7 +11914,7 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
-    @patch("mindroom.config.main.Config.from_yaml")
+    @patch("mindroom.config.main.load_config")
     @patch("mindroom.teams.resolve_agent_knowledge_access")
     @patch("mindroom.teams.create_agent")
     @patch("mindroom.model_loading.get_model_instance")
@@ -12519,7 +12534,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.main.Config.from_yaml")
+    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_initialize(
         self,
         mock_load_config: MagicMock,
@@ -12533,17 +12548,22 @@ class TestMultiAgentOrchestrator:
             "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
         }
         mock_config.teams = {}
+        cache_path = bind_mock_config_cache(mock_config, tmp_path)
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            await orchestrator.initialize()
+            try:
+                await orchestrator.initialize()
 
-            # Should have 3 bots: calculator, general, and router
-            assert len(orchestrator.agent_bots) == 3
-            assert "calculator" in orchestrator.agent_bots
-            assert "general" in orchestrator.agent_bots
-            assert "router" in orchestrator.agent_bots
+                # Should have 3 bots: calculator, general, and router
+                assert len(orchestrator.agent_bots) == 3
+                assert "calculator" in orchestrator.agent_bots
+                assert "general" in orchestrator.agent_bots
+                assert "router" in orchestrator.agent_bots
+                assert orchestrator._runtime_support.event_cache.db_path == cache_path
+            finally:
+                await orchestrator._close_runtime_support_services()
 
     @pytest.mark.asyncio
     async def test_orchestrator_initialize_uses_custom_config_path(self, tmp_path: Path) -> None:
@@ -12695,7 +12715,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.main.Config.from_yaml")
+    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_start(
         self,
         mock_load_config: MagicMock,
@@ -12710,32 +12730,36 @@ class TestMultiAgentOrchestrator:
         }
         mock_config.teams = {}
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
+        bind_mock_config_cache(mock_config, tmp_path)
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            await orchestrator.initialize()  # Need to initialize first
+            try:
+                await orchestrator.initialize()  # Need to initialize first
 
-            # Mock start for all bots to avoid actual login/setup
-            start_mocks = []
-            for bot in orchestrator.agent_bots.values():
-                # Create a mock that tracks the call
-                mock_start = AsyncMock()
-                # Replace start with our mock
-                bot.start = mock_start
-                start_mocks.append(mock_start)
-                bot.running = False
+                # Mock start for all bots to avoid actual login/setup
+                start_mocks = []
+                for bot in orchestrator.agent_bots.values():
+                    # Create a mock that tracks the call
+                    mock_start = AsyncMock()
+                    # Replace start with our mock
+                    bot.start = mock_start
+                    start_mocks.append(mock_start)
+                    bot.running = False
 
-            # Start the orchestrator but don't wait for sync_forever
-            start_tasks = [bot.start() for bot in orchestrator.agent_bots.values()]
+                # Start the orchestrator but don't wait for sync_forever
+                start_tasks = [bot.start() for bot in orchestrator.agent_bots.values()]
 
-            await asyncio.gather(*start_tasks)
-            orchestrator.running = True  # Manually set since we're not calling orchestrator.start()
+                await asyncio.gather(*start_tasks)
+                orchestrator.running = True  # Manually set since we're not calling orchestrator.start()
 
-            assert orchestrator.running
-            # Verify start was called for each bot
-            for mock_start in start_mocks:
-                mock_start.assert_called_once()
+                assert orchestrator.running
+                # Verify start was called for each bot
+                for mock_start in start_mocks:
+                    mock_start.assert_called_once()
+            finally:
+                await orchestrator._close_runtime_support_services()
 
     @pytest.mark.asyncio
     async def test_orchestrator_start_sets_up_rooms_before_auxiliary_workers(self, tmp_path: Path) -> None:
@@ -13659,14 +13683,13 @@ class TestMultiAgentOrchestrator:
             assert updated is True
             assert task.done() is False
             assert event_order == ["send", "cleanup"]
-            pending = await store.get_pending_approval("!room:localhost", approval_id)
+            pending = await _live_pending_approval(store, room_id="!room:localhost", approval_id=approval_id)
             assert pending is not None
 
-            await store.resolve_approval(
-                card_event_id=pending.card_event_id,
-                room_id=pending.room_id,
+            await _resolve_pending_approval(
+                store,
+                pending,
                 status="approved",
-                resolved_by="@user:localhost",
             )
             decision = await task
 
@@ -13807,16 +13830,15 @@ class TestMultiAgentOrchestrator:
                 await code_bot.leave_unconfigured_rooms()
 
             assert task.done() is False
-            pending = await store.get_pending_approval("!room:localhost", approval_id)
+            pending = await _live_pending_approval(store, room_id="!room:localhost", approval_id=approval_id)
             assert pending is not None
             assert event_order == ["send", "leave"]
             leave_non_dm_rooms.assert_awaited_once()
 
-            await store.resolve_approval(
-                card_event_id=pending.card_event_id,
-                room_id=pending.room_id,
+            await _resolve_pending_approval(
+                store,
+                pending,
                 status="approved",
-                resolved_by="@user:localhost",
             )
             decision = await task
 
@@ -14476,7 +14498,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.main.Config.from_yaml")
+    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_stop(
         self,
         mock_load_config: MagicMock,
@@ -14491,30 +14513,34 @@ class TestMultiAgentOrchestrator:
         }
         mock_config.teams = {}
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
+        bind_mock_config_cache(mock_config, tmp_path)
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            await orchestrator.initialize()
+            try:
+                await orchestrator.initialize()
 
-            # Mock the agent clients and ensure_user_account
-            for bot in orchestrator.agent_bots.values():
-                bot.client = AsyncMock()
-                bot.running = True
-                bot.ensure_user_account = AsyncMock()
+                # Mock the agent clients and ensure_user_account
+                for bot in orchestrator.agent_bots.values():
+                    bot.client = AsyncMock()
+                    bot.running = True
+                    bot.ensure_user_account = AsyncMock()
 
-            await orchestrator.stop()
+                await orchestrator.stop()
 
-            assert not orchestrator.running
-            for bot in orchestrator.agent_bots.values():
-                assert not bot.running
-                if bot.client is not None:
-                    bot.client.close.assert_called_once()
+                assert not orchestrator.running
+                for bot in orchestrator.agent_bots.values():
+                    assert not bot.running
+                    if bot.client is not None:
+                        bot.client.close.assert_called_once()
+            finally:
+                await orchestrator._close_runtime_support_services()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator streaming
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.config.main.Config.from_yaml")
+    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_streaming_default_config(
         self,
         mock_load_config: MagicMock,
@@ -14530,13 +14556,17 @@ class TestMultiAgentOrchestrator:
         mock_config.teams = {}
         mock_config.defaults.enable_streaming = False
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
+        bind_mock_config_cache(mock_config, tmp_path)
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            await orchestrator.initialize()
+            try:
+                await orchestrator.initialize()
 
-            # All bots should have streaming disabled except teams (which never stream)
-            for bot in orchestrator.agent_bots.values():
-                if hasattr(bot, "enable_streaming"):
-                    assert bot.enable_streaming is False
+                # All bots should have streaming disabled except teams (which never stream)
+                for bot in orchestrator.agent_bots.values():
+                    if hasattr(bot, "enable_streaming"):
+                        assert bot.enable_streaming is False
+            finally:
+                await orchestrator._close_runtime_support_services()

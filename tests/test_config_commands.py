@@ -33,7 +33,7 @@ from mindroom.handled_turns import HandledTurnState
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugins import PluginReloadResult
-from tests.conftest import make_event_cache_mock
+from tests.conftest import make_event_cache_mock, write_config_yaml
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
@@ -45,7 +45,7 @@ def test_validate_and_persist_config_payload_validates_and_writes_authored_paylo
     config_path = tmp_path / "config.yaml"
     runtime_paths = _runtime_paths_for_config(config_path)
     config = Config(models={"default": {"provider": "openai", "id": "gpt-5.4"}})
-    config.save_to_yaml(config_path)
+    write_config_yaml(config, config_path)
     payload = config.authored_model_dump()
     payload["agents"] = {
         "writer": {
@@ -73,7 +73,7 @@ def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_pat
     config_path = tmp_path / "config.yaml"
     runtime_paths = _runtime_paths_for_config(config_path)
     config = Config(models={"default": {"provider": "openai", "id": "gpt-5.4"}})
-    config.save_to_yaml(config_path)
+    write_config_yaml(config, config_path)
     original_source = config_path.read_text(encoding="utf-8")
     payload = config.authored_model_dump()
     payload["plugins"] = ["./plugins/bad-name"]

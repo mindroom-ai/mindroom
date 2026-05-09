@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.logging_config import bound_log_context
-from mindroom.timing import elapsed_ms_between, elapsed_ms_since, emit_timing_event, timing_enabled
+from mindroom.timing import elapsed_ms_between, emit_timing_event, timing_enabled
 
 if TYPE_CHECKING:
     import structlog
@@ -88,32 +88,6 @@ class EventCacheWriteCoordinator:
     def _pending_entry_tasks(self, entries: list[_RoomQueueEntry]) -> tuple[_UpdateTask, ...]:
         tasks = [entry.task for entry in entries if isinstance(entry, _QueuedUpdate) and not entry.task.done()]
         return tuple(dict.fromkeys(tasks))
-
-    def _room_pending_tasks(self, room_id: str) -> tuple[_UpdateTask, ...]:
-        tasks = list(self._fallback_room_tasks(room_id))
-        state = self._room_states.get(room_id)
-        if state is not None:
-            tasks.extend(self._pending_entry_tasks(state.entries))
-        return tuple(dict.fromkeys(tasks))
-
-    def _emit_idle_wait_timing(
-        self,
-        *,
-        room_id: str,
-        wait_started: float | None,
-        wait_iterations: int,
-        pending_task_count: int,
-    ) -> None:
-        if wait_started is None:
-            return
-        emit_timing_event(
-            "Event cache idle wait timing",
-            barrier_kind="room",
-            room_id=room_id,
-            wait_ms=elapsed_ms_since(wait_started, clock=time.perf_counter),
-            wait_iterations=wait_iterations,
-            pending_task_count=pending_task_count,
-        )
 
     def _room_state(self, room_id: str) -> _RoomSchedulerState:
         return self._room_states.setdefault(room_id, _RoomSchedulerState())
@@ -535,16 +509,6 @@ class EventCacheWriteCoordinator:
                 log_context["thread_id"] = thread_id
             self.logger.debug(log_message, **log_context)
 
-    def _room_is_idle(self, room_id: str) -> bool:
-        self._prune_done_task_maps(room_id)
-        state = self._room_states.get(room_id)
-        if state is not None and state.entries:
-            return False
-        if self._room_update_tasks.get(room_id) is not None:
-            return False
-        room_threads = self._thread_update_tasks_by_room.get(room_id)
-        return not room_threads
-
     def _thread_is_idle(
         self,
         room_id: str,
@@ -567,15 +531,6 @@ class EventCacheWriteCoordinator:
         if self._room_update_tasks.get(room_id) is not None:
             return False
         return self._thread_update_tasks.get((room_id, thread_id)) is None
-
-    def _fallback_room_tasks(self, room_id: str) -> tuple[_UpdateTask, ...]:
-        pending_tasks: list[_UpdateTask] = []
-        room_task = self._room_update_tasks.get(room_id)
-        if room_task is not None and not room_task.done():
-            pending_tasks.append(room_task)
-        room_threads = self._thread_update_tasks_by_room.get(room_id, {})
-        pending_tasks.extend(task for task in room_threads.values() if not task.done())
-        return tuple(dict.fromkeys(pending_tasks))
 
     def _fallback_thread_tasks(self, room_id: str, thread_id: str) -> tuple[_UpdateTask, ...]:
         pending_tasks: list[_UpdateTask] = []
@@ -609,21 +564,6 @@ class EventCacheWriteCoordinator:
             emit_timing=emit_timing,
             coalesce_key=coalesce_key,
             coalesce_log_context=coalesce_log_context,
-        )
-
-    async def run_room_update(
-        self,
-        room_id: str,
-        update_coro_factory: _UpdateCoroFactory,
-        *,
-        name: str,
-    ) -> object:
-        """Run one room-scoped operation through the same ordered barrier and await its result."""
-        return await self.queue_room_update(
-            room_id,
-            update_coro_factory,
-            name=name,
-            log_exceptions=False,
         )
 
     def queue_thread_update(
@@ -670,90 +610,6 @@ class EventCacheWriteCoordinator:
             log_exceptions=False,
             ignore_cancelled_room_fences=ignore_cancelled_room_fences,
         )
-
-    async def _wait_for_room_idle_without_timing(self, room_id: str) -> None:
-        while True:
-            self._reevaluate_room(room_id)
-            if self._room_is_idle(room_id):
-                return
-
-            state = self._room_states.get(room_id)
-            if state is None or not state.entries:
-                for pending_task in self._fallback_room_tasks(room_id):
-                    await self._await_idle_task(
-                        pending_task,
-                        room_id=room_id,
-                        log_message="Room cache update failed before room became idle",
-                    )
-                continue
-
-            waiter = asyncio.get_running_loop().create_future()
-            state.waiters.append(waiter)
-            self._reevaluate_room(room_id)
-            if self._room_is_idle(room_id):
-                self._discard_waiter(room_id, waiter)
-                return
-            try:
-                await waiter
-            except asyncio.CancelledError:
-                self._discard_waiter(room_id, waiter)
-                raise
-
-    async def _wait_for_room_idle_with_timing(self, room_id: str) -> None:
-        wait_started: float | None = None
-        wait_iterations = 0
-        pending_tasks_seen: set[_UpdateTask] = set()
-        while True:
-            self._reevaluate_room(room_id)
-            if self._room_is_idle(room_id):
-                self._emit_idle_wait_timing(
-                    room_id=room_id,
-                    wait_started=wait_started,
-                    wait_iterations=wait_iterations,
-                    pending_task_count=len(pending_tasks_seen),
-                )
-                return
-
-            if wait_started is None:
-                wait_started = time.perf_counter()
-            pending_tasks_seen.update(self._room_pending_tasks(room_id))
-
-            state = self._room_states.get(room_id)
-            if state is None or not state.entries:
-                for pending_task in self._fallback_room_tasks(room_id):
-                    await self._await_idle_task(
-                        pending_task,
-                        room_id=room_id,
-                        log_message="Room cache update failed before room became idle",
-                    )
-                wait_iterations += 1
-                continue
-
-            waiter = asyncio.get_running_loop().create_future()
-            state.waiters.append(waiter)
-            self._reevaluate_room(room_id)
-            if self._room_is_idle(room_id):
-                self._discard_waiter(room_id, waiter)
-                self._emit_idle_wait_timing(
-                    room_id=room_id,
-                    wait_started=wait_started,
-                    wait_iterations=wait_iterations,
-                    pending_task_count=len(pending_tasks_seen),
-                )
-                return
-            try:
-                await waiter
-            except asyncio.CancelledError:
-                self._discard_waiter(room_id, waiter)
-                raise
-            wait_iterations += 1
-
-    async def wait_for_room_idle(self, room_id: str) -> None:
-        """Wait for the currently queued same-room update chain to drain."""
-        if timing_enabled():
-            await self._wait_for_room_idle_with_timing(room_id)
-            return
-        await self._wait_for_room_idle_without_timing(room_id)
 
     async def wait_for_thread_idle(
         self,

@@ -37,7 +37,6 @@ class ResponseOutcome:
     session_id: str | None = None
     session_type: SessionType | None = None
     execution_identity: ToolExecutionIdentity | None = None
-    run_succeeded: bool = True
     interactive_target: MessageTarget | None = None
     thread_summary_room_id: str | None = None
     thread_summary_thread_id: str | None = None

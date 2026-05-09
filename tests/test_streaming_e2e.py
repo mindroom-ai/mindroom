@@ -15,7 +15,7 @@ from agno.run.agent import ToolCallStartedEvent
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -30,6 +30,7 @@ from tests.conftest import (
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
+    thread_history_result,
 )
 
 if TYPE_CHECKING:
@@ -192,46 +193,17 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
 @pytest.mark.requires_matrix  # Requires real Matrix server for streaming e2e test
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 @patch("mindroom.response_attempt.is_user_online")
-@patch("mindroom.matrix.users._ensure_all_agent_users")
 @patch("mindroom.bot.login_agent_user")
 @patch("mindroom.bot.AgentBot.ensure_user_account")
 async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     mock_ensure_user: AsyncMock,
     mock_login: AsyncMock,
-    mock_ensure_all: AsyncMock,
     mock_is_user_online: AsyncMock,
     tmp_path: Path,
 ) -> None:
     """End-to-end test that agents don't respond to streaming edits from other agents."""
     # Mock user as online for stop button to show
     mock_is_user_online.return_value = True
-
-    # Mock ensure_all_agent_users to return proper user objects
-
-    mock_agents = {
-        "helper": AgentMatrixUser(
-            agent_name="helper",
-            user_id="@mindroom_helper:localhost",
-            display_name="HelperAgent",
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        ),
-        "calculator": AgentMatrixUser(
-            agent_name="calculator",
-            user_id="@mindroom_calculator:localhost",
-            display_name="CalculatorAgent",
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        ),
-        "router": AgentMatrixUser(
-            agent_name="router",
-            user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        ),
-    }
-    mock_ensure_all.return_value = mock_agents
 
     # Mock ensure_user_account to set proper user IDs
     async def ensure_user_side_effect(bot_self: object) -> None:
@@ -254,10 +226,11 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 agent_user.user_id = "@mindroom_router:localhost"
 
     # Need to handle both positional and method call
-    def ensure_user_wrapper(*args: object, **kwargs: object) -> object:
+    async def ensure_user_wrapper(*args: object, **kwargs: object) -> None:
         if len(args) > 0:
-            return ensure_user_side_effect(args[0])
-        return ensure_user_side_effect(kwargs.get("self"))
+            await ensure_user_side_effect(args[0])
+            return
+        await ensure_user_side_effect(kwargs.get("self"))
 
     mock_ensure_user.side_effect = ensure_user_wrapper
 
@@ -275,7 +248,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     calc_client = _matrix_client_mock()
 
     # Configure login to return appropriate clients
-    def login_side_effect(_homeserver: str, agent_user: object) -> object:
+    def login_side_effect(_homeserver: str, agent_user: object, **_kwargs: object) -> object:
         if hasattr(agent_user, "agent_name"):
             if agent_user.agent_name == "helper":
                 return helper_client
@@ -343,13 +316,17 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime)
 
     # Patch the config loading to assign rooms
-    with patch("mindroom.config.main.Config.from_yaml") as mock_config:
-        mock_cfg = MagicMock()
-        mock_cfg.agents = {
-            "helper": MagicMock(display_name="HelperAgent", rooms=[test_room_id]),
-            "calculator": MagicMock(display_name="CalculatorAgent", rooms=[test_room_id]),
-        }
-        mock_cfg.teams = {}
+    with patch("mindroom.orchestrator.load_config") as mock_config:
+        mock_cfg = Config(
+            agents={
+                "helper": AgentConfig(display_name="HelperAgent", rooms=[test_room_id]),
+                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=[test_room_id]),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            defaults=DefaultsConfig(thread_summary_first_threshold=100),
+            memory={"backend": "none"},
+            router=RouterConfig(model="default"),
+        )
         mock_config.return_value = mock_cfg
 
         # Patch create_bot_for_entity to create bots with proper user_ids
@@ -362,8 +339,12 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 entity_name: str,
                 agent_user: object,
                 config: object,
+                runtime_paths: object,
                 storage_path: Path,
+                *,
+                config_path: Path | None = None,
             ) -> object:
+                del config_path
                 # Update the agent_user with proper user_id
                 if entity_name == "helper":
                     agent_user.user_id = "@mindroom_helper:localhost"
@@ -373,7 +354,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                     agent_user.user_id = "@mindroom_router:localhost"
 
                 # Create the actual bot with config
-                runtime_config = bind_runtime_paths(config, storage_path)
+                runtime_config = bind_runtime_paths(config, runtime_paths)
                 return AgentBot(
                     agent_user,
                     storage_path,
@@ -389,6 +370,10 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     # MagicMock config, so keep unrelated runtime services stubbed.
     support_services_patch = patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock())
     support_services_patch.start()
+    room_setup_patch = patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock())
+    room_setup_patch.start()
+    wait_for_homeserver_patch = patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock())
+    wait_for_homeserver_patch.start()
     start_task = asyncio.create_task(orchestrator.start())
 
     try:
@@ -398,6 +383,14 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         # Access the bots
         helper_bot = orchestrator.agent_bots["helper"]
         calc_bot = orchestrator.agent_bots["calculator"]
+        empty_thread_history = thread_history_result([], is_full_history=True)
+        empty_thread_snapshot = thread_history_result([], is_full_history=False)
+        helper_bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=empty_thread_history)
+        helper_bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
+        helper_bot._conversation_cache.get_thread_history = AsyncMock(return_value=empty_thread_history)
+        calc_bot._conversation_cache.get_dispatch_thread_history = AsyncMock(return_value=empty_thread_history)
+        calc_bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
+        calc_bot._conversation_cache.get_thread_history = AsyncMock(return_value=empty_thread_history)
 
         # Ensure calculator bot has streaming disabled for this test
         calc_bot.enable_streaming = False
@@ -420,20 +413,35 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
             },
         }
 
-        # Mock AI response for helper (streaming)
-        with patch("mindroom.response_runner.stream_agent_response") as mock_streaming:
+        async def should_use_streaming_for_test(
+            _client: object,
+            _room_id: str,
+            requester_user_id: str | None = None,
+            *,
+            enable_streaming: bool,
+        ) -> bool:
+            del requester_user_id
+            return enable_streaming
 
-            async def stream_response(
-                _agent_name: str,
-                _prompt: str,
-                _session_id: str,
-                _storage_path: object,
-                _thread_history: list[object],
-                _room_id: str,
-            ) -> AsyncGenerator[str, None]:
-                yield "I can help! Let me ask "
-                yield "@mindroom_calculator:localhost what's 2+2?"
+        async def stream_response(
+            _agent_name: str,
+            _prompt: str,
+            _session_id: str,
+            _storage_path: object,
+            _thread_history: list[object],
+            _room_id: str,
+        ) -> AsyncGenerator[str, None]:
+            yield "I can help! Let me ask "
+            yield "@mindroom_calculator:localhost what's 2+2?"
 
+        with (
+            patch(
+                "mindroom.response_runner.should_use_streaming",
+                new=AsyncMock(side_effect=should_use_streaming_for_test),
+            ),
+            patch("mindroom.response_runner.stream_agent_response") as mock_streaming,
+            patch("mindroom.response_runner.ai_response", new=AsyncMock(return_value="The answer is 4")),
+        ):
             mock_streaming.return_value = stream_response(
                 "helper",
                 user_event.body,
@@ -450,65 +458,61 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 # Process with helper bot
                 await helper_bot._on_message(test_room, user_event)
 
-        # Wait for streaming to complete
-        await asyncio.sleep(0.1)
+            # Wait for streaming to complete
+            await asyncio.sleep(0.1)
 
-        # Verify helper sent initial message and edit
-        assert len(helper_events) >= 1
-        initial_msg = helper_events[0]
-        assert initial_msg["type"] == "m.room.message"
+            # Verify helper sent initial message and edit
+            assert len(helper_events) >= 1
+            initial_msg = helper_events[0]
+            assert initial_msg["type"] == "m.room.message"
 
-        # Find the edit event (if streaming produced one)
-        edit_event = None
-        for event in helper_events[1:]:
-            content = event.get("content", {})
-            if isinstance(content, dict) and "m.relates_to" in content:
-                edit_event = event
-                break
+            # Find the edit event (if streaming produced one)
+            edit_event = None
+            for event in helper_events[1:]:
+                content = event.get("content", {})
+                if isinstance(content, dict) and "m.relates_to" in content:
+                    edit_event = event
+                    break
 
-        if edit_event:
-            # Simulate calculator seeing the edit
-            calc_edit_event = MagicMock(spec=nio.RoomMessageText)
-            content_dict = edit_event.get("content", {})
-            calc_edit_event.body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
-            calc_edit_event.sender = "@mindroom_helper:localhost"
-            calc_edit_event.event_id = f"$edit_{helper_events.index(edit_event)}"
-            calc_edit_event.server_timestamp = 1234567891
-            calc_edit_event.source = {
-                "event_id": f"$edit_{helper_events.index(edit_event)}",
+            if edit_event:
+                # Simulate calculator seeing the edit
+                calc_edit_event = MagicMock(spec=nio.RoomMessageText)
+                content_dict = edit_event.get("content", {})
+                calc_edit_event.body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
+                calc_edit_event.sender = "@mindroom_helper:localhost"
+                calc_edit_event.event_id = f"$edit_{helper_events.index(edit_event)}"
+                calc_edit_event.server_timestamp = 1234567891
+                calc_edit_event.source = {
+                    "event_id": f"$edit_{helper_events.index(edit_event)}",
+                    "sender": "@mindroom_helper:localhost",
+                    "origin_server_ts": 1234567891,
+                    "type": "m.room.message",
+                    "content": edit_event.get("content", {}),
+                }
+
+                # Process edit with calculator bot
+                await calc_bot._on_message(test_room, calc_edit_event)
+
+                # Verify calculator did NOT respond to the edit
+                assert len(calc_events) == 0, "Calculator should not respond to agent edits"
+
+            # Now simulate helper's final message (not an edit)
+            final_event = MagicMock(spec=nio.RoomMessageText)
+            final_event.body = "I can help! Let me ask @mindroom_calculator:localhost what's 2+2?"
+            final_event.sender = "@mindroom_helper:localhost"
+            final_event.event_id = "$helper_final"
+            final_event.server_timestamp = 1234567892
+            final_event.source = {
+                "event_id": "$helper_final",
                 "sender": "@mindroom_helper:localhost",
-                "origin_server_ts": 1234567891,
+                "origin_server_ts": 1234567892,
                 "type": "m.room.message",
-                "content": edit_event.get("content", {}),
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "I can help! Let me ask @mindroom_calculator:localhost what's 2+2?",
+                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                },
             }
-
-            # Process edit with calculator bot
-            await calc_bot._on_message(test_room, calc_edit_event)
-
-            # Verify calculator did NOT respond to the edit
-            assert len(calc_events) == 0, "Calculator should not respond to agent edits"
-
-        # Now simulate helper's final message (not an edit)
-        final_event = MagicMock(spec=nio.RoomMessageText)
-        final_event.body = "I can help! Let me ask @mindroom_calculator:localhost what's 2+2?"
-        final_event.sender = "@mindroom_helper:localhost"
-        final_event.event_id = "$helper_final"
-        final_event.server_timestamp = 1234567892
-        final_event.source = {
-            "event_id": "$helper_final",
-            "sender": "@mindroom_helper:localhost",
-            "origin_server_ts": 1234567892,
-            "type": "m.room.message",
-            "content": {
-                "msgtype": "m.text",
-                "body": "I can help! Let me ask @mindroom_calculator:localhost what's 2+2?",
-                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            },
-        }
-
-        # Mock AI response for calculator (non-streaming)
-        with patch("mindroom.response_runner.ai_response") as mock_ai:
-            mock_ai.return_value = "The answer is 4"
 
             # Also mock that calculator is mentioned
             with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
@@ -517,21 +521,21 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 # Process final message with calculator bot
                 await calc_bot._on_message(test_room, final_event)
 
-        # Wait for processing
-        await asyncio.sleep(0.1)
+            # Wait for processing
+            await asyncio.sleep(0.1)
 
-        # Verify calculator responded to the final message
-        assert len(calc_events) == 3, "Calculator should respond to final message (initial + reaction + final)"
-        # Check the final message (third one, after initial and reaction)
-        calc_response = calc_events[2]  # The final edited message
-        assert calc_response["type"] == "m.room.message"
-        content_dict = calc_response.get("content", {})
-        # For edited messages, check m.new_content
-        if "m.new_content" in content_dict:
-            body = content_dict["m.new_content"].get("body", "")
-        else:
-            body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
-        assert "4" in body
+            # Verify calculator responded to the final message
+            assert len(calc_events) == 3, "Calculator should respond to final message (initial + reaction + final)"
+            # Check the final message (third one, after initial and reaction)
+            calc_response = calc_events[2]  # The final edited message
+            assert calc_response["type"] == "m.room.message"
+            content_dict = calc_response.get("content", {})
+            # For edited messages, check m.new_content
+            if "m.new_content" in content_dict:
+                body = content_dict["m.new_content"].get("body", "")
+            else:
+                body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
+            assert "4" in body
 
     finally:
         # Stop the orchestrator
@@ -539,6 +543,8 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         start_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await start_task
+        wait_for_homeserver_patch.stop()
+        room_setup_patch.stop()
         support_services_patch.stop()
 
 

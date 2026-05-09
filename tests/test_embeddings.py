@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.embeddings import (
@@ -14,10 +15,6 @@ from mindroom.embeddings import (
     effective_knowledge_embedder_signature,
     effective_mem0_embedder_signature,
 )
-
-if TYPE_CHECKING:
-    import pytest
-
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 
@@ -90,6 +87,35 @@ def test_custom_host_explicit_dimensions_override_is_preserved() -> None:
 
     _, kwargs = client.embeddings.create.call_args
     assert kwargs["dimensions"] == 3072
+
+
+@pytest.mark.asyncio
+async def test_custom_host_batch_embedding_omits_dimensions() -> None:
+    """Async batch requests should use the same custom-host dimension rules as single requests."""
+    async_client = MagicMock()
+    async_client.embeddings.create = AsyncMock(
+        return_value=SimpleNamespace(
+            data=[
+                SimpleNamespace(embedding=[1.0, 2.0]),
+                SimpleNamespace(embedding=[3.0, 4.0]),
+            ],
+            usage=SimpleNamespace(model_dump=lambda: {"total_tokens": 2}),
+        ),
+    )
+    embedder = MindRoomOpenAIEmbedder(
+        id="gemini-embedding-001",
+        api_key="sk-test",
+        base_url="http://example.com/v1",
+        async_client=async_client,
+    )
+
+    embeddings, usage = await embedder.async_get_embeddings_batch_and_usage(["hello", "world"])
+
+    assert embeddings == [[1.0, 2.0], [3.0, 4.0]]
+    assert usage == [{"total_tokens": 2}, {"total_tokens": 2}]
+    _, kwargs = async_client.embeddings.create.call_args
+    assert kwargs["input"] == ["hello", "world"]
+    assert "dimensions" not in kwargs
 
 
 def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(

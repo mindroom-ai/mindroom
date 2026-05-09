@@ -63,7 +63,6 @@ class _CredentialServicePolicy:
 
     service: str
     worker_scope: _WorkerScope | None
-    is_local_only_shared_service: bool
     uses_local_shared_credentials: bool
     uses_primary_runtime_global_credentials: bool
     uses_primary_runtime_scoped_credentials: bool
@@ -77,7 +76,6 @@ def credential_service_policy(service: str, worker_scope: _WorkerScope | None) -
     return _CredentialServicePolicy(
         service=service,
         worker_scope=worker_scope,
-        is_local_only_shared_service=is_local_only,
         uses_local_shared_credentials=worker_scope == "shared" and is_local_only,
         uses_primary_runtime_global_credentials=is_primary_runtime_global,
         uses_primary_runtime_scoped_credentials=(

@@ -668,7 +668,6 @@ class ToolCategory(str, Enum):
     """Tool categories for organization."""
 
     EMAIL = "email"
-    SHOPPING = "shopping"
     ENTERTAINMENT = "entertainment"
     SOCIAL = "social"
     DEVELOPMENT = "development"

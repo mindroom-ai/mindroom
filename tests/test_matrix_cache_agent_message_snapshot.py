@@ -9,6 +9,7 @@ import pytest
 
 from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache
 from mindroom.matrix.cache.agent_message_snapshot import AgentMessageSnapshotUnavailable
+from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -72,7 +73,8 @@ async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message
     cache = event_cache_factory()
     await cache.initialize()
     try:
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [
@@ -120,7 +122,8 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
     cache = event_cache_factory()
     await cache.initialize()
     try:
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [
@@ -439,7 +442,8 @@ async def test_accessor_accepts_old_thread_cache_without_stale_marker(
     cache = event_cache_factory()
     await cache.initialize()
     try:
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [
@@ -488,7 +492,8 @@ async def test_accessor_reuses_thread_cache_from_prior_bot_run(
     cache = event_cache_factory()
     await cache.initialize()
     try:
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [
@@ -537,7 +542,8 @@ async def test_accessor_rejects_invalidated_thread_cache(
     cache = event_cache_factory()
     await cache.initialize()
     try:
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [
@@ -597,7 +603,8 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
                 ),
             ],
         )
-        await cache.replace_thread(
+        await _replace_thread(
+            cache,
             "!room:localhost",
             "$thread-root",
             [

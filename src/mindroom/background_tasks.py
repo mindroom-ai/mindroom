@@ -134,8 +134,3 @@ async def wait_for_background_tasks(
             logger.warning("background_tasks_wait_timeout", timeout_seconds=timeout)
             await _cancel_and_drain_background_tasks(tuple(pending), owner=owner)
             return
-
-
-def _get_background_task_count() -> int:
-    """Get the number of currently running background tasks."""
-    return len(_background_tasks)

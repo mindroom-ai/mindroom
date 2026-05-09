@@ -42,8 +42,6 @@ from mindroom.knowledge.manager import (
 from mindroom.knowledge.redaction import credential_free_repo_url, credential_free_url_identity, redact_url_credentials
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
-    _clear_published_indexes,
-    _published_indexed_count,
     get_published_index,
     load_published_index_state,
     published_index_metadata_path,
@@ -190,12 +188,12 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
     monkeypatch.setattr("mindroom.knowledge.manager._create_embedder", lambda *_args, **_kwargs: object())
-    _clear_published_indexes()
+    knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_runner._refresh_locks.clear()
     knowledge_refresh_runner._active_refresh_counts.clear()
     yield
-    _clear_published_indexes()
+    knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_runner._refresh_locks.clear()
     knowledge_refresh_runner._active_refresh_counts.clear()
@@ -315,7 +313,6 @@ def test_cold_git_status_with_existing_non_checkout_dir_returns_empty_files(tmp_
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
     assert manager.list_files() == []
-    assert manager._git_repo_present is False
     assert not (knowledge_path / ".git").exists()
 
 
@@ -325,7 +322,6 @@ async def test_git_manager_construction_does_not_probe_checkout_on_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Git checkout detection during construction must stay filesystem-only."""
-    loop_thread_id = get_ident()
     knowledge_path = tmp_path / "knowledge"
     (knowledge_path / ".git").mkdir(parents=True)
     config = _config(
@@ -335,16 +331,12 @@ async def test_git_manager_construction_does_not_probe_checkout_on_event_loop(
         git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git")},
     )
 
-    def _unexpected_checkout_probe(*_args: object, **_kwargs: object) -> bool:
-        msg = f"git checkout probe ran during manager construction on thread {loop_thread_id}"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(knowledge_manager_module, "git_checkout_present", _unexpected_checkout_probe)
+    checkout_probe = MagicMock(return_value=True)
+    monkeypatch.setattr(knowledge_manager_module, "git_checkout_present", checkout_probe)
 
     await asyncio.sleep(0)
-    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
-
-    assert manager._git_repo_present is True
+    KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+    checkout_probe.assert_not_called()
 
 
 def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: Path) -> None:
@@ -804,7 +796,7 @@ async def test_stale_index_metadata_schedules_refresh_without_source_scan(tmp_pa
     doc.write_text("ready index changed", encoding="utf-8")
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.mark_published_index_stale(key, reason="test_stale")
-    _clear_published_indexes()
+    knowledge_registry._published_indexes.clear()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -847,7 +839,7 @@ async def test_stale_index_skips_duplicate_refresh_when_scheduler_is_active(tmp_
     doc.write_text("ready index changed", encoding="utf-8")
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.mark_published_index_stale(key, reason="test_stale")
-    _clear_published_indexes()
+    knowledge_registry._published_indexes.clear()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=True)
     scheduler.schedule_refresh = MagicMock()
@@ -1090,7 +1082,7 @@ async def test_index_metadata_without_source_signature_is_unavailable_and_schedu
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     payload.pop("source_signature", None)
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    _clear_published_indexes()
+    knowledge_registry._published_indexes.clear()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -1947,7 +1939,7 @@ async def test_git_ready_index_schedules_refresh_after_poll_interval(
     payload["last_published_at"] = "2000-01-01T00:00:00+00:00"
     payload["last_refresh_at"] = "2000-01-01T00:00:00+00:00"
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    _clear_published_indexes()
+    knowledge_registry._published_indexes.clear()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -2041,7 +2033,7 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     payload["last_published_at"] = "2000-01-01T00:00:00+00:00"
     payload["last_refresh_at"] = "2000-01-01T00:00:00+00:00"
     metadata_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    _clear_published_indexes()
+    knowledge_registry._published_indexes.clear()
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -3145,7 +3137,7 @@ async def test_stale_or_failed_index_reports_chunking_config_mismatch_before_coo
         knowledge_registry.mark_published_index_stale(key, reason="test_stale")
     else:
         knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="previous failure")
-    _clear_published_indexes()
+    knowledge_registry._published_indexes.clear()
     changed_config = config.model_copy(deep=True)
     changed_config.knowledge_bases["docs"].chunk_size = 1024
     newer_config = config.model_copy(deep=True)
@@ -4661,7 +4653,7 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
         )
         knowledge_registry.mark_published_index_refresh_succeeded(key)
 
-    _clear_published_indexes()
+    knowledge_registry._published_indexes.clear()
 
     for index in range(count):
         lookup = get_published_index(
@@ -4726,7 +4718,7 @@ async def test_published_indexed_count_uses_persisted_metadata_without_collectio
 
     monkeypatch.setattr(_Client, "get_collection", _raise_scan)
 
-    assert _published_indexed_count(lookup.index) == 1
+    assert (lookup.index.state.indexed_count or 0) == 1
 
 
 @pytest.mark.asyncio
@@ -5074,7 +5066,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     assert state.collection is not None
     missing_collection = state.collection
     _VectorDb.collections.pop(missing_collection, None)
-    _clear_published_indexes()
+    knowledge_registry._published_indexes.clear()
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     repaired_state = load_published_index_state(published_index_metadata_path(key))
 
@@ -5879,7 +5871,6 @@ async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_s
 
     assert cloned is False
     assert git_checkout_present(docs_path)
-    assert manager._git_repo_present is True
     assert list_git_tracked_knowledge_files(config, "docs", docs_path) == [docs_path.resolve() / "doc.md"]
 
     main.initialize_api_app(main.app, runtime_paths)

@@ -425,7 +425,7 @@ async def build_memory_prompt_parts(
     )
 
 
-async def _build_memory_enhanced_prompt(
+async def build_memory_enhanced_prompt(
     prompt: str,
     agent_name: str,
     storage_path: Path,

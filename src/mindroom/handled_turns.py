@@ -351,12 +351,6 @@ class HandledTurnLedger:
             record = self._responses.get(event_id)
             return bool(record and record.get("completed", True))
 
-    def get_response_event_id(self, source_event_id: str) -> str | None:
-        """Return the tracked response event ID for one source event."""
-        with self._thread_lock, self._file_lock(exclusive=False):
-            self._responses = self._read_responses_file_locked(repair_corrupt_file=False)
-            return _response_event_id_for_record(self._responses.get(source_event_id))
-
     def get_visible_echo_event_id(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo event ID for one source event."""
         with self._thread_lock, self._file_lock(exclusive=False):

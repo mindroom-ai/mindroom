@@ -122,52 +122,6 @@ def _wrap_msg_body(sender: str, body: str) -> str:
     return f"<msg from={xml_quoteattr(sender)}><![CDATA[{safe_body}]]></msg>"
 
 
-def _truncate_message_body(body: str, limit: int) -> str:
-    """Cap one rendered history body to the requested character limit."""
-    if len(body) <= limit:
-        return body
-    if limit <= 1:
-        return "…"
-    return f"{body[: limit - 1]}…"
-
-
-def _collect_history_messages(
-    thread_history: Sequence[ResolvedVisibleMessage],
-    *,
-    max_messages: int | None,
-    max_message_length: int | None,
-    missing_sender_label: str | None,
-) -> list[tuple[str, str]]:
-    messages = thread_history[-max_messages:] if max_messages is not None else thread_history
-    collected: list[tuple[str, str]] = []
-    for msg in messages:
-        body = msg.body
-        if not body:
-            continue
-        if max_message_length is not None:
-            body = _truncate_message_body(body, max_message_length)
-        sender = msg.sender
-        if not sender:
-            if missing_sender_label is None:
-                continue
-            sender = missing_sender_label
-        collected.append((sender, body))
-    return collected
-
-
-def _build_plain_prompt_with_history(
-    prompt: str,
-    history_messages: list[tuple[str, str]],
-    *,
-    header: str,
-    prompt_intro: str,
-) -> str:
-    if not history_messages:
-        return prompt
-    context = "\n".join(f"{sender}: {body}" for sender, body in history_messages)
-    return f"{header}\n{context}\n\n{prompt_intro}{prompt}"
-
-
 def _build_matrix_prompt_with_history(
     prompt: str,
     history_messages: list[tuple[str, str]],
@@ -182,64 +136,6 @@ def _build_matrix_prompt_with_history(
         return standalone_prompt
     rendered_history = "\n".join(_wrap_msg_body(sender, body) for sender, body in history_messages)
     return f"{header}\n<conversation>\n{rendered_history}\n</conversation>\n\n{prompt_intro}{current_block}"
-
-
-def _build_prompt_with_thread_history(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    *,
-    header: str = "Previous conversation in this thread:",
-    prompt_intro: str = "Current message:\n",
-    max_messages: int | None = None,
-    max_message_length: int | None = None,
-    missing_sender_label: str | None = None,
-) -> str:
-    """Build a plain-text prompt with ``sender: body`` history lines."""
-    if not thread_history:
-        return prompt
-    history_messages = _collect_history_messages(
-        thread_history,
-        max_messages=max_messages,
-        max_message_length=max_message_length,
-        missing_sender_label=missing_sender_label,
-    )
-    return _build_plain_prompt_with_history(
-        prompt,
-        history_messages,
-        header=header,
-        prompt_intro=prompt_intro,
-    )
-
-
-def _build_matrix_prompt_with_thread_history(
-    prompt: str,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    *,
-    header: str = "Previous conversation in this thread:",
-    prompt_intro: str = "Current message:\n",
-    max_messages: int | None = None,
-    max_message_length: int | None = None,
-    missing_sender_label: str | None = None,
-    current_sender: str | None = None,
-) -> str:
-    """Build a Matrix prompt with structured XML-like message wrappers."""
-    history_messages = (
-        _collect_history_messages(
-            thread_history,
-            max_messages=max_messages,
-            max_message_length=max_message_length,
-            missing_sender_label=missing_sender_label,
-        )
-        if thread_history
-        else []
-    )
-    return _build_matrix_prompt_with_history(
-        prompt,
-        history_messages,
-        header=header,
-        prompt_intro=prompt_intro,
-        current_sender=current_sender,
-    )
 
 
 def _classify_partial_reply(
@@ -285,6 +181,15 @@ def _is_relayed_user_message(message: ResolvedVisibleMessage) -> bool:
     """Return whether an internal Matrix sender is relaying a user-authored message."""
     original_sender = message.content.get(ORIGINAL_SENDER_KEY)
     return isinstance(original_sender, str) and bool(original_sender)
+
+
+def _cap_visible_message_body(body: str, max_length: int | None) -> str:
+    """Return a body capped for fallback context while marking truncated text."""
+    if max_length is None or len(body) <= max_length:
+        return body
+    if max_length <= 0:
+        return ""
+    return f"{body[: max_length - 1]}…"
 
 
 def _build_unseen_messages_header(
@@ -333,15 +238,24 @@ def _context_messages_from_visible_messages(
 ) -> tuple[Message, ...]:
     """Convert visible Matrix context into provider-native message objects."""
     visible_messages = messages[-max_messages:] if max_messages is not None else messages
-    return tuple(
-        _context_message_from_visible_message(
-            message,
-            response_sender_id=response_sender_id,
-            missing_sender_label=missing_sender_label,
+    context_messages: list[Message] = []
+    for message in visible_messages:
+        if not message.body:
+            continue
+        capped_message = message
+        if max_message_length is not None:
+            capped_body = _cap_visible_message_body(message.body, max_message_length)
+            if not capped_body:
+                continue
+            capped_message = replace_visible_message(message, body=capped_body)
+        context_messages.append(
+            _context_message_from_visible_message(
+                capped_message,
+                response_sender_id=response_sender_id,
+                missing_sender_label=missing_sender_label,
+            ),
         )
-        for message in visible_messages
-        if message.body and (max_message_length is None or len(message.body) < max_message_length)
-    )
+    return tuple(context_messages)
 
 
 def _messages_with_capped_context(

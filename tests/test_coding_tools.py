@@ -59,7 +59,7 @@ class TestTruncateHead:
         content = "\n".join(f"line{i}" for i in range(1000))
         result = _truncate_head(content, max_lines=10, max_bytes=1_000_000)
         assert result.was_truncated
-        assert result.shown_lines == 10
+        assert len(result.content.splitlines()) == 10
         assert result.total_lines == 1000
 
     def test_truncation_by_bytes(self) -> None:
@@ -67,7 +67,7 @@ class TestTruncateHead:
         content = "x" * 200 + "\n" + "y" * 200 + "\n"
         result = _truncate_head(content, max_lines=1000, max_bytes=250)
         assert result.was_truncated
-        assert result.shown_lines == 1
+        assert len(result.content.splitlines()) == 1
 
 
 class TestFuzzyMatching:
@@ -97,7 +97,7 @@ class TestFuzzyMatching:
         matches = _find_all_matches("hello world", "hello")
         assert len(matches) == 1
         assert not matches[0].was_fuzzy
-        assert matches[0].matched_text == "hello"
+        assert (matches[0].start, matches[0].end) == (0, 5)
 
     def test_fuzzy_match_trailing_whitespace(self) -> None:
         """Fuzzy match handles trailing whitespace differences."""

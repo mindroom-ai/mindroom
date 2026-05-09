@@ -78,6 +78,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
+    return not gate._gates and not any(not task.done() for task in gate._retired_in_flight_drain_tasks)
+
+
 def _make_config(
     tmp_path: Path,
     *,
@@ -561,7 +565,7 @@ async def test_text_first_image_during_debounce_dispatches_without_upload_grace_
         )
         await _wait_for(lambda: calls == [(["$m1", "$img1"], 1)], deadline_seconds=0.12)
 
-    assert bot._coalescing_gate.is_idle()
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 @pytest.mark.asyncio
@@ -1212,7 +1216,7 @@ async def test_already_queued_command_barrier_flushes_normal_without_debounce() 
 
     await _wait_for(lambda: calls == [["$m1"], ["$cmd"]], deadline_seconds=0.2)
 
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -1313,7 +1317,7 @@ async def test_in_flight_command_barrier_flushes_buffered_normal_without_debounc
     release_first_dispatch.set()
     await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$cmd"]], deadline_seconds=0.2)
 
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -1352,7 +1356,7 @@ async def test_command_during_active_dispatch_preserves_fifo_order() -> None:
     release_first_dispatch.set()
     await _wait_for(lambda: calls == [["$m1"], ["$m2"], ["$cmd"], ["$m3"]])
 
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -1412,7 +1416,7 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
         release_first_dispatch.set()
         await _wait_for(lambda: calls == [["$m1"], ["$m2"]])
 
-    assert bot._coalescing_gate.is_idle()
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 def test_automation_source_kinds_are_coalescing_exempt() -> None:
@@ -1577,7 +1581,7 @@ async def test_bypass_preserves_fifo_order_behind_existing_normal_work() -> None
 
     await _wait_for(lambda: calls == [["$m1"], ["$hook"], ["$m2"]])
 
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -1691,7 +1695,7 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         await shutdown_task
 
     assert calls == [["$m1"]]
-    assert bot._coalescing_gate.is_idle()
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 @pytest.mark.asyncio
@@ -1724,7 +1728,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
         await bot.prepare_for_sync_shutdown()
 
     assert calls == [("hello", ["$m1"])]
-    assert bot._coalescing_gate.is_idle()
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 @pytest.mark.asyncio
@@ -1761,7 +1765,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_upload_grace(tmp_path: P
         await bot.prepare_for_sync_shutdown()
 
     assert calls == [("hello", ["$m1"])]
-    assert bot._coalescing_gate.is_idle()
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 @pytest.mark.asyncio
@@ -1817,7 +1821,7 @@ async def test_shutdown_during_in_flight_dispatch_does_not_start_grace(tmp_path:
         await shutdown_task
 
     assert calls == [("first", ["$m1"]), ("second", ["$m2"])]
-    assert bot._coalescing_gate.is_idle()
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 @pytest.mark.asyncio
@@ -1881,7 +1885,7 @@ async def test_first_turn_thread_resolution_retargets_in_flight_gate(tmp_path: P
         await _wait_for(lambda: calls == [["$m1"], ["$m2", "$m3"]])
 
     assert calls == [["$m1"], ["$m2", "$m3"]]
-    assert bot._coalescing_gate.is_idle()
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 @pytest.mark.asyncio
@@ -1913,7 +1917,7 @@ async def test_retargeted_sleeping_timer_flushes_under_current_key() -> None:
     await _wait_for(lambda: len(dispatched_source_event_ids) == 1)
 
     assert dispatched_source_event_ids == [["$m1"]]
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -1959,7 +1963,7 @@ async def test_retarget_merges_existing_destination_gate_queue() -> None:
     await gate.drain_all()
 
     assert dispatched_source_event_ids == [["$m1", "$m2"]]
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -2019,7 +2023,7 @@ async def test_retarget_preserves_in_flight_destination_dispatch() -> None:
 
     assert cancelled_source_event_ids == []
     assert dispatched_source_event_ids == [["$m2"], ["$m1"]]
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -2081,7 +2085,7 @@ async def test_retarget_preserves_both_in_flight_dispatches() -> None:
 
     assert cancelled_source_event_ids == []
     assert sorted(dispatched_source_event_ids) == [["$m1"], ["$m2"]]
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -2131,7 +2135,7 @@ async def test_retarget_tracks_retired_in_flight_source_until_dispatch_finishes(
     release_dispatch["$m2"].set()
     await _wait_for(lambda: dispatched_source_event_ids == [["$m2"]])
 
-    assert gate.is_idle() is False
+    assert _coalescing_gate_is_idle(gate) is False
     drain_task = asyncio.create_task(gate.drain_all())
     await asyncio.sleep(0.01)
     assert drain_task.done() is False
@@ -2140,7 +2144,7 @@ async def test_retarget_tracks_retired_in_flight_source_until_dispatch_finishes(
     await drain_task
 
     assert sorted(dispatched_source_event_ids) == [["$m1"], ["$m2"]]
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -2450,7 +2454,7 @@ async def test_flush_logs_failed_outcome_when_dispatch_batch_raises() -> None:
             ),
         )
         await gate.drain_all()
-        assert gate.is_idle()
+        assert _coalescing_gate_is_idle(gate)
 
     flush_calls = [call for call in mock_emit.call_args_list if call.args and call.args[0] == "coalescing_gate.flush"]
     assert len(flush_calls) == 1
@@ -2508,7 +2512,7 @@ async def test_slow_coalescing_flush_warns_with_correlation_metadata() -> None:
                 source_kind="message",
             ),
         )
-        await _wait_for(gate.is_idle)
+        await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
     mock_warning.assert_called_once()
     assert mock_warning.call_args.args == ("coalescing_gate_flush_slow",)
@@ -2563,7 +2567,7 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
     assert mock_exception.call_args.kwargs["error_message"] == "Coalesced dispatch failed."
     assert "pending_count" in mock_exception.call_args.kwargs
     assert "oldest_pending_age_ms" in mock_exception.call_args.kwargs
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -2597,7 +2601,7 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
         )
         await _wait_for(lambda: mock_exception.called)
 
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
     await gate.enqueue(
         ("!room:localhost", None, "@user:localhost"),
@@ -2609,7 +2613,7 @@ async def test_failed_drain_does_not_poison_future_ingress() -> None:
     )
     await _wait_for(lambda: dispatched_source_event_ids == [["$m2"]])
 
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -2659,7 +2663,7 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
         await _wait_for(lambda: mock_exception.called)
         await _wait_for(lambda: dispatched_source_event_ids == [["$m2"]])
 
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -2699,7 +2703,7 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
     drain_task.cancel()
     await asyncio.gather(drain_task, return_exceptions=True)
 
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
     await gate.enqueue(
         ("!room:localhost", None, "@user:localhost"),
@@ -2711,7 +2715,7 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
     )
     await _wait_for(lambda: dispatched_source_event_ids == [["$m1"], ["$m2"]])
 
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -2760,7 +2764,7 @@ async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_a
     await asyncio.gather(drain_task, return_exceptions=True)
     await _wait_for(lambda: dispatched_source_event_ids == [["$m1"], ["$m2"]])
 
-    assert gate.is_idle()
+    assert _coalescing_gate_is_idle(gate)
 
 
 @pytest.mark.asyncio
@@ -2783,7 +2787,7 @@ async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
                 source_kind="message",
             ),
         )
-        await _wait_for(gate.is_idle)
+        await _wait_for(lambda: _coalescing_gate_is_idle(gate))
 
     debug_events = [call.args[0] for call in mock_debug.call_args_list if call.args]
     assert "coalescing_gate_enqueue" in debug_events
@@ -2819,12 +2823,12 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        assert not bot._coalescing_gate.is_idle()
+        assert not _coalescing_gate_is_idle(bot._coalescing_gate)
 
         await bot.cleanup()
 
     mock_dispatch.assert_awaited_once()
-    assert bot._coalescing_gate.is_idle()
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 @pytest.mark.asyncio
@@ -2962,7 +2966,7 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
         await _wait_for(lambda: len(calls) == 1)
 
     assert calls == [("immediate", ["$m1"])]
-    assert bot._coalescing_gate.is_idle()
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 @pytest.mark.asyncio
@@ -3015,7 +3019,7 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
     event = _text_event(event_id="$m1", body="hello")
 
     with patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()):
-        assert bot._coalescing_gate.is_idle()
+        assert _coalescing_gate_is_idle(bot._coalescing_gate)
         await bot._turn_controller._enqueue_for_dispatch(
             event,
             room,
@@ -3024,7 +3028,7 @@ async def test_gate_entry_removed_after_dispatch_with_no_pending(tmp_path: Path)
         )
         await asyncio.sleep(0.03)
 
-    assert bot._coalescing_gate.is_idle()
+    assert _coalescing_gate_is_idle(bot._coalescing_gate)
 
 
 # ---------------------------------------------------------------------------
@@ -3897,7 +3901,6 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
             "content": {"msgtype": "m.text", "body": "scheduled task output", "com.mindroom.source_kind": "scheduled"},
         },
         server_timestamp=1000,
-        is_synthetic=True,
         source_kind_override="scheduled",
     )
     dispatch = _prepared_dispatch(event_id="$s1", body="scheduled task output", source_kind="scheduled")
@@ -3949,7 +3952,6 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         body="hook result",
         source={"content": {"msgtype": "m.text", "body": "hook result", "com.mindroom.source_kind": "hook"}},
         server_timestamp=1000,
-        is_synthetic=True,
         source_kind_override="hook",
     )
     dispatch = _prepared_dispatch(event_id="$h1", body="hook result", source_kind="hook")
@@ -4001,7 +4003,6 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         body="scheduled fire 1",
         source={"content": {"msgtype": "m.text", "body": "scheduled fire 1", "com.mindroom.source_kind": "scheduled"}},
         server_timestamp=1000,
-        is_synthetic=True,
         source_kind_override="scheduled",
     )
     dispatch = _prepared_dispatch(event_id="$s1", body="scheduled fire 1", source_kind="scheduled")
@@ -4059,7 +4060,6 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
         body="batched message",
         source={"content": {"msgtype": "m.text", "body": "batched message"}},
         server_timestamp=1000,
-        is_synthetic=True,
         source_kind_override="user",
     )
     dispatch = _prepared_dispatch(event_id="$m1", body="batched message")
@@ -4103,7 +4103,6 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
         body="[Attached image]",
         source={"content": {"msgtype": "m.text", "body": "[Attached image]"}},
         server_timestamp=1000,
-        is_synthetic=True,
         source_kind_override="image",
     )
     dispatch = _prepared_dispatch(event_id="$img1", body="[Attached image]")
@@ -4845,7 +4844,6 @@ async def test_untrusted_synthetic_voice_payload_metadata_spoofing_is_not_truste
             },
         },
         server_timestamp=1000,
-        is_synthetic=True,
         source_kind_override="voice",
     )
     captured_extra_content: list[object] = []
@@ -4884,7 +4882,6 @@ async def test_trusted_voice_normalized_payload_metadata_reaches_envelope_and_pa
             },
         },
         server_timestamp=1000,
-        is_synthetic=True,
         source_kind_override="voice",
     )
     captured_extra_content: list[object] = []

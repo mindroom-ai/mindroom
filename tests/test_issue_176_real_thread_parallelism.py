@@ -78,12 +78,11 @@ async def _assert_room_update_blocks_later_thread(coord: EventCacheWriteCoordina
         await release_b.wait()
         return "thread-b"
 
-    first = asyncio.create_task(
-        coord.run_room_update(
-            ROOM_ID,
-            room_update,
-            name="measure_room_update_a",
-        ),
+    first = coord.queue_room_update(
+        ROOM_ID,
+        room_update,
+        name="measure_room_update_a",
+        log_exceptions=False,
     )
     await asyncio.wait_for(started_a.wait(), timeout=1.0)
 

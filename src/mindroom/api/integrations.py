@@ -85,13 +85,6 @@ class SpotifyStatus(BaseModel):
     error: str | None = None
 
 
-def _get_spotify_credentials(request: Request, agent_name: str | None = None) -> dict[str, Any]:
-    """Get stored Spotify credentials."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
-    credentials = load_credentials_for_target("spotify", target)
-    return credentials or {}
-
-
 def _save_spotify_credentials(
     credentials: dict[str, Any],
     request: Request,

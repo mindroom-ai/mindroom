@@ -22,13 +22,13 @@ from mindroom.credential_policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import make_conversation_cache_mock, make_event_cache_mock
+from tests.conftest import load_config_yaml, make_conversation_cache_mock, make_event_cache_mock, write_config_yaml
 
 
 def _minimal_config_path(tmp_path: Path) -> Path:
     """Write a minimal valid config file for ConfigManager tool tests."""
     config_path = tmp_path / "config.yaml"
-    Config(models={"default": {"provider": "openai", "id": "gpt-4o"}}).save_to_yaml(config_path)
+    write_config_yaml(Config(models={"default": {"provider": "openai", "id": "gpt-4o"}}), config_path)
     return config_path
 
 
@@ -50,11 +50,14 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
-    Config(
-        agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
-        models={"default": {"provider": "openai", "id": "gpt-4o"}},
-        plugins=["./plugins/bad-name"],
-    ).save_to_yaml(config_path)
+    write_config_yaml(
+        Config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            plugins=["./plugins/bad-name"],
+        ),
+        config_path,
+    )
     return config_path
 
 
@@ -85,11 +88,14 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
-    Config(
-        agents={},
-        models={"default": {"provider": "openai", "id": "gpt-4o"}},
-        plugins=["./plugins/demo"],
-    ).save_to_yaml(config_path)
+    write_config_yaml(
+        Config(
+            agents={},
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            plugins=["./plugins/demo"],
+        ),
+        config_path,
+    )
     return config_path
 
 
@@ -118,7 +124,7 @@ class TestConsolidatedConfigManager:
                 tools=["googlesearch"],
                 model="default",
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -139,7 +145,7 @@ class TestConsolidatedConfigManager:
                 tools=["googlesearch"],
                 model="default",
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -161,7 +167,7 @@ class TestConsolidatedConfigManager:
             models={"default": {"provider": "openai", "id": "gpt-4o"}},
         )
         config_path = tmp_path / "config.yaml"
-        config.save_to_yaml(config_path)
+        write_config_yaml(config, config_path)
         cm = _config_manager(config_path)
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -231,7 +237,7 @@ class TestConsolidatedConfigManager:
                 agents=["agent1", "agent2"],
                 mode="coordinate",
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -298,7 +304,7 @@ class TestConsolidatedConfigManager:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
             config = Config(agents={})
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -314,7 +320,7 @@ class TestConsolidatedConfigManager:
             assert "test_agent" in result
 
             # Verify agent was created
-            config = Config.from_yaml(config_path)
+            config = load_config_yaml(config_path)
             assert "test_agent" in config.agents
             assert config.agents["test_agent"].display_name == "Test Agent"
         finally:
@@ -379,7 +385,7 @@ class TestConsolidatedConfigManager:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
             config = Config(agents={})
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -392,7 +398,7 @@ class TestConsolidatedConfigManager:
             )
             assert "Successfully created" in result
 
-            config = Config.from_yaml(config_path)
+            config = load_config_yaml(config_path)
             assert config.agents["test_agent"].tool_names == ["openclaw_compat"]
             effective = config.get_agent_tools("test_agent")
             assert effective[0] == "openclaw_compat"
@@ -414,7 +420,7 @@ class TestConsolidatedConfigManager:
                     ),
                 },
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -433,7 +439,7 @@ class TestConsolidatedConfigManager:
                     "docs": KnowledgeBaseConfig(path="./docs"),
                 },
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -446,7 +452,7 @@ class TestConsolidatedConfigManager:
             )
             assert result == "Error: Unknown knowledge bases: missing_docs. Available knowledge bases: docs."
 
-            config = Config.from_yaml(config_path)
+            config = load_config_yaml(config_path)
             assert "test_agent" not in config.agents
         finally:
             config_path.unlink(missing_ok=True)
@@ -455,11 +461,14 @@ class TestConsolidatedConfigManager:
         """Create must not persist configs that fail runtime-aware validation."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            Config(
-                agents={},
-                mindroom_user=MindRoomUserConfig(username="mindroom_assistant"),
-                models={"default": {"provider": "openai", "id": "gpt-4o"}},
-            ).save_to_yaml(config_path)
+            write_config_yaml(
+                Config(
+                    agents={},
+                    mindroom_user=MindRoomUserConfig(username="mindroom_assistant"),
+                    models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                ),
+                config_path,
+            )
 
         try:
             cm = _config_manager(config_path)
@@ -475,7 +484,7 @@ class TestConsolidatedConfigManager:
             assert "Invalid configuration" in result
             assert "conflicts" in result
             assert "Changes were NOT applied." in result
-            config = Config.from_yaml(config_path)
+            config = load_config_yaml(config_path)
             assert "assistant" not in config.agents
         finally:
             config_path.unlink(missing_ok=True)
@@ -490,7 +499,7 @@ class TestConsolidatedConfigManager:
                     "docs": KnowledgeBaseConfig(path="./docs"),
                 },
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -503,7 +512,7 @@ class TestConsolidatedConfigManager:
             )
             assert result == "Error: Duplicate knowledge bases are not allowed: docs."
 
-            config = Config.from_yaml(config_path)
+            config = load_config_yaml(config_path)
             assert "test_agent" not in config.agents
         finally:
             config_path.unlink(missing_ok=True)
@@ -517,7 +526,7 @@ class TestConsolidatedConfigManager:
                 display_name="Old Name",
                 role="Old role",
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -530,7 +539,7 @@ class TestConsolidatedConfigManager:
             assert "Display Name -> New Name" in result
 
             # Verify agent was updated
-            config = Config.from_yaml(config_path)
+            config = load_config_yaml(config_path)
             assert config.agents["test_agent"].display_name == "New Name"
             assert config.agents["test_agent"].role == "Old role"  # Unchanged
         finally:
@@ -641,9 +650,9 @@ class TestConsolidatedConfigManager:
                 ),
             },
         )
-        config.save_to_yaml(config_path)
+        write_config_yaml(config, config_path)
 
-        reloaded = Config.from_yaml(config_path)
+        reloaded = load_config_yaml(config_path)
         assert reloaded.model_dump(exclude_none=True)["defaults"]["tools"] == [
             "scheduler",
             {"shell": {"extra_env_passthrough": "DAWARICH_*"}},
@@ -700,7 +709,7 @@ class TestConsolidatedConfigManager:
                 ),
             },
         )
-        config.save_to_yaml(config_path)
+        write_config_yaml(config, config_path)
 
         cm = _config_manager(config_path)
         result = cm.manage_agent(
@@ -710,7 +719,7 @@ class TestConsolidatedConfigManager:
         )
 
         assert "Successfully updated" in result
-        reloaded = Config.from_yaml(config_path)
+        reloaded = load_config_yaml(config_path)
         assert reloaded.agents["code"].model_dump(exclude_none=True)["tools"] == [
             {"shell": {"enable_run_shell_command": False}},
             "calculator",
@@ -778,7 +787,7 @@ class TestConsolidatedConfigManager:
                 role="Test role",
                 knowledge_bases=["docs"],
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -789,7 +798,7 @@ class TestConsolidatedConfigManager:
             )
             assert result == "Error: Unknown knowledge bases: missing_docs. Available knowledge bases: docs."
 
-            config = Config.from_yaml(config_path)
+            config = load_config_yaml(config_path)
             assert config.agents["test_agent"].knowledge_bases == ["docs"]
         finally:
             config_path.unlink(missing_ok=True)
@@ -809,7 +818,7 @@ class TestConsolidatedConfigManager:
                 role="Test role",
                 knowledge_bases=["docs"],
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -820,7 +829,7 @@ class TestConsolidatedConfigManager:
             )
             assert result == "Error: Duplicate knowledge bases are not allowed: docs."
 
-            config = Config.from_yaml(config_path)
+            config = load_config_yaml(config_path)
             assert config.agents["test_agent"].knowledge_bases == ["docs"]
         finally:
             config_path.unlink(missing_ok=True)
@@ -829,7 +838,7 @@ class TestConsolidatedConfigManager:
         """Test manage_agent supports learning and learning_mode create and update."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            Config(agents={}).save_to_yaml(config_path)
+            write_config_yaml(Config(agents={}), config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -853,7 +862,7 @@ class TestConsolidatedConfigManager:
             assert "Learning -> True" in update_result
             assert "Learning Mode -> agentic" in update_result
 
-            config = Config.from_yaml(config_path)
+            config = load_config_yaml(config_path)
             assert config.agents["learning_agent"].learning is True
             assert config.agents["learning_agent"].learning_mode == "agentic"
         finally:
@@ -868,7 +877,7 @@ class TestConsolidatedConfigManager:
                 display_name="Test Agent",
                 role="Test role",
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -895,7 +904,7 @@ class TestConsolidatedConfigManager:
         """Regression: memory tool must be accepted in create/update/validate."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            Config(agents={}).save_to_yaml(config_path)
+            write_config_yaml(Config(agents={}), config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -944,7 +953,7 @@ class TestConsolidatedConfigManager:
                 display_name="Agent 2",
                 role="Role 2",
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -959,7 +968,7 @@ class TestConsolidatedConfigManager:
             assert "test_team" in result
 
             # Verify team was created
-            config = Config.from_yaml(config_path)
+            config = load_config_yaml(config_path)
             assert "test_team" in config.teams
             assert config.teams["test_team"].display_name == "Test Team"
             assert config.teams["test_team"].agents == ["agent1", "agent2"]
@@ -1052,7 +1061,7 @@ class TestConsolidatedConfigManager:
                     },
                 },
             )
-            config.save_to_yaml(config_path)
+            write_config_yaml(config, config_path)
 
         try:
             cm = _config_manager(config_path)
@@ -1067,97 +1076,8 @@ class TestConsolidatedConfigManager:
             config_path.unlink(missing_ok=True)
 
 
-class TestGetAgentWorkerTools:
-    """Tests for Config.get_agent_worker_tools and get_agent_execution_scope."""
-
-    def test_agent_worker_tools_override_takes_precedence(self) -> None:
-        """Agent-level worker_tools should override defaults."""
-        config = Config(
-            defaults=DefaultsConfig(worker_tools=["shell", "file"]),
-            agents={
-                "code": AgentConfig(display_name="Code", worker_tools=["python"]),
-            },
-        )
-        assert config.get_agent_worker_tools("code", _runtime_paths()) == ["python"]
-
-    def test_worker_tools_fall_back_to_defaults(self) -> None:
-        """When agent has no worker_tools, defaults should apply."""
-        config = Config(
-            defaults=DefaultsConfig(worker_tools=["shell", "file"]),
-            agents={
-                "code": AgentConfig(display_name="Code"),
-            },
-        )
-        assert config.get_agent_worker_tools("code", _runtime_paths()) == ["shell", "file"]
-
-    def test_worker_tools_use_default_policy_when_unset(self) -> None:
-        """When worker_tools are omitted everywhere, the built-in worker routing policy applies."""
-        config = Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    tools=["calculator", "shell", "coding"],
-                    include_default_tools=False,
-                ),
-            },
-        )
-        assert config.get_agent_worker_tools("code", _runtime_paths()) == ["shell", "coding"]
-
-    def test_worker_tools_default_policy_returns_empty_list_for_primary_only_tools(self) -> None:
-        """Tools without a worker default should stay local when worker_tools are omitted."""
-        config = Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    tools=["calculator", "scheduler"],
-                    include_default_tools=False,
-                ),
-            },
-        )
-        assert config.get_agent_worker_tools("code", _runtime_paths()) == []
-
-    def test_worker_tools_empty_list_disables_routing(self) -> None:
-        """Empty worker_tools should explicitly disable worker routing for that agent."""
-        config = Config(
-            defaults=DefaultsConfig(worker_tools=["shell"]),
-            agents={
-                "research": AgentConfig(display_name="Research", worker_tools=[]),
-            },
-        )
-        assert config.get_agent_worker_tools("research", _runtime_paths()) == []
-
-    def test_defaults_empty_list_disables_worker_routing(self) -> None:
-        """Empty default worker_tools should disable worker routing for inheriting agents."""
-        config = Config(
-            defaults=DefaultsConfig(worker_tools=[]),
-            agents={
-                "code": AgentConfig(display_name="Code"),
-            },
-        )
-        assert config.get_agent_worker_tools("code", _runtime_paths()) == []
-
-    def test_worker_tools_expand_implied_tools(self) -> None:
-        """Worker tool resolution should preserve the normal preset expansion behavior."""
-        config = Config(
-            defaults=DefaultsConfig(worker_tools=["openclaw_compat", "python", "shell"]),
-            agents={
-                "code": AgentConfig(display_name="Code"),
-            },
-        )
-        assert config.get_agent_worker_tools("code", _runtime_paths()) == [
-            "openclaw_compat",
-            "python",
-            "shell",
-            "coding",
-            "duckduckgo",
-            "website",
-            "browser",
-            "scheduler",
-            "subagents",
-            "matrix_message",
-            "attachments",
-            "matrix_room",
-        ]
+class TestAgentWorkerScope:
+    """Tests for Config.get_agent_execution_scope."""
 
     def test_worker_scope_prefers_agent_override(self) -> None:
         """Agent-level worker_scope should override defaults."""
@@ -1192,12 +1112,15 @@ class TestWorkerGrantableCredentials:
     def test_worker_grantable_credentials_roundtrip_and_helper(self, tmp_path: Path) -> None:
         """Authored worker_grantable_credentials should survive YAML roundtrips and helper resolution."""
         config_path = tmp_path / "config.yaml"
-        Config(
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
-            defaults=DefaultsConfig(worker_grantable_credentials=["openai", "github_private"]),
-        ).save_to_yaml(config_path)
+        write_config_yaml(
+            Config(
+                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                defaults=DefaultsConfig(worker_grantable_credentials=["openai", "github_private"]),
+            ),
+            config_path,
+        )
 
-        reloaded = Config.from_yaml(config_path)
+        reloaded = load_config_yaml(config_path)
 
         assert reloaded.defaults.worker_grantable_credentials == ["openai", "github_private"]
         assert reloaded.get_worker_grantable_credentials() == frozenset({"openai", "github_private"})

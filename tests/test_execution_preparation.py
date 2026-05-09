@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from defusedxml.ElementTree import fromstring
-
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.execution_preparation import (
-    _build_matrix_prompt_with_thread_history,
+    _build_thread_history_messages,
     _build_unseen_context_messages,
-    _collect_history_messages,
     _fallback_static_token_budget,
 )
 from tests.conftest import make_visible_message
@@ -19,118 +16,36 @@ def _config() -> Config:
     return Config.model_validate({})
 
 
-def test_collect_history_messages_keeps_visible_body_only() -> None:
-    """History collection should ignore Matrix tool-trace metadata and keep only the visible body."""
-    messages = [
-        make_visible_message(
-            sender="@alice:localhost",
-            body="Worked on it",
-            content={"io.mindroom.tool_trace": {"version": 2, "events": [{"tool_name": "run_shell_command"}]}},
-        ),
-    ]
-
-    collected = _collect_history_messages(
-        messages,
-        max_messages=None,
-        max_message_length=None,
-        missing_sender_label=None,
-    )
-
-    assert collected == [("@alice:localhost", "Worked on it")]
-
-
-def test_collect_history_messages_leaves_no_trace_messages_unchanged() -> None:
-    """No-trace history collection should remain byte-identical to the prior output."""
-    messages = [make_visible_message(sender="@alice:localhost", body="Earlier context")]
-
-    collected = _collect_history_messages(
-        messages,
-        max_messages=None,
-        max_message_length=None,
-        missing_sender_label=None,
-    )
-
-    assert collected == [("@alice:localhost", "Earlier context")]
-
-
-def test_collect_history_messages_drops_tool_only_message() -> None:
-    """Tool-only metadata should not be promoted into visible history context."""
-    messages = [
-        make_visible_message(
-            sender="@alice:localhost",
-            content={"io.mindroom.tool_trace": {"version": 2, "events": [{"tool_name": "run_shell_command"}]}},
-        ),
-    ]
-
-    collected = _collect_history_messages(
-        messages,
-        max_messages=None,
-        max_message_length=None,
-        missing_sender_label=None,
-    )
-
-    assert collected == []
-
-
-def test_collect_history_messages_truncates_visible_body() -> None:
-    """Length caps should apply only to the visible body content."""
-    messages = [
-        make_visible_message(
-            sender="@alice:localhost",
-            body="ok" * 20,
-            content={"io.mindroom.tool_trace": {"version": 2, "events": [{"tool_name": "run_shell_command"}]}},
-        ),
-    ]
-
-    collected = _collect_history_messages(
-        messages,
-        max_messages=None,
-        max_message_length=20,
-        missing_sender_label=None,
-    )
-
-    assert collected[0][0] == "@alice:localhost"
-    assert collected[0][1].startswith("okok")
-    assert collected[0][1].endswith("…")
-    assert len(collected[0][1]) == 20
-
-
-def test_build_matrix_prompt_with_thread_history_truncates_visible_body_to_max_length() -> None:
-    """Rendered Matrix history bodies should respect max_message_length using only visible text."""
-    thread_history = [
-        make_visible_message(
-            sender="@alice:localhost",
-            body="ok" * 200,
-            content={"io.mindroom.tool_trace": {"version": 2, "events": [{"tool_name": "run_shell_command"}]}},
-        ),
-    ]
-
-    prompt = _build_matrix_prompt_with_thread_history(
-        "Follow-up",
-        thread_history,
-        max_message_length=200,
-        current_sender="@bob:localhost",
-    )
-
-    conversation_xml = prompt.split("Previous conversation in this thread:\n", 1)[1].split("\n\nCurrent message:\n", 1)[
-        0
-    ]
-    conversation = fromstring(conversation_xml)
-    message = conversation.find("msg")
-
-    assert message is not None
-    assert message.text is not None
-    assert message.text.startswith("okok")
-    assert message.text.endswith("…")
-    assert len(message.text) <= 200
-
-
 def test_fallback_static_token_budget_preserves_context_window_bounds() -> None:
     """Fallback static budgeting should keep missing and reserve-clamped bounds."""
     assert _fallback_static_token_budget(context_window=None, reserve_tokens=100) is None
     assert _fallback_static_token_budget(context_window=0, reserve_tokens=100) is None
     assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=800) == 500
     assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=100) == 900
+
+
+def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> None:
+    """Oversized Matrix fallback messages should stay in context with a capped body."""
+    long_body = "x" * 201
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body=long_body,
+                event_id="$long",
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        max_message_length=200,
+    )
+
+    assert len(messages) == 2
+    assert messages[0].role == "user"
+    assert messages[0].content == f"@alice:localhost: {'x' * 199}…"
+    assert long_body not in str(messages[0].content)
+    assert messages[1].content == "Current request"
 
 
 def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:

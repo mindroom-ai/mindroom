@@ -214,7 +214,7 @@ def test_has_missing_managed_avatars_detects_complete_avatar_set(
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars._has_missing_managed_avatars(config, runtime_paths)
+    assert not generate_avatars._missing_avatar_targets(config, runtime_paths)
 
 
 def test_has_missing_managed_avatars_ignores_direct_room_ids(
@@ -240,7 +240,7 @@ def test_has_missing_managed_avatars_ignores_direct_room_ids(
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars._has_missing_managed_avatars(config, runtime_paths)
+    assert not generate_avatars._missing_avatar_targets(config, runtime_paths)
 
 
 def test_has_missing_managed_avatars_ignores_full_room_aliases(
@@ -266,7 +266,7 @@ def test_has_missing_managed_avatars_ignores_full_room_aliases(
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars._has_missing_managed_avatars(config, runtime_paths)
+    assert not generate_avatars._missing_avatar_targets(config, runtime_paths)
 
 
 def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
@@ -305,7 +305,7 @@ def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars._has_missing_managed_avatars(config, runtime_paths)
+    assert not generate_avatars._missing_avatar_targets(config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -446,7 +446,7 @@ async def test_run_avatar_generation_accepts_null_optional_sections(
     tmp_path: Path,
     workspace_avatar_dir: Path,
 ) -> None:
-    """Avatar generation should accept legacy configs normalized by Config.from_yaml()."""
+    """Avatar generation should accept legacy configs normalized by load_config_yaml()."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"

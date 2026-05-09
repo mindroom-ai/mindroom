@@ -250,7 +250,7 @@ async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
 
     join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
     welcome_message.assert_awaited_once_with("!router-invited:localhost")
-    assert bot._invited_rooms == {"!router-invited:localhost"}
+    assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
     assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (
         '[\n  "!router-invited:localhost"\n]\n'
     )
@@ -326,7 +326,7 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
     join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
     bot.client.room_messages.assert_awaited_once()
     bot._send_response.assert_awaited_once()
-    assert bot._invited_rooms == {"!router-invited:localhost"}
+    assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
 
 
 @pytest.mark.asyncio
@@ -371,7 +371,7 @@ async def test_router_duplicate_invite_retries_failed_welcome_delivery(
     join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
     assert bot.client.room_messages.await_count == 2
     assert bot._send_response.await_count == 2
-    assert bot._invited_rooms == {"!router-invited:localhost"}
+    assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
 
 
 @pytest.mark.asyncio
@@ -471,7 +471,7 @@ async def test_router_ignores_invite_when_accept_invites_disabled(
     await bot._on_invite(room, event)
 
     join_room.assert_not_awaited()
-    assert bot._invited_rooms == set()
+    assert bot._room_lifecycle.invited_rooms == set()
     assert not _invited_rooms_path(config, ROUTER_AGENT_NAME).exists()
 
 
@@ -520,7 +520,7 @@ async def test_router_leave_unconfigured_rooms_preserves_persisted_invited_room(
 
     await bot.leave_unconfigured_rooms()
 
-    assert bot._invited_rooms == {"!router-invited:localhost"}
+    assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
     assert left_room_ids == ["!old-room:localhost"]
 
 
@@ -821,7 +821,7 @@ async def test_agent_refuses_invite_from_unauthorized_sender(
     await bot._on_invite(room, event)
 
     join_room.assert_not_awaited()
-    assert bot._invited_rooms == set()
+    assert bot._room_lifecycle.invited_rooms == set()
     assert not _invited_rooms_path(config, "agent1").exists()
 
 
@@ -902,7 +902,7 @@ async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatc
     await bot._on_invite(room, event)
 
     join_room.assert_awaited_once_with(bot.client, "!project-room:localhost")
-    assert bot._invited_rooms == {"!project-room:localhost"}
+    assert bot._room_lifecycle.invited_rooms == {"!project-room:localhost"}
     assert _invited_rooms_path(config, "agent1").read_text(encoding="utf-8") == '[\n  "!project-room:localhost"\n]\n'
 
 
@@ -973,7 +973,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
     join_room.assert_awaited_once_with(bot.client, "!project-room:localhost")
     invite_router.assert_not_awaited()
     router_bot.join_configured_rooms.assert_not_awaited()
-    assert router_bot._invited_rooms == set()
+    assert router_bot._room_lifecycle.invited_rooms == set()
     assert _invited_rooms_path(config, ROUTER_AGENT_NAME).exists() is False
 
 
@@ -1033,7 +1033,7 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
 
     await bot.leave_unconfigured_rooms()
 
-    assert bot._invited_rooms == {"!invited-room:localhost"}
+    assert bot._room_lifecycle.invited_rooms == {"!invited-room:localhost"}
     assert left_room_ids == ["!old-room:localhost"]
 
 
@@ -1067,5 +1067,5 @@ def test_load_invited_rooms_returns_empty_set_for_invalid_utf8(tmp_path: Path) -
         runtime_paths=runtime_paths_for(config),
     )
 
-    assert bot._load_invited_rooms() == set()
-    assert bot._invited_rooms == set()
+    assert bot._room_lifecycle.load_invited_rooms() == set()
+    assert bot._room_lifecycle.invited_rooms == set()

@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 from contextlib import AsyncExitStack
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 import mcp.types as mcp_types
@@ -71,14 +71,6 @@ class MCPServerManager:
             raise state.last_error
         msg = f"MCP server '{server_id}' is not connected"
         raise MCPConnectionError(server_id, msg)
-
-    def get_catalog_for_tool(self, tool_name: str) -> MCPServerCatalog:
-        """Return the cached catalog for one dynamic MindRoom MCP tool."""
-        server_id = mcp_server_id_from_tool_name(tool_name)
-        if server_id is None:
-            msg = f"Tool '{tool_name}' is not an MCP tool"
-            raise ValueError(msg)
-        return self.get_catalog(server_id)
 
     async def sync_servers(self, config: Config) -> set[str]:
         """Reconcile live server sessions against the active config."""
@@ -365,10 +357,8 @@ class MCPServerManager:
             tool_name=mcp_tool_name(server_id),
             tool_prefix=tool_prefix,
             tools=tuple(filtered_tools),
-            server_info=initialize_result.serverInfo,
             instructions=initialize_result.instructions,
             catalog_hash=catalog_hash,
-            discovered_at=datetime.now(UTC),
         )
 
     def _build_message_handler(self, server_id: str) -> MessageHandlerFnT:

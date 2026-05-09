@@ -277,11 +277,6 @@ class _SqliteEventCacheRuntime:
         return self._db
 
     @property
-    def room_locks(self) -> dict[str, _RoomLockEntry]:
-        """Return the cached room-lock table for observability and tests."""
-        return self._room_locks
-
-    @property
     def is_initialized(self) -> bool:
         """Return whether the SQLite connection is currently open."""
         return self._db is not None
@@ -629,28 +624,6 @@ class SqliteEventCache:
                 mxc_url=mxc_url,
                 text=text,
                 cached_at=time.time(),
-            ),
-        )
-
-    async def replace_thread(
-        self,
-        room_id: str,
-        thread_id: str,
-        events: list[dict[str, Any]],
-        *,
-        validated_at: float | None = None,
-    ) -> None:
-        """Atomically replace one cached thread snapshot."""
-        await self._write_operation(
-            room_id,
-            operation="replace_thread",
-            disabled_result=None,
-            writer=lambda db: sqlite_event_cache_threads.replace_thread_locked(
-                db,
-                room_id=room_id,
-                thread_id=thread_id,
-                events=events,
-                validated_at=time.time() if validated_at is None else validated_at,
             ),
         )
 

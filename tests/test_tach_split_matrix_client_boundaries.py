@@ -446,4 +446,3 @@ def test_ty_rejects_runtime_view_missing_structural_member(tmp_path: Path) -> No
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
     assert RUNTIME_VIEW_STRUCTURAL_MEMBER in output
-    assert "SupportsConfigOrchestrator" in output

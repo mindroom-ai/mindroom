@@ -34,6 +34,7 @@ from mindroom.runtime_support import (
     _initialize_event_cache_best_effort,
     sync_owned_runtime_support,
 )
+from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -122,7 +123,7 @@ async def _assert_thread_lookup_behavior(
     root_event: dict[str, object],
     reply_event: dict[str, object],
 ) -> None:
-    await cache.replace_thread(room_id, thread_id, [reply_event, root_event], validated_at=100.0)
+    await _replace_thread(cache, room_id, thread_id, [reply_event, root_event], validated_at=100.0)
 
     cached_thread = await cache.get_thread_events(room_id, thread_id)
     assert cached_thread is not None
@@ -559,7 +560,7 @@ async def test_postgres_event_cache_recovers_after_backend_connection_terminatio
 
     await cache.initialize()
     try:
-        await cache.replace_thread(room_id, thread_id, [root_event], validated_at=100.0)
+        await _replace_thread(cache, room_id, thread_id, [root_event], validated_at=100.0)
         assert cache._runtime.db is not None
         cursor = await cache._runtime.db.execute("SELECT pg_backend_pid()")
         row = await cursor.fetchone()
@@ -614,7 +615,7 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
 
     await cache.initialize()
     try:
-        await cache.replace_thread(room_id, thread_id, [root_event], validated_at=100.0)
+        await _replace_thread(cache, room_id, thread_id, [root_event], validated_at=100.0)
         cache._runtime.record_pending_thread_invalidation(
             room_id,
             thread_id,
@@ -663,7 +664,7 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
 
     await cache.initialize()
     try:
-        await cache.replace_thread(room_id, thread_id, [root_event], validated_at=50.0)
+        await _replace_thread(cache, room_id, thread_id, [root_event], validated_at=50.0)
         cache._runtime.record_pending_room_invalidation(
             room_id,
             invalidated_at=100.0,
@@ -741,7 +742,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
 
     await cache.initialize()
     try:
-        await cache.replace_thread(room_id, thread_id, [root_event], validated_at=50.0)
+        await _replace_thread(cache, room_id, thread_id, [root_event], validated_at=50.0)
         cache._runtime.record_pending_thread_invalidation(
             room_id,
             thread_id,

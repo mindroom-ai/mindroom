@@ -19,7 +19,6 @@ from mindroom.constants import (
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
     _calculate_event_size,
-    _clear_oversized_nonterminal_streaming_edit_rate_limits,
     _create_preview,
     _is_edit_message,
     _oversized_nonterminal_streaming_edit_sent_at,
@@ -72,7 +71,7 @@ def test_oversized_nonterminal_streaming_edit_rate_limit_prunes_expired_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Oversized streaming-edit rate state should not retain old streams forever."""
-    _clear_oversized_nonterminal_streaming_edit_rate_limits()
+    _oversized_nonterminal_streaming_edit_sent_at.clear()
     body = "x" * 40000
 
     def oversized_edit_content(original_event_id: str) -> dict[str, object]:

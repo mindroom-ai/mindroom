@@ -604,7 +604,7 @@ class TestCredentialsSync:
         """Test that env sync does NOT overwrite legacy credentials (no _source)."""
         cm = CredentialsManager(base_path=temp_credentials_dir)
         # Legacy credential without _source field
-        cm.set_api_key("openai", "legacy-key")
+        cm.save_credentials("openai", {"api_key": "legacy-key"})
 
         monkeypatch.setenv("OPENAI_API_KEY", "env-key")
 
@@ -815,8 +815,8 @@ class TestCredentialsSync:
     def test_get_api_key_for_provider(self, credentials_manager: CredentialsManager) -> None:
         """Test getting API key for different providers."""
         # Set up test data
-        credentials_manager.set_api_key("openai", "test-openai-key")
-        credentials_manager.set_api_key("google", "test-google-key")
+        credentials_manager.save_credentials("openai", {"api_key": "test-openai-key"})
+        credentials_manager.save_credentials("google", {"api_key": "test-google-key"})
         runtime_paths = _runtime_paths(
             credentials_manager.storage_root,
             shared_credentials_dir=credentials_manager.base_path,

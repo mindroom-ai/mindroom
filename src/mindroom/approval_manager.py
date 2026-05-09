@@ -327,37 +327,6 @@ class _ApprovalManager:
             with self._live_lock:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
 
-    async def resolve_approval(
-        self,
-        *,
-        card_event_id: str,
-        room_id: str,
-        status: _ResolutionStatus,
-        reason: str | None = None,
-        resolved_by: str | None = None,
-    ) -> ApprovalActionResult:
-        """Emit a terminal edit for one approval card and then release any live waiter."""
-        pending = await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
-        if pending is None:
-            return ApprovalActionResult(consumed=False, resolved=False)
-        return await self._resolve_live_response(
-            pending=pending,
-            status=status,
-            reason=reason,
-            resolved_by=resolved_by,
-        )
-
-    async def get_pending_approval(
-        self,
-        room_id: str,
-        approval_id: str,
-    ) -> PendingApproval | None:
-        """Return a pending approval by id only when this process has a live waiter."""
-        card_event_id = self._live_card_event_id_for_approval(approval_id)
-        if card_event_id is None:
-            return None
-        return await self._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
-
     async def discard_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
         """Expire cached, router-authored approval cards after startup."""
         transport_sender = self._transport_sender_id()
@@ -1034,10 +1003,6 @@ class _ApprovalManager:
     def _forget_cancelled_card_event_id(self, card_event_id: str) -> None:
         with self._live_lock:
             self._cancelled_card_event_ids.discard(card_event_id)
-
-    def _resolved_card_event_ids_contains(self, card_event_id: str) -> bool:
-        with self._live_lock:
-            return card_event_id in self._resolved_card_event_ids
 
     def _cancelled_card_event_ids_contains(self, card_event_id: str) -> bool:
         with self._live_lock:

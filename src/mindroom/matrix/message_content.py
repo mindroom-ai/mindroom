@@ -357,8 +357,3 @@ def _clean_expired_cache() -> None:
             expired_entries=len(expired_keys),
             evicted_entries=evicted_entries,
         )
-
-
-def _clear_mxc_cache() -> None:
-    """Clear the entire MXC cache. Useful for testing."""
-    _mxc_cache.clear()

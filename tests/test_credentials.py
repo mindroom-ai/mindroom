@@ -13,8 +13,7 @@ from mindroom.api.credentials import RequestCredentialsTarget
 from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials import (
     CredentialsManager,
-    _get_credentials_manager,
-    _merge_scoped_credentials,
+    _merge_credential_layers,
     get_runtime_credentials_manager,
     load_scoped_credentials,
     save_scoped_credentials,
@@ -71,7 +70,7 @@ class TestCredentialsManager:
         config_path = tmp_path / "config.yaml"
         config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
         runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
-        manager = CredentialsManager(constants_mod._credentials_dir(runtime_paths=runtime_paths))
+        manager = CredentialsManager(runtime_paths.storage_root / "credentials")
         assert manager.base_path == tmp_path / "credentials"
         assert manager.base_path.exists()
 
@@ -1023,11 +1022,7 @@ class TestCredentialsManager:
         worker_manager = manager.for_worker("worker-a")
         worker_manager.save_credentials("google", {"api_key": "worker-key", "_source": "ui"})
 
-        merged = _merge_scoped_credentials(
-            "google",
-            base_manager=manager,
-            worker_manager=worker_manager,
-        )
+        merged = _merge_credential_layers(manager.load_credentials("google"), worker_manager.load_credentials("google"))
 
         assert merged == {"api_key": "worker-key", "_source": "ui", "shared_only": "yes"}
 
@@ -1055,7 +1050,7 @@ class TestCredentialsManager:
         manager = CredentialsManager(temp_credentials_dir)
 
         # Test getting API key from simple structure
-        manager.set_api_key("openai", "sk-test123")
+        manager.save_credentials("openai", {"api_key": "sk-test123"})
         assert manager.get_api_key("openai") == "sk-test123"
 
         # Test getting non-existent service
@@ -1065,50 +1060,6 @@ class TestCredentialsManager:
         manager.save_credentials("custom", {"token": "custom-token"})
         assert manager.get_api_key("custom", "token") == "custom-token"
         assert manager.get_api_key("custom", "api_key") is None
-
-    def test_set_api_key(self, temp_credentials_dir: Path) -> None:
-        """Test setting API keys in credentials."""
-        manager = CredentialsManager(temp_credentials_dir)
-
-        # Test setting new API key
-        manager.set_api_key("anthropic", "claude-key")
-        assert manager.get_api_key("anthropic") == "claude-key"
-
-        # Test updating existing API key
-        manager.set_api_key("anthropic", "new-claude-key")
-        assert manager.get_api_key("anthropic") == "new-claude-key"
-
-        # Test setting custom key name
-        manager.set_api_key("service", "value123", "custom_key")
-        creds = manager.load_credentials("service")
-        assert creds is not None
-        assert creds["custom_key"] == "value123"
-
-        # Test that other fields are preserved
-        manager.save_credentials("multi", {"field1": "value1", "api_key": "old"})
-        manager.set_api_key("multi", "new")
-        creds = manager.load_credentials("multi")
-        assert creds is not None
-        assert creds["api_key"] == "new"
-        assert creds["field1"] == "value1"
-
-    def test_encrypted_set_api_key_refuses_to_overwrite_unreadable_credentials(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """set_api_key should fail closed when encrypted mode cannot load an existing credential file."""
-        encryption_key = _test_encryption_key()
-        monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
-        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
-        creds_path = manager.get_credentials_path("oauth_service")
-        original_payload = b'{"refresh_token":"plaintext-refresh-token"}'
-        creds_path.write_bytes(original_payload)
-
-        with pytest.raises(ValueError, match="refusing to overwrite"):
-            manager.set_api_key("oauth_service", "new-api-key")
-
-        assert creds_path.read_bytes() == original_payload
 
 
 class TestGlobalCredentialsManager:
@@ -1122,13 +1073,15 @@ class TestGlobalCredentialsManager:
 
     def test_get_credentials_manager_singleton(self, tmp_path: Path) -> None:
         """Test that get_credentials_manager returns the same instance."""
-        manager1 = _get_credentials_manager(storage_root=tmp_path)
-        manager2 = _get_credentials_manager(storage_root=tmp_path)
+        runtime_paths = constants_mod.resolve_runtime_paths(storage_path=tmp_path)
+        manager1 = get_runtime_credentials_manager(runtime_paths)
+        manager2 = get_runtime_credentials_manager(runtime_paths)
         assert manager1 is manager2
 
     def test_global_manager_uses_explicit_storage_root(self, tmp_path: Path) -> None:
         """Test that global manager uses the provided storage root."""
-        manager = _get_credentials_manager(storage_root=tmp_path)
+        runtime_paths = constants_mod.resolve_runtime_paths(storage_path=tmp_path)
+        manager = get_runtime_credentials_manager(runtime_paths)
         assert manager.base_path == tmp_path / "credentials"
 
     def test_global_manager_uses_explicit_shared_credentials_path(
@@ -1192,9 +1145,11 @@ class TestGlobalCredentialsManager:
         first_root = tmp_path / "one"
         second_root = tmp_path / "two"
 
-        manager_one = _get_credentials_manager(storage_root=first_root)
+        first_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, storage_path=first_root)
+        second_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, storage_path=second_root)
 
-        manager_two = _get_credentials_manager(storage_root=second_root)
+        manager_one = get_runtime_credentials_manager(first_runtime_paths)
+        manager_two = get_runtime_credentials_manager(second_runtime_paths)
 
         assert manager_one.base_path == first_root / "credentials"
         assert manager_two.base_path == second_root / "credentials"

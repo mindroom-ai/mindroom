@@ -301,7 +301,6 @@ class AgentBot:
     _room_member_join_hooks_armed: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
-    _invited_rooms: set[str]
 
     def __init__(
         self,
@@ -356,7 +355,6 @@ class AgentBot:
                 on_router_invite_joined=lambda room_id: self._send_welcome_message_if_empty(room_id),
             ),
         )
-        self._invited_rooms = self._room_lifecycle.invited_rooms
         self._init_runtime_components()
 
     def _init_runtime_components(self) -> None:
@@ -845,26 +843,6 @@ class AgentBot:
             hook_registry=self.hook_registry,
             refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
         )
-
-    def _should_accept_invite(self) -> bool:
-        """Return whether this entity should accept one inbound room invite."""
-        return self._room_lifecycle.should_accept_invite()
-
-    def _should_persist_invited_rooms(self) -> bool:
-        """Return whether this entity persists invited room IDs across restarts."""
-        return self._room_lifecycle.should_persist_invited_rooms()
-
-    def _invited_rooms_path(self) -> Path:
-        """Return the durable path for invited room IDs for this entity."""
-        return self._room_lifecycle.invited_rooms_file_path()
-
-    def _load_invited_rooms(self) -> set[str]:
-        """Load invited rooms persisted for one eligible entity."""
-        return self._room_lifecycle.load_invited_rooms()
-
-    def _save_invited_rooms(self) -> None:
-        """Persist invited room IDs atomically for one eligible named agent."""
-        self._room_lifecycle.save_invited_rooms()
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""

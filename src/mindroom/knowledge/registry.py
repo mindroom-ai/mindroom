@@ -731,11 +731,6 @@ def publish_knowledge_index_from_state(
     return _publish_knowledge_index(key, knowledge=knowledge, state=state, metadata_path=metadata_path)
 
 
-def _published_indexed_count(index: _PublishedIndexHandle) -> int:
-    """Return the persisted indexed source file count."""
-    return index.state.indexed_count or 0
-
-
 def _same_physical_binding(key: PublishedIndexKey, refresh_target: KnowledgeRefreshTarget) -> bool:
     return (
         key.base_id == refresh_target.base_id
@@ -852,8 +847,3 @@ async def mark_knowledge_source_changed_async(
         execution_identity=execution_identity,
         reason=reason,
     )
-
-
-def _clear_published_indexes() -> None:
-    """Clear process-local read handles."""
-    _published_indexes.clear()

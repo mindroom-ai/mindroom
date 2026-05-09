@@ -17,6 +17,7 @@ from mindroom.config.main import Config, load_config
 from mindroom.handled_turns import HandledTurnLedger
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import managed_space_alias_localpart
+from tests.conftest import load_config_yaml
 
 _RUNTIME_GLOBAL_NAMES = {
     "MATRIX_HOMESERVER",
@@ -521,7 +522,7 @@ class TestResolveConfigRelativePath:
         )
         monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
 
-        Config.from_yaml(config_path)
+        load_config_yaml(config_path)
 
         resolved = constants_mod.resolve_config_relative_path(
             "${MINDROOM_STORAGE_PATH}/kb",
@@ -626,7 +627,7 @@ class TestResolveConfigRelativePath:
         )
         monkeypatch.setenv("OPENAI_API_KEY", "from-shell")
 
-        config = Config.from_yaml(config_path)
+        config = load_config_yaml(config_path)
         resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
         assert not hasattr(config, "runtime_paths")
@@ -646,7 +647,7 @@ class TestResolveConfigRelativePath:
         )
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
 
-        config = Config.from_yaml(config_path)
+        config = load_config_yaml(config_path)
         resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
         assert not hasattr(config, "runtime_paths")
@@ -698,7 +699,7 @@ class TestResolveConfigRelativePath:
         )
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
 
-        config = Config.from_yaml(config_path)
+        config = load_config_yaml(config_path)
         resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
         assert config.get_domain(resolved_runtime_paths) == "example.org"
@@ -723,7 +724,7 @@ class TestResolveConfigRelativePath:
         )
 
         with pytest.raises(ValidationError, match="conflicts with router"):
-            Config.from_yaml(config_path)
+            load_config_yaml(config_path)
 
     def test_config_from_yaml_rejects_root_space_alias_collision(
         self,
@@ -755,18 +756,7 @@ class TestResolveConfigRelativePath:
         )
 
         with pytest.raises(ValidationError, match="reserved root Space alias"):
-            Config.from_yaml(config_path)
-
-    def test_config_from_yaml_rejects_runtime_paths_and_config_path_together(self, tmp_path: Path) -> None:
-        """Config loads should not accept duplicated runtime context."""
-        config_path = tmp_path / "config.yaml"
-        config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
-            encoding="utf-8",
-        )
-        invalid_kwargs = {"runtime_paths": constants_mod.resolve_runtime_paths(config_path=config_path)}
-        with pytest.raises(TypeError):
-            Config.from_yaml(config_path, **invalid_kwargs)
+            load_config_yaml(config_path)
 
     def test_config_from_yaml_explicit_path_ignores_activated_runtime_storage(self, tmp_path: Path) -> None:
         """Explicit path reloads should stay pure and ignore compatibility-injected runtime storage."""
@@ -779,7 +769,7 @@ class TestResolveConfigRelativePath:
 
         constants_mod.resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_path)
 
-        config = Config.from_yaml(config_path)
+        config = load_config_yaml(config_path)
         resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
         assert not hasattr(config, "runtime_paths")

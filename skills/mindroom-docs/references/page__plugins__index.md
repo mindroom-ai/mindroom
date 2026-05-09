@@ -279,7 +279,7 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 | `description`  | string         | Brief description of what the tool does                                            |
 | `category`     | `ToolCategory` | Category for dashboard grouping (see values below)                                 |
 
-`ToolCategory` values: `COMMUNICATION`, `DEVELOPMENT`, `EMAIL`, `ENTERTAINMENT`, `INFORMATION`, `INTEGRATIONS`, `PRODUCTIVITY`, `RESEARCH`, `SHOPPING`, `SMART_HOME`, `SOCIAL`.
+`ToolCategory` values: `COMMUNICATION`, `DEVELOPMENT`, `EMAIL`, `ENTERTAINMENT`, `INFORMATION`, `INTEGRATIONS`, `PRODUCTIVITY`, `RESEARCH`, `SMART_HOME`, `SOCIAL`.
 
 **Optional fields:**
 

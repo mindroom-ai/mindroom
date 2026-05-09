@@ -201,11 +201,6 @@ def _storage_root_from_env_values(env_file_values: dict[str, str], *, config_dir
     return _resolve_runtime_relative_path(value, base_dir=config_dir)
 
 
-def _storage_root_from_env_path(env_path: Path) -> Path | None:
-    """Read MINDROOM_STORAGE_PATH from one env file when present."""
-    return _storage_root_from_env_values(_runtime_env_file_values_for_path(env_path), config_dir=env_path.parent)
-
-
 def resolve_runtime_paths(
     *,
     config_path: Path | None = None,
@@ -670,16 +665,6 @@ def tracking_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "tracking"
 
 
-def _memory_dir(runtime_paths: RuntimePaths) -> Path:
-    """Return the shared memory directory for one runtime context."""
-    return runtime_paths.storage_root / "memory"
-
-
-def _credentials_dir(runtime_paths: RuntimePaths) -> Path:
-    """Return the credentials directory for one runtime context."""
-    return runtime_paths.storage_root / "credentials"
-
-
 def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the encryption-keys directory for one runtime context."""
     return runtime_paths.storage_root / "encryption_keys"
@@ -797,16 +782,6 @@ def _find_config(*, process_env: Mapping[str, str]) -> Path:
         if path.exists():
             return path
     return _CONFIG_SEARCH_PATHS[-1]  # default to ~/.mindroom/config.yaml for creation
-
-
-def _set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) -> Path:
-    """Return the storage root for the updated primary runtime context."""
-    updated_runtime_paths = resolve_primary_runtime_paths(
-        config_path=runtime_paths.config_path,
-        storage_path=storage_path,
-        process_env=dict(runtime_paths.process_env),
-    )
-    return updated_runtime_paths.storage_root
 
 
 # Other constants

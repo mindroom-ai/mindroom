@@ -4072,6 +4072,7 @@ dev = [
     { name = "ruff" },
     { name = "tach" },
     { name = "ty" },
+    { name = "vulture" },
     { name = "zensical" },
 ]
 
@@ -4257,6 +4258,7 @@ dev = [
     { name = "ruff", specifier = ">=0.12.5" },
     { name = "tach", specifier = ">=0.34.1" },
     { name = "ty", specifier = ">=0.0.17" },
+    { name = "vulture", specifier = ">=2.16" },
     { name = "zensical" },
 ]
 
@@ -8898,6 +8900,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/74/f7/f4ffba3e6a02729ccd15676ca99d4f968d8e4097775cebbd421bafc3fb02/vodozemac-0.9.0.post2-cp314-cp314t-musllinux_1_2_armv7l.whl", hash = "sha256:958ce6863ec696ed94e7ca63c4656e7866ed399ec1fa8faa490d4ab61d9381c1", size = 1039723, upload-time = "2026-02-16T11:20:38.644Z" },
     { url = "https://files.pythonhosted.org/packages/c4/4d/5347fbfc833f729f7fe70dee19efe2b779b752986adc641edc0417e265b8/vodozemac-0.9.0.post2-cp314-cp314t-musllinux_1_2_i686.whl", hash = "sha256:cdffbce3fdb146f37297fa08f3342fd272bc25ef52bb02bccbef93ad54028ff7", size = 1017331, upload-time = "2026-02-16T11:21:25.421Z" },
     { url = "https://files.pythonhosted.org/packages/c4/74/2a1cc1b7268780fa2cb8eddbec4176248a7732c3ae80557b0c14dc20e5b0/vodozemac-0.9.0.post2-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:7e55493d129d63d7843e1d72e8782d653688318000d3c1c4bf2faf5b5c407b8a", size = 982985, upload-time = "2026-02-16T11:21:26.679Z" },
+]
+
+[[package]]
+name = "vulture"
+version = "2.16"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/66/3e/4d08c5903b2c0c70cad583c170cc4a663fc6a61e2ad00b711fcda61358cd/vulture-2.16.tar.gz", hash = "sha256:f8d9f6e2af03011664a3c6c240c9765b3f392917d3135fddca6d6a68d359f717", size = 52680, upload-time = "2026-03-25T14:41:27.141Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f5/be/f935130312330614811dae2ea9df3f395f6d63889eb6c2e68c14507152ee/vulture-2.16-py3-none-any.whl", hash = "sha256:6e0f1c312cef1c87856957e5c2ca9608834a7c794c2180477f30bf0e4cc58eee", size = 26993, upload-time = "2026-03-25T14:41:26.21Z" },
 ]
 
 [[package]]

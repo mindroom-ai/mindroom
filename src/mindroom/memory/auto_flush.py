@@ -52,7 +52,6 @@ class _FlushSessionEntry(TypedDict, total=False):
     first_dirty_at: int
     last_seen_at: int
     last_session_updated_at: int | None
-    last_flushed_at: int | None
     last_flushed_session_updated_at: int | None
     next_attempt_at: int | None
     consecutive_failures: int
@@ -720,7 +719,6 @@ class MemoryAutoFlushWorker:
                 has_newer_dirty_marks if isinstance(flush_started_dirty_revision, int) else has_newer_updates
             )
             latest_entry["in_flight"] = False
-            latest_entry["last_flushed_at"] = now
             if isinstance(latest_session_updated_at, int):
                 latest_entry["last_session_updated_at"] = latest_session_updated_at
             if isinstance(session_updated_at, int):

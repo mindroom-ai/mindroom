@@ -18,6 +18,7 @@ from mindroom.config.matrix import MatrixSpaceConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.self_config import SelfConfigTools
+from tests.conftest import load_config_yaml, write_config_yaml
 
 _DEFAULT_MODELS = {"default": ModelConfig(provider="openai", id="gpt-4o")}
 _BOUND_RUNTIME_PATHS: dict[int, RuntimePaths] = {}
@@ -39,7 +40,7 @@ def _make_config(
     config_dir = Path(tempfile.mkdtemp(prefix="mindroom-self-config-"))
     config_path = config_dir / "config.yaml"
     runtime_paths = resolve_runtime_paths(config_path=config_path)
-    config.save_to_yaml(config_path)
+    write_config_yaml(config, config_path)
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound, config_path
@@ -74,11 +75,14 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
-    Config(
-        agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
-        models=_DEFAULT_MODELS,
-        plugins=["./plugins/bad-name"],
-    ).save_to_yaml(config_path)
+    write_config_yaml(
+        Config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
+            models=_DEFAULT_MODELS,
+            plugins=["./plugins/bad-name"],
+        ),
+        config_path,
+    )
     return config_path
 
 
@@ -109,11 +113,14 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_pl
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
-    Config(
-        agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
-        models=_DEFAULT_MODELS,
-        plugins=["./plugins/demo"],
-    ).save_to_yaml(config_path)
+    write_config_yaml(
+        Config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[])},
+            models=_DEFAULT_MODELS,
+            plugins=["./plugins/demo"],
+        ),
+        config_path,
+    )
     return config_path
 
 
@@ -208,7 +215,7 @@ class TestUpdateOwnConfig:
             assert "Role" in result
 
             # Verify persisted
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].role == "New role"
         finally:
             config_path.unlink(missing_ok=True)
@@ -243,7 +250,7 @@ class TestUpdateOwnConfig:
             result = tool.update_own_config(tools=["googlesearch", "calculator"])
             assert "Successfully" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["googlesearch", "calculator"]
         finally:
             config_path.unlink(missing_ok=True)
@@ -258,7 +265,7 @@ class TestUpdateOwnConfig:
             result = tool.update_own_config(tools=["openclaw_compat", "python"])
             assert "Successfully" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["openclaw_compat", "python"]
             effective = reloaded.get_agent_tools("coder")
             assert effective[0] == "openclaw_compat"
@@ -303,7 +310,7 @@ class TestUpdateOwnConfig:
             assert "privileged tools" in result
             assert "config_manager" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["self_config"]
         finally:
             config_path.unlink(missing_ok=True)
@@ -321,7 +328,7 @@ class TestUpdateOwnConfig:
             assert "privileged tools" in result
             assert "config_manager" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].include_default_tools is False
         finally:
             config_path.unlink(missing_ok=True)
@@ -337,7 +344,7 @@ class TestUpdateOwnConfig:
             result = tool.update_own_config(include_default_tools=True)
             assert "Successfully" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].include_default_tools is True
         finally:
             config_path.unlink(missing_ok=True)
@@ -355,7 +362,7 @@ class TestUpdateOwnConfig:
             assert "Error" in result
             assert "config_manager" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].include_default_tools is False
         finally:
             config_path.unlink(missing_ok=True)
@@ -380,7 +387,7 @@ class TestUpdateOwnConfig:
 
             assert "Successfully" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].model_dump(exclude_none=True)["tools"] == [
                 {"shell": {"enable_run_shell_command": False}},
                 "calculator",
@@ -422,7 +429,7 @@ class TestUpdateOwnConfig:
             result = tool.update_own_config(knowledge_bases=["docs"])
             assert "Successfully" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].knowledge_bases == ["docs"]
         finally:
             config_path.unlink(missing_ok=True)
@@ -468,7 +475,7 @@ class TestUpdateOwnConfig:
             )
             assert "Successfully" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].display_name == "Super Coder"
             assert reloaded.agents["coder"].role == "Write awesome code"
             assert reloaded.agents["coder"].markdown is False
@@ -497,7 +504,7 @@ class TestUpdateOwnConfig:
             result = tool.update_own_config(thread_mode="invalid")
             assert "Error validating configuration" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].thread_mode == "thread"
         finally:
             config_path.unlink(missing_ok=True)
@@ -511,7 +518,7 @@ class TestUpdateOwnConfig:
         )
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
             config_path = Path(tmp.name)
-        config.save_to_yaml(config_path)
+        write_config_yaml(config, config_path)
 
         try:
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
@@ -520,7 +527,7 @@ class TestUpdateOwnConfig:
             assert "reserved root Space alias" in result
             assert "Changes were NOT applied." in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].rooms == ["lobby"]
         finally:
             config_path.unlink(missing_ok=True)
@@ -535,7 +542,7 @@ class TestUpdateOwnConfig:
             result = tool.update_own_config(num_history_runs=2, num_history_messages=10)
             assert "Error validating configuration" in result
 
-            reloaded = Config.from_yaml(config_path)
+            reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].num_history_runs is None
             assert reloaded.agents["coder"].num_history_messages is None
         finally:

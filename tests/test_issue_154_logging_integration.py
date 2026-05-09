@@ -249,11 +249,17 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         thread_id="$thread-root:localhost",
         reply_to_event_id="$event:localhost",
     )
-    dispatch_context = ToolDispatchContext.from_target(
-        agent_name="general",
-        runtime_paths=runtime_paths,
-        requester_user_id="@user:localhost",
-        target=target,
+    dispatch_context = ToolDispatchContext(
+        execution_identity=build_tool_execution_identity(
+            channel="matrix",
+            agent_name="general",
+            runtime_paths=runtime_paths,
+            requester_id="@user:localhost",
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            resolved_thread_id=target.resolved_thread_id,
+            session_id=target.session_id,
+        ),
     )
     model = _LoggingModel()
     install_llm_request_logging(

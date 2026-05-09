@@ -877,10 +877,6 @@ class StreamingResponse:
         self.chars_since_last_update = 0
         self.placeholder_progress_sent = self._last_placeholder_progress_sent
 
-    def apply_worker_progress_event(self, event: WorkerProgressEvent) -> bool:
-        """Update side-band warmup state from one routed worker progress event."""
-        return self._warmup_state.apply_event(event)
-
     def _resolve_stream_status(self, *, is_final: bool, stream_status: str | None) -> str:
         """Return the content status for the current send or edit."""
         if stream_status is not None:

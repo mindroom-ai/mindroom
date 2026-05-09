@@ -18,16 +18,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 import pytest_asyncio
+import yaml
 from aioresponses import aioresponses
 
 import mindroom.bot  # noqa: F401
 from mindroom.bot import AgentBot, TeamBot
-from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.config.main import Config, load_config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.history import prepare_history_for_run as prepare_history_for_run_for_test
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -50,6 +52,7 @@ __all__ = [
     "TEST_PASSWORD",
     "FakeCredentialsManager",
     "aioresponse",
+    "bind_mock_config_cache",
     "bind_runtime_paths",
     "build_private_template_dir",
     "bypass_authorization",
@@ -64,6 +67,7 @@ __all__ = [
     "install_generate_response_mock",
     "install_runtime_cache_support",
     "install_send_response_mock",
+    "load_config_yaml",
     "make_conversation_cache_mock",
     "make_event_cache_mock",
     "make_event_cache_write_coordinator_mock",
@@ -73,6 +77,7 @@ __all__ = [
     "orchestrator_runtime_paths",
     "patch_response_runner_module",
     "postgres_event_cache_url",
+    "prepare_history_for_run_for_test",
     "prepared_dispatch_result",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
@@ -87,6 +92,7 @@ __all__ = [
     "test_runtime_paths",
     "unwrap_extracted_collaborator",
     "wrap_extracted_collaborators",
+    "write_config_yaml",
 ]
 
 _TEST_RUNTIME_PATHS_BY_CONFIG_ID: dict[int, RuntimePaths] = {}
@@ -602,6 +608,28 @@ def orchestrator_runtime_paths(
     )
 
 
+def load_config_yaml(config_path: Path) -> Config:
+    """Load a config YAML file through the production runtime-aware loader."""
+    return load_config(resolve_runtime_paths(config_path=Path(config_path).expanduser().resolve()))
+
+
+def write_config_yaml(config: Config, config_path: Path) -> None:
+    """Write a test config using the authored YAML representation."""
+    path = Path(config_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        yaml.dump(
+            config.authored_model_dump(),
+            f,
+            default_flow_style=False,
+            sort_keys=True,
+            allow_unicode=True,
+            width=120,
+        )
+    safe_replace(tmp_path, path)
+
+
 def bind_runtime_paths(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -615,6 +643,14 @@ def bind_runtime_paths(
         bound.defaults.coalescing.upload_grace_ms = 0
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
     return bound
+
+
+def bind_mock_config_cache(mock_config: MagicMock, runtime_root: Path) -> Path:
+    """Give a config mock the cache path contract used by orchestrator init."""
+    cache_path = runtime_root / "event_cache.db"
+    mock_config.cache.backend = "sqlite"
+    mock_config.cache.resolve_db_path.return_value = cache_path
+    return cache_path
 
 
 def runtime_paths_for(config: Config) -> RuntimePaths:

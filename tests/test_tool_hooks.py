@@ -56,11 +56,11 @@ from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     ToolRuntimeContext,
     emit_custom_event,
-    get_plugin_state_root,
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
@@ -304,7 +304,12 @@ async def _wait_for_sent_pending(
                     content = sender.await_args.args[2]
                 assert isinstance(content, dict)
                 approval_id = content["approval_id"]
-                pending = await store.get_pending_approval(room_id, approval_id)
+                card_event_id = store._live_card_event_id_for_approval(approval_id)
+                pending = (
+                    None
+                    if card_event_id is None
+                    else await store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
+                )
                 if pending is not None:
                     return pending
             await asyncio.sleep(0)
@@ -1644,12 +1649,11 @@ async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: 
     assert store is not None
     pending = await _wait_for_sent_pending(store, client.room_send)
 
-    await store.resolve_approval(
-        card_event_id=pending.card_event_id,
-        room_id=pending.room_id,
+    await _resolve_pending_approval(
+        store,
+        pending,
         status="approved",
         reason=None,
-        resolved_by="@user:localhost",
     )
     await asyncio.to_thread(thread.join, 1)
 
@@ -1712,12 +1716,11 @@ async def test_sync_tool_approval_aexecute_resumes_on_runtime_loop(tmp_path: Pat
         store = get_approval_store()
         assert store is not None
         pending = await _wait_for_sent_pending(store, client.room_send)
-        await store.resolve_approval(
-            card_event_id=pending.card_event_id,
-            room_id=pending.room_id,
+        await _resolve_pending_approval(
+            store,
+            pending,
             status="approved",
             reason=None,
-            resolved_by="@user:localhost",
         )
         return await task
 
@@ -1883,12 +1886,11 @@ async def test_tool_approval_scripts_cannot_mutate_rendered_approval_payload(tmp
     approval_payload = sender.await_args.args[2]
     assert approval_payload["arguments"] == {"payload": "original"}
 
-    await store.resolve_approval(
-        card_event_id=pending.card_event_id,
-        room_id=pending.room_id,
+    await _resolve_pending_approval(
+        store,
+        pending,
         status="approved",
         reason=None,
-        resolved_by="@user:localhost",
     )
     await asyncio.to_thread(thread.join, 1)
 
@@ -2038,11 +2040,10 @@ async def test_tool_approval_uses_transport_agent_for_detached_team_member_runs(
         pending = await _wait_for_sent_pending(store, sender)
         assert sender.await_args.args[:2] == ("!room:localhost", "$resolved-thread")
         assert sender.await_args.args[2]["agent_name"] == "code"
-        await store.resolve_approval(
-            card_event_id=pending.card_event_id,
-            room_id=pending.room_id,
+        await _resolve_pending_approval(
+            store,
+            pending,
             status="approved",
-            resolved_by="@user:localhost",
         )
         result = await task
 
@@ -2103,11 +2104,10 @@ async def test_tool_approval_uses_transport_agent_for_delegated_live_runs(tmp_pa
         pending = await _wait_for_sent_pending(store, sender)
         assert sender.await_args.args[:2] == ("!room:localhost", "$resolved-thread")
         assert sender.await_args.args[2]["agent_name"] == "code"
-        await store.resolve_approval(
-            card_event_id=pending.card_event_id,
-            room_id=pending.room_id,
+        await _resolve_pending_approval(
+            store,
+            pending,
             status="approved",
-            resolved_by="@user:localhost",
         )
         result = await task
 
@@ -2379,11 +2379,10 @@ async def test_tool_before_call_hooks_run_before_tool_approval_gate(tmp_path: Pa
         pending = await _wait_for_sent_pending(store, sender)
         assert seen == ["before"]
 
-        await store.resolve_approval(
-            card_event_id=pending.card_event_id,
-            room_id=pending.room_id,
+        await _resolve_pending_approval(
+            store,
+            pending,
             status="approved",
-            resolved_by="@user:localhost",
         )
         result = await task
 
@@ -2482,12 +2481,11 @@ async def test_tool_approval_deny_emits_after_call_as_blocked(tmp_path: Path) ->
         store = get_approval_store()
         assert store is not None
         pending = await _wait_for_sent_pending(store, sender)
-        await store.resolve_approval(
-            card_event_id=pending.card_event_id,
-            room_id=pending.room_id,
+        await _resolve_pending_approval(
+            store,
+            pending,
             status="denied",
             reason="Denied by dashboard user.",
-            resolved_by="@user:localhost",
         )
         result = await task
 
@@ -2968,11 +2966,3 @@ async def test_create_agent_prepends_bridge_to_real_tool_functions(tmp_path: Pat
         TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
-
-
-def test_get_plugin_state_root_rejects_invalid_plugin_name(tmp_path: Path) -> None:
-    """Tool runtime state helpers should reject path-like plugin names."""
-    runtime_paths = test_runtime_paths(tmp_path)
-
-    with pytest.raises(ValueError, match="Invalid plugin name"):
-        get_plugin_state_root("../../escaped", runtime_paths=runtime_paths)

@@ -507,12 +507,6 @@ def require_worker_key_for_scope(
     return worker_key
 
 
-def _is_unscoped_worker_key(worker_key: str) -> bool:
-    """Return whether a worker key uses the unscoped backend worker form."""
-    parts = worker_key.split(":")
-    return len(parts) >= 4 and parts[0] == "v1" and parts[2] == "unscoped"
-
-
 def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
     """Return the parsed scope discriminator for one resolved worker key."""
     parts = worker_key.split(":")

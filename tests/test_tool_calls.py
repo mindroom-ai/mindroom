@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -19,11 +20,24 @@ from mindroom.tool_system.tool_calls import (
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 
 @pytest.fixture(autouse=True)
-def reset_tool_call_loggers() -> None:
+def reset_tool_call_loggers() -> Iterator[None]:
     """Reset cached rotating loggers so tests do not leak global handler state."""
-    tool_calls._reset_tool_call_loggers_for_tests()
+
+    def cleanup() -> None:
+        for tool_call_logger in tool_calls._TOOL_CALL_LOGGERS.values():
+            for handler in list(tool_call_logger.handlers):
+                handler.close()
+                tool_call_logger.removeHandler(handler)
+        tool_calls._TOOL_CALL_LOGGERS.clear()
+
+    cleanup()
+    yield
+    cleanup()
 
 
 def _execution_identity() -> ToolExecutionIdentity:

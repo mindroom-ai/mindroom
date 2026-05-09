@@ -257,11 +257,6 @@ def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) ->
         return False
 
 
-def _git_metadata_present(root: Path) -> bool:
-    """Return whether root has cheap local Git metadata."""
-    return root.is_dir() and (root / ".git").exists()
-
-
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     """Check collection existence without constructing Agno Knowledge."""
     vector_db = ChromaDb(
@@ -764,12 +759,7 @@ class KnowledgeManager:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _git_syncing: bool = field(default=False, init=False)
-    _git_repo_present: bool = field(default=False, init=False)
-    _git_initial_sync_complete: bool = field(default=False, init=False)
-    _git_last_successful_sync_at: datetime | None = field(default=None, init=False)
     _git_last_successful_commit: str | None = field(default=None, init=False)
-    _git_last_error: str | None = field(default=None, init=False)
     _last_refresh_error: str | None = field(default=None, init=False)
     _git_lfs_checked: bool = field(default=False, init=False)
     _git_lfs_repository_ready: bool = field(default=False, init=False)
@@ -796,7 +786,6 @@ class KnowledgeManager:
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
-        self._git_repo_present = base_config.git is not None and _git_metadata_present(self.knowledge_path)
         persisted_state = self._load_persisted_index_state()
         self._persisted_collection_missing_on_init = self._persisted_collection_missing(persisted_state)
         collection_name = (
@@ -936,9 +925,6 @@ class KnowledgeManager:
         git_config = self._git_config()
         return bool(git_config and git_config.lfs)
 
-    def _mark_git_initial_sync_complete(self) -> None:
-        self._git_initial_sync_complete = True
-
     def _git_sync_timeout_seconds(self) -> float | None:
         git_config = self._git_config()
         if git_config is None:
@@ -1077,7 +1063,6 @@ class KnowledgeManager:
         runtime_paths = self.runtime_paths
         knowledge_root = self._knowledge_source_path()
         if await self._git_checkout_present():
-            self._git_repo_present = True
             await self._ensure_git_lfs_repository_ready(knowledge_root)
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
             expected_remote = credential_free_repo_url(git_config.repo_url)
@@ -1111,7 +1096,6 @@ class KnowledgeManager:
                 self._git_lfs_skip_smudge_env(git_config),
             ),
         )
-        self._git_repo_present = True
         await self._run_git(["remote", "set-url", "origin", clone_url], cwd=knowledge_root)
         await asyncio.to_thread(self._clear_git_lfs_hydrated_head)
         await self._ensure_git_lfs_repository_ready(knowledge_root)
@@ -1167,9 +1151,7 @@ class KnowledgeManager:
         if self._git_config() is not None:
             if self._git_tracked_relative_paths is None:
                 if not git_checkout_present(knowledge_root, timeout_seconds=self._git_sync_timeout_seconds()):
-                    self._git_repo_present = False
                     return []
-                self._git_repo_present = True
                 self._git_tracked_relative_paths = _git_tracked_relative_paths_from_checkout(
                     self.config,
                     self.base_id,
@@ -1408,22 +1390,10 @@ class KnowledgeManager:
         if git_config is None:
             return {"updated": False, "changed_count": 0, "removed_count": 0}
 
-        self._git_syncing = True
-        try:
-            async with self._git_sync_lock:
-                changed_files, removed_files, updated = await self._sync_git_source_once(git_config)
+        async with self._git_sync_lock:
+            changed_files, removed_files, updated = await self._sync_git_source_once(git_config)
             current_head = await self._git_rev_parse("HEAD")
-        except Exception as exc:
-            self._git_repo_present = await self._git_checkout_present()
-            self._git_last_error = redact_credentials_in_text(str(exc))
-            raise
-        finally:
-            self._git_syncing = False
-
-        self._git_repo_present = await self._git_checkout_present()
-        self._git_last_successful_sync_at = datetime.now(tz=UTC)
-        self._git_last_successful_commit = current_head
-        self._git_last_error = None
+            self._git_last_successful_commit = current_head
 
         if updated:
             logger.info(

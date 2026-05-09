@@ -65,7 +65,6 @@ def test_credential_service_policy_classifies_google_oauth_user_scope() -> None:
 
     assert policy.service == "google_drive_oauth"
     assert policy.worker_scope == "user"
-    assert policy.is_local_only_shared_service is True
     assert policy.uses_primary_runtime_scoped_credentials is True
     assert policy.uses_local_shared_credentials is False
     assert policy.worker_grantable_supported is False
@@ -97,7 +96,6 @@ def test_credential_service_policy_classifies_regular_shared_service() -> None:
 
     assert policy.service == "openai"
     assert policy.worker_scope == "shared"
-    assert policy.is_local_only_shared_service is False
     assert policy.uses_primary_runtime_scoped_credentials is False
     assert policy.uses_local_shared_credentials is False
     assert policy.worker_grantable_supported is True

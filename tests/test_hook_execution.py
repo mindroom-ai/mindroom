@@ -38,7 +38,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     emit_custom_event,
-    get_plugin_state_root,
     tool_runtime_context,
 )
 from tests.conftest import (
@@ -532,7 +531,7 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
     with tool_runtime_context(tool_context):
         await emit_custom_event("todo", "todo:item_added", {"item_id": "123"})
 
-    expected_root = get_plugin_state_root("todo-plugin", runtime_paths=runtime_paths)
+    expected_root = runtime_paths.storage_root / "plugins" / "todo-plugin"
     assert seen == [("123", "todo", expected_root, {"name": "Lobby"}, True, "!todo-room:localhost")]
     assert expected_root.is_dir()
     client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")

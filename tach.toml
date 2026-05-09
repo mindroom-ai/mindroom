@@ -333,14 +333,6 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.api.runtime_reload"
-depends_on = [
-    "mindroom.api.config_lifecycle",
-    "mindroom.constants",
-    "mindroom.workers.runtime",
-]
-
-[[modules]]
 path = "mindroom.api.homeassistant_integration"
 depends_on = [
     "mindroom.api.auth",

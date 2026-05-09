@@ -94,16 +94,6 @@ class ConversationEventCache(Protocol):
     async def store_mxc_text(self, room_id: str, mxc_url: str, text: str) -> None:
         """Insert or replace one durably cached MXC text payload."""
 
-    async def replace_thread(
-        self,
-        room_id: str,
-        thread_id: str,
-        events: list[dict[str, Any]],
-        *,
-        validated_at: float | None = None,
-    ) -> None:
-        """Atomically replace one cached thread snapshot."""
-
     async def replace_thread_if_not_newer(
         self,
         room_id: str,

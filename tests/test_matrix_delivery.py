@@ -10,6 +10,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.matrix.client_delivery import send_message_result
+from tests.conftest import load_config_yaml
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -37,7 +38,7 @@ def test_matrix_delivery_yaml_opt_in(tmp_path) -> None:  # noqa: ANN001
         encoding="utf-8",
     )
 
-    config = Config.from_yaml(config_path)
+    config = load_config_yaml(config_path)
 
     assert config.matrix_delivery.ignore_unverified_devices is True
 

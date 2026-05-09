@@ -12,13 +12,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
-    from mindroom.runtime_protocols import (
-        OrchestratorRuntime,
-        SupportsClientConfig,
-        SupportsClientConfigOrchestrator,
-        SupportsConfig,
-        SupportsConfigOrchestrator,
-    )
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
 
 
@@ -70,20 +64,3 @@ class BotRuntimeState:
     def mark_runtime_started(self) -> None:
         """Record the runtime start time for this bot start."""
         self.runtime_started_at = time.time()
-
-
-if TYPE_CHECKING:
-
-    def _check_runtime_state_satisfies_narrow_protocols(
-        view: BotRuntimeView,
-    ) -> None:
-        """Type-only proof that BotRuntimeView satisfies every narrow protocol.
-
-        This function is never called at runtime. The assignments below
-        will fail static type-check if any narrow protocol drifts out of
-        the BotRuntimeView surface.
-        """
-        _a: SupportsConfig = view
-        _b: SupportsClientConfig = view
-        _c: SupportsConfigOrchestrator = view
-        _d: SupportsClientConfigOrchestrator = view

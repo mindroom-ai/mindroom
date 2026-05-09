@@ -20,14 +20,13 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
     AgentMatrixUser,
-    _ensure_all_agent_users,
     _get_agent_credentials,
     _register_user,
     _save_agent_credentials,
     create_agent_user,
     login_agent_user,
 )
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -916,63 +915,3 @@ class TestAgentLogin:
 
             with pytest.raises(ValueError, match="Failed to login"):
                 await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
-
-
-class TestEnsureAllAgentUsers:
-    """Test ensuring all agents have user accounts."""
-
-    @pytest.mark.asyncio
-    @patch("mindroom.matrix.users.create_agent_user")
-    async def test_ensure_all_agent_users(
-        self,
-        mock_create_user: AsyncMock,
-        tmp_path: Path,
-    ) -> None:
-        """Test ensuring all configured agents have users."""
-        config = _bound_agent_manager_config(tmp_path)
-
-        # Mock user creation - router is created first, then configured agents
-        mock_users = []
-        # Router user
-        mock_users.append(AgentMatrixUser("router", "@mindroom_router:localhost", "RouterAgent", "router_pass"))
-        # Create mock users for all configured agents
-        for agent_name in config.agents:
-            user_id = f"@mindroom_{agent_name}:localhost"
-            display_name = config.agents[agent_name].display_name or f"{agent_name.title()}Agent"
-            mock_users.append(AgentMatrixUser(agent_name, user_id, display_name, f"pass_{agent_name}"))
-        # Create mock users for all configured teams
-        for team_name in config.teams:
-            user_id = f"@mindroom_{team_name}:localhost"
-            display_name = config.teams[team_name].display_name or f"{team_name.title()}Team"
-            mock_users.append(AgentMatrixUser(team_name, user_id, display_name, f"pass_{team_name}"))
-
-        mock_create_user.side_effect = mock_users
-
-        agent_users = await _ensure_all_agent_users("http://localhost:8008", config, runtime_paths_for(config))
-
-        # Should have router + all configured agents + all configured teams
-        expected_count = 1 + len(config.agents) + len(config.teams)
-        assert len(agent_users) == expected_count
-        assert "router" in agent_users
-        assert mock_create_user.call_count == expected_count
-
-    @pytest.mark.asyncio
-    @patch("mindroom.matrix.users.create_agent_user")
-    async def test_ensure_all_agent_users_with_error(
-        self,
-        mock_create_user: AsyncMock,
-        tmp_path: Path,
-    ) -> None:
-        """Test handling errors when creating agent users."""
-        config = _bound_agent_manager_config(tmp_path)
-        mock_create_user.side_effect = [
-            AgentMatrixUser("router", "@mindroom_router:localhost", "RouterAgent", "router_pass"),
-            AgentMatrixUser("calculator", "@mindroom_calculator:localhost", "CalculatorAgent", "pass_calculator"),
-            Exception("Failed to create user"),
-            AgentMatrixUser("helpers", "@mindroom_helpers:localhost", "HelpersTeam", "pass_helpers"),
-        ]
-
-        agent_users = await _ensure_all_agent_users("http://localhost:8008", config, runtime_paths_for(config))
-
-        # Router succeeds, one agent fails, and team creation still continues.
-        assert set(agent_users) == {"router", "calculator", "helpers"}

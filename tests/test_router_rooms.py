@@ -229,37 +229,6 @@ async def test_orchestrator_creates_router_with_all_rooms(
     """Test that the orchestrator properly initializes the router with all rooms."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
 
-    # Mock various async operations
-    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
-        return {
-            ROUTER_AGENT_NAME: AgentMatrixUser(
-                agent_name=ROUTER_AGENT_NAME,
-                user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-                display_name="RouterAgent",
-                password=TEST_PASSWORD,
-            ),
-            "agent1": AgentMatrixUser(
-                agent_name="agent1",
-                user_id="@mindroom_agent1:localhost",
-                display_name="Agent 1",
-                password=TEST_PASSWORD,
-            ),
-            "agent2": AgentMatrixUser(
-                agent_name="agent2",
-                user_id="@mindroom_agent2:localhost",
-                display_name="Agent 2",
-                password=TEST_PASSWORD,
-            ),
-            "team1": AgentMatrixUser(
-                agent_name="team1",
-                user_id="@mindroom_team1:localhost",
-                display_name="Team 1",
-                password=TEST_PASSWORD,
-            ),
-        }
-
-    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users)
-
     # Mock resolve_room_aliases to return the same aliases (no resolution needed for test)
     def mock_resolve_room_aliases(
         aliases: list[str],
@@ -271,25 +240,28 @@ async def test_orchestrator_creates_router_with_all_rooms(
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock load_config to return our test config
-    def mock_load_config(_config_path: Path | None = None) -> Config:
+    def mock_load_config(_runtime_paths: object | None = None, **_kwargs: object) -> Config:
         return config_with_rooms
 
-    monkeypatch.setattr("mindroom.config.main.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
     # Create orchestrator
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
-    # Initialize (creates all bots)
-    await orchestrator.initialize()
+    try:
+        # Initialize (creates all bots)
+        await orchestrator.initialize()
 
-    # Check that router exists and has all rooms
-    assert ROUTER_AGENT_NAME in orchestrator.agent_bots
-    router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        # Check that router exists and has all rooms
+        assert ROUTER_AGENT_NAME in orchestrator.agent_bots
+        router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
 
-    expected_rooms = {"room1", "room2", "room3", "room4"}
-    assert set(router_bot.rooms) == expected_rooms
+        expected_rooms = {"room1", "room2", "room3", "room4"}
+        assert set(router_bot.rooms) == expected_rooms
+    finally:
+        await orchestrator.stop()
 
 
 @pytest.mark.asyncio
@@ -324,25 +296,6 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
         },
     )
 
-    # Mock various operations
-    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
-        return {
-            ROUTER_AGENT_NAME: AgentMatrixUser(
-                agent_name=ROUTER_AGENT_NAME,
-                user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
-                display_name="RouterAgent",
-                password=TEST_PASSWORD,
-            ),
-            "agent1": AgentMatrixUser(
-                agent_name="agent1",
-                user_id="@mindroom_agent1:localhost",
-                display_name="Agent 1",
-                password=TEST_PASSWORD,
-            ),
-        }
-
-    monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users)
-
     def mock_resolve_room_aliases(
         aliases: list[str],
         runtime_paths: object | None = None,
@@ -356,12 +309,12 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
     load_config_returns = [initial_config, updated_config]
     load_config_counter = [0]
 
-    def mock_load_config(_config_path: Path | None = None) -> Config:
+    def mock_load_config(_runtime_paths: object | None = None, **_kwargs: object) -> Config:
         result = load_config_returns[min(load_config_counter[0], len(load_config_returns) - 1)]
         load_config_counter[0] += 1
         return result
 
-    monkeypatch.setattr("mindroom.config.main.Config.from_yaml", mock_load_config)
+    monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
@@ -378,35 +331,38 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
-    await orchestrator.initialize()
+    try:
+        await orchestrator.initialize()
 
-    # Check initial router rooms
-    router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
-    assert set(router_bot.rooms) == {"room1"}
+        # Check initial router rooms
+        router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        assert set(router_bot.rooms) == {"room1"}
 
-    # Mock bot operations using monkeypatch to avoid method assignment errors
-    async def mock_stop() -> None:
-        pass
+        # Mock bot operations using monkeypatch to avoid method assignment errors
+        async def mock_stop(*, reason: str | None = None) -> None:
+            del reason
 
-    async def mock_start() -> None:
-        pass
+        async def mock_start() -> None:
+            pass
 
-    async def mock_ensure_user_account() -> None:
-        pass
+        async def mock_ensure_user_account() -> None:
+            pass
 
-    async def mock_sync_forever() -> None:
-        raise asyncio.CancelledError
+        async def mock_sync_forever() -> None:
+            raise asyncio.CancelledError
 
-    for bot in orchestrator.agent_bots.values():
-        monkeypatch.setattr(bot, "stop", mock_stop)
-        monkeypatch.setattr(bot, "start", mock_start)
-        monkeypatch.setattr(bot, "ensure_user_account", mock_ensure_user_account)
-        monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
+        for bot in orchestrator.agent_bots.values():
+            monkeypatch.setattr(bot, "stop", mock_stop)
+            monkeypatch.setattr(bot, "start", mock_start)
+            monkeypatch.setattr(bot, "ensure_user_account", mock_ensure_user_account)
+            monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
 
-    # Update config
-    updated = await orchestrator.update_config()
-    assert updated  # Should return True since router needs restart
+        # Update config
+        updated = await orchestrator.update_config()
+        assert updated  # Should return True since router needs restart
 
-    # Router should be recreated with new rooms
-    new_router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
-    assert set(new_router_bot.rooms) == {"room1", "room2", "room3"}
+        # Router should be recreated with new rooms
+        new_router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        assert set(new_router_bot.rooms) == {"room1", "room2", "room3"}
+    finally:
+        await orchestrator.stop()

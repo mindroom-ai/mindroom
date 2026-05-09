@@ -166,7 +166,7 @@ class TestCredentialsAPI:
         mock_credentials_manager: CredentialsManager,
     ) -> None:
         """Test getting API key status when it exists."""
-        mock_credentials_manager.set_api_key("openai", "sk-test-key-123456789")
+        mock_credentials_manager.save_credentials("openai", {"api_key": "sk-test-key-123456789"})
 
         response = test_client.get("/api/credentials/openai/api-key")
         assert response.status_code == 200
@@ -182,7 +182,7 @@ class TestCredentialsAPI:
         mock_credentials_manager: CredentialsManager,
     ) -> None:
         """Test getting API key status with a short key."""
-        mock_credentials_manager.set_api_key("openai", "short")
+        mock_credentials_manager.save_credentials("openai", {"api_key": "short"})
 
         response = test_client.get("/api/credentials/openai/api-key")
         assert response.status_code == 200
@@ -275,7 +275,7 @@ class TestCredentialsAPI:
     ) -> None:
         """Test updating an existing API key."""
         # Set initial key
-        mock_credentials_manager.set_api_key("openai", "old-key")
+        mock_credentials_manager.save_credentials("openai", {"api_key": "old-key"})
 
         # Update it
         response = test_client.post(

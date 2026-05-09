@@ -49,8 +49,6 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
     resolve_config_relative_path,
-    resolve_runtime_paths,
-    safe_replace,
 )
 from mindroom.git_urls import credential_free_repo_url
 
@@ -100,7 +98,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_space",
     "matrix_delivery",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "avatars", "tool_approval")
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval")
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -173,14 +171,7 @@ class _StaticCompactionConfigSemantics:
     """Static compaction semantics for one config scope."""
 
     scope_label: str
-    effective_enabled: bool
     authored_model: _AuthoredOptionalModel
-
-
-class AvatarConfig(BaseModel):
-    """Managed avatar generation configuration."""
-
-    model_config = ConfigDict(extra="forbid")
 
 
 def _history_policy_from_limits(
@@ -327,7 +318,6 @@ class Config(BaseModel):
     )
     plugins: list[PluginEntryConfig] = Field(default_factory=list, description="Plugin entries")
     debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug and diagnostic settings")
-    avatars: AvatarConfig = Field(default_factory=AvatarConfig, description="Managed avatar generation settings")
     prompts: dict[str, str] = Field(
         default_factory=dict,
         description="Built-in prompt overrides keyed by the uppercase global name from mindroom.prompts",
@@ -524,7 +514,6 @@ class Config(BaseModel):
         """Return static compaction semantics for defaults, agents, and teams."""
         semantics: list[_StaticCompactionConfigSemantics] = []
         defaults_compaction = self.defaults.compaction
-        defaults_enabled = defaults_compaction.enabled if defaults_compaction is not None else False
 
         if defaults_compaction is not None:
             authored_model = _authored_optional_model(
@@ -534,7 +523,6 @@ class Config(BaseModel):
             semantics.append(
                 _StaticCompactionConfigSemantics(
                     scope_label="defaults",
-                    effective_enabled=defaults_enabled,
                     authored_model=authored_model,
                 ),
             )
@@ -550,12 +538,6 @@ class Config(BaseModel):
             semantics.append(
                 _StaticCompactionConfigSemantics(
                     scope_label=f"agents.{agent_name}",
-                    effective_enabled=_effective_static_compaction_enabled(
-                        defaults_enabled=defaults_enabled,
-                        override_enabled=override.enabled,
-                        override_fields_set=override.model_fields_set,
-                        authored_model=authored_model,
-                    ),
                     authored_model=authored_model,
                 ),
             )
@@ -571,12 +553,6 @@ class Config(BaseModel):
             semantics.append(
                 _StaticCompactionConfigSemantics(
                     scope_label=f"teams.{team_name}",
-                    effective_enabled=_effective_static_compaction_enabled(
-                        defaults_enabled=defaults_enabled,
-                        override_enabled=override.enabled,
-                        override_fields_set=override.model_fields_set,
-                        authored_model=authored_model,
-                    ),
                     authored_model=authored_model,
                 ),
             )
@@ -944,26 +920,6 @@ class Config(BaseModel):
         """Serialize authored config."""
         return _strip_empty_root_sections(cast("dict[str, Any]", self.model_dump(exclude_unset=True)))
 
-    @classmethod
-    def from_yaml(
-        cls,
-        config_path: Path,
-    ) -> Config:
-        """Create a pure Config instance from one explicit YAML file path."""
-        path = Path(config_path).expanduser().resolve()
-        if not path.exists():
-            msg = f"Agent configuration file not found: {path}"
-            raise FileNotFoundError(msg)
-
-        with path.open() as f:
-            data = yaml.safe_load(f) or {}
-
-        runtime_paths = resolve_runtime_paths(config_path=path)
-        config = cls.validate_with_runtime(data, runtime_paths)
-        logger.info("loaded_agent_configuration", path=str(path))
-        logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
-        return config
-
     def get_agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
         """Get the configured culture assignment for an agent, if any."""
         for culture_name, culture_config in self.cultures.items():
@@ -1135,27 +1091,6 @@ class Config(BaseModel):
             for toolkit_name in self.get_agent(agent_name).allowed_toolkits
             if (incompatible_tools := self.get_toolkit_scope_incompatible_tools(agent_name, toolkit_name))
         }
-
-    def get_agent_worker_tools(
-        self,
-        agent_name: str,
-        runtime_paths: RuntimePaths,
-    ) -> list[str]:
-        """Get effective worker-routed tools for an agent, including default policy resolution."""
-        agent_config = self.get_agent(agent_name)
-        configured = agent_config.worker_tools
-        if configured is None:
-            configured = self.defaults.worker_tools
-        if configured is None:
-            # Imported lazily to avoid a circular import: tool metadata also imports Config.
-            from mindroom.tool_system.catalog import (  # noqa: PLC0415
-                default_worker_routed_tools,
-                ensure_tool_registry_loaded,
-            )
-
-            ensure_tool_registry_loaded(runtime_paths, self)
-            return default_worker_routed_tools(self.get_agent_tools(agent_name))
-        return self.expand_tool_names(list(configured))
 
     def get_worker_grantable_credentials(self) -> frozenset[str]:
         """Return shared credential service names allowed inside isolated workers."""
@@ -1411,12 +1346,6 @@ class Config(BaseModel):
 
         return authored_tool_overrides_to_runtime(tool_name, overrides)
 
-    def get_private_agent_names(self) -> frozenset[str]:
-        """Return agent names that materialize requester-private state."""
-        return frozenset(
-            agent_name for agent_name, agent_config in self.agents.items() if agent_config.private is not None
-        )
-
     def _agent_hard_dependency_tool_names(self, agent_name: str) -> set[str]:
         """Return tool names that are hard startup dependencies for one agent."""
         agent_config = self.get_agent(agent_name)
@@ -1567,12 +1496,6 @@ class Config(BaseModel):
             return self.memory.backend == "file"
         return any(self.get_agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
 
-    def uses_mem0_memory(self) -> bool:
-        """Return whether any configured agent uses Mem0-backed memory."""
-        if not self.agents:
-            return self.memory.backend == "mem0"
-        return any(self.get_agent_memory_backend(agent_name) == "mem0" for agent_name in self.agents)
-
     def get_all_configured_rooms(self) -> set[str]:
         """Extract all room aliases configured for agents and teams.
 
@@ -1713,32 +1636,6 @@ class Config(BaseModel):
             resolved_context_window = self.get_model_context_window(resolved_model_name)
 
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
-
-    def save_to_yaml(
-        self,
-        config_path: Path,
-    ) -> None:
-        """Save the config to a YAML file, excluding None values.
-
-        Args:
-            config_path: Path to save the config to.
-
-        """
-        config_dict = self.authored_model_dump()
-        path_obj = Path(config_path)
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path_obj.with_suffix(path_obj.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            yaml.dump(
-                config_dict,
-                f,
-                default_flow_style=False,
-                sort_keys=True,
-                allow_unicode=True,  # Preserve Unicode characters like ë
-                width=120,  # Wider lines to reduce wrapping
-            )
-        safe_replace(tmp_path, path_obj)
-        logger.info("saved_configuration", path=str(config_path))
 
 
 def load_config(
