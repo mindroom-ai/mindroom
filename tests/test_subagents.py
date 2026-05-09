@@ -372,6 +372,25 @@ async def test_sessions_send_agent_id_uses_current_matrix_username(
 
 
 @pytest.mark.asyncio
+async def test_sessions_send_rejects_unknown_agent_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_send should validate explicit agent_id before Matrix dispatch."""
+    send_mock = AsyncMock(return_value="$evt")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().sessions_send(message="do it", agent_id="missing"))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_send"
+    assert payload["message"] == "Unknown agent_id 'missing'. Available agents: code, openclaw, research."
+    send_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_sessions_send_defaults_to_resolved_thread_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -625,6 +644,32 @@ async def test_sessions_spawn_uses_current_matrix_username(
         thread_id=None,
         original_sender=ctx.requester_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_rejects_unknown_agent_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sessions_spawn should validate explicit agent_id before Matrix dispatch."""
+    send_mock = AsyncMock(return_value="$event")
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
+    ctx = _make_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                agent_id="missing",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "sessions_spawn"
+    assert payload["message"] == "Unknown agent_id 'missing'. Available agents: code, openclaw, research."
+    send_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

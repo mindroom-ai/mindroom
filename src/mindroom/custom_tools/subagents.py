@@ -248,6 +248,17 @@ def _current_agent_mention(context: ToolRuntimeContext, agent_name: str) -> str:
     return f"@{matrix_id.username}"
 
 
+def _unknown_agent_id_error(context: ToolRuntimeContext, *, tool_name: str, agent_id: str | None) -> str | None:
+    if not agent_id or agent_id in context.config.agents:
+        return None
+    available = ", ".join(sorted(context.config.agents)) or "(none)"
+    return _payload(
+        tool_name,
+        "error",
+        message=f"Unknown agent_id '{agent_id}'. Available agents: {available}.",
+    )
+
+
 async def _send_matrix_text(
     context: ToolRuntimeContext,
     *,
@@ -549,6 +560,10 @@ class SubAgentsTools(Toolkit):
         if not message.strip():
             return _payload("sessions_send", "error", message="Message cannot be empty.")
 
+        agent_id_error = _unknown_agent_id_error(context, tool_name="sessions_send", agent_id=agent_id)
+        if agent_id_error is not None:
+            return agent_id_error
+
         target_session = session_key or MessageTarget.from_runtime_context(context).session_id
         if label and not session_key:
             resolved = await asyncio.to_thread(_resolve_by_label, context, label)
@@ -627,6 +642,10 @@ class SubAgentsTools(Toolkit):
             normalized_summary, normalized_tag = _validate_spawn_metadata(summary, tag)
         except (ThreadTagsError, ValueError) as exc:
             return _payload("sessions_spawn", "error", message=str(exc))
+
+        agent_id_error = _unknown_agent_id_error(context, tool_name="sessions_spawn", agent_id=agent_id)
+        if agent_id_error is not None:
+            return agent_id_error
 
         target_agent = agent_id or context.agent_name
         reused_payload = await _maybe_reuse_spawned_session(
