@@ -16,8 +16,6 @@ from bs4 import BeautifulSoup, Tag
 
 if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
-else:
-    type Knowledge = Any
 
 _PREFERRED_CONTENT_SELECTORS = (
     "main",
