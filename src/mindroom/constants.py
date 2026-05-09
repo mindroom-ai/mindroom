@@ -19,6 +19,7 @@ from mindroom import runtime_env_policy
 # Agent names
 ROUTER_AGENT_NAME = "router"
 MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
+DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml

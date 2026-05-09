@@ -12,14 +12,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import mindroom.tool_system.plugin_imports as plugin_module
+from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.dependencies import auto_install_optional_extra_for_import_retry, ensure_tool_deps
-from mindroom.tool_system.output_files import (
-    DEFAULT_AUTO_SAVE_THRESHOLD_BYTES,
-    ToolOutputFilePolicy,
-    wrap_toolkit_for_output_files,
-)
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
     BUILTIN_TOOL_REGISTRY,
@@ -602,7 +599,7 @@ def get_tool_by_name(
     shared_storage_root_path: Path | None = None,
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
-    tool_output_auto_save_threshold_bytes: int = DEFAULT_AUTO_SAVE_THRESHOLD_BYTES,
+    tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""

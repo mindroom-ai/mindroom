@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
 from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 
+from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
@@ -36,7 +37,6 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
 )
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
-DEFAULT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 _AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
@@ -52,7 +52,7 @@ class ToolOutputFilePolicy:
 
     workspace_root: Path
     max_bytes: int = _DEFAULT_MAX_BYTES
-    auto_save_threshold_bytes: int = DEFAULT_AUTO_SAVE_THRESHOLD_BYTES
+    auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 
     @classmethod
     def from_runtime(
@@ -60,7 +60,7 @@ class ToolOutputFilePolicy:
         workspace_root: Path,
         runtime_paths: RuntimePaths,
         *,
-        auto_save_threshold_bytes: int = DEFAULT_AUTO_SAVE_THRESHOLD_BYTES,
+        auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     ) -> ToolOutputFilePolicy:
         """Build a policy using the runtime-visible byte cap."""
         return cls(
