@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from ipaddress import ip_address
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
@@ -107,12 +108,36 @@ def _safe_url_for_log(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
+def _normalized_hostname(url: str) -> str:
+    """Return the normalized hostname component for crawl domain checks."""
+    return (urlparse(url).hostname or "").rstrip(".").lower()
+
+
+def _is_ip_address(host: str) -> bool:
+    """Return whether a host is an IPv4 or IPv6 address."""
+    try:
+        ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _url_matches_primary_domain(url: str, primary_domain: str) -> bool:
+    """Return whether a URL belongs to the crawl's primary domain boundary."""
+    host = _normalized_hostname(url)
+    if not host or not primary_domain:
+        return False
+    return host == primary_domain or host.endswith(f".{primary_domain}")
+
+
 class _MindRoomWebsiteReader(WebsiteReader):
     """WebsiteReader variant that avoids selecting early search/navigation sections."""
 
     def _get_primary_domain(self, url: str) -> str:
         """Extract the primary domain without treating URL userinfo as part of the host."""
-        host = urlparse(url).hostname or ""
+        host = _normalized_hostname(url)
+        if _is_ip_address(host):
+            return host
         return ".".join(host.split(".")[-2:])
 
     def _queue_links(self, soup: BeautifulSoup, current_url: str, current_depth: int, primary_domain: str) -> None:
@@ -124,7 +149,9 @@ class _MindRoomWebsiteReader(WebsiteReader):
             href_str = str(link["href"])
             full_url = urljoin(current_url, href_str)
             parsed_url = urlparse(full_url)
-            if not parsed_url.netloc.endswith(primary_domain) or parsed_url.path.endswith((".pdf", ".jpg", ".png")):
+            if not _url_matches_primary_domain(full_url, primary_domain) or parsed_url.path.endswith(
+                (".pdf", ".jpg", ".png"),
+            ):
                 continue
 
             full_url_str = str(full_url)
@@ -143,7 +170,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
         """Return whether a queued crawl URL is outside the current crawl budget."""
         return (
             current_url in self._visited
-            or not urlparse(current_url).netloc.endswith(primary_domain)
+            or not _url_matches_primary_domain(current_url, primary_domain)
             or (current_depth > self.max_depth and current_url != starting_url)
             or num_links >= self.max_links
         )

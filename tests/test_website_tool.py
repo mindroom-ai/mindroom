@@ -91,6 +91,55 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
     assert "Detailed reference material" in content_by_url[docs_url]
 
 
+def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same-domain checks should ignore URL ports when crawling."""
+    start_url = "https://example.test:8443/docs"
+    html = """
+    <html>
+      <body>
+        <main>
+          <h1>Docs</h1>
+          <p>Reference material with enough text to exercise ported URL crawling.</p>
+        </main>
+      </body>
+    </html>
+    """
+
+    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
+        assert url == start_url
+        assert timeout == 10
+        assert follow_redirects is True
+        request = httpx.Request("GET", url)
+        return httpx.Response(200, content=html.encode(), request=request)
+
+    def no_delay(_reader: _MindRoomWebsiteReader, min_seconds: int = 1, max_seconds: int = 3) -> None:
+        assert min_seconds == 1
+        assert max_seconds == 3
+
+    monkeypatch.setattr("mindroom.custom_tools.website.httpx.get", fake_get)
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
+
+    documents = _MindRoomWebsiteReader().read(start_url)
+
+    assert documents[0].meta_data["url"] == start_url
+    assert "ported URL crawling" in documents[0].content
+
+
+def test_website_reader_rejects_domain_suffix_lookalikes() -> None:
+    """Same-domain checks should not treat badexample.com as example.com."""
+    reader = _MindRoomWebsiteReader()
+
+    primary_domain = reader._get_primary_domain("https://example.com/")
+
+    assert reader._should_skip_crawl_url(
+        current_url="https://badexample.com/private",
+        starting_url="https://example.com/",
+        current_depth=1,
+        num_links=0,
+        primary_domain=primary_domain,
+    )
+
+
 def test_safe_url_for_log_strips_userinfo_query_and_fragment() -> None:
     """Website logs should keep origin/path context without exposing secrets."""
     assert (
