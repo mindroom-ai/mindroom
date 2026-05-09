@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
+from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -2989,6 +2990,89 @@ def test_sandbox_runner_forwards_worker_context_to_tool_rebuild(
     worker_target = captured_kwargs["worker_target"]
     assert worker_target.worker_scope == "shared"
     assert worker_target.routing_agent_name == "general"
+
+
+def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner-side toolkit rebuilds should auto-save large outputs without an explicit output path."""
+    _set_sandbox_token(monkeypatch)
+    tool_name = "test_runner_auto_save_large_output"
+    marker = "ISSUE200_RUNNER_AUTO_SAVE"
+
+    class _LargeOutputToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name=tool_name, tools=[self.large])
+
+        def large(self) -> str:
+            return marker * 20
+
+    original_registry = metadata_module.TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
+    original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
+    metadata_module.register_builtin_tool_metadata(
+        ToolMetadata(
+            name=tool_name,
+            display_name="Runner Auto Save",
+            description="Test-only runner auto-save coverage.",
+            category=ToolCategory.DEVELOPMENT,
+            factory=lambda: _LargeOutputToolkit,
+        ),
+    )
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+    storage_root = Path(os.environ["MINDROOM_STORAGE_PATH"])
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "defaults:\n"
+        "  tool_output_auto_save_threshold_bytes: 100\n"
+        "agents:\n"
+        "  general:\n"
+        "    display_name: General\n"
+        "    memory_backend: file\n"
+        "router:\n"
+        "  model: default\n",
+        encoding="utf-8",
+    )
+    _refresh_runner_app_from_env()
+
+    try:
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": tool_name,
+                "function_name": "large",
+                "routing_agent_name": "general",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        receipt = payload["result"]["mindroom_tool_output"]
+        assert receipt["status"] == "saved_to_file"
+        assert receipt["auto_saved"] is True
+        assert receipt["threshold_bytes"] == 100
+        assert receipt["format"] == "text"
+        assert marker in receipt["preview"]
+        workspace = agent_workspace_root_path(storage_root, "general")
+        saved_path = workspace / receipt["path"]
+        assert saved_path.read_text(encoding="utf-8") == marker * 20
+    finally:
+        metadata_module.TOOL_REGISTRY.clear()
+        metadata_module.TOOL_REGISTRY.update(original_registry)
+        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
+        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        metadata_module.BUILTIN_TOOL_METADATA.clear()
+        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
+        _refresh_runner_app_from_env()
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
