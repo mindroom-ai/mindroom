@@ -1638,7 +1638,7 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_refreshes_room_membership_when_cached_room_has_no_agents() -> None:
+async def test_schedule_task_uses_configured_room_boundary_without_membership_refresh() -> None:
     """Configured schedule rooms should use the static responder boundary without membership refresh."""
     client = AsyncMock()
     room = MagicMock(spec=nio.MatrixRoom)

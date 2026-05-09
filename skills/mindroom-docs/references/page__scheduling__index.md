@@ -1,6 +1,8 @@
 # Scheduling
 
-Schedule agents or teams to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
+Schedule agents or teams to perform tasks at specific times or intervals using natural language.
+
+Tasks run in the thread where they were created.
 
 ## Commands
 
@@ -28,7 +30,9 @@ Schedule agents or teams to perform tasks at specific times or intervals using n
 **Conditional Workflows (polling-based):**
 
 Conditional or event-like requests are converted to recurring cron-based polling schedules.
+
 The AI picks an appropriate polling frequency based on urgency, and the condition is embedded in the task message so the scheduled responder checks it on each poll cycle.
+
 These are **not** real event subscriptions — they are periodic checks.
 
 ```
@@ -42,7 +46,9 @@ These are **not** real event subscriptions — they are periodic checks.
 !edit_schedule <task-id> <new-task-description>
 ```
 
-Edits an existing scheduled task by ID. The task description is re-parsed to update timing and content.
+Edits an existing scheduled task by ID.
+
+The task description is re-parsed to update timing and content.
 
 ### List and Cancel Schedules
 
@@ -59,6 +65,7 @@ Use `!help schedule` for detailed inline help on scheduling commands.
 ## Agent and Team Mentions
 
 Include `@agent_name` or `@team_name` in your schedule to have specific responders answer.
+
 The scheduler validates that mentioned agents and teams are available in the room before creating the task.
 
 ## Timezone
@@ -71,15 +78,24 @@ timezone: America/Los_Angeles
 
 ## Limitations
 
-- **Schedule type cannot be changed** — editing a one-time task to be recurring (or vice versa) is not supported. Cancel the existing task and create a new one instead.
+- **Schedule type cannot be changed** — editing a one-time task to be recurring (or vice versa) is not supported.
+
+Cancel the existing task and create a new one instead.
+
 - **Conditional workflows are polling** — event-like schedules (`If ...`, `When ...`) are converted to recurring cron polls, not real event subscriptions.
 
 ## Persistence
 
 Schedules are stored in Matrix room state and persist across restarts.
+
 New schedules use the live runtime to start their in-memory runners immediately.
+
 Edits are state-only Matrix writes.
+
 Running tasks pick up edited state on their next poll instead of relying on caller-supplied cache or restart hooks.
+
 Past one-time tasks are automatically skipped during restoration.
+
 Only the router restores persisted schedules after startup — individual agents do not restore their own.
+
 On shutdown, the router cancels its in-memory scheduled tasks before exiting.

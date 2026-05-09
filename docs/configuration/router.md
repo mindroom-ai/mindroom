@@ -67,13 +67,19 @@ Even in single-responder rooms, commands are always processed by the router.
 
 ### Welcome Messages
 
-When the router joins a room with no messages (or only a previous welcome message), it automatically sends a welcome message listing:
+When the router joins a room after an invite, it sends a requester-scoped welcome message.
 
-- All available agents and teams in that room with their descriptions
+That welcome message lists:
+
+- Available agents and teams visible to the inviter with their descriptions
 - How to interact with agents and teams (mentions, commands)
 - Quick command reference
 
+Startup welcomes with no requester send the general interaction guidance and quick command reference without an available-responder list.
+
 Use `!hi` in any room to see the welcome message again.
+
+The `!hi` welcome lists responders visible to the requester.
 
 ### Room Management
 

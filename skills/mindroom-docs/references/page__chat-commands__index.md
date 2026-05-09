@@ -59,6 +59,7 @@ Show the welcome message for the current room, listing available agents and team
 ### `!schedule`
 
 Schedule a one-time or recurring task using natural language.
+
 Tasks run in the thread where they were created.
 
 ```
@@ -83,6 +84,7 @@ Tasks run in the thread where they were created.
 **Conditional workflows (polling-based):**
 
 Conditional requests are converted to recurring cron-based polling schedules.
+
 These are periodic checks, not real event subscriptions.
 
 ```
@@ -91,9 +93,12 @@ These are periodic checks, not real event subscriptions.
 ```
 
 Include `@agent_name` or `@team_name` in your schedule to target specific responders.
+
 The scheduler validates that mentioned agents and teams are available in the room before creating the task.
 
-Schedules use the timezone from `config.yaml` (defaults to UTC). See [Scheduling](https://docs.mindroom.chat/scheduling/index.md) for full details.
+Schedules use the timezone from `config.yaml` (defaults to UTC).
+
+See [Scheduling](https://docs.mindroom.chat/scheduling/index.md) for full details.
 
 ### `!list_schedules`
 
@@ -127,6 +132,7 @@ Replace an existing scheduled task with new timing and content.
 ```
 
 The task description is re-parsed to update timing and content.
+
 Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel and recreate instead.
 
 **Aliases:** `!editschedule`, `!edit-schedule`

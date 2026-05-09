@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.authorization import is_authorized_sender
-from mindroom.commands.handler import generate_welcome_message
+from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms, join_room
 from mindroom.matrix.invited_rooms_store import (
@@ -20,7 +20,7 @@ from mindroom.matrix.invited_rooms_store import (
     should_accept_invites,
     should_persist_invited_rooms,
 )
-from mindroom.matrix.rooms import leave_non_dm_rooms
+from mindroom.matrix.rooms import filter_non_dm_rooms, leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
@@ -47,7 +47,6 @@ class BotRoomLifecycleDeps:
     get_configured_rooms: Callable[[], Sequence[str]]
     send_response: Callable[..., Awaitable[str | None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
-    on_router_invite_joined: Callable[[str], Awaitable[None]]
 
 
 class BotRoomLifecycle:
@@ -89,6 +88,14 @@ class BotRoomLifecycle:
 
     def _logger(self) -> structlog.stdlib.BoundLogger:
         return self.deps.get_logger()
+
+    def _room_for_welcome(self, room_id: str) -> nio.MatrixRoom:
+        rooms = self._client().rooms
+        if isinstance(rooms, Mapping):
+            cached_room = rooms.get(room_id)
+            if isinstance(cached_room, nio.MatrixRoom):
+                return cached_room
+        return nio.MatrixRoom(room_id=room_id, own_user_id=self.deps.agent_user.user_id)
 
     def should_accept_invite(self) -> bool:
         """Return whether this entity should accept one inbound room invite."""
@@ -163,7 +170,13 @@ class BotRoomLifecycle:
 
         return list(current_rooms - configured_rooms)
 
-    async def send_welcome_message_if_empty(self, room_id: str) -> None:
+    async def rooms_to_actually_leave(self) -> list[str]:
+        """Return the exact rooms this bot will leave after DM filtering."""
+        client = self._client()
+        room_ids = await self.rooms_to_leave()
+        return await filter_non_dm_rooms(client, room_ids)
+
+    async def send_welcome_message_if_empty(self, room_id: str, visible_to_sender_id: str | None = None) -> None:
         """Send the router welcome message only when the room has no other history."""
         async with self._lock_for_room(self._welcome_locks, room_id):
             if room_id in self._welcomed_room_ids:
@@ -182,7 +195,13 @@ class BotRoomLifecycle:
 
             if not response.chunk:
                 self._logger().info("Room is empty, sending welcome message", room_id=room_id)
-                welcome_msg = generate_welcome_message(room_id, self._config(), self.deps.runtime_paths)
+                welcome_msg = await generate_welcome_message_for_room(
+                    client,
+                    self._room_for_welcome(room_id),
+                    visible_to_sender_id,
+                    self._config(),
+                    self.deps.runtime_paths,
+                )
                 event_id = await self.deps.send_response(
                     room_id=room_id,
                     reply_to_event_id=None,
@@ -238,7 +257,7 @@ class BotRoomLifecycle:
             if room.room_id in self._handled_invite_room_ids or self._client_has_joined_room(room.room_id):
                 self._logger().debug("Invite already handled", room_id=room.room_id, sender=event.sender)
                 if self.deps.agent_name == ROUTER_AGENT_NAME:
-                    await self.deps.on_router_invite_joined(room.room_id)
+                    await self.send_welcome_message_if_empty(room.room_id, event.sender)
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
@@ -252,4 +271,4 @@ class BotRoomLifecycle:
                 self.invited_rooms.add(room.room_id)
                 self.save_invited_rooms()
             if self.deps.agent_name == ROUTER_AGENT_NAME:
-                await self.deps.on_router_invite_joined(room.room_id)
+                await self.send_welcome_message_if_empty(room.room_id, event.sender)

@@ -16,6 +16,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -240,7 +241,7 @@ async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
     welcome_message = AsyncMock()
-    monkeypatch.setattr(bot, "_send_welcome_message_if_empty", welcome_message)
+    monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
 
     room = MagicMock(room_id="!router-invited:localhost")
     room.canonical_alias = None
@@ -249,7 +250,7 @@ async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
     await bot._on_invite(room, event)
 
     join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
-    welcome_message.assert_awaited_once_with("!router-invited:localhost")
+    welcome_message.assert_awaited_once_with("!router-invited:localhost", "@owner:localhost")
     assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
     assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (
         '[\n  "!router-invited:localhost"\n]\n'
@@ -441,6 +442,165 @@ async def test_router_welcome_send_retries_after_delivery_failure(
 
     assert bot.client.room_messages.await_count == 2
     assert bot._send_response.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_router_auto_welcome_lists_ad_hoc_present_responder(tmp_path: Path) -> None:
+    """Automatic ad-hoc room welcomes should advertise live responder candidates."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Writes code",
+                ),
+            },
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    room = nio.MatrixRoom(room_id="!adhoc:localhost", own_user_id="@mindroom_router:localhost")
+    room.members_synced = False
+    bot.client = AsyncMock()
+    bot.client.rooms = {"!adhoc:localhost": room}
+    bot.client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(
+            members=[nio.RoomMember("@mindroom_code:localhost", "Code", None)],
+            room_id="!adhoc:localhost",
+        ),
+    )
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!adhoc:localhost",
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    bot._send_response = AsyncMock(return_value="$welcome")
+
+    await bot._send_welcome_message_if_empty("!adhoc:localhost", "@alice:localhost")
+
+    response_text = bot._send_response.await_args.kwargs["response_text"]
+    assert "\u2022 **@mindroom_code**: Writes code" in response_text
+    bot.client.joined_members.assert_awaited_once_with("!adhoc:localhost")
+
+
+@pytest.mark.asyncio
+async def test_router_startup_welcome_without_requester_omits_responder_list(tmp_path: Path) -> None:
+    """Startup welcomes should not use internal bot permissions to advertise responders."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Writes code",
+                ),
+            },
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    room = nio.MatrixRoom(room_id="!startup:localhost", own_user_id="@mindroom_router:localhost")
+    room.add_member("@mindroom_code:localhost", "Code", None)
+    room.members_synced = True
+    bot.client = AsyncMock()
+    bot.client.rooms = {"!startup:localhost": room}
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!startup:localhost",
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    bot._send_response = AsyncMock(return_value="$welcome")
+
+    await bot._send_welcome_message_if_empty("!startup:localhost")
+
+    response_text = bot._send_response.await_args.kwargs["response_text"]
+    assert "\U0001f9e0 **Available agents and teams in this room:**" not in response_text
+    assert "@mindroom_code" not in response_text
+
+
+@pytest.mark.asyncio
+async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Invite welcomes should advertise responders visible to the inviting user."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    role="Writes code",
+                ),
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Finds sources",
+                ),
+            },
+            router=RouterConfig(model="default", accept_invites=True),
+            authorization=AuthorizationConfig(
+                global_users=["@alice:localhost"],
+                agent_reply_permissions={
+                    "code": ["@alice:localhost"],
+                    "research": ["@bob:localhost"],
+                },
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    bot.client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(
+            members=[
+                nio.RoomMember("@mindroom_code:localhost", "Code", None),
+                nio.RoomMember("@mindroom_research:localhost", "Research", None),
+            ],
+            room_id="!adhoc:localhost",
+        ),
+    )
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(
+            room_id="!adhoc:localhost",
+            chunk=[],
+            start="",
+            end=None,
+        ),
+    )
+    bot._send_response = AsyncMock(return_value="$welcome")
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True))
+
+    room = MagicMock(room_id="!adhoc:localhost")
+    room.canonical_alias = None
+    event = MagicMock(sender="@alice:localhost")
+
+    await bot._on_invite(room, event)
+
+    response_text = bot._send_response.await_args.kwargs["response_text"]
+    assert "\u2022 **@mindroom_code**: Writes code" in response_text
+    assert "@mindroom_research" not in response_text
 
 
 @pytest.mark.asyncio

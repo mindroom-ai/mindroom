@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.entity_resolution import configured_routable_entity_ids_for_room
 from mindroom.handled_turns import HandledTurnState
 from mindroom.logging_config import get_logger
 from mindroom.scheduling import (
@@ -23,7 +23,7 @@ from mindroom.scheduling import (
 from mindroom.thread_utils import check_agent_mentioned
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
     import nio
     import structlog
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
+    from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.plugins import PluginReloadResult
 
@@ -122,12 +123,14 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
     return ""
 
 
-def generate_welcome_message(room_id: str, config: Config, runtime_paths: RuntimePaths) -> str:
-    """Generate the welcome message text for a room."""
-    configured_entities = configured_routable_entity_ids_for_room(config, room_id, runtime_paths)
-
+def _format_welcome_message(
+    candidate_entities: Iterable[MatrixID],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str:
+    """Generate the welcome message text for resolved responder candidates."""
     entity_list = []
-    for entity_id in configured_entities:
+    for entity_id in candidate_entities:
         entity_name = entity_id.agent_name(config, runtime_paths)
         if not entity_name or entity_name == ROUTER_AGENT_NAME:
             continue
@@ -165,6 +168,20 @@ def generate_welcome_message(room_id: str, config: Config, runtime_paths: Runtim
     )
 
     return welcome_msg
+
+
+async def generate_welcome_message_for_room(
+    client: nio.AsyncClient | None,
+    room: nio.MatrixRoom,
+    sender_id: str | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str:
+    """Generate a welcome message from the same responder candidates used by routing."""
+    candidate_entities = []
+    if sender_id is not None:
+        candidate_entities = await responder_candidate_entities_for_room(client, room, sender_id, config, runtime_paths)
+    return _format_welcome_message(candidate_entities, config, runtime_paths)
 
 
 def _normalized_response_event_id(raw_response_event_id: str | None) -> str | None:
@@ -214,8 +231,13 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 response_text = f"❌ Plugin reload failed: {exc}"
 
     elif command.type == CommandType.HI:
-        # Generate the welcome message for this room
-        response_text = generate_welcome_message(room.room_id, context.config, context.runtime_paths)
+        response_text = await generate_welcome_message_for_room(
+            context.client,
+            room,
+            requester_user_id,
+            context.config,
+            context.runtime_paths,
+        )
 
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]

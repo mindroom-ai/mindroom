@@ -348,7 +348,6 @@ class AgentBot:
                 get_configured_rooms=lambda: self.rooms,
                 send_response=lambda *args, **kwargs: self._send_response(*args, **kwargs),
                 on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
-                on_router_invite_joined=lambda room_id: self._send_welcome_message_if_empty(room_id),
             ),
         )
         self._init_runtime_components()
@@ -1337,12 +1336,12 @@ class AgentBot:
             await self.client.close()
         self.logger.info("Stopped agent bot")
 
-    async def _send_welcome_message_if_empty(self, room_id: str) -> None:
+    async def _send_welcome_message_if_empty(self, room_id: str, visible_to_sender_id: str | None = None) -> None:
         """Send a welcome message if the room has no messages yet.
 
         Only called by the router agent when joining a room.
         """
-        await self._room_lifecycle.send_welcome_message_if_empty(room_id)
+        await self._room_lifecycle.send_welcome_message_if_empty(room_id, visible_to_sender_id)
 
     def _maybe_start_deferred_overdue_task_drain(self) -> None:
         """Start draining queued overdue tasks once Matrix sync is ready."""

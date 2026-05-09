@@ -2272,13 +2272,19 @@ Even in single-responder rooms, commands are always processed by the router.
 
 ### Welcome Messages
 
-When the router joins a room with no messages (or only a previous welcome message), it automatically sends a welcome message listing:
+When the router joins a room after an invite, it sends a requester-scoped welcome message.
 
-- All available agents and teams in that room with their descriptions
+That welcome message lists:
+
+- Available agents and teams visible to the inviter with their descriptions
 - How to interact with agents and teams (mentions, commands)
 - Quick command reference
 
+Startup welcomes with no requester send the general interaction guidance and quick command reference without an available-responder list.
+
 Use `!hi` in any room to see the welcome message again.
+
+The `!hi` welcome lists responders visible to the requester.
 
 ### Room Management
 
@@ -11145,7 +11151,9 @@ Show the welcome message for the current room, listing available agents and team
 
 ### `!schedule`
 
-Schedule a one-time or recurring task using natural language. Tasks run in the thread where they were created.
+Schedule a one-time or recurring task using natural language.
+
+Tasks run in the thread where they were created.
 
 ```
 !schedule <natural-language-request>
@@ -11168,16 +11176,22 @@ Schedule a one-time or recurring task using natural language. Tasks run in the t
 
 **Conditional workflows (polling-based):**
 
-Conditional requests are converted to recurring cron-based polling schedules. These are periodic checks, not real event subscriptions.
+Conditional requests are converted to recurring cron-based polling schedules.
+
+These are periodic checks, not real event subscriptions.
 
 ```
 !schedule If I get an email about "urgent", @phone_agent call me
 !schedule When Bitcoin drops below $40k, @crypto_agent notify me
 ```
 
-Include `@agent_name` or `@team_name` in your schedule to target specific responders. The scheduler validates that mentioned agents and teams are available in the room before creating the task.
+Include `@agent_name` or `@team_name` in your schedule to target specific responders.
 
-Schedules use the timezone from `config.yaml` (defaults to UTC). See [Scheduling](https://docs.mindroom.chat/scheduling/index.md) for full details.
+The scheduler validates that mentioned agents and teams are available in the room before creating the task.
+
+Schedules use the timezone from `config.yaml` (defaults to UTC).
+
+See [Scheduling](https://docs.mindroom.chat/scheduling/index.md) for full details.
 
 ### `!list_schedules`
 
@@ -11210,7 +11224,9 @@ Replace an existing scheduled task with new timing and content.
 !edit_schedule <task-id> <new-task-description>
 ```
 
-The task description is re-parsed to update timing and content. Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel and recreate instead.
+The task description is re-parsed to update timing and content.
+
+Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel and recreate instead.
 
 **Aliases:** `!editschedule`, `!edit-schedule`
 
@@ -11541,7 +11557,9 @@ MindRoom also supports a `ReplacementStreamingResponse` variant where each chunk
 
 # Scheduling
 
-Schedule agents or teams to perform tasks at specific times or intervals using natural language. Tasks run in the thread where they were created.
+Schedule agents or teams to perform tasks at specific times or intervals using natural language.
+
+Tasks run in the thread where they were created.
 
 ## Commands
 
@@ -11568,7 +11586,11 @@ Schedule agents or teams to perform tasks at specific times or intervals using n
 
 **Conditional Workflows (polling-based):**
 
-Conditional or event-like requests are converted to recurring cron-based polling schedules. The AI picks an appropriate polling frequency based on urgency, and the condition is embedded in the task message so the scheduled responder checks it on each poll cycle. These are **not** real event subscriptions — they are periodic checks.
+Conditional or event-like requests are converted to recurring cron-based polling schedules.
+
+The AI picks an appropriate polling frequency based on urgency, and the condition is embedded in the task message so the scheduled responder checks it on each poll cycle.
+
+These are **not** real event subscriptions — they are periodic checks.
 
 ```
 !schedule If I get an email about "urgent", @phone_agent call me
@@ -11581,7 +11603,9 @@ Conditional or event-like requests are converted to recurring cron-based polling
 !edit_schedule <task-id> <new-task-description>
 ```
 
-Edits an existing scheduled task by ID. The task description is re-parsed to update timing and content.
+Edits an existing scheduled task by ID.
+
+The task description is re-parsed to update timing and content.
 
 ### List and Cancel Schedules
 
@@ -11597,7 +11621,9 @@ Use `!help schedule` for detailed inline help on scheduling commands.
 
 ## Agent and Team Mentions
 
-Include `@agent_name` or `@team_name` in your schedule to have specific responders answer. The scheduler validates that mentioned agents and teams are available in the room before creating the task.
+Include `@agent_name` or `@team_name` in your schedule to have specific responders answer.
+
+The scheduler validates that mentioned agents and teams are available in the room before creating the task.
 
 ## Timezone
 
@@ -11609,12 +11635,27 @@ timezone: America/Los_Angeles
 
 ## Limitations
 
-- **Schedule type cannot be changed** — editing a one-time task to be recurring (or vice versa) is not supported. Cancel the existing task and create a new one instead.
+- **Schedule type cannot be changed** — editing a one-time task to be recurring (or vice versa) is not supported.
+
+Cancel the existing task and create a new one instead.
+
 - **Conditional workflows are polling** — event-like schedules (`If ...`, `When ...`) are converted to recurring cron polls, not real event subscriptions.
 
 ## Persistence
 
-Schedules are stored in Matrix room state and persist across restarts. New schedules use the live runtime to start their in-memory runners immediately. Edits are state-only Matrix writes. Running tasks pick up edited state on their next poll instead of relying on caller-supplied cache or restart hooks. Past one-time tasks are automatically skipped during restoration. Only the router restores persisted schedules after startup — individual agents do not restore their own. On shutdown, the router cancels its in-memory scheduled tasks before exiting.
+Schedules are stored in Matrix room state and persist across restarts.
+
+New schedules use the live runtime to start their in-memory runners immediately.
+
+Edits are state-only Matrix writes.
+
+Running tasks pick up edited state on their next poll instead of relying on caller-supplied cache or restart hooks.
+
+Past one-time tasks are automatically skipped during restoration.
+
+Only the router restores persisted schedules after startup — individual agents do not restore their own.
+
+On shutdown, the router cancels its in-memory scheduled tasks before exiting.
 
 # Authorization
 

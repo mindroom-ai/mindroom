@@ -1761,11 +1761,11 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.handler"
 depends_on = [
+    "mindroom.authorization",
     "mindroom.commands.config_commands",
     "mindroom.commands.config_confirmation",
     "mindroom.commands.parsing",
     "mindroom.constants",
-    "mindroom.entity_resolution",
     "mindroom.handled_turns",
     "mindroom.logging_config",
     "mindroom.matrix.event_info",
