@@ -23,6 +23,7 @@ class ResolvedToolConfig:
 
 AgentLearningMode = Literal["always", "agentic"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
+_DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 
 
 class StreamingConfig(BaseModel):
@@ -372,6 +373,14 @@ class DefaultsConfig(BaseModel):
         default=50000,
         ge=1,
         description="Hard cap for extra role preload context loaded from context_files",
+    )
+    tool_output_auto_save_threshold_bytes: int = Field(
+        default=_DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+        ge=1,
+        description=(
+            "Supported tool outputs larger than this many bytes are automatically saved to the agent workspace "
+            "and replaced with a compact receipt in the model-visible tool result"
+        ),
     )
     streaming: StreamingConfig = Field(
         default_factory=StreamingConfig,

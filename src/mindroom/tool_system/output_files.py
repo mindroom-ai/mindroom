@@ -35,9 +35,8 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
 )
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
-_AUTO_SAVE_THRESHOLD_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES"
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
-_DEFAULT_AUTO_SAVE_THRESHOLD_BYTES = 256 * 1024
+DEFAULT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 _AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
@@ -53,19 +52,21 @@ class ToolOutputFilePolicy:
 
     workspace_root: Path
     max_bytes: int = _DEFAULT_MAX_BYTES
-    auto_save_threshold_bytes: int = _DEFAULT_AUTO_SAVE_THRESHOLD_BYTES
+    auto_save_threshold_bytes: int = DEFAULT_AUTO_SAVE_THRESHOLD_BYTES
 
     @classmethod
     def from_runtime(
         cls,
         workspace_root: Path,
         runtime_paths: RuntimePaths,
+        *,
+        auto_save_threshold_bytes: int = DEFAULT_AUTO_SAVE_THRESHOLD_BYTES,
     ) -> ToolOutputFilePolicy:
         """Build a policy using the runtime-visible byte cap."""
         return cls(
             workspace_root=workspace_root,
             max_bytes=_output_redirect_max_bytes(runtime_paths),
-            auto_save_threshold_bytes=_auto_save_threshold_bytes(runtime_paths),
+            auto_save_threshold_bytes=auto_save_threshold_bytes,
         )
 
 
@@ -99,15 +100,6 @@ def _output_redirect_max_bytes(runtime_paths: RuntimePaths) -> int:
         _MAX_BYTES_ENV,
         default=_DEFAULT_MAX_BYTES,
         log_key="invalid_tool_output_redirect_max_bytes",
-    )
-
-
-def _auto_save_threshold_bytes(runtime_paths: RuntimePaths) -> int:
-    return _positive_int_runtime_setting(
-        runtime_paths,
-        _AUTO_SAVE_THRESHOLD_BYTES_ENV,
-        default=_DEFAULT_AUTO_SAVE_THRESHOLD_BYTES,
-        log_key="invalid_tool_output_auto_save_threshold_bytes",
     )
 
 
@@ -612,12 +604,15 @@ def _auto_save_large_result(
     byte_count = len(serialized.payload) if isinstance(serialized, _SerializedToolOutput) else 0
 
     if isinstance(serialized, _SerializedToolOutput) and byte_count > policy.auto_save_threshold_bytes:
-        auto_saved_result = _write_auto_saved_result(
-            serialized,
-            policy=policy,
-            tool_name=tool_name,
-            byte_count=byte_count,
-        )
+        try:
+            auto_saved_result = _write_auto_saved_result(
+                serialized,
+                policy=policy,
+                tool_name=tool_name,
+                byte_count=byte_count,
+            )
+        except Exception as exc:
+            logger.warning("tool_output_auto_save_write_failed", error_type=type(exc).__name__)
     return auto_saved_result
 
 

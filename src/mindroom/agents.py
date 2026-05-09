@@ -402,6 +402,7 @@ def _build_registered_agent_tool(
     agent_name: str,
     tool_config_overrides: dict[str, object] | None,
     workspace_path: Path | None,
+    tool_output_auto_save_threshold_bytes: int,
     routing_agent_is_private: bool,
     execution_identity: ToolExecutionIdentity | None,
     runtime_overrides: dict[str, object] | None,
@@ -433,6 +434,7 @@ def _build_registered_agent_tool(
         worker_tools_override=worker_tools,
         allowed_shared_services=allowed_shared_services,
         tool_output_workspace_root=workspace_path,
+        tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         worker_target=worker_target,
     )
 
@@ -464,10 +466,15 @@ def _wrap_direct_agent_toolkit_for_output_files(
     *,
     agent_runtime: ResolvedAgentRuntime,
     runtime_paths: constants.RuntimePaths,
+    tool_output_auto_save_threshold_bytes: int,
 ) -> Toolkit:
     """Apply the central output-file wrapper to MindRoom-owned direct toolkits."""
     policy = (
-        ToolOutputFilePolicy.from_runtime(agent_runtime.tool_base_dir, runtime_paths)
+        ToolOutputFilePolicy.from_runtime(
+            agent_runtime.tool_base_dir,
+            runtime_paths,
+            auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+        )
         if agent_runtime.tool_base_dir is not None
         else None
     )
@@ -541,6 +548,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "delegate":
@@ -573,6 +581,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "self_config":
@@ -582,6 +591,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
             SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "compact_context":
@@ -596,6 +606,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "dynamic_tools":
@@ -621,6 +632,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     return _build_registered_agent_tool(
@@ -634,6 +646,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         agent_name,
         tool_config_overrides,
         agent_runtime.tool_base_dir,
+        config.defaults.tool_output_auto_save_threshold_bytes,
         agent_runtime.is_private,
         execution_identity,
         config.get_agent_tool_runtime_overrides(agent_name, tool_name, runtime_paths=runtime_paths),

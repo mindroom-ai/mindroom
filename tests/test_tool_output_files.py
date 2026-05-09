@@ -17,6 +17,7 @@ from agno.tools.function import Function, FunctionCall, ToolResult
 from pydantic import BaseModel
 
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -27,6 +28,7 @@ from mindroom.hooks import (
 )
 from mindroom.tool_system.events import format_tool_combined
 from mindroom.tool_system.output_files import (
+    DEFAULT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
     _wrap_function_for_output_files,
@@ -77,6 +79,15 @@ def _assert_output_path_schema_is_optional(function: Function) -> None:
     assert output_schema["description"].startswith("Optional")
     assert "workspace-relative path" in output_schema["description"]
     assert OUTPUT_PATH_ARGUMENT not in function.parameters["required"]
+
+
+def test_runtime_policy_defaults_to_50_kib_auto_save_threshold(tmp_path: Path) -> None:
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+
+    policy = ToolOutputFilePolicy.from_runtime(tmp_path, runtime_paths)
+
+    assert DEFAULT_AUTO_SAVE_THRESHOLD_BYTES == 50 * 1024
+    assert policy.auto_save_threshold_bytes == DEFAULT_AUTO_SAVE_THRESHOLD_BYTES
 
 
 def _receipt(result: object) -> dict[str, object]:
@@ -837,6 +848,23 @@ def test_auto_save_serialization_failure_preserves_original_result(tmp_path: Pat
     ).execute()
 
     assert result.result is raw_result
+    assert not list(tmp_path.iterdir())
+
+
+def test_auto_save_write_failure_preserves_original_result(tmp_path: Path) -> None:
+    raw_result = "x" * 200
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=1_000, auto_save_threshold_bytes=10)
+    toolkit = _EchoToolkit(result=raw_result)
+    wrap_toolkit_for_output_files(toolkit, policy)
+
+    with patch("mindroom.tool_system.output_files._write_auto_saved_result", side_effect=RuntimeError("boom")):
+        result = FunctionCall(
+            function=_first_function(toolkit),
+            arguments={"text": "hi"},
+            call_id="call-1",
+        ).execute()
+
+    assert result.result == raw_result
     assert not list(tmp_path.iterdir())
 
 

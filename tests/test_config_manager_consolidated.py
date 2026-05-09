@@ -602,6 +602,14 @@ class TestConsolidatedConfigManager:
         assert config.tool_approval.timeout_days == 7.0
         assert config.tool_approval.rules == []
 
+    def test_tool_output_auto_save_threshold_is_configurable_in_defaults(self) -> None:
+        """The automatic tool-output save threshold should be a validated config setting."""
+        config = Config.model_validate({"defaults": {"tool_output_auto_save_threshold_bytes": 51200}})
+
+        assert config.defaults.tool_output_auto_save_threshold_bytes == 50 * 1024
+        with pytest.raises(ValidationError, match="tool_output_auto_save_threshold_bytes"):
+            DefaultsConfig(tool_output_auto_save_threshold_bytes=0)
+
     def test_duplicate_tool_entries_are_rejected_for_agents_and_defaults(self) -> None:
         """Duplicate tool names should be rejected even across mixed string and mapping syntax."""
         with pytest.raises(ValueError, match="Duplicate default tools are not allowed: shell"):

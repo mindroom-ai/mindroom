@@ -587,6 +587,34 @@ def _runner_tool_output_workspace_root(
     return None
 
 
+def _optional_runner_tool_output_workspace_root(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    runtime_overrides: dict[str, object] | None,
+    execution_identity: ToolExecutionIdentity | None,
+    routing_agent_name: str | None,
+    output_path: str | None,
+) -> Path | None:
+    """Resolve auto-save workspace roots without failing tool calls that can run without one."""
+    try:
+        return _runner_tool_output_workspace_root(
+            config=config,
+            runtime_paths=runtime_paths,
+            runtime_overrides=runtime_overrides,
+            execution_identity=execution_identity,
+            routing_agent_name=routing_agent_name,
+        )
+    except ValueError:
+        if output_path is not None:
+            raise
+        logger.warning(
+            "sandbox_runner_tool_output_workspace_resolution_failed",
+            routing_agent_name=routing_agent_name,
+        )
+        return None
+
+
 def _resolve_entrypoint(
     *,
     runtime_paths: RuntimePaths,
@@ -624,6 +652,7 @@ def _resolve_entrypoint(
             runtime_overrides=runtime_overrides,
             allowed_shared_services=(config.get_worker_grantable_credentials() if worker_scope is not None else None),
             tool_output_workspace_root=tool_output_workspace_root,
+            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
             worker_target=worker_target,
         )
     except (ToolConfigOverrideError, ToolInitOverrideError) as exc:
@@ -1022,17 +1051,21 @@ async def _execute_request_inprocess(
     if output_path is None and OUTPUT_PATH_ARGUMENT in kwargs:
         kwargs = dict(kwargs)
         kwargs.pop(OUTPUT_PATH_ARGUMENT, None)
-    tool_output_workspace_root = (
-        _runner_tool_output_workspace_root(
+    should_resolve_tool_output_workspace = (
+        output_path is not None
+        or request.routing_agent_name is not None
+        or (runtime_overrides is not None and runtime_overrides.get("base_dir") is not None)
+    )
+    tool_output_workspace_root: Path | None = None
+    if should_resolve_tool_output_workspace:
+        tool_output_workspace_root = _optional_runner_tool_output_workspace_root(
             config=config,
             runtime_paths=effective_runtime_paths,
             runtime_overrides=runtime_overrides,
             execution_identity=execution_identity,
             routing_agent_name=request.routing_agent_name,
+            output_path=output_path,
         )
-        if output_path is not None
-        else None
-    )
     with tool_execution_identity(
         execution_identity,
     ):
