@@ -299,6 +299,15 @@ def _find_matching_entity_name_for_localpart(
     return None
 
 
+def resolve_entity_name_for_mention_localpart(
+    localpart: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the configured agent or team name matched by one Matrix mention localpart."""
+    return _find_matching_entity_name_for_localpart(localpart, config, runtime_paths)
+
+
 def _is_stale_prefixed_entity_localpart(
     localpart: str,
     entity_name: str,

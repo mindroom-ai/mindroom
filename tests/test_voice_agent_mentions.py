@@ -300,10 +300,12 @@ def test_sanitize_unavailable_mentions_direct(
     expected: str,
 ) -> None:
     """Test direct sanitizer behavior for mention edge cases."""
+    config = _voice_config({entity_name: entity_name for entity_name in sorted(configured_entities)})
     result = _sanitize_unavailable_mentions(
         text,
         allowed_entities=allowed_entities,
-        configured_entities=configured_entities,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
     )
     assert result == expected
 

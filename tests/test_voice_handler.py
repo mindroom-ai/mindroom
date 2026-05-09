@@ -99,6 +99,26 @@ class TestVoiceHandler:
         assert config.voice.stt.model == "whisper-1"
         assert config.voice.intelligence.model == "default"
 
+    def test_sanitize_unavailable_mentions_uses_canonical_prefixed_name_precedence(self) -> None:
+        """Voice mention sanitizing should match Matrix mention alias precedence."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "foo": AgentConfig(display_name="Foo"),
+                    "mindroom_foo": AgentConfig(display_name="Prefixed Foo"),
+                },
+            ),
+        )
+
+        sanitized = voice_handler._sanitize_unavailable_mentions(
+            "@mindroom_foo help @mindroom_mindroom_foo",
+            allowed_entities={"foo"},
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+        assert sanitized == "@mindroom_foo help mindroom_mindroom_foo"
+
     @pytest.mark.asyncio
     async def test_voice_handler_ignores_when_disabled(self) -> None:
         """Test that voice handler does nothing when disabled."""

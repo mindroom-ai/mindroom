@@ -20,7 +20,7 @@ from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, VOICE_PR
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
-from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.mentions import format_message_with_mentions, resolve_entity_name_for_mention_localpart
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -451,8 +451,8 @@ async def _process_transcription(
             return _sanitize_unavailable_mentions(
                 response.content.strip(),
                 allowed_entities=set(agent_names) | set(team_names),
-                configured_entities=set(config.agents) | set(config.teams),
-                entity_aliases_by_localpart=_entity_aliases_by_localpart(config, runtime_paths),
+                config=config,
+                runtime_paths=runtime_paths,
             )
 
     except Exception as e:
@@ -499,23 +499,19 @@ def _sanitize_unavailable_mentions(
     text: str,
     *,
     allowed_entities: set[str],
-    configured_entities: set[str],
-    entity_aliases_by_localpart: dict[str, str] | None = None,
+    config: Config,
+    runtime_paths: RuntimePaths,
 ) -> str:
     """Strip @ from mentions that target configured but unavailable entities."""
     if not text:
         return text
 
-    configured_by_lower = {name.lower(): name for name in configured_entities}
     allowed_lower = {name.lower() for name in allowed_entities}
-    aliases_by_lower = {
-        localpart.lower(): entity_name for localpart, entity_name in (entity_aliases_by_localpart or {}).items()
-    }
 
     def _replace(match: re.Match[str]) -> str:
         name = match.group("name")
         localpart = f"{match.group('prefix') or ''}{name}"
-        configured_name = aliases_by_lower.get(localpart.lower()) or configured_by_lower.get(name.lower())
+        configured_name = resolve_entity_name_for_mention_localpart(localpart, config, runtime_paths)
         if configured_name is None:
             return match.group(0)
         if configured_name.lower() in allowed_lower:
@@ -524,12 +520,3 @@ def _sanitize_unavailable_mentions(
         return match.group(0)[1:]
 
     return _VOICE_MENTION_PATTERN.sub(_replace, text)
-
-
-def _entity_aliases_by_localpart(config: Config, runtime_paths: RuntimePaths) -> dict[str, str]:
-    config_ids = config.get_ids(runtime_paths)
-    aliases: dict[str, str] = {}
-    for entity_name in (*config.agents, *config.teams):
-        aliases[entity_name] = entity_name
-        aliases[config_ids[entity_name].username] = entity_name
-    return aliases
