@@ -740,6 +740,106 @@ def test_existing_tool_behavior_unchanged_without_output_path(tmp_path: Path) ->
     assert result.result == "RAW"
 
 
+def test_large_text_result_auto_saved_without_output_path(tmp_path: Path) -> None:
+    marker = "ISSUE200_AUTO_MARKER"
+    raw_output = marker * 1_000
+    toolkit = _EchoToolkit(result=raw_output)
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100_000, auto_save_threshold_bytes=100)
+    wrap_toolkit_for_output_files(toolkit, policy)
+
+    result = FunctionCall(
+        function=_first_function(toolkit),
+        arguments={"text": "hi"},
+        call_id="call-1",
+    ).execute()
+
+    receipt = _receipt(result.result)
+    assert receipt["status"] == "saved_to_file"
+    assert receipt["auto_saved"] is True
+    assert receipt["threshold_bytes"] == 100
+    assert receipt["format"] == "text"
+    assert marker in str(receipt["preview"])
+    assert raw_output not in str(result.result)
+    saved_path = tmp_path / cast("str", receipt["path"])
+    assert raw_output == saved_path.read_text(encoding="utf-8")
+
+
+def test_large_json_result_auto_saved_without_output_path(tmp_path: Path) -> None:
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=40)
+    toolkit = _EchoToolkit(result={"items": ["z" * 30, "a" * 30]})
+    wrap_toolkit_for_output_files(toolkit, policy)
+
+    result = FunctionCall(
+        function=_first_function(toolkit),
+        arguments={"text": "hi"},
+        call_id="call-1",
+    ).execute()
+
+    receipt = _receipt(result.result)
+    assert receipt["format"] == "json"
+    assert str(receipt["path"]).endswith(".json")
+    saved_text = (tmp_path / cast("str", receipt["path"])).read_text(encoding="utf-8")
+    assert '"items"' in saved_text
+    assert "z" * 30 in saved_text
+
+
+def test_explicit_output_path_takes_precedence_over_auto_save_threshold(tmp_path: Path) -> None:
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=10)
+    toolkit = _EchoToolkit(result="x" * 200)
+    wrap_toolkit_for_output_files(toolkit, policy)
+
+    result = FunctionCall(
+        function=_first_function(toolkit),
+        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "explicit.txt"},
+        call_id="call-1",
+    ).execute()
+
+    receipt = _receipt(result.result)
+    assert receipt["path"] == "explicit.txt"
+    assert "auto_saved" not in receipt
+    assert (tmp_path / "explicit.txt").read_text(encoding="utf-8") == "x" * 200
+
+
+def test_large_result_over_auto_save_limit_returns_compact_error(tmp_path: Path) -> None:
+    marker = "ISSUE200_TOO_LARGE"
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100, auto_save_threshold_bytes=10)
+    toolkit = _EchoToolkit(result=marker * 20)
+    wrap_toolkit_for_output_files(toolkit, policy)
+
+    result = FunctionCall(
+        function=_first_function(toolkit),
+        arguments={"text": "hi"},
+        call_id="call-1",
+    ).execute()
+
+    receipt = _receipt(result.result)
+    assert receipt["status"] == "error"
+    assert "auto-save limit" in str(receipt["error"])
+    assert marker not in str(result.result)
+    assert not list(tmp_path.iterdir())
+
+
+def test_auto_save_serialization_failure_preserves_original_result(tmp_path: Path) -> None:
+    class Unstringable:
+        def __str__(self) -> str:
+            msg = "cannot stringify"
+            raise RuntimeError(msg)
+
+    raw_result = Unstringable()
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100, auto_save_threshold_bytes=10)
+    toolkit = _EchoToolkit(result=raw_result)
+    wrap_toolkit_for_output_files(toolkit, policy)
+
+    result = FunctionCall(
+        function=_first_function(toolkit),
+        arguments={"text": "hi"},
+        call_id="call-1",
+    ).execute()
+
+    assert result.result is raw_result
+    assert not list(tmp_path.iterdir())
+
+
 def test_before_hook_sees_mindroom_output_path_and_after_hook_receives_receipt(tmp_path: Path) -> None:
     marker = "ISSUE200_HOOK_MARKER"
     seen: list[tuple[str, object]] = []

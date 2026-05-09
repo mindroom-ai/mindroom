@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import tempfile
+import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
@@ -34,9 +35,13 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
     "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
 )
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
+_AUTO_SAVE_THRESHOLD_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES"
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+_DEFAULT_AUTO_SAVE_THRESHOLD_BYTES = 256 * 1024
+_AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
+_AUTO_SAVE_ROOT = "mindroom_tool_outputs"
 _TEXT_FALLBACK_HEADER = (
     "MindRoom tool output serialized with text fallback because the result was not JSON-normalizable.\n\n"
 )
@@ -48,6 +53,7 @@ class ToolOutputFilePolicy:
 
     workspace_root: Path
     max_bytes: int = _DEFAULT_MAX_BYTES
+    auto_save_threshold_bytes: int = _DEFAULT_AUTO_SAVE_THRESHOLD_BYTES
 
     @classmethod
     def from_runtime(
@@ -59,6 +65,7 @@ class ToolOutputFilePolicy:
         return cls(
             workspace_root=workspace_root,
             max_bytes=_output_redirect_max_bytes(runtime_paths),
+            auto_save_threshold_bytes=_auto_save_threshold_bytes(runtime_paths),
         )
 
 
@@ -87,22 +94,46 @@ class _ToolOutputWriteResult:
 
 
 def _output_redirect_max_bytes(runtime_paths: RuntimePaths) -> int:
+    return _positive_int_runtime_setting(
+        runtime_paths,
+        _MAX_BYTES_ENV,
+        default=_DEFAULT_MAX_BYTES,
+        log_key="invalid_tool_output_redirect_max_bytes",
+    )
+
+
+def _auto_save_threshold_bytes(runtime_paths: RuntimePaths) -> int:
+    return _positive_int_runtime_setting(
+        runtime_paths,
+        _AUTO_SAVE_THRESHOLD_BYTES_ENV,
+        default=_DEFAULT_AUTO_SAVE_THRESHOLD_BYTES,
+        log_key="invalid_tool_output_auto_save_threshold_bytes",
+    )
+
+
+def _positive_int_runtime_setting(
+    runtime_paths: RuntimePaths,
+    env_name: str,
+    *,
+    default: int,
+    log_key: str,
+) -> int:
     raw_value = (
-        runtime_paths.process_env.get(_MAX_BYTES_ENV)
-        or runtime_paths.env_file_values.get(_MAX_BYTES_ENV)
-        or os.environ.get(_MAX_BYTES_ENV)
+        runtime_paths.process_env.get(env_name)
+        or runtime_paths.env_file_values.get(env_name)
+        or os.environ.get(env_name)
     )
     if raw_value is None or raw_value == "":
-        return _DEFAULT_MAX_BYTES
+        return default
     try:
-        max_bytes = int(raw_value)
+        configured_value = int(raw_value)
     except ValueError:
-        logger.warning("invalid_tool_output_redirect_max_bytes", value=raw_value)
-        return _DEFAULT_MAX_BYTES
-    if max_bytes <= 0:
-        logger.warning("invalid_tool_output_redirect_max_bytes", value=raw_value)
-        return _DEFAULT_MAX_BYTES
-    return max_bytes
+        logger.warning(log_key, value=raw_value)
+        return default
+    if configured_value <= 0:
+        logger.warning(log_key, value=raw_value)
+        return default
+    return configured_value
 
 
 def _success_receipt(
@@ -120,6 +151,26 @@ def _success_receipt(
             overwritten=overwritten,
         ),
     }
+
+
+def _auto_save_success_receipt(
+    *,
+    path: str,
+    byte_count: int,
+    output_format: Literal["text", "json", "binary"],
+    threshold_bytes: int,
+    preview: str,
+) -> dict[str, object]:
+    receipt = saved_tool_output_receipt(
+        path=path,
+        byte_count=byte_count,
+        output_format=output_format,
+        overwritten=False,
+    )
+    receipt["auto_saved"] = True
+    receipt["threshold_bytes"] = threshold_bytes
+    receipt["preview"] = preview
+    return {"mindroom_tool_output": receipt}
 
 
 def saved_tool_output_receipt(
@@ -411,6 +462,24 @@ def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
     return serialized
 
 
+def _preview_payload(payload: bytes) -> str:
+    preview_bytes = payload[:_AUTO_SAVE_PREVIEW_BYTES]
+    preview = preview_bytes.decode("utf-8", errors="replace").rstrip()
+    if len(payload) <= _AUTO_SAVE_PREVIEW_BYTES:
+        return preview
+    return f"{preview}\n\n[Preview truncated. Full tool output was saved to file.]"
+
+
+def _safe_tool_name(tool_name: str) -> str:
+    safe = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in tool_name.strip())
+    return safe[:80] or "tool"
+
+
+def _auto_output_relative_path(tool_name: str, output_format: Literal["text", "json", "binary"]) -> str:
+    suffix = {"text": "txt", "json": "json", "binary": "bin"}[output_format]
+    return f"{_AUTO_SAVE_ROOT}/{_safe_tool_name(tool_name)}-{uuid.uuid4().hex}.{suffix}"
+
+
 def _write_atomic(
     path: Path,
     payload: bytes,
@@ -528,6 +597,65 @@ def _redirect_result_to_file(
     )
 
 
+def _auto_save_large_result(
+    result: object,
+    *,
+    policy: ToolOutputFilePolicy,
+    tool_name: str,
+) -> object:
+    auto_saved_result = result
+    try:
+        serialized = _serialize_tool_output(result)
+    except Exception as exc:
+        logger.warning("tool_output_auto_save_serialization_failed", error_type=type(exc).__name__)
+        return auto_saved_result
+    byte_count = len(serialized.payload) if isinstance(serialized, _SerializedToolOutput) else 0
+
+    if isinstance(serialized, _SerializedToolOutput) and byte_count > policy.auto_save_threshold_bytes:
+        auto_saved_result = _write_auto_saved_result(
+            serialized,
+            policy=policy,
+            tool_name=tool_name,
+            byte_count=byte_count,
+        )
+    return auto_saved_result
+
+
+def _write_auto_saved_result(
+    serialized: _SerializedToolOutput,
+    *,
+    policy: ToolOutputFilePolicy,
+    tool_name: str,
+    byte_count: int,
+) -> object:
+    if byte_count > policy.max_bytes:
+        return _error_receipt(
+            f"Tool output is {byte_count} bytes, which exceeds the {policy.max_bytes} byte auto-save limit.",
+        )
+
+    relative_path = _auto_output_relative_path(tool_name, serialized.format)
+    validated_path = _validate_output_path(policy, relative_path)
+    if isinstance(validated_path, str):
+        return _error_receipt(validated_path)
+
+    write_error = _write_atomic(
+        validated_path.absolute_path,
+        serialized.payload,
+        policy.workspace_root,
+        validated_path.relative_path,
+    )
+    if write_error is not None:
+        return _error_receipt(write_error)
+
+    return _auto_save_success_receipt(
+        path=validated_path.requested_path,
+        byte_count=byte_count,
+        output_format=serialized.format,
+        threshold_bytes=policy.auto_save_threshold_bytes,
+        preview=_preview_payload(serialized.payload),
+    )
+
+
 def _signature_with_output_path(entrypoint: Callable[..., object]) -> inspect.Signature:
     signature = inspect.signature(entrypoint)
     parameters = list(signature.parameters.values())
@@ -566,6 +694,8 @@ def _docstring_with_output_path(original_doc: str | None) -> str:
 def _wrap_entrypoint(
     entrypoint: Callable[..., object],
     policy: ToolOutputFilePolicy,
+    *,
+    tool_name: str,
 ) -> Callable[..., object]:
     if inspect.iscoroutinefunction(entrypoint):
         async_entrypoint = cast("Callable[..., Awaitable[object]]", entrypoint)
@@ -573,7 +703,8 @@ def _wrap_entrypoint(
         async def async_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
             normalized_output_path = _normalize_output_path_argument(mindroom_output_path)
             if normalized_output_path is None:
-                return await async_entrypoint(*args, **kwargs)
+                result = await async_entrypoint(*args, **kwargs)
+                return _auto_save_large_result(result, policy=policy, tool_name=tool_name)
             validated_path = _validate_output_path(policy, normalized_output_path)
             if isinstance(validated_path, str):
                 return _error_receipt(validated_path)
@@ -586,7 +717,8 @@ def _wrap_entrypoint(
         def sync_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
             normalized_output_path = _normalize_output_path_argument(mindroom_output_path)
             if normalized_output_path is None:
-                return entrypoint(*args, **kwargs)
+                result = entrypoint(*args, **kwargs)
+                return _auto_save_large_result(result, policy=policy, tool_name=tool_name)
             validated_path = _validate_output_path(policy, normalized_output_path)
             if isinstance(validated_path, str):
                 return _error_receipt(validated_path)
@@ -617,7 +749,7 @@ def _wrap_function_for_output_files(function: Function, policy: ToolOutputFilePo
         return function
 
     uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != _DEFAULT_PARAMETERS
-    function.entrypoint = _wrap_entrypoint(function.entrypoint, policy)
+    function.entrypoint = _wrap_entrypoint(function.entrypoint, policy, tool_name=function.name)
     function.strict = False
     _install_output_path_schema_postprocessor(function)
     if uses_custom_parameters:
