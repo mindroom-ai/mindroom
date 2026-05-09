@@ -83,6 +83,7 @@ class TestVoiceHandler:
         """Test that voice handler is disabled when not configured."""
         config = Config()
         assert not config.voice.enabled
+        assert config.voice.visible_router_echo
 
     def test_voice_handler_enabled_with_config(self) -> None:
         """Test that voice handler is enabled when configured."""

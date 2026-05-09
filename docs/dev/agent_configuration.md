@@ -286,7 +286,7 @@ Enable voice message processing with speech-to-text:
 ```yaml
 voice:
   enabled: false
-  visible_router_echo: false  # Post transcript as visible router message
+  visible_router_echo: true  # Post transcript as visible router message
   stt:
     provider: openai
     model: whisper-1

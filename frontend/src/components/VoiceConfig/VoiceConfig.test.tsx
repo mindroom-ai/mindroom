@@ -46,7 +46,7 @@ describe("VoiceConfig", () => {
     },
     voice: {
       enabled: true,
-      visible_router_echo: false,
+      visible_router_echo: true,
       stt: {
         provider: "custom",
         model: "whisper-1",
@@ -124,7 +124,7 @@ describe("VoiceConfig", () => {
     await waitFor(() => {
       expect(mockUpdateVoiceConfig).toHaveBeenCalledWith({
         enabled: true,
-        visible_router_echo: false,
+        visible_router_echo: true,
         stt: {
           provider: "openai",
           model: "whisper-1",
@@ -158,7 +158,7 @@ describe("VoiceConfig", () => {
       expect(mockSaveConfig).toHaveBeenCalled();
       expect(mockUpdateVoiceConfig).toHaveBeenLastCalledWith({
         enabled: true,
-        visible_router_echo: false,
+        visible_router_echo: true,
         stt: {
           provider: "openai",
           model: "whisper-1",
@@ -251,6 +251,8 @@ describe("VoiceConfig", () => {
 
   it("updates visible router echo from the voice tab", async () => {
     const config = createConfig();
+    if (!config.voice) throw new Error("Expected voice config");
+    config.voice.visible_router_echo = false;
     setMockStore(config);
 
     render(<VoiceConfig />);
